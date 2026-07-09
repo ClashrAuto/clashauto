@@ -157,14 +157,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install aqtinstall
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -O C:\Qt
+          }
           python -m aqt install-qt windows desktop $env:QT_VERSION ${{ matrix.qt_arch }} -O C:\Qt
           $qtRoot = Get-ChildItem "C:\Qt\$env:QT_VERSION" -Directory |
-            Where-Object { Test-Path (Join-Path $_.FullName "bin\qmake.exe") } |
+            Where-Object {
+              (Test-Path (Join-Path $_.FullName "bin\qmake.exe")) -or
+              (Test-Path (Join-Path $_.FullName "bin\qmake.bat"))
+            } |
+            Where-Object {
+              if ("${{ matrix.arch }}" -eq "arm64") {
+                $_.Name -like "*arm64*"
+              } else {
+                $_.Name -notlike "*arm64*"
+              }
+            } |
             Select-Object -First 1 -ExpandProperty FullName
           if (-not $qtRoot) {
             throw "Cannot find installed Qt root"
           }
           "QT_ROOT=$qtRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $hostQtRoot = Get-ChildItem "C:\Qt\$env:QT_VERSION" -Directory |
+            Where-Object { $_.Name -notlike "*arm64*" -and (Test-Path (Join-Path $_.FullName "bin\windeployqt.exe")) } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if ($hostQtRoot) {
+            "QT_HOST_ROOT=$hostQtRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
 
       - name: Install NSIS
         shell: pwsh
@@ -193,7 +212,17 @@ jobs:
           New-Item -ItemType Directory -Force $appDir, $resourceDir | Out-Null
           Copy-Item "$env:BUILD_DIR\Release\clashauto-cpp.exe" $appDir -Force
 
-          & "$env:QT_ROOT\bin\windeployqt.exe" --release --no-translations "$appDir\clashauto-cpp.exe"
+          $deployTool = Join-Path $env:QT_ROOT "bin\windeployqt.exe"
+          if (-not (Test-Path $deployTool)) {
+            $deployTool = Join-Path $env:QT_ROOT "bin\windeployqt.bat"
+          }
+          if (-not (Test-Path $deployTool) -and $env:QT_HOST_ROOT) {
+            $deployTool = Join-Path $env:QT_HOST_ROOT "bin\windeployqt.exe"
+          }
+          if (-not (Test-Path $deployTool)) {
+            throw "Cannot find windeployqt"
+          }
+          & $deployTool --release --no-translations "$appDir\clashauto-cpp.exe"
 
           $resourceItems = @("command", "config", "language", "mihomo", "static", "version")
           foreach ($item in $resourceItems) {
