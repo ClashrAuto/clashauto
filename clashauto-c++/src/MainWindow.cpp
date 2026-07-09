@@ -431,7 +431,7 @@ QWidget *MainWindow::buildSettingsPage()
     save->setObjectName("primaryButton");
     save->setFixedWidth(120);
     layout->addWidget(save, 0, Qt::AlignRight);
-    connect(save, &QPushButton::clicked, this, [=, this] {
+    connect(save, &QPushButton::clicked, this, [=] {
         const QString path = QDir(config.userDir).filePath("config.yaml");
         QFile file(path);
         if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {

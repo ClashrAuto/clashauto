@@ -30,6 +30,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout runtime resources
+        uses: actions/checkout@v4
+        with:
+          repository: ClashrAuto/Clashr-Auto-Desktop
+          path: Clashr-Auto
+          sparse-checkout: |
+            command
+            config
+            language
+            mihomo
+            static
+            version
+
       - name: Read CMake project version
         shell: pwsh
         run: |
