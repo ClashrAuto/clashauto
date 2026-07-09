@@ -33,6 +33,8 @@ constexpr int TitleHeight = 28;
 constexpr int SidebarWidth = 120;
 constexpr int FooterHeight = 38;
 constexpr int Radius = 5;
+constexpr int MainWidth = 900;
+constexpr int MainHeight = 510;
 }
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
@@ -48,8 +50,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     setWindowIcon(QIcon(":/assets/icon.ico"));
     setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
     setAttribute(Qt::WA_TranslucentBackground, true);
-    resize(980, 640);
-    setMinimumSize(760, 480);
+    resize(MainWidth, MainHeight);
+    setMinimumSize(MainWidth, MainHeight);
 
     auto *root = new QFrame(this);
     root->setObjectName("root");
@@ -188,16 +190,23 @@ QWidget *MainWindow::buildSidebar()
 
     auto *logoWrap = new QFrame(side);
     logoWrap->setObjectName("logoWrap");
-    logoWrap->setFixedHeight(96);
+    logoWrap->setFixedHeight(118);
     auto *logoLayout = new QVBoxLayout(logoWrap);
     logoLayout->setContentsMargins(0, 0, 5, 0);
-    auto *logo = new QLabel("CA", logoWrap);
+    auto *logo = new QLabel(QString::fromUtf8("☁"), logoWrap);
     logo->setObjectName("logo");
     logo->setAlignment(Qt::AlignCenter);
     logoLayout->addWidget(logo);
     layout->addWidget(logoWrap);
 
-    const QStringList menu = {"Status", "Sub", "Settings", "Logs", "VIP", "About"};
+    const QStringList menu = {
+        QString::fromUtf8("状态"),
+        QString::fromUtf8("订阅"),
+        QString::fromUtf8("设置"),
+        QString::fromUtf8("日志"),
+        "VIP",
+        QString::fromUtf8("关于")
+    };
     for (int i = 0; i < menu.size(); ++i) {
         layout->addWidget(createMenuButton(menu[i], i));
     }
@@ -224,15 +233,17 @@ QWidget *MainWindow::buildStatusPage()
     leftLayout->setContentsMargins(0, 0, 0, 0);
     leftLayout->setSpacing(10);
 
-    auto *metrics = new QGridLayout();
+    auto *metricsBox = new QFrame(left);
+    metricsBox->setObjectName("metricsBox");
+    auto *metrics = new QGridLayout(metricsBox);
     metrics->setContentsMargins(0, 0, 0, 0);
-    metrics->setHorizontalSpacing(10);
-    metrics->setVerticalSpacing(10);
-    metrics->addWidget(createMetricCard("UP", "Upload", &m_upValue, "up"), 0, 0);
-    metrics->addWidget(createMetricCard("DN", "Download", &m_downValue, "down"), 0, 1);
-    metrics->addWidget(createMetricCard("PR", "Processes", &m_processValue, "process"), 1, 0);
-    metrics->addWidget(createMetricCard("TD", "Total Down", &m_totalDownValue, "download"), 1, 1);
-    leftLayout->addLayout(metrics);
+    metrics->setHorizontalSpacing(16);
+    metrics->setVerticalSpacing(16);
+    metrics->addWidget(createMetricCard(QString::fromUtf8("☁"), QString::fromUtf8("上传"), &m_upValue, "up"), 0, 0);
+    metrics->addWidget(createMetricCard(QString::fromUtf8("☁"), QString::fromUtf8("下载"), &m_downValue, "down"), 0, 1);
+    metrics->addWidget(createMetricCard(QString::fromUtf8("⌁"), QString::fromUtf8("进程数"), &m_processValue, "process"), 1, 0);
+    metrics->addWidget(createMetricCard(QString::fromUtf8("▾"), QString::fromUtf8("总下载"), &m_totalDownValue, "download"), 1, 1);
+    leftLayout->addWidget(metricsBox);
 
     auto *bandTitle = new QLabel("实时带宽", left);
     bandTitle->setObjectName("sectionTitle");
@@ -250,11 +261,11 @@ QWidget *MainWindow::buildStatusPage()
     auto *nodeHeader = new QFrame(right);
     auto *nodeHeaderLayout = new QHBoxLayout(nodeHeader);
     nodeHeaderLayout->setContentsMargins(0, 0, 0, 0);
-    m_nodeTitle = new QLabel("Nodes <span style='font-size:9px'>(0)</span>", nodeHeader);
+    m_nodeTitle = new QLabel(QString::fromUtf8("节点 <span style='font-size:9px'>(0)</span>"), nodeHeader);
     m_nodeTitle->setObjectName("sectionTitle");
     nodeHeaderLayout->addWidget(m_nodeTitle);
     m_nodeSearch = new QLineEdit(nodeHeader);
-    m_nodeSearch->setPlaceholderText("Search nodes");
+    m_nodeSearch->setPlaceholderText(QString::fromUtf8("搜索"));
     m_nodeSearch->setFixedWidth(180);
     nodeHeaderLayout->addWidget(m_nodeSearch);
     m_nodeGroupSelector = new QComboBox(nodeHeader);
@@ -280,7 +291,7 @@ QWidget *MainWindow::buildStatusPage()
     scroll->setWidget(m_nodeList);
     rightLayout->addWidget(scroll, 1);
 
-    layout->addWidget(left, 1);
+    layout->addWidget(left, 5);
     layout->addWidget(right, 1);
     return page;
 }
@@ -548,14 +559,15 @@ QFrame *MainWindow::createMetricCard(const QString &icon, const QString &title, 
     auto *card = new QFrame(this);
     card->setObjectName("metricCard");
     card->setProperty("kind", className);
+    card->setMinimumHeight(70);
     auto *layout = new QHBoxLayout(card);
-    layout->setContentsMargins(10, 8, 10, 8);
-    layout->setSpacing(10);
+    layout->setContentsMargins(14, 18, 14, 18);
+    layout->setSpacing(16);
 
     auto *iconLabel = new QLabel(icon, card);
     iconLabel->setObjectName("metricIcon");
     iconLabel->setAlignment(Qt::AlignCenter);
-    iconLabel->setFixedWidth(34);
+    iconLabel->setFixedWidth(50);
     layout->addWidget(iconLabel);
 
     auto *texts = new QVBoxLayout();
@@ -849,7 +861,7 @@ void MainWindow::populateNodeList()
     layout->addStretch();
 
     if (m_nodeTitle) {
-        m_nodeTitle->setText(QString("Nodes <span style='font-size:9px'>(%1/%2)</span>")
+        m_nodeTitle->setText(QString::fromUtf8("节点 <span style='font-size:9px'>(%1/%2)</span>")
                                  .arg(shown)
                                  .arg(m_currentNodes.size()));
     }
@@ -888,15 +900,19 @@ QString MainWindow::appStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #rightPane, #page { background:rgba(0,0,0,0); }
         #sidebar { background:#303032; }
-        #logo { color:#ffff00; font-size:70px; text-shadow:0 0 5px #baba36; }
+        #logo { color:#252525; background:#ffff00; border-radius:40px; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:54px; font-weight:700; }
         #menuButton { color:#fff; background:transparent; border:0; border-radius:5px 0 0 5px; text-align:left; padding-left:35px; font-size:14px; }
         #menuButton:hover { background:rgb(62,62,62); }
         #menuButton:checked { background:#000; color:#ccc; }
         #version { color:#666; font-size:12px; }
         #metricCard { background:#222; border:0; border-radius:4px; min-height:70px; }
-        #metricIcon { font-size:30px; color:#aaa; }
+        #metricIcon { font-size:44px; color:#aaa; }
         #metricTitle { color:#bfbfbf; font-size:12px; }
         #metricValue { color:#bfbfbf; font-size:20px; }
+        #metricCard[kind="up"] QLabel { color:rgb(168,67,67); }
+        #metricCard[kind="down"] QLabel { color:rgb(77,161,62); }
+        #metricCard[kind="process"] QLabel { color:rgb(70,110,168); }
+        #metricCard[kind="download"] QLabel { color:rgb(72,165,167); }
         #sectionTitle { color:#eee; font-size:18px; font-weight:400; }
         QScrollArea { background:transparent; border:0; }
         QScrollBar:vertical { background:#242425; width:10px; margin:0; }
@@ -907,8 +923,8 @@ QString MainWindow::appStyle() const
         QTabBar::tab:selected { color:#fff; border-bottom:2px solid #4898f8; }
         QCheckBox, QLabel { color:#ccc; }
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
-        #nodeRow, #plainCard { background:#252525; border:0; border-radius:4px; min-height:38px; }
-        #nodeRow[active="true"] { background:rgba(72,151,248,0.69); }
+        #nodeRow, #plainCard { background:#252525; border:0; border-radius:0; min-height:56px; }
+        #nodeRow[active="true"] { background:rgba(72,151,248,0.86); }
         #nodeName { color:#ccc; font-size:12px; }
         #delayBadge { color:#222; border-radius:5px; padding:3px 5px; font-size:12px; }
         #nodeButton { color:#ccc; background:transparent; border:0; border-left:1px solid #000; border-radius:0; font-size:12px; }
