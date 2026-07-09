@@ -194,8 +194,17 @@ jobs:
       - name: Configure
         shell: pwsh
         run: |
-          cmake -S clashauto-c++ -B $env:BUILD_DIR -G "Visual Studio 17 2022" -A ${{ matrix.cmake_arch }} `
-            -DCMAKE_PREFIX_PATH="$env:QT_ROOT"
+          $args = @(
+            "-S", "clashauto-c++",
+            "-B", $env:BUILD_DIR,
+            "-G", "Visual Studio 17 2022",
+            "-A", "${{ matrix.cmake_arch }}",
+            "-DCMAKE_PREFIX_PATH=$env:QT_ROOT"
+          )
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            $args += "-DQT_HOST_PATH=$env:QT_HOST_ROOT"
+          }
+          cmake @args
 
       - name: Build
         shell: pwsh
