@@ -18,11 +18,15 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QStyle>
 #include <QTabWidget>
 #include <QTextEdit>
+#include <QTextStream>
 #include <QDateTime>
 #include <QVBoxLayout>
+
+#include <utility>
 
 namespace {
 constexpr int TitleHeight = 28;
@@ -96,16 +100,22 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         m_processValue->setText(QString::number(count));
         m_totalDownValue->setText(speedText(total));
     });
-    connect(&m_service, &ClashService::nodesUpdated, this, [this](const QVector<NodeInfo> &nodes, const QString &) {
-        auto *layout = qobject_cast<QVBoxLayout *>(m_nodeList->layout());
-        while (QLayoutItem *item = layout->takeAt(0)) {
-            delete item->widget();
-            delete item;
+    connect(&m_service, &ClashService::nodesUpdated, this, [this](const QVector<NodeInfo> &nodes, const QString &selected) {
+        m_currentNodes = nodes;
+        m_selectedNode = selected;
+        populateNodeList();
+    });
+    connect(&m_service, &ClashService::proxyGroupsUpdated, this, [this](const QStringList &groups, const QString &selectedGroup) {
+        if (!m_nodeGroupSelector) {
+            return;
         }
-        for (const NodeInfo &node : nodes) {
-            layout->addWidget(createNodeRow(node));
+        const QSignalBlocker blocker(m_nodeGroupSelector);
+        m_nodeGroupSelector->clear();
+        m_nodeGroupSelector->addItems(groups);
+        const int index = m_nodeGroupSelector->findText(selectedGroup);
+        if (index >= 0) {
+            m_nodeGroupSelector->setCurrentIndex(index);
         }
-        layout->addStretch();
     });
     connect(&m_service, &ClashService::logUpdated, this, [this](const QString &message) {
         appendLog(message);
@@ -240,22 +250,25 @@ QWidget *MainWindow::buildStatusPage()
     auto *nodeHeader = new QFrame(right);
     auto *nodeHeaderLayout = new QHBoxLayout(nodeHeader);
     nodeHeaderLayout->setContentsMargins(0, 0, 0, 0);
-    auto *nodeTitle = new QLabel("鑺傜偣 <span style='font-size:9px'>(6)</span>", nodeHeader);
-    nodeTitle->setObjectName("sectionTitle");
-    nodeHeaderLayout->addWidget(nodeTitle);
-    auto *search = new QLineEdit(nodeHeader);
-    search->setPlaceholderText("鎼滅储鑺傜偣");
-    search->setFixedWidth(180);
-    nodeHeaderLayout->addWidget(search);
-    auto *select = new QComboBox(nodeHeader);
-    select->addItems({"GLOBAL", "馃殌 鑺傜偣閫夋嫨", "DIRECT"});
-    select->setFixedWidth(130);
-    nodeHeaderLayout->addWidget(select);
+    m_nodeTitle = new QLabel("Nodes <span style='font-size:9px'>(0)</span>", nodeHeader);
+    m_nodeTitle->setObjectName("sectionTitle");
+    nodeHeaderLayout->addWidget(m_nodeTitle);
+    m_nodeSearch = new QLineEdit(nodeHeader);
+    m_nodeSearch->setPlaceholderText("Search nodes");
+    m_nodeSearch->setFixedWidth(180);
+    nodeHeaderLayout->addWidget(m_nodeSearch);
+    m_nodeGroupSelector = new QComboBox(nodeHeader);
+    m_nodeGroupSelector->addItem("GLOBAL");
+    m_nodeGroupSelector->setFixedWidth(130);
+    nodeHeaderLayout->addWidget(m_nodeGroupSelector);
     auto *refresh = new QPushButton("R", nodeHeader);
     refresh->setObjectName("iconButton");
     refresh->setFixedWidth(30);
     nodeHeaderLayout->addWidget(refresh);
     rightLayout->addWidget(nodeHeader);
+    connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { populateNodeList(); });
+    connect(m_nodeGroupSelector, &QComboBox::currentTextChanged, &m_service, &ClashService::setSelectedGroup);
+    connect(refresh, &QPushButton::clicked, &m_service, &ClashService::refreshNodes);
 
     auto *scroll = new QScrollArea(right);
     scroll->setWidgetResizable(true);
@@ -353,6 +366,7 @@ QWidget *MainWindow::buildSubscriptionsPageLegacy()
 
 QWidget *MainWindow::buildSettingsPage()
 {
+    const AppConfig config = AppConfigLoader::load();
     auto *tabs = new QTabWidget(this);
     tabs->setObjectName("settingsTabs");
 
@@ -362,30 +376,89 @@ QWidget *MainWindow::buildSettingsPage()
     auto *host = new QComboBox(uiPage);
     host->setEditable(true);
     host->addItems({"127.0.0.1", "localhost"});
-    form->addRow("绠＄悊 Clash 鍦板潃", host);
+    host->setCurrentText(config.host);
+    auto *uiPort = new QLineEdit(QString::number(config.uiPort), uiPage);
+    auto *mixedPort = new QLineEdit(QString::number(config.mixedPort), uiPage);
+    form->addRow("Clash API host", host);
+    form->addRow("Clash API port", uiPort);
+    form->addRow("Mixed port", mixedPort);
     tabs->addTab(uiPage, "UI");
 
     auto *systemPage = new QWidget(tabs);
     auto *system = new QFormLayout(systemPage);
     system->setContentsMargins(10, 16, 10, 10);
-    for (const QString &label : {"Start with system", "Hide on launch", "Auto permissions", "Only available nodes", "System notifications", "Enhanced mode", "Web proxy"}) {
-        auto *check = new QCheckBox(systemPage);
-        check->setChecked(label == "Start with system" || label == "Auto permissions" || label == "System notifications");
-        system->addRow(label, check);
-    }
+    auto *nodeOnly = new QCheckBox(systemPage);
+    nodeOnly->setChecked(config.nodeOnlyAvailable);
+    auto *webProxy = new QCheckBox(systemPage);
+    webProxy->setChecked(config.webProxy);
+    auto *tun = new QCheckBox(systemPage);
+    tun->setChecked(config.tun);
+    auto *clearConnections = new QCheckBox(systemPage);
+    clearConnections->setChecked(config.clearConnections);
+    auto *increment = new QCheckBox(systemPage);
+    increment->setChecked(config.increment);
+    system->addRow("Only available nodes", nodeOnly);
+    system->addRow("Web proxy", webProxy);
+    system->addRow("TUN", tun);
+    system->addRow("Clear connections", clearConnections);
+    system->addRow("Increment update", increment);
     auto *theme = new QComboBox(systemPage);
     theme->addItems({"Dark", "Light"});
+    theme->setCurrentText(config.theme.compare("light", Qt::CaseInsensitive) == 0 ? "Light" : "Dark");
     system->addRow("Theme", theme);
     tabs->addTab(systemPage, "System");
 
     auto *filterPage = new QWidget(tabs);
     auto *filter = new QFormLayout(filterPage);
     filter->setContentsMargins(10, 16, 10, 10);
-    filter->addRow("Allow rule", new QLineEdit("\\[0\\.[0-9]+\\]", filterPage));
-    filter->addRow("Block rule", new QLineEdit("CN|^CN|CN_", filterPage));
+    auto *allowUse = new QCheckBox(filterPage);
+    allowUse->setChecked(config.allowRuleEnabled);
+    auto *allowRule = new QLineEdit(config.allowRule.isEmpty() ? "\\[0\\.[0-9]+\\]" : config.allowRule, filterPage);
+    auto *blockUse = new QCheckBox(filterPage);
+    blockUse->setChecked(config.noAllowRuleEnabled);
+    auto *blockRule = new QLineEdit(config.noAllowRule.isEmpty() ? "CN|^CN|CN_" : config.noAllowRule, filterPage);
+    filter->addRow("Enable allow rule", allowUse);
+    filter->addRow("Allow rule", allowRule);
+    filter->addRow("Enable block rule", blockUse);
+    filter->addRow("Block rule", blockRule);
     tabs->addTab(filterPage, "Node filter");
 
-    return tabs;
+    auto *page = new QFrame(this);
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 10);
+    layout->addWidget(tabs, 1);
+    auto *save = new QPushButton("Save settings", page);
+    save->setObjectName("primaryButton");
+    save->setFixedWidth(120);
+    layout->addWidget(save, 0, Qt::AlignRight);
+    connect(save, &QPushButton::clicked, this, [=, this] {
+        const QString path = QDir(config.userDir).filePath("config.yaml");
+        QFile file(path);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            appendLog(QString("Save settings failed: %1").arg(file.errorString()));
+            return;
+        }
+        QTextStream out(&file);
+        out << "host: " << host->currentText().trimmed() << "\n";
+        out << "ui: " << uiPort->text().trimmed() << "\n";
+        out << "port: " << mixedPort->text().trimmed() << "\n";
+        out << "web: " << (webProxy->isChecked() ? "true" : "false") << "\n";
+        out << "use: " << (tun->isChecked() ? "true" : "false") << "\n";
+        out << "node: " << (nodeOnly->isChecked() ? "true" : "false") << "\n";
+        out << "clearConnections: " << (clearConnections->isChecked() ? "true" : "false") << "\n";
+        out << "increment: " << (increment->isChecked() ? "true" : "false") << "\n";
+        out << "theme: " << (theme->currentText() == "Light" ? "light" : "black") << "\n";
+        out << "language: " << config.language << "\n";
+        out << "use_rule:\n";
+        out << "  allow: " << allowRule->text() << "\n";
+        out << "  noallow: " << blockRule->text() << "\n";
+        out << "  allowUse: " << (allowUse->isChecked() ? "true" : "false") << "\n";
+        out << "  noallowUse: " << (blockUse->isChecked() ? "true" : "false") << "\n";
+        appendLog(QString("Settings saved: %1").arg(path));
+        m_core->rebuildConfig();
+    });
+
+    return page;
 }
 
 QWidget *MainWindow::buildLogsPage()
@@ -743,6 +816,43 @@ void MainWindow::reloadSubscriptions()
         }
     }
     layout->addStretch();
+}
+
+void MainWindow::populateNodeList()
+{
+    if (!m_nodeList) {
+        return;
+    }
+    auto *layout = qobject_cast<QVBoxLayout *>(m_nodeList->layout());
+    while (QLayoutItem *item = layout->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+
+    const QString filter = m_nodeSearch ? m_nodeSearch->text().trimmed() : QString();
+    int shown = 0;
+    for (const NodeInfo &node : std::as_const(m_currentNodes)) {
+        if (!filter.isEmpty() && !node.name.contains(filter, Qt::CaseInsensitive)) {
+            continue;
+        }
+        layout->addWidget(createNodeRow(node));
+        ++shown;
+    }
+
+    if (shown == 0) {
+        auto *empty = new QLabel(filter.isEmpty() ? "No nodes" : "No matched nodes", m_nodeList);
+        empty->setObjectName("nodeName");
+        empty->setAlignment(Qt::AlignCenter);
+        empty->setMinimumHeight(80);
+        layout->addWidget(empty);
+    }
+    layout->addStretch();
+
+    if (m_nodeTitle) {
+        m_nodeTitle->setText(QString("Nodes <span style='font-size:9px'>(%1/%2)</span>")
+                                 .arg(shown)
+                                 .arg(m_currentNodes.size()));
+    }
 }
 
 void MainWindow::mousePressEvent(QMouseEvent *event)

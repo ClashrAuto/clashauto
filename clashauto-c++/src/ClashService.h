@@ -25,6 +25,7 @@ public:
 
     void start();
     void setMode(const QString &mode);
+    void setSelectedGroup(const QString &group);
     void selectNode(const QString &name);
     void clearConnections();
     void refreshNodes();
@@ -33,6 +34,7 @@ signals:
     void trafficUpdated(qint64 up, qint64 down);
     void connectionsUpdated(int count, qint64 downloadTotal);
     void nodesUpdated(QVector<NodeInfo> nodes, QString selected);
+    void proxyGroupsUpdated(QStringList groups, QString selectedGroup);
     void logUpdated(QString message);
     void statusUpdated(bool tun, bool proxy, bool core);
 

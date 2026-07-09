@@ -56,6 +56,15 @@ void ClashService::setMode(const QString &mode)
                     });
 }
 
+void ClashService::setSelectedGroup(const QString &group)
+{
+    if (group.isEmpty() || group == m_selectedGroup) {
+        return;
+    }
+    m_selectedGroup = group;
+    pollNodes();
+}
+
 void ClashService::selectNode(const QString &name)
 {
     if (name.isEmpty()) {
@@ -122,6 +131,14 @@ void ClashService::pollNodes()
 
         QString groupName = m_selectedGroup;
         QJsonObject group = proxies.value(groupName).toObject();
+        QStringList groups;
+        for (auto it = proxies.begin(); it != proxies.end(); ++it) {
+            const QJsonObject candidate = it.value().toObject();
+            if (!candidate.value("all").toArray().isEmpty()) {
+                groups.push_back(it.key());
+            }
+        }
+
         if (group.value("all").toArray().isEmpty()) {
             groupName = "GLOBAL";
             group = proxies.value(groupName).toObject();
@@ -142,6 +159,7 @@ void ClashService::pollNodes()
         const QJsonArray all = group.value("all").toArray();
         m_selectedGroup = groupName.isEmpty() ? QStringLiteral("GLOBAL") : groupName;
         m_selectedNode = selected;
+        emit proxyGroupsUpdated(groups, m_selectedGroup);
 
         for (const QJsonValue &value : all) {
             const QString name = value.toString();

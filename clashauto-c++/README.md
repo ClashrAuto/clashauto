@@ -11,8 +11,9 @@
 - `TrayController` 支持系统托盘菜单、流量显示、核心/代理/TUN 快捷开关。
 - `ConfigBuilder` 生成 `full.yaml`，合并默认配置、插件 DNS/TUN、订阅节点、代理组和自动分组。
 - `SubscriptionStore` 支持订阅读取、添加、启用/禁用、远程/本地 YAML 更新、`sub` 转换、增量更新、规则过滤、节点明细和单节点启用/禁用。
-- 状态页节点列表已接入 Clash REST API：读取当前分组节点、应用节点、清理连接、刷新节点。
+- 状态页节点列表已接入 Clash REST API：读取当前分组节点、应用节点、清理连接、刷新节点、搜索过滤、切换代理分组。
 - 模式切换已通过 Clash REST API 写入 `Rule` / `Global` / `Direct`。
+- 设置页支持保存 API 地址、端口、主题、TUN、系统代理、增量更新、节点过滤规则，并写回用户目录 `config.yaml`。
 - 日志页已从占位页变成真实日志视图，并同步写入用户目录 `logs/qt-main.log`。
 - 提供 CLI 辅助命令，便于脚本测试订阅和配置生成。
 

@@ -14,6 +14,8 @@
 #include <QStackedWidget>
 
 class QTextEdit;
+class QComboBox;
+class QLineEdit;
 
 class MainWindow final : public QMainWindow
 {
@@ -46,6 +48,7 @@ private:
     void appendLog(const QString &message);
     QLabel *createSwitchDot(bool enabled);
     void reloadSubscriptions();
+    void populateNodeList();
     QString speedText(qint64 value) const;
     QColor delayColor(int delay) const;
     QString appStyle() const;
@@ -54,6 +57,9 @@ private:
     ClashService m_service;
     QStackedWidget *m_pages = nullptr;
     QFrame *m_nodeList = nullptr;
+    QLabel *m_nodeTitle = nullptr;
+    QComboBox *m_nodeGroupSelector = nullptr;
+    QLineEdit *m_nodeSearch = nullptr;
     QLabel *m_upValue = nullptr;
     QLabel *m_downValue = nullptr;
     QLabel *m_processValue = nullptr;
@@ -72,6 +78,8 @@ private:
     TrayController *m_tray = nullptr;
     SubscriptionStore *m_subscriptions = nullptr;
     QVector<QPushButton *> m_menuButtons;
+    QVector<NodeInfo> m_currentNodes;
+    QString m_selectedNode;
     bool m_dragging = false;
     QPoint m_dragStart;
 };
