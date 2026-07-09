@@ -103,11 +103,11 @@ jobs:
           if ("${{ matrix.arch }}" -eq "arm64") {
             $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:MIHOMO_REPO/releases/latest"
             $asset = $release.assets |
-              Where-Object { $_.name -like "mihomo-windows-arm64-compatible-*.gz" } |
+              Where-Object { $_.name -like "mihomo-windows-arm64-*.zip" } |
               Select-Object -First 1
             if (-not $asset) {
               $asset = $release.assets |
-                Where-Object { $_.name -like "mihomo-windows-arm64-*.gz" } |
+                Where-Object { $_.name -like "mihomo-windows-arm64-compatible-*.gz" -or $_.name -like "mihomo-windows-arm64-*.gz" } |
                 Select-Object -First 1
             }
             if (-not $asset) {
@@ -118,21 +118,33 @@ jobs:
             Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
 
             $output = "Clashr-Auto\command\clash\${{ matrix.clash_core }}"
-            $inputStream = [System.IO.File]::OpenRead($archive)
-            try {
-              $gzipStream = [System.IO.Compression.GZipStream]::new($inputStream, [System.IO.Compression.CompressionMode]::Decompress)
+            if ($asset.name.EndsWith(".zip")) {
+              $extractDir = Join-Path $env:RUNNER_TEMP "mihomo-windows-arm64"
+              Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
+              Expand-Archive -Path $archive -DestinationPath $extractDir -Force
+              $exe = Get-ChildItem $extractDir -Recurse -Filter "*.exe" |
+                Select-Object -First 1
+              if (-not $exe) {
+                throw "Windows ARM64 mihomo zip did not contain an exe"
+              }
+              Copy-Item $exe.FullName $output -Force
+            } else {
+              $inputStream = [System.IO.File]::OpenRead($archive)
               try {
-                $outputStream = [System.IO.File]::Create($output)
+                $gzipStream = [System.IO.Compression.GZipStream]::new($inputStream, [System.IO.Compression.CompressionMode]::Decompress)
                 try {
-                  $gzipStream.CopyTo($outputStream)
+                  $outputStream = [System.IO.File]::Create($output)
+                  try {
+                    $gzipStream.CopyTo($outputStream)
+                  } finally {
+                    $outputStream.Dispose()
+                  }
                 } finally {
-                  $outputStream.Dispose()
+                  $gzipStream.Dispose()
                 }
               } finally {
-                $gzipStream.Dispose()
+                $inputStream.Dispose()
               }
-            } finally {
-              $inputStream.Dispose()
             }
           }
 
