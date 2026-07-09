@@ -20,6 +20,8 @@ env:
   QT_ARCH: win64_msvc2022_64
   BUILD_DIR: build-release
   STAGE_DIR: dist/package/ClashAuto
+  RUNTIME_RELEASE_TAG: v2.5.7
+  RUNTIME_ASSET: Clash.Auto-amd64-2.5.7-win.zip
 
 jobs:
   windows:
@@ -29,19 +31,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Checkout runtime resources
-        uses: actions/checkout@v4
-        with:
-          repository: ClashrAuto/Clashr-Auto-Desktop
-          path: Clashr-Auto
-          sparse-checkout: |
-            command
-            config
-            language
-            mihomo
-            static
-            version
 
       - name: Read CMake project version
         shell: pwsh
@@ -55,6 +44,41 @@ jobs:
           "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "RELEASE_TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Release version: $version"
+
+      - name: Download runtime resources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/ClashrAuto/Clashr-Auto-Desktop/releases/download/$env:RUNTIME_RELEASE_TAG/$env:RUNTIME_ASSET"
+          $zip = Join-Path $env:RUNNER_TEMP $env:RUNTIME_ASSET
+          Invoke-WebRequest -Uri $url -OutFile $zip
+
+          New-Item -ItemType Directory -Force "Clashr-Auto" | Out-Null
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            foreach ($entry in $archive.Entries) {
+              $name = $entry.FullName.Replace('\', '/')
+              if (-not ($name -eq "version" -or $name.StartsWith("command/") -or $name.StartsWith("config/") -or $name.StartsWith("language/"))) {
+                continue
+              }
+
+              $target = Join-Path "Clashr-Auto" $name
+              if ($name.EndsWith("/")) {
+                New-Item -ItemType Directory -Force $target | Out-Null
+                continue
+              }
+
+              New-Item -ItemType Directory -Force (Split-Path $target) | Out-Null
+              [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
+            }
+          } finally {
+            $archive.Dispose()
+          }
+
+          if (-not (Test-Path "Clashr-Auto\config\config.yaml")) {
+            throw "Runtime resources did not contain config/config.yaml"
+          }
 
       - name: Install Qt
         shell: pwsh
