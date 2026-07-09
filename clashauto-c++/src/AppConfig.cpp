@@ -11,7 +11,7 @@
 QString AppConfig::clashExecutable() const
 {
 #if defined(Q_OS_WIN)
-    return QDir(sourceRoot).filePath("command/clash/clash-windows-amd64.exe");
+    return QDir(sourceRoot).filePath(QSysInfo::currentCpuArchitecture().contains("arm") ? "command/clash/clash-windows-arm64.exe" : "command/clash/clash-windows-amd64.exe");
 #elif defined(Q_OS_MACOS)
     return QDir(sourceRoot).filePath(QSysInfo::currentCpuArchitecture().contains("arm") ? "command/clash/clash-darwin-arm64" : "command/clash/clash-darwin-amd64");
 #else
