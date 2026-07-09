@@ -1,0 +1,218 @@
+#include "CoreController.h"
+
+#include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QRegularExpression>
+
+CoreController::CoreController(AppConfig config, QObject *parent)
+    : QObject(parent),
+      m_config(std::move(config)),
+      m_configBuilder(m_config),
+      m_proxyEnabled(m_config.webProxy),
+      m_tunEnabled(m_config.tun)
+{
+    connect(&m_core, &QProcess::readyReadStandardOutput, this, [this] {
+        const QString output = QString::fromLocal8Bit(m_core.readAllStandardOutput()).trimmed();
+        if (!output.isEmpty()) {
+            emit logUpdated(output.split(QRegularExpression("[\\r\\n]+")).last());
+        }
+    });
+    connect(&m_core, &QProcess::readyReadStandardError, this, [this] {
+        const QString output = QString::fromLocal8Bit(m_core.readAllStandardError()).trimmed();
+        if (!output.isEmpty()) {
+            emit logUpdated(output.split(QRegularExpression("[\\r\\n]+")).last());
+        }
+    });
+    connect(&m_core, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this](int code) {
+        stopProxy();
+        emit logUpdated(QString("Clash 核心已退出，代码: %1").arg(code));
+        emitStatus();
+    });
+}
+
+bool CoreController::isRunning() const
+{
+    return m_core.state() != QProcess::NotRunning;
+}
+
+bool CoreController::isProxyEnabled() const
+{
+    return m_proxyEnabled;
+}
+
+bool CoreController::isTunEnabled() const
+{
+    return m_tunEnabled;
+}
+
+void CoreController::startCore()
+{
+    if (isRunning()) {
+        return;
+    }
+
+    const QString exe = m_config.clashExecutable();
+    m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
+    const QString cfg = m_fullConfigPath.isEmpty() ? m_config.clashConfig() : m_fullConfigPath;
+    if (!QFileInfo::exists(exe)) {
+        emit logUpdated(QString("找不到 Clash 核心: %1").arg(exe));
+        emitStatus();
+        return;
+    }
+    if (!QFileInfo::exists(cfg)) {
+        emit logUpdated(QString("找不到 Clash 配置: %1").arg(cfg));
+        emitStatus();
+        return;
+    }
+
+    m_core.setProgram(exe);
+    m_core.setArguments({"-f", cfg, "-token", QString::number(QDateTime::currentMSecsSinceEpoch())});
+    m_core.setWorkingDirectory(QFileInfo(exe).absolutePath());
+    m_core.start();
+    if (!m_core.waitForStarted(3000)) {
+        emit logUpdated(QString("启动 Clash 核心失败: %1").arg(m_core.errorString()));
+    } else {
+        emit logUpdated("Start clash is OK!");
+        if (m_proxyEnabled) {
+            startProxy();
+        }
+    }
+    emitStatus();
+}
+
+void CoreController::stopCore()
+{
+    stopProxy();
+    if (isRunning()) {
+        m_core.terminate();
+        if (!m_core.waitForFinished(2500)) {
+            m_core.kill();
+        }
+    }
+    emitStatus();
+}
+
+void CoreController::toggleCore()
+{
+    isRunning() ? stopCore() : startCore();
+}
+
+void CoreController::toggleProxy()
+{
+    m_proxyEnabled = !m_proxyEnabled;
+    if (m_proxyEnabled) {
+        startProxy();
+    } else {
+        stopProxy();
+    }
+    emitStatus();
+}
+
+void CoreController::toggleTun()
+{
+    m_tunEnabled = !m_tunEnabled;
+    if (m_fullConfigPath.isEmpty()) {
+        m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
+    } else {
+        m_configBuilder.writeTunEnabled(m_fullConfigPath, m_tunEnabled);
+    }
+    emit logUpdated(m_tunEnabled ? "已开启增强模式，正在重载 TUN 配置" : "已关闭增强模式，正在重载 TUN 配置");
+    reloadConfig();
+    emitStatus();
+}
+
+void CoreController::rebuildConfig()
+{
+    m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
+    emit logUpdated(QString("Config generated: %1").arg(m_fullConfigPath));
+    reloadConfig();
+}
+
+void CoreController::startProxy()
+{
+    if (!ensureSysproxy()) {
+        return;
+    }
+
+    const QString sysproxy = m_config.sysproxyExecutable();
+    QProcess::execute(sysproxy, {"global", QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort), "localhost;127.*;10.*;172.16.*;192.168.*;<local>"});
+    emit logUpdated("Start sysproxy ok!");
+}
+
+void CoreController::stopProxy()
+{
+    const QString sysproxy = m_config.sysproxyExecutable();
+    if (QFileInfo::exists(sysproxy)) {
+        QProcess::execute(sysproxy, {"set", "1"});
+        emit logUpdated("Stop sysproxy ok!");
+    }
+}
+
+bool CoreController::ensureSysproxy()
+{
+    const QString sysproxy = m_config.sysproxyExecutable();
+    if (QFileInfo::exists(sysproxy)) {
+        return true;
+    }
+
+    const QString archive = QDir(m_config.sourceRoot).filePath("command/sysproxy/sysproxy.zip");
+    const QString outputDir = QDir(m_config.sourceRoot).filePath("command/sysproxy");
+    if (!QFileInfo::exists(archive)) {
+        emit logUpdated(QString("sysproxy 不存在，且找不到压缩包: %1").arg(archive));
+        return false;
+    }
+
+#if defined(Q_OS_WIN)
+    QString escapedArchive = archive;
+    QString escapedOutputDir = outputDir;
+    escapedArchive.replace("'", "''");
+    escapedOutputDir.replace("'", "''");
+    const int code = QProcess::execute("powershell", {
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-Command",
+        QString("Expand-Archive -LiteralPath '%1' -DestinationPath '%2' -Force")
+            .arg(escapedArchive, escapedOutputDir)
+    });
+#else
+    const int code = QProcess::execute("unzip", {"-o", archive, "-d", outputDir});
+#endif
+
+    if (code != 0 || !QFileInfo::exists(sysproxy)) {
+        emit logUpdated(QString("解压 sysproxy 失败: %1").arg(archive));
+        return false;
+    }
+
+    emit logUpdated(QString("sysproxy 已解压: %1").arg(sysproxy));
+    return true;
+}
+
+void CoreController::reloadConfig()
+{
+    if (!isRunning() || m_fullConfigPath.isEmpty()) {
+        return;
+    }
+
+    QJsonObject payload;
+    payload.insert("path", m_fullConfigPath);
+    QNetworkRequest request(QUrl(QString("http://%1:%2/configs").arg(m_config.host).arg(m_config.uiPort)));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    QNetworkReply *reply = m_network.put(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+        const QByteArray body = reply->readAll();
+        const bool ok = reply->error() == QNetworkReply::NoError;
+        const QString error = reply->errorString();
+        reply->deleteLater();
+        emit logUpdated(ok ? "Clash 配置已重载" : QString("重载 Clash 配置失败: %1 %2").arg(error, QString::fromUtf8(body)));
+    });
+}
+
+void CoreController::emitStatus()
+{
+    emit statusChanged(m_tunEnabled, m_proxyEnabled, isRunning());
+}
