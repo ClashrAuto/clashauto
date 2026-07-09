@@ -234,11 +234,11 @@ QWidget *MainWindow::buildStatusPage()
     metrics->addWidget(createMetricCard("TD", "Total Down", &m_totalDownValue, "download"), 1, 1);
     leftLayout->addLayout(metrics);
 
-    auto *bandTitle = new QLabel("瀹炴椂甯﹀", left);
+    auto *bandTitle = new QLabel("实时带宽", left);
     bandTitle->setObjectName("sectionTitle");
     leftLayout->addWidget(bandTitle);
-    m_upChart = new TrafficChart("涓婁紶", QColor(177, 74, 74), left);
-    m_downChart = new TrafficChart("涓嬭浇", QColor(91, 180, 75), left);
+    m_upChart = new TrafficChart("上传", QColor(177, 74, 74), left);
+    m_downChart = new TrafficChart("下载", QColor(91, 180, 75), left);
     leftLayout->addWidget(m_upChart, 1);
     leftLayout->addWidget(m_downChart, 1);
 
@@ -350,11 +350,11 @@ QWidget *MainWindow::buildSubscriptionsPageLegacy()
     auto *page = new QFrame(this);
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 10);
-    auto *button = new QPushButton("娣诲姞璁㈤槄", page);
+    auto *button = new QPushButton("添加订阅", page);
     button->setObjectName("primaryButton");
     button->setFixedWidth(96);
     layout->addWidget(button, 0, Qt::AlignLeft);
-    for (const QString &name : {"榛樿璁㈤槄", "Clash 璁㈤槄閾炬帴"}) {
+    for (const QString &name : {"默认订阅", "Clash 订阅链接"}) {
         NodeInfo node;
         node.name = name;
         node.delay = 0;
@@ -531,12 +531,12 @@ QWidget *MainWindow::buildFooter()
         layout->addWidget(button);
     };
 
-    addSwitch("澧炲己", &m_tunDot, &CoreController::toggleTun);
-    addSwitch("缃戦〉", &m_proxyDot, &CoreController::toggleProxy);
-    addSwitch("鏍稿績", &m_coreDot, &CoreController::toggleCore);
+    addSwitch("增强", &m_tunDot, &CoreController::toggleTun);
+    addSwitch("网页", &m_proxyDot, &CoreController::toggleProxy);
+    addSwitch("核心", &m_coreDot, &CoreController::toggleCore);
 
     auto *mode = new QComboBox(footer);
-    mode->addItems({"鍏ㄩ儴", "瑙勫垯", "鐩磋繛"});
+    mode->addItems({"全部", "规则", "直连"});
     mode->setFixedWidth(120);
     connect(mode, &QComboBox::currentTextChanged, &m_service, &ClashService::setMode);
     layout->addWidget(mode);
@@ -601,7 +601,7 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     delay->setFixedWidth(104);
     layout->addWidget(delay);
 
-    auto *apply = new QPushButton(node.active ? "绂佺敤" : "搴旂敤", row);
+    auto *apply = new QPushButton(node.active ? "禁用" : "应用", row);
     apply->setObjectName("nodeButton");
     apply->setFixedSize(82, 38);
     connect(apply, &QPushButton::clicked, this, [this, node] {
