@@ -300,8 +300,8 @@ jobs:
               -o "$core_archive" \
               "https://raw.githubusercontent.com/ClashrAuto/Clashr-Auto-Desktop/master/clash/clash-linux-amd64-2021.07.03.gz"
             gzip -dc "$core_archive" > "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
-            chmod +x "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
           fi
+          chmod +x "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
 
       - name: Install build dependencies
         shell: bash
