@@ -22,6 +22,7 @@ env:
   STAGE_DIR: dist/package/ClashAuto
   RUNTIME_RELEASE_TAG: v2.5.7
   RUNTIME_ASSET: Clash.Auto-amd64-2.5.7-win.zip
+  RUNTIME_LINUX_ASSET: clash-auto-amd64-2.5.7.zip
 
 jobs:
   windows:
@@ -204,6 +205,211 @@ jobs:
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
           make_latest: true
+          overwrite_files: true
           files: |
-            dist/ClashAuto-*-windows-x64-portable.zip
-            dist/ClashAuto-*-windows-x64-setup.exe
+            dist/ClashAuto-*
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: ubuntu-22.04
+            deb_arch: amd64
+            clash_core: clash-linux-amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            deb_arch: arm64
+            clash_core: clash-linux-arm64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read CMake project version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/.*project\s*\(\s*[^ ]+\s+VERSION\s+([0-9]+(\.[0-9]+){1,3}).*/\1/p' clashauto-c++/CMakeLists.txt | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "Cannot find project VERSION in clashauto-c++/CMakeLists.txt" >&2
+            exit 1
+          fi
+          {
+            echo "APP_VERSION=$version"
+            echo "RELEASE_TAG=v$version"
+          } >> "$GITHUB_ENV"
+          echo "Release version: $version"
+
+      - name: Download runtime resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          url="https://github.com/ClashrAuto/Clashr-Auto-Desktop/releases/download/${RUNTIME_RELEASE_TAG}/${RUNTIME_LINUX_ASSET}"
+          zip_path="${RUNNER_TEMP}/${RUNTIME_LINUX_ASSET}"
+          curl -L --fail --retry 3 -o "$zip_path" "$url"
+          rm -rf Clashr-Auto
+          mkdir -p Clashr-Auto
+
+          python3 - "$zip_path" <<'PY'
+          import pathlib
+          import sys
+          import zipfile
+
+          zip_path = pathlib.Path(sys.argv[1])
+          target_root = pathlib.Path("Clashr-Auto")
+          prefixes = ("command/", "config/", "language/")
+          with zipfile.ZipFile(zip_path) as archive:
+              for entry in archive.infolist():
+                  name = entry.filename.replace("\\", "/")
+                  if not (name == "version" or name.startswith(prefixes)):
+                      continue
+                  target = target_root / name
+                  if entry.is_dir():
+                      target.mkdir(parents=True, exist_ok=True)
+                      continue
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with archive.open(entry) as src, target.open("wb") as dst:
+                      dst.write(src.read())
+          PY
+
+          if [ ! -f Clashr-Auto/config/config.yaml ]; then
+            echo "Runtime resources did not contain config/config.yaml" >&2
+            exit 1
+          fi
+
+      - name: Normalize Linux runtime core
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p Clashr-Auto/command/clash
+
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            core_archive="${RUNNER_TEMP}/${{ matrix.clash_core }}.gz"
+            curl -L --fail --retry 3 \
+              -o "$core_archive" \
+              "https://raw.githubusercontent.com/ClashrAuto/Clashr-Auto-Desktop/master/clash/clash-linux-armv8-2021.07.03.gz"
+            gzip -dc "$core_archive" > "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
+            chmod +x "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
+          elif [ ! -f "Clashr-Auto/command/clash/${{ matrix.clash_core }}" ]; then
+            core_archive="${RUNNER_TEMP}/${{ matrix.clash_core }}.gz"
+            curl -L --fail --retry 3 \
+              -o "$core_archive" \
+              "https://raw.githubusercontent.com/ClashrAuto/Clashr-Auto-Desktop/master/clash/clash-linux-amd64-2021.07.03.gz"
+            gzip -dc "$core_archive" > "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
+            chmod +x "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
+          fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            qt6-base-dev \
+            qt6-tools-dev-tools \
+            libgl1-mesa-dev \
+            fakeroot \
+            zip
+
+      - name: Configure
+        shell: bash
+        run: cmake -S clashauto-c++ -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        run: cmake --build "$BUILD_DIR" --parallel
+
+      - name: Stage portable app
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$STAGE_DIR"
+          app_dir="$stage/clashauto-c++"
+          resource_dir="$stage/Clashr-Auto"
+          rm -rf "$stage"
+          mkdir -p "$app_dir" "$resource_dir"
+
+          cp "$BUILD_DIR/clashauto-cpp" "$app_dir/"
+          chmod +x "$app_dir/clashauto-cpp"
+
+          for item in command config language mihomo static version; do
+            if [ -e "Clashr-Auto/$item" ]; then
+              cp -a "Clashr-Auto/$item" "$resource_dir/"
+            else
+              echo "Skipping missing resource: Clashr-Auto/$item"
+            fi
+          done
+
+          test -x "$app_dir/clashauto-cpp"
+          test -f "$resource_dir/config/config.yaml"
+          test -x "$resource_dir/command/clash/${{ matrix.clash_core }}"
+
+      - name: Create portable tar.gz
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -C dist/package -czf "dist/ClashAuto-${APP_VERSION}-linux-${{ matrix.arch }}-portable.tar.gz" ClashAuto
+          (cd dist/package && zip -r "../ClashAuto-${APP_VERSION}-linux-${{ matrix.arch }}-portable.zip" ClashAuto)
+
+      - name: Create deb package
+        shell: bash
+        run: |
+          set -euo pipefail
+          pkg_root="dist/deb/ClashAuto"
+          install_root="$pkg_root/opt/ClashAuto"
+          mkdir -p "$install_root" "$pkg_root/usr/share/applications" "$pkg_root/usr/bin" "$pkg_root/DEBIAN"
+
+          cp -a "$STAGE_DIR/." "$install_root/"
+          ln -s /opt/ClashAuto/clashauto-c++/clashauto-cpp "$pkg_root/usr/bin/clashauto-cpp"
+
+          cat > "$pkg_root/usr/share/applications/clashauto.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Clash Auto
+          Exec=/opt/ClashAuto/clashauto-c++/clashauto-cpp
+          Terminal=false
+          Categories=Network;
+          EOF
+
+          installed_size="$(du -sk "$install_root" | cut -f1)"
+          cat > "$pkg_root/DEBIAN/control" <<EOF
+          Package: clashauto
+          Version: ${APP_VERSION}
+          Section: net
+          Priority: optional
+          Architecture: ${{ matrix.deb_arch }}
+          Installed-Size: ${installed_size}
+          Maintainer: Clash Auto <auto@clash.com>
+          Depends: libc6, libstdc++6, libqt6core6 | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libqt6network6 | libqt6network6t64
+          Description: Clash Auto Qt desktop client
+           Clash Auto desktop client built with Qt Widgets.
+          EOF
+
+          fakeroot dpkg-deb --build "$pkg_root" "dist/ClashAuto-${APP_VERSION}-linux-${{ matrix.arch }}.deb"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClashAuto-linux-${{ matrix.arch }}
+          path: |
+            dist/ClashAuto-*-linux-${{ matrix.arch }}-portable.tar.gz
+            dist/ClashAuto-*-linux-${{ matrix.arch }}-portable.zip
+            dist/ClashAuto-*-linux-${{ matrix.arch }}.deb
+
+      - name: Upload to GitHub Release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: Clash Auto ${{ env.APP_VERSION }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          overwrite_files: true
+          files: |
+            dist/ClashAuto-*
