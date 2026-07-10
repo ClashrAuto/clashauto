@@ -912,20 +912,16 @@ QWidget *MainWindow::buildSettingsPage()
     systemScroll->setWidget(sysBody);
     tabs->addTab(systemScroll, QString::fromUtf8("系统"));
 
-    // 页面 + 顶部右侧保存（对应旧项目右上角「应用」）
+    // 页面：「应用」按钮放到 tab 栏右上角同一行（对应旧项目 top:5 right:5 绝对定位）
     auto *page = new QFrame(this);
     page->setObjectName("page");
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 10);
     layout->setSpacing(4);
-    auto *topBar = new QHBoxLayout();
-    topBar->setContentsMargins(0, 0, 0, 0);
-    topBar->addStretch();
-    auto *save = new QPushButton(QString::fromUtf8("应用"), page);
+    auto *save = new QPushButton(QString::fromUtf8("应用"), tabs);
     save->setObjectName("primaryButton");
     save->setFixedSize(82, 28);
-    topBar->addWidget(save);
-    layout->addLayout(topBar);
+    tabs->setCornerWidget(save, Qt::TopRightCorner);
     layout->addWidget(tabs, 1);
 
     connect(save, &QPushButton::clicked, this, [=] {
@@ -1185,16 +1181,12 @@ QWidget *MainWindow::buildLogsPage()
     layout->setContentsMargins(0, 0, 0, 10);
     layout->setSpacing(6);
 
-    auto *header = new QHBoxLayout();
-    header->setContentsMargins(0, 0, 0, 0);
-    header->addStretch();
-    auto *openDir = new QPushButton(QString::fromUtf8("打开日志目录"), page);
-    openDir->setObjectName("iconButton");
-    header->addWidget(openDir);
-    layout->addLayout(header);
-
     auto *tabs = new QTabWidget(page);
     tabs->setObjectName("logsTabs");
+    // 「打开日志目录」放到 tab 栏右上角同一行（对应旧项目 top:5 right:5）
+    auto *openDir = new QPushButton(QString::fromUtf8("打开日志目录"), tabs);
+    openDir->setObjectName("iconButton");
+    tabs->setCornerWidget(openDir, Qt::TopRightCorner);
 
     auto makeTimelineTab = [](QScrollArea *&scrollOut, QVBoxLayout *&layoutOut) -> QWidget * {
         auto *scroll = new QScrollArea();
