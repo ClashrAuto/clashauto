@@ -22,7 +22,7 @@ QString speedText(double v)
 TrafficChart::TrafficChart(QString title, QColor lineColor, QWidget *parent)
     : QWidget(parent), m_title(std::move(title)), m_lineColor(std::move(lineColor))
 {
-    setMinimumHeight(110);
+    setMinimumHeight(60); // 低下限：避免与固定 200px 流量卡区争高导致卡片被挤（真机验证）
     m_pointers.fill(1.0, m_maxPointer);
 
     m_scrollTimer = new QTimer(this);

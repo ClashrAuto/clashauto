@@ -238,9 +238,25 @@ jobs:
           if (-not (Test-Path $deployTool)) {
             throw "Cannot find windeployqt"
           }
-          # --compiler-runtime: 一并打包 MSVC 运行库（msvcp140*/vcruntime140*），
-          # 否则未装 VC++ redist 的机器上启动即 0xC0000135（真机验证发现）
-          & $deployTool --release --no-translations --compiler-runtime "$appDir\clashauto-cpp.exe"
+          & $deployTool --release --no-translations "$appDir\clashauto-cpp.exe"
+
+          # 显式打包 MSVC 运行库：--compiler-runtime 实测不落 msvcp140_1/_2.dll，
+          # 未装 VC++ redist 的机器启动即 0xC0000135（真机验证）。从 VC Tools Redist 目录直接复制。
+          $redistRoots = @()
+          if ($env:VCToolsRedistDir) { $redistRoots += $env:VCToolsRedistDir }
+          $redistRoots += (Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC" -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+          $crtDir = $null
+          foreach ($rr in $redistRoots) {
+            $crtDir = Get-ChildItem (Join-Path $rr "*\${{ matrix.arch }}\Microsoft.VC*.CRT") -Directory -ErrorAction SilentlyContinue |
+              Sort-Object Name -Descending | Select-Object -First 1 -ExpandProperty FullName
+            if ($crtDir) { break }
+          }
+          if ($crtDir) {
+            Write-Host "Copying MSVC runtime from $crtDir"
+            Copy-Item (Join-Path $crtDir "*.dll") $appDir -Force
+          } else {
+            Write-Host "WARNING: MSVC runtime CRT dir not found; package may need VC++ redist"
+          }
 
           $resourceItems = @("command", "config", "language", "mihomo", "static", "version")
           foreach ($item in $resourceItems) {

@@ -33,17 +33,14 @@ void ClashService::start()
 void ClashService::setMode(const QString &mode)
 {
     QString apiMode = mode;
-    if (mode.compare("Rule", Qt::CaseInsensitive) == 0 || mode.contains("rule", Qt::CaseInsensitive)) {
+    if (mode.compare("Rule", Qt::CaseInsensitive) == 0 || mode.contains("rule", Qt::CaseInsensitive)
+        || mode.contains(QString::fromUtf8("规则"))) {
         apiMode = "Rule";
-    } else if (mode.compare("Global", Qt::CaseInsensitive) == 0 || mode.contains("global", Qt::CaseInsensitive)) {
+    } else if (mode.compare("Global", Qt::CaseInsensitive) == 0 || mode.contains("global", Qt::CaseInsensitive)
+               || mode.contains(QString::fromUtf8("全局")) || mode.contains(QString::fromUtf8("全部"))) {
         apiMode = "Global";
-    } else if (mode.compare("Direct", Qt::CaseInsensitive) == 0 || mode.contains("direct", Qt::CaseInsensitive)) {
-        apiMode = "Direct";
-    } else if (mode.contains("瑙")) {
-        apiMode = "Rule";
-    } else if (mode.contains("鍏")) {
-        apiMode = "Global";
-    } else if (mode.contains("鐩")) {
+    } else if (mode.compare("Direct", Qt::CaseInsensitive) == 0 || mode.contains("direct", Qt::CaseInsensitive)
+               || mode.contains(QString::fromUtf8("直连")) || mode.contains(QString::fromUtf8("直"))) {
         apiMode = "Direct";
     }
 

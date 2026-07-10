@@ -1308,8 +1308,8 @@ QWidget *MainWindow::buildFooter()
     addSwitch("核心", &m_coreDot, &CoreController::toggleCore);
 
     auto *mode = new QComboBox(footer);
-    mode->addItems({"全部", "规则", "直连"});
-    mode->setFixedWidth(120);
+    mode->addItems({QString::fromUtf8("规则"), QString::fromUtf8("全局"), QString::fromUtf8("直连")});
+    mode->setFixedWidth(120); // 默认「规则」(Rule)，与旧项目一致
     connect(mode, &QComboBox::currentTextChanged, &m_service, &ClashService::setMode);
     layout->addWidget(mode);
     return footer;
