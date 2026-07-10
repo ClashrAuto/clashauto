@@ -355,7 +355,7 @@ QWidget *MainWindow::buildSidebar()
     side->setObjectName("sidebar");
     side->setFixedWidth(SidebarWidth);
     auto *layout = new QVBoxLayout(side);
-    layout->setContentsMargins(5, 16, 0, 10);
+    layout->setContentsMargins(5, 16, 0, 5); // 版本号紧贴侧栏底部 5px
     layout->setSpacing(0);
 
     auto *logoWrap = new QFrame(side);
@@ -389,7 +389,6 @@ QWidget *MainWindow::buildSidebar()
     auto *version = new QLabel("Ver: " APP_VERSION, side);
     version->setObjectName("version");
     version->setAlignment(Qt::AlignCenter);
-    version->setFixedHeight(24);
     layout->addWidget(version);
     return side;
 }
