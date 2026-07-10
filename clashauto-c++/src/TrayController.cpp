@@ -37,6 +37,13 @@ void TrayController::setTraffic(qint64 up, qint64 down)
     rebuildMenu();
 }
 
+void TrayController::notify(const QString &title, const QString &message)
+{
+    if (QSystemTrayIcon::supportsMessages()) {
+        m_tray.showMessage(title, message, QSystemTrayIcon::Information, 3000);
+    }
+}
+
 void TrayController::rebuildMenu()
 {
     auto *menu = new QMenu();

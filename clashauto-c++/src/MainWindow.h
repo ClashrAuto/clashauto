@@ -20,6 +20,7 @@ class QScrollArea;
 class QVBoxLayout;
 class QTableWidget;
 class QJsonArray;
+class QCloseEvent;
 
 class MainWindow final : public QMainWindow
 {
@@ -32,6 +33,7 @@ protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
+    void closeEvent(QCloseEvent *event) override;
 
 private:
     QWidget *buildTitleBar();
@@ -40,7 +42,6 @@ private:
     QWidget *buildSubscriptionsPage();
     QWidget *buildSettingsPage();
     QWidget *buildLogsPage();
-    QWidget *buildVipPage();
     QWidget *buildAboutPage();
     QWidget *buildFooter();
     QFrame *createMetricCard(const QString &icon, const QString &title, QLabel **valueLabel, const QString &className);
@@ -66,6 +67,7 @@ private:
     QJsonArray loadRuleSection(const QString &section) const;
     bool saveRuleSection(const QString &section, const QJsonArray &array);
     void setCurrentPage(int page);
+    void applyAutoStart(bool enabled);
 
     ClashService m_service;
     QStackedWidget *m_pages = nullptr;
@@ -102,5 +104,7 @@ private:
     QVector<NodeInfo> m_currentNodes;
     QString m_selectedNode;
     bool m_dragging = false;
+    bool m_closeToTray = true;
+    bool m_trayHintShown = false;
     QPoint m_dragStart;
 };

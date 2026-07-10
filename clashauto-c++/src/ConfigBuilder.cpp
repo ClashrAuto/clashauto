@@ -3,6 +3,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTextStream>
@@ -34,6 +37,7 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = setNestedScalar(yaml, "tun", "enable", tunEnabled ? "true" : "false");
     yaml = normalizeEmptyProxies(yaml);
     yaml = applySubscriptions(yaml, readSubscriptions());
+    yaml = applyCustomRules(yaml);
 
     const QString fullPath = QDir(m_config.userDir).filePath("full.yaml");
     writeText(fullPath, yaml);
@@ -287,6 +291,190 @@ QString ConfigBuilder::applySubscriptions(QString yaml, const QVector<Subscripti
     }
 
     return appendSubscriptionGroups(yaml, subscriptions);
+}
+
+QString ConfigBuilder::applyCustomRules(QString yaml) const
+{
+    // 消费设置页写入的 userDir/rules.json：
+    //   area: [{name, type, rule}]  -> 生成按正则匹配节点名的自定义 proxy-group（对应旧项目 def['proxy-groups'] 中带 rule 的项）
+    //   rule: [{type, node, value}] -> 前插到 rules: 顶部（对应旧项目 def.rules.unshift）
+    const QString rulesPath = QDir(m_config.userDir).filePath("rules.json");
+    QFile file(rulesPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return yaml;
+    }
+    const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
+    file.close();
+
+    const QJsonArray areas = root.value("area").toArray();
+    const QJsonArray customRules = root.value("rule").toArray();
+    if (areas.isEmpty() && customRules.isEmpty()) {
+        return yaml;
+    }
+
+    // 1) 自定义区域分组：按正则匹配节点名，生成 proxy-group，并把组名加入首个选择组
+    const QStringList nodeNames = proxyNames(yaml);
+    QSet<QString> existing;
+    for (const QString &groupName : existingGroupNames(yaml)) {
+        existing.insert(groupName);
+    }
+
+    QString groupBlock;
+    QStringList newGroupNames;
+    for (const QJsonValue &value : areas) {
+        const QJsonObject obj = value.toObject();
+        const QString name = obj.value("name").toString().trimmed();
+        QString type = obj.value("type").toString().trimmed();
+        const QString rule = obj.value("rule").toString().trimmed();
+        if (name.isEmpty() || rule.isEmpty() || existing.contains(name)) {
+            continue;
+        }
+        if (type.isEmpty()) {
+            type = "url-test";
+        }
+        const QRegularExpression re(rule);
+        if (!re.isValid()) {
+            continue;
+        }
+        QStringList matched;
+        for (const QString &node : nodeNames) {
+            if (re.match(node).hasMatch()) {
+                matched << node;
+            }
+        }
+        matched.removeDuplicates();
+        if (matched.isEmpty()) {
+            continue;
+        }
+        existing.insert(name);
+        newGroupNames << name;
+        groupBlock += QString("  - name: %1\n").arg(yamlQuote(name));
+        groupBlock += QString("    type: %1\n").arg(type);
+        if (type != "select") {
+            groupBlock += "    url: 'http://www.gstatic.com/generate_204'\n";
+            groupBlock += "    interval: 300\n";
+        }
+        groupBlock += "    proxies:\n";
+        for (const QString &node : matched) {
+            groupBlock += QString("      - %1\n").arg(yamlQuote(node));
+        }
+    }
+
+    // 仅当存在 rules: 锚点时才注入（避免只更新选择组却插不进组定义，产生悬空引用）
+    if (!newGroupNames.isEmpty() && yaml.indexOf("\nrules:") >= 0) {
+        yaml = addToFirstGroup(yaml, newGroupNames);
+        const qsizetype rulesPos = yaml.indexOf("\nrules:");
+        if (rulesPos >= 0) {
+            yaml.insert(rulesPos + 1, groupBlock);
+        }
+    }
+
+    // 2) 自定义路由规则：前插到 rules: 顶部
+    QString ruleLines;
+    for (const QJsonValue &value : customRules) {
+        const QJsonObject obj = value.toObject();
+        const QString type = obj.value("type").toString().trimmed();
+        const QString node = obj.value("node").toString().trimmed();
+        const QString val = obj.value("value").toString().trimmed();
+        if (type.isEmpty() || node.isEmpty()) {
+            continue;
+        }
+        const QString rule = (type == "MATCH")
+            ? QString("%1,%2").arg(type, node)
+            : QString("%1,%2,%3").arg(type, val, node);
+        ruleLines += QString("  - %1\n").arg(yamlQuote(rule));
+    }
+    if (!ruleLines.isEmpty()) {
+        const qsizetype rulesPos = yaml.indexOf("\nrules:");
+        if (rulesPos >= 0) {
+            const qsizetype lineEnd = yaml.indexOf('\n', rulesPos + 1);
+            if (lineEnd >= 0) {
+                yaml.insert(lineEnd + 1, ruleLines);
+            }
+        }
+    }
+
+    return yaml;
+}
+
+QStringList ConfigBuilder::proxyNames(const QString &yaml) const
+{
+    QStringList names;
+    const qsizetype start = yaml.indexOf(QRegularExpression("(?m)^proxies:"));
+    if (start < 0) {
+        return names;
+    }
+    qsizetype end = yaml.indexOf("\nproxy-groups:", start);
+    if (end < 0) {
+        end = yaml.size();
+    }
+    const QString block = yaml.mid(start, end - start);
+    const QRegularExpression nameRe("(?m)^  - name:\\s*(.+)$");
+    QRegularExpressionMatchIterator it = nameRe.globalMatch(block);
+    while (it.hasNext()) {
+        const QString name = yamlScalar(it.next().captured(1));
+        if (!name.isEmpty()) {
+            names << name;
+        }
+    }
+    return names;
+}
+
+QStringList ConfigBuilder::existingGroupNames(const QString &yaml) const
+{
+    QStringList names;
+    const qsizetype start = yaml.indexOf("\nproxy-groups:");
+    if (start < 0) {
+        return names;
+    }
+    qsizetype end = yaml.indexOf("\nrules:", start);
+    if (end < 0) {
+        end = yaml.size();
+    }
+    const QString block = yaml.mid(start, end - start);
+    const QRegularExpression nameRe("(?m)^  - name:\\s*(.+)$");
+    QRegularExpressionMatchIterator it = nameRe.globalMatch(block);
+    while (it.hasNext()) {
+        const QString name = yamlScalar(it.next().captured(1));
+        if (!name.isEmpty()) {
+            names << name;
+        }
+    }
+    return names;
+}
+
+QString ConfigBuilder::addToFirstGroup(QString yaml, const QStringList &names) const
+{
+    if (names.isEmpty()) {
+        return yaml;
+    }
+    const qsizetype groups = yaml.indexOf("\nproxy-groups:");
+    if (groups < 0) {
+        return yaml;
+    }
+    const qsizetype firstProxies = yaml.indexOf("\n    proxies:", groups);
+    if (firstProxies < 0) {
+        return yaml;
+    }
+
+    QStringList values;
+    const qsizetype listStart = yaml.indexOf('\n', firstProxies + 1) + 1;
+    qsizetype cursor = listStart;
+    while (cursor > 0 && cursor < yaml.size()) {
+        const qsizetype nextEnd = yaml.indexOf('\n', cursor);
+        const QString line = yaml.mid(cursor, nextEnd < 0 ? -1 : nextEnd - cursor);
+        if (!line.startsWith("      - ")) {
+            break;
+        }
+        values << yamlScalar(line.mid(8));
+        cursor = nextEnd < 0 ? yaml.size() : nextEnd + 1;
+    }
+    for (const QString &name : names) {
+        if (!values.contains(name)) {
+            values << name;
+        }
+    }
+    return replaceProxyListAt(yaml, firstProxies + 1, values);
 }
 
 QString ConfigBuilder::replaceTopLevelProxies(QString yaml, const QString &proxyBlock) const

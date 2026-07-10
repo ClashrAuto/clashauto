@@ -31,6 +31,10 @@ private:
     QString mergePlugin(const QString &base, const QString &plugin) const;
     QVector<Subscription> readSubscriptions() const;
     QString applySubscriptions(QString yaml, const QVector<Subscription> &subscriptions) const;
+    QString applyCustomRules(QString yaml) const;
+    QStringList proxyNames(const QString &yaml) const;
+    QStringList existingGroupNames(const QString &yaml) const;
+    QString addToFirstGroup(QString yaml, const QStringList &names) const;
     QString replaceTopLevelProxies(QString yaml, const QString &proxyBlock) const;
     QString replaceProxyListAt(QString yaml, qsizetype proxiesKey, const QStringList &values) const;
     QString appendSubscriptionGroups(QString yaml, const QVector<Subscription> &subscriptions) const;

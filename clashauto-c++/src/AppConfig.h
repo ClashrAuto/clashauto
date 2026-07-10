@@ -15,6 +15,8 @@ struct AppConfig {
     bool nodeOnlyAvailable = true;
     bool clearConnections = true;
     bool increment = false;
+    bool closeToTray = true;
+    bool autoStart = false;
     bool allowRuleEnabled = false;
     bool noAllowRuleEnabled = false;
     QString allowRule;

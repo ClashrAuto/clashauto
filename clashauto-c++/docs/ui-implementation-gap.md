@@ -18,17 +18,17 @@
 | 页脚 footer | ✅ | ✅ | 加在线 ◉ / 箭头 › 图标 + 圆点 **1s 呼吸动画**（QPropertyAnimation 透明度） |
 | 状态页 status | ⚠️ 结构 | ✅ | 左右 **50:50**、卡片图标 30、间距 10、徽标 120、节点选中蓝左条；⚡ 测速按钮；折线图**按 tubiao.js**（平滑左滚 50ms/点步 1s + 四分网格 + 右侧速度刻度 + 阶梯自适应最大值）；**节点列表宽度自适应**（搜索框占满、名称随列宽伸缩、无横向滚动条） |
 | 订阅页 sub | ❌ 结构 | ✅ | **3 列卡片网格** + 「+」新增卡 + 6 圆按钮；启用/查看/更新/编辑/删除/**测速**全功能（测速调 `/proxies/{name}/delay`，需核心运行） |
-| 设置页 setting | ❌ 结构 | ⚠️ | 5 tab + 系统分组(h1+虚线) + **区域/规则表格真 CRUD**（持久化 `rules.json`，增/改/删对话框）；仅「路由注入 full.yaml」未接 |
+| 设置页 setting | ❌ 结构 | ✅ | 5 tab + 系统分组(h1+虚线) + **区域/规则表格真 CRUD**（持久化 `rules.json`，增/改/删对话框）；**区域/规则已注入 full.yaml**（`ConfigBuilder::applyCustomRules`，改动后自动 `rebuildConfig` 热重载）；系统 tab 新增「托盘/启动」分组：**关闭到托盘**(`mini`)、**开机自启**(`sys`，Win 注册表 Run) |
 | 日志页 logs | ❌ 结构 | ✅ | 双 tab(主/Clash) + 打开日志目录 + **圆点竖轴时间线**（自绘 rail，按级别着色，最新在顶） |
-| 会员页 vip | ❌ 结构 | ✅ | 图标卡(80/36) + 使用VIP复选框 + 兑换 input-number + 分享 + 机器码；积分/兑换/绑定后端无（点击提示待接入） |
+| 会员页 vip | ❌ 结构 | ➖ 已移除 | **按需求整页删除**：`buildVipPage`、侧栏「VIP」菜单项、`#vip*`/`#machineId` 样式、设备码/分享逻辑及 `QClipboard`/`QSysInfo` include 全部移除；菜单与 `m_pages` 索引保持对齐（状态/订阅/设置/日志/关于 = 0–4） |
 | 关于页 about | ❌ 结构 | ✅ | 版本(绿粗) + 红色可点链接 + Exe/Root 路径 + **检查更新按钮** |
 | 主题 | ❌ | ✅ | **深/浅双主题 + 切换**（启动读 config，设置保存实时切换） |
-| 更新弹窗 update | ❌ | ✅ | 独立 **QDialog 600×660**：左侧 tabs 正式/测试版 + 版本说明 + 资源列表 + 进度条(26) + 底部；拉 GitHub releases，「打开下载页」 |
+| 更新弹窗 update | ❌ | ✅ | 独立 **QDialog 600×660**：左侧 tabs 正式/测试版 + 版本说明 + 资源列表 + 进度条(26) + 底部；拉 GitHub releases，「打开下载页」 + **双击资源应用内下载**（进度条 + 跟随重定向 + 存至「下载」目录并打开所在文件夹） |
 
 ### 仍未做（明确清单）
-- **设置 区域/规则 → full.yaml 路由注入**：表格 CRUD/持久化(`rules.json`)已完成，但尚未让 `ConfigBuilder` 消费它生成代理组/规则——刻意留作专项，避免影响已通过 `clash -t` 的配置生成。
-- **会员**积分/兑换/绑定的真实后端（需会员服务），当前 UI 完整、点击提示「待接入」。
-- 更新弹窗的**应用内自动下载 / 自更新**（当前为「打开下载页」）、标题栏按钮宽度 42 vs mini（可忽略）。
+- **区域/规则 → full.yaml 路由注入**：✅ 已完成。`ConfigBuilder::applyCustomRules` 读取 `userDir/rules.json`：`area` 项按正则匹配节点名生成自定义 `proxy-group`（原名，非旧项目的「 自定义」后缀，因 C++ 规则目标为自由文本、需与组名一致）并加入首个选择组；`rule` 项按 `MATCH,<node>` / `<type>,<value>,<node>` 前插到 `rules:` 顶部。**验证**：本机无 Qt/核心可跑，改用 PyYAML 对等移植的字符串手术在真实 `default.yaml` 上跑通（区域分组/去重/选择组接线/规则前插均断言通过、输出可被 YAML 解析）。
+- **会员页已按需求整页移除**（不再实现会员/VIP 相关任何功能）。
+- 更新弹窗的**自更新（下载后自动替换重启）**：当前为「应用内下载到『下载』目录 + 打开文件夹」，未做静默替换；标题栏按钮宽度 42 vs mini（可忽略）。
 
 ### 节点测速（本轮新增，已实现）
 - `ClashService::testDelays()`（测当前分组）+ `testNodeDelays(names)`（测指定名单），逐个 GET `/proxies/{name}/delay?timeout=5000&url=...`，全部返回后 `pollNodes()` 刷新延迟色。
@@ -143,13 +143,7 @@
 | 打开目录按钮 | 右上 mini text | 无 | ❌ |
 | 滚动高度 | `dom.height-73` | 自适应 | ➖ |
 
-### 3.5 会员页 vip
-
-| 项 | 规格 | 现状 | 状态 |
-|---|---|---|---|
-| 卡片 | 图标卡 icon width80 font36，`el-col line-height40` | 4 个 `#plainCard`+label | ❌ 结构 |
-| 机器码 | 底部绝对 font12 #999 | 文本 label | ❌ |
-| 积分/兑换 | input-number mini + 按钮 | 无 | ❌ |
+### 3.5 会员页 vip —— ➖ 已按需求移除，不再对照
 
 ### 3.6 关于页 about
 
@@ -351,7 +345,7 @@ QString MainWindow::lightStyle() const
 | 订阅新增/编辑对话框 | 自定义 `QDialog`：radio(sub/clash)+name/url/updateTime |
 | 设置页 5 tab + 表格 | 加「区域/规则」`QTableWidget`（列 180/180/auto/100）+ 分页；系统页分组 `h1+虚线` |
 | 日志页双 tab 时间线 | `QTabWidget` main/clash + 时间线样式 + 打开目录按钮 |
-| 会员/关于页 | 按 include/vip.vue、include/about.vue 结构重搭 |
+| 关于页 | 按 include/about.vue 结构重搭（会员页已移除） |
 | logo 状态变色 | 状态回调里 `m_logo->setProperty("state", tun?"tun":proxy?"proxy":"off")` + unpolish/polish |
 | 主题切换 | 读 `config.theme`，`setStyleSheet(light?lightStyle():appStyle())` |
 
@@ -361,4 +355,4 @@ QString MainWindow::lightStyle() const
 
 1. **样式性快赢**（4.1+4.2）：菜单蓝左条 / hover 右移 / 卡片图标 30 / 状态页 50:50 / 徽标宽 120 / 外圆角 10 —— 改动小、观感提升明显。
 2. **浅色主题**（4.3）：加 `lightStyle()` + 按 `config.theme` 切换。
-3. **结构性**（4.4）：按 订阅网格 → 设置表格 → 日志时间线 → 会员/关于 的顺序补齐。
+3. **结构性**（4.4）：按 订阅网格 → 设置表格 → 日志时间线 → 关于 的顺序补齐（会员页已移除）。

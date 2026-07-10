@@ -5,6 +5,7 @@
 #include <QButtonGroup>
 #include <QCoreApplication>
 #include <QCheckBox>
+#include <QCloseEvent>
 #include <QComboBox>
 #include <QDesktopServices>
 #include <QDialog>
@@ -35,11 +36,14 @@
 #include <QPropertyAnimation>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QTimer>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStyle>
+#include <QSystemTrayIcon>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -101,6 +105,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_core = new CoreController(config, this);
     m_tray = new TrayController(this, this);
     m_subscriptions = new SubscriptionStore(config, this);
+    m_closeToTray = config.closeToTray;
+
+    // 退出时停止核心并还原系统代理（关闭到托盘或从托盘退出都会走到这里）
+    connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
+        if (m_core) {
+            m_core->stopCore();
+        }
+    });
 
     setWindowTitle("Clash Auto");
     setWindowIcon(QIcon(":/assets/icon.ico"));
@@ -135,7 +147,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_pages->addWidget(buildSubscriptionsPage());
     m_pages->addWidget(buildSettingsPage());
     m_pages->addWidget(buildLogsPage());
-    m_pages->addWidget(buildVipPage());
     m_pages->addWidget(buildAboutPage());
 
     rightLayout->addWidget(m_pages, 1);
@@ -282,7 +293,6 @@ QWidget *MainWindow::buildSidebar()
         QString::fromUtf8("订阅"),
         QString::fromUtf8("设置"),
         QString::fromUtf8("日志"),
-        "VIP",
         QString::fromUtf8("关于")
     };
     auto *menuLayout = new QVBoxLayout();
@@ -569,6 +579,10 @@ QWidget *MainWindow::buildSettingsPage()
     clearConnections->setChecked(config.clearConnections);
     auto *increment = new QCheckBox();
     increment->setChecked(config.increment);
+    auto *closeToTray = new QCheckBox();
+    closeToTray->setChecked(config.closeToTray);
+    auto *autoStart = new QCheckBox();
+    autoStart->setChecked(config.autoStart);
     auto *theme = new QComboBox();
     theme->addItems({QString::fromUtf8("黑色"), QString::fromUtf8("白色")});
     theme->setFixedWidth(200);
@@ -657,6 +671,10 @@ QWidget *MainWindow::buildSettingsPage()
     sysLayout->addWidget(row(QString::fromUtf8("TUN"), tun));
     sysLayout->addWidget(row(QString::fromUtf8("系统代理"), webProxy));
     sysLayout->addWidget(row(QString::fromUtf8("切换时清理连接"), clearConnections));
+    addDivider();
+    addGroup(QString::fromUtf8("托盘 / 启动"));
+    sysLayout->addWidget(row(QString::fromUtf8("关闭到托盘"), closeToTray));
+    sysLayout->addWidget(row(QString::fromUtf8("开机自启"), autoStart));
     sysLayout->addStretch();
     systemScroll->setWidget(sysBody);
     tabs->addTab(systemScroll, QString::fromUtf8("系统"));
@@ -694,6 +712,8 @@ QWidget *MainWindow::buildSettingsPage()
         out << "node: " << (nodeOnly->isChecked() ? "true" : "false") << "\n";
         out << "clearConnections: " << (clearConnections->isChecked() ? "true" : "false") << "\n";
         out << "increment: " << (increment->isChecked() ? "true" : "false") << "\n";
+        out << "mini: " << (closeToTray->isChecked() ? "true" : "false") << "\n";
+        out << "sys: " << (autoStart->isChecked() ? "true" : "false") << "\n";
         out << "theme: " << (light ? "light" : "black") << "\n";
         out << "language: " << language->currentText() << "\n";
         out << "use_rule:\n";
@@ -702,6 +722,8 @@ QWidget *MainWindow::buildSettingsPage()
         out << "  allowUse: " << (allowUse->isChecked() ? "true" : "false") << "\n";
         out << "  noallowUse: " << (blockUse->isChecked() ? "true" : "false") << "\n";
         appendLog(QString("Settings saved: %1").arg(path));
+        m_closeToTray = closeToTray->isChecked();
+        applyAutoStart(autoStart->isChecked());
         applyTheme(light ? "light" : "black");
         m_core->rebuildConfig();
     });
@@ -831,6 +853,9 @@ void MainWindow::reloadRuleTable(const QString &section)
                 current.removeAt(i);
                 saveRuleSection(section, current);
                 reloadRuleTable(section);
+                if (m_core) {
+                    m_core->rebuildConfig();
+                }
                 appendLog(QString::fromUtf8("已删除一条%1").arg(section == "area" ? QString::fromUtf8("区域") : QString::fromUtf8("规则")));
             }
         });
@@ -894,6 +919,9 @@ void MainWindow::openRuleEditor(const QString &section, int editIndex)
         }
         saveRuleSection(section, current);
         reloadRuleTable(section);
+        if (m_core) {
+            m_core->rebuildConfig();
+        }
         appendLog(QString::fromUtf8("已保存一条%1").arg(section == "area" ? QString::fromUtf8("区域") : QString::fromUtf8("规则")));
         dialog->accept();
     });
@@ -944,122 +972,6 @@ QWidget *MainWindow::buildLogsPage()
         const QString dir = m_logFilePath.isEmpty() ? QDir::homePath() : QFileInfo(m_logFilePath).absolutePath();
         QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
     });
-    return page;
-}
-
-QWidget *MainWindow::buildVipPage()
-{
-    auto *page = new QFrame(this);
-    page->setObjectName("page");
-    auto *layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 0, 0, 10);
-    layout->setSpacing(10);
-
-    // 复刻 include/vip.vue：图标卡 icon 宽 80 / font 36，content 右侧
-    auto vipCardFrame = [this](const QString &icon, QWidget *content) -> QFrame * {
-        auto *card = new QFrame(this);
-        card->setObjectName("vipCard");
-        auto *h = new QHBoxLayout(card);
-        h->setContentsMargins(10, 10, 10, 10);
-        h->setSpacing(10);
-        auto *ic = new QLabel(icon, card);
-        ic->setObjectName("vipIcon");
-        ic->setAlignment(Qt::AlignCenter);
-        ic->setFixedWidth(80);
-        h->addWidget(ic);
-        h->addWidget(content, 1);
-        return card;
-    };
-
-    // 卡1：积分兑换时长
-    auto *c1 = new QWidget();
-    auto *v1 = new QVBoxLayout(c1);
-    v1->setContentsMargins(0, 0, 0, 0);
-    v1->setSpacing(2);
-    auto *t1 = new QLabel(QString::fromUtf8("积分兑换时长"), c1);
-    t1->setObjectName("vipTitle");
-    auto *d1 = new QLabel(QString::fromUtf8("剩余积分：0"), c1);
-    d1->setObjectName("vipDesc");
-    v1->addWidget(t1);
-    v1->addWidget(d1);
-
-    // 卡2：会员信息 + 使用 VIP 复选框
-    auto *c2 = new QWidget();
-    auto *v2 = new QVBoxLayout(c2);
-    v2->setContentsMargins(0, 0, 0, 0);
-    v2->setSpacing(2);
-    auto *titleRow = new QHBoxLayout();
-    titleRow->setContentsMargins(0, 0, 0, 0);
-    auto *t2 = new QLabel(QString::fromUtf8("会员信息"), c2);
-    t2->setObjectName("vipTitle");
-    auto *useVip = new QCheckBox(QString::fromUtf8("使用 VIP"), c2);
-    titleRow->addWidget(t2);
-    titleRow->addStretch();
-    titleRow->addWidget(useVip);
-    auto *d2 = new QLabel(QString::fromUtf8("当前会员：未绑定"), c2);
-    d2->setObjectName("vipDesc");
-    v2->addLayout(titleRow);
-    v2->addWidget(d2);
-
-    auto *topRow = new QHBoxLayout();
-    topRow->setContentsMargins(0, 0, 0, 0);
-    topRow->setSpacing(10);
-    topRow->addWidget(vipCardFrame(QString::fromUtf8("⏱"), c1), 1);
-    topRow->addWidget(vipCardFrame(QString::fromUtf8("👤"), c2), 1);
-    layout->addLayout(topRow);
-
-    // 卡3：积分兑换（input-number + 按钮）
-    auto *c3 = new QWidget();
-    auto *v3 = new QVBoxLayout(c3);
-    v3->setContentsMargins(0, 0, 0, 0);
-    v3->setSpacing(6);
-    auto *t3 = new QLabel(QString::fromUtf8("积分兑换"), c3);
-    t3->setObjectName("vipTitle");
-    auto *redeemRow = new QHBoxLayout();
-    redeemRow->setContentsMargins(0, 0, 0, 0);
-    redeemRow->setSpacing(8);
-    auto *spin = new QSpinBox(c3);
-    spin->setMinimum(500);
-    spin->setMaximum(500000);
-    spin->setSingleStep(500);
-    spin->setValue(500);
-    spin->setFixedWidth(120);
-    auto *redeem = new QPushButton(QString::fromUtf8("兑换"), c3);
-    redeem->setObjectName("primaryButton");
-    redeem->setFixedSize(72, 30);
-    auto *hint = new QLabel(QString::fromUtf8("500 积分 = 1 天"), c3);
-    hint->setObjectName("vipDesc");
-    redeemRow->addWidget(spin);
-    redeemRow->addWidget(redeem);
-    redeemRow->addWidget(hint);
-    redeemRow->addStretch();
-    v3->addWidget(t3);
-    v3->addLayout(redeemRow);
-    connect(redeem, &QPushButton::clicked, this, [this] { appendLog(QString::fromUtf8("积分兑换功能待接入")); });
-    layout->addWidget(vipCardFrame(QString::fromUtf8("🎁"), c3));
-
-    // 卡4：账号绑定 / 分享
-    auto *c4 = new QWidget();
-    auto *h4 = new QHBoxLayout(c4);
-    h4->setContentsMargins(0, 0, 0, 0);
-    auto *t4 = new QLabel(QString::fromUtf8("账号绑定 / 分享"), c4);
-    t4->setObjectName("vipTitle");
-    auto *share = new QPushButton(QString::fromUtf8("分享"), c4);
-    share->setObjectName("primaryButton");
-    share->setFixedSize(72, 30);
-    h4->addWidget(t4);
-    h4->addStretch();
-    h4->addWidget(share);
-    connect(share, &QPushButton::clicked, this, [this] { appendLog(QString::fromUtf8("账号绑定/分享功能待接入")); });
-    layout->addWidget(vipCardFrame(QString::fromUtf8("🔒"), c4));
-
-    layout->addStretch();
-
-    auto *machine = new QLabel(QString::fromUtf8("设备码：********-****-****-********"), page);
-    machine->setObjectName("machineId");
-    machine->setAlignment(Qt::AlignCenter);
-    machine->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    layout->addWidget(machine);
     return page;
 }
 
@@ -1353,7 +1265,7 @@ void MainWindow::showUpdateDialog()
         auto *body = new QTextEdit(page);
         body->setReadOnly(true);
         body->setMinimumHeight(200);
-        auto *h2 = new QLabel(QString::fromUtf8("下载资源"), page);
+        auto *h2 = new QLabel(QString::fromUtf8("下载资源（双击下载到「下载」目录）"), page);
         h2->setObjectName("subCardMeta");
         auto *assets = new QListWidget(page);
         assets->setMinimumHeight(130);
@@ -1392,17 +1304,61 @@ void MainWindow::showUpdateDialog()
     connect(openPage, &QPushButton::clicked, dialog, [] {
         QDesktopServices::openUrl(QUrl("https://github.com/ClashrAuto/Clashr-Auto-Desktop/releases"));
     });
-    auto openAsset = [](QListWidgetItem *item) {
-        const QString url = item->data(Qt::UserRole).toString();
-        if (!url.isEmpty()) {
-            QDesktopServices::openUrl(QUrl(url));
-        }
-    };
-    connect(rel.assets, &QListWidget::itemActivated, dialog, openAsset);
-    connect(beta.assets, &QListWidget::itemActivated, dialog, openAsset);
-
     // 拉取 GitHub releases（失败时优雅降级，仅显示提示）
     auto *nam = new QNetworkAccessManager(dialog);
+
+    // 双击资源即在应用内下载到「下载」目录，带进度条；完成后打开所在文件夹
+    auto downloadAsset = [this, dialog, nam, progress](QListWidgetItem *item) {
+        const QString url = item->data(Qt::UserRole).toString();
+        const QString name = item->text();
+        if (url.isEmpty()) {
+            return;
+        }
+        QString dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (dir.isEmpty()) {
+            dir = QDir::homePath();
+        }
+        const QString savePath = QDir(dir).filePath(name);
+
+        QNetworkRequest req(QUrl(url));
+        req.setRawHeader("User-Agent", "clashauto-cpp");
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply *reply = nam->get(req);
+
+        progress->setValue(0);
+        progress->show();
+        appendLog(QString::fromUtf8("开始下载: %1").arg(name));
+
+        connect(reply, &QNetworkReply::downloadProgress, dialog, [progress](qint64 received, qint64 total) {
+            if (total > 0) {
+                progress->setValue(static_cast<int>(received * 100 / total));
+            }
+        });
+        connect(reply, &QNetworkReply::finished, dialog, [this, reply, progress, savePath, name] {
+            const bool ok = reply->error() == QNetworkReply::NoError;
+            const QByteArray data = reply->readAll();
+            const QString err = reply->errorString();
+            reply->deleteLater();
+            if (!ok) {
+                progress->hide();
+                appendLog(QString::fromUtf8("下载失败: %1 (%2)").arg(name, err));
+                return;
+            }
+            QFile out(savePath);
+            if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                progress->hide();
+                appendLog(QString::fromUtf8("保存失败: %1").arg(savePath));
+                return;
+            }
+            out.write(data);
+            out.close();
+            progress->setValue(100);
+            appendLog(QString::fromUtf8("下载完成: %1").arg(savePath));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(savePath).absolutePath()));
+        });
+    };
+    connect(rel.assets, &QListWidget::itemActivated, dialog, downloadAsset);
+    connect(beta.assets, &QListWidget::itemActivated, dialog, downloadAsset);
     QNetworkRequest req(QUrl("https://api.github.com/repos/ClashrAuto/Clashr-Auto-Desktop/releases"));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "clashauto-cpp");
@@ -1569,6 +1525,41 @@ void MainWindow::setCurrentPage(int page)
     for (int i = 0; i < m_menuButtons.size(); ++i) {
         m_menuButtons[i]->setChecked(i == page);
     }
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    // 关闭到托盘：隐藏窗口、核心继续运行；真正退出走托盘「退出程序」
+    if (m_closeToTray && QSystemTrayIcon::isSystemTrayAvailable()) {
+        hide();
+        event->ignore();
+        if (!m_trayHintShown && m_tray) {
+            m_tray->notify(QString::fromUtf8("Clash Auto"),
+                           QString::fromUtf8("已最小化到托盘，右键托盘图标可退出"));
+            m_trayHintShown = true;
+        }
+        return;
+    }
+    event->accept();
+    qApp->quit();
+}
+
+void MainWindow::applyAutoStart(bool enabled)
+{
+#if defined(Q_OS_WIN)
+    QSettings reg("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                  QSettings::NativeFormat);
+    if (enabled) {
+        const QString path = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+        reg.setValue("ClashAuto", QString("\"%1\"").arg(path));
+    } else {
+        reg.remove("ClashAuto");
+    }
+    appendLog(enabled ? QString::fromUtf8("已设置开机自启") : QString::fromUtf8("已取消开机自启"));
+#else
+    Q_UNUSED(enabled);
+    appendLog(QString::fromUtf8("开机自启当前仅支持 Windows"));
+#endif
 }
 
 void MainWindow::reloadSubscriptions()
@@ -1743,7 +1734,6 @@ QString MainWindow::appStyle() const
         #linkLabel { color:red; font-size:14px; }
         #linkLabel:hover { text-decoration:underline; }
         #versionValue { color:green; font-size:14px; font-weight:bold; }
-        #machineId { color:#999; font-size:12px; }
         #settingGroupTitle { color:#666; font-size:24px; font-weight:800; }
         #settingDivider { background:transparent; border:0; border-bottom:1px dashed #333; }
         #circleButton { border-radius:14px; min-width:28px; max-width:28px; min-height:28px; max-height:28px; color:#ccc; background:#444; border:0; }
@@ -1755,10 +1745,6 @@ QString MainWindow::appStyle() const
         #subCardTitle { color:#eee; font-size:16px; }
         #subCardMeta { color:#999; font-size:12px; }
         #addCard { background:#222; border:2px dashed #444; border-radius:5px; color:#4898f8; font-size:48px; }
-        #vipCard { background:#222; border:0; border-radius:5px; }
-        #vipIcon { color:#4898f8; font-size:36px; }
-        #vipTitle { color:#eee; font-size:14px; }
-        #vipDesc { color:#bbb; font-size:12px; }
     )";
 }
 
@@ -1821,7 +1807,6 @@ QString MainWindow::lightStyle() const
         #linkLabel { color:red; font-size:14px; }
         #linkLabel:hover { text-decoration:underline; }
         #versionValue { color:green; font-size:14px; font-weight:bold; }
-        #machineId { color:#999; font-size:12px; }
         #settingGroupTitle { color:#ccc; font-size:24px; font-weight:800; }
         #settingDivider { background:transparent; border:0; border-bottom:1px dashed #ccc; }
         #circleButton { border-radius:14px; min-width:28px; max-width:28px; min-height:28px; max-height:28px; color:#333; background:#ccc; border:0; }
@@ -1833,10 +1818,6 @@ QString MainWindow::lightStyle() const
         #subCardTitle { color:#333; font-size:16px; }
         #subCardMeta { color:#999; font-size:12px; }
         #addCard { background:#eee; border:2px dashed #ccc; border-radius:5px; color:#4898f8; font-size:48px; }
-        #vipCard { background:#eee; border:0; border-radius:5px; }
-        #vipIcon { color:#4898f8; font-size:36px; }
-        #vipTitle { color:#333; font-size:14px; }
-        #vipDesc { color:#555; font-size:12px; }
     )";
 }
 

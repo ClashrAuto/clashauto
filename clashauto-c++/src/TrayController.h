@@ -15,6 +15,7 @@ public:
 public slots:
     void setStatus(bool tun, bool proxy, bool core);
     void setTraffic(qint64 up, qint64 down);
+    void notify(const QString &title, const QString &message);
 
 signals:
     void toggleCoreRequested();
