@@ -405,7 +405,32 @@ QWidget *MainWindow::buildStatusPage()
     metrics->setVerticalSpacing(MetricGutter);
     metrics->addWidget(createMetricCard(QChar(0xE6CC), QString::fromUtf8("上传"), &m_upValue, "up"), 0, 0);
     metrics->addWidget(createMetricCard(QChar(0xE6CD), QString::fromUtf8("下载"), &m_downValue, "down"), 0, 1);
-    metrics->addWidget(createMetricCard(QChar(0xE6BC), QString::fromUtf8("进程数"), &m_processValue, "process"), 1, 0);
+    // 进程数卡：右上角「查看全部连接 / 关闭全部」两个图标（复刻旧项目 .look 角标）
+    auto *processCard = createMetricCard(QChar(0xE6BC), QString::fromUtf8("进程数"), &m_processValue, "process");
+    auto *cornerWrap = new QWidget(processCard);
+    auto *cornerLayout = new QHBoxLayout(cornerWrap);
+    cornerLayout->setContentsMargins(0, 0, 0, 0);
+    cornerLayout->setSpacing(0);
+    auto *viewConns = new QPushButton(QString::fromUtf8("◉"), cornerWrap);
+    viewConns->setObjectName("cardCorner");
+    viewConns->setFixedSize(26, 22);
+    viewConns->setToolTip(QString::fromUtf8("查看全部连接"));
+    auto *closeConns = new QPushButton(QString::fromUtf8("✕"), cornerWrap);
+    closeConns->setObjectName("cardCornerDanger");
+    closeConns->setFixedSize(26, 22);
+    closeConns->setToolTip(QString::fromUtf8("关闭全部连接"));
+    cornerLayout->addWidget(viewConns);
+    cornerLayout->addWidget(closeConns);
+    connect(viewConns, &QPushButton::clicked, this, &MainWindow::showConnectionsDialog);
+    connect(closeConns, &QPushButton::clicked, this, [this] {
+        m_service.clearConnections();
+        appendLog(QString::fromUtf8("已清理全部连接"));
+    });
+    auto *processGrid = new QGridLayout();
+    processGrid->setContentsMargins(0, 0, 0, 0);
+    processGrid->addWidget(processCard, 0, 0);
+    processGrid->addWidget(cornerWrap, 0, 0, Qt::AlignTop | Qt::AlignRight);
+    metrics->addLayout(processGrid, 1, 0);
     metrics->addWidget(createMetricCard(QChar(0xE7A3), QString::fromUtf8("总下载"), &m_totalDownValue, "download"), 1, 1);
     leftLayout->addWidget(metricsBox);
 
@@ -428,36 +453,31 @@ QWidget *MainWindow::buildStatusPage()
     m_nodeTitle = new QLabel(QString::fromUtf8("节点 <span style='font-size:9px'>(0)</span>"), nodeHeader);
     m_nodeTitle->setObjectName("sectionTitle");
     nodeHeaderLayout->addWidget(m_nodeTitle);
+    nodeHeaderLayout->addStretch();
+    // 旧项目节点栏：搜索(el-icon-search) + 测速(el-icon-refresh-right) + 帮助(el-icon-question)
     m_nodeSearch = new QLineEdit(nodeHeader);
     m_nodeSearch->setPlaceholderText(QString::fromUtf8("搜索"));
-    m_nodeSearch->setMinimumWidth(80);
-    nodeHeaderLayout->addWidget(m_nodeSearch, 1); // 自适应：占满标题栏剩余宽度
-    m_nodeGroupSelector = new QComboBox(nodeHeader);
-    m_nodeGroupSelector->addItem("GLOBAL");
-    m_nodeGroupSelector->setFixedWidth(130);
-    nodeHeaderLayout->addWidget(m_nodeGroupSelector);
-    auto *refresh = new QPushButton("R", nodeHeader);
-    refresh->setObjectName("iconButton");
-    refresh->setFixedWidth(30);
-    nodeHeaderLayout->addWidget(refresh);
-    auto *speedTest = new QPushButton(QString::fromUtf8("⚡"), nodeHeader);
+    m_nodeSearch->setFixedWidth(160);
+    nodeHeaderLayout->addWidget(m_nodeSearch);
+    auto *speedTest = new QPushButton(QChar(0x21BB), nodeHeader); // ↻ 测速/刷新（el-icon-refresh-right 对应）
     speedTest->setObjectName("iconButton");
     speedTest->setFixedWidth(30);
-    speedTest->setToolTip(QString::fromUtf8("测速(测试当前分组延迟)"));
+    speedTest->setToolTip(QString::fromUtf8("测速"));
     nodeHeaderLayout->addWidget(speedTest);
-    auto *connsBtn = new QPushButton(QString::fromUtf8("🔗"), nodeHeader);
-    connsBtn->setObjectName("iconButton");
-    connsBtn->setFixedWidth(30);
-    connsBtn->setToolTip(QString::fromUtf8("连接管理(查看/关闭活动连接)"));
-    nodeHeaderLayout->addWidget(connsBtn);
-    connect(connsBtn, &QPushButton::clicked, this, &MainWindow::showConnectionsDialog);
+    auto *helpBtn = new QPushButton(QChar(0x003F), nodeHeader); // ? 帮助（el-icon-question 对应）
+    helpBtn->setObjectName("iconButton");
+    helpBtn->setFixedWidth(30);
+    helpBtn->setToolTip(QString::fromUtf8("帮助"));
+    nodeHeaderLayout->addWidget(helpBtn);
     rightLayout->addWidget(nodeHeader);
     connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { populateNodeList(); });
-    connect(m_nodeGroupSelector, &QComboBox::currentTextChanged, &m_service, &ClashService::setSelectedGroup);
-    connect(refresh, &QPushButton::clicked, &m_service, &ClashService::refreshNodes);
     connect(speedTest, &QPushButton::clicked, this, [this] {
         appendLog(QString::fromUtf8("开始测速..."));
+        m_service.refreshNodes();
         m_service.testDelays();
+    });
+    connect(helpBtn, &QPushButton::clicked, this, [] {
+        QDesktopServices::openUrl(QUrl("https://clashr-auto.gitbook.io"));
     });
 
     auto *scroll = new QScrollArea(right);
@@ -825,6 +845,55 @@ QWidget *MainWindow::buildSettingsPage()
     addGroup(QString::fromUtf8("托盘 / 启动"));
     sysLayout->addWidget(row(QString::fromUtf8("关闭到托盘"), closeToTray));
     sysLayout->addWidget(row(QString::fromUtf8("开机自启"), autoStart));
+    addDivider();
+    addGroup(QString::fromUtf8("其他"));
+    // 旧项目系统页的工具：打开配置目录 / 导出节点 / 打开面板
+    auto *openCfgBtn = new QPushButton(QString::fromUtf8("打开配置目录"));
+    openCfgBtn->setObjectName("nodeButton");
+    openCfgBtn->setFixedSize(120, 30);
+    connect(openCfgBtn, &QPushButton::clicked, this, [this] {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(m_userDir));
+    });
+    auto *exportBtn = new QPushButton(QString::fromUtf8("导出节点"));
+    exportBtn->setObjectName("nodeButton");
+    exportBtn->setFixedSize(120, 30);
+    connect(exportBtn, &QPushButton::clicked, this, [this] {
+        if (m_currentNodes.isEmpty()) {
+            appendLog(QString::fromUtf8("当前无节点可导出（请先在状态页加载节点）"));
+            return;
+        }
+        QJsonArray arr;
+        for (const NodeInfo &n : m_currentNodes) {
+            arr.append(QJsonObject{{"name", n.name}, {"delay", n.delay}});
+        }
+        QJsonObject exp;
+        exp.insert("selected", m_selectedNode);
+        exp.insert("nodes", arr);
+        QString dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (dir.isEmpty()) {
+            dir = QDir::homePath();
+        }
+        const QString path = QDir(dir).filePath("clashauto-nodes.json");
+        QFile file(path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(QJsonDocument(exp).toJson(QJsonDocument::Indented));
+            file.close();
+            appendLog(QString::fromUtf8("已导出 %1 个节点: %2").arg(QString::number(m_currentNodes.size()), path));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+        } else {
+            appendLog(QString::fromUtf8("导出失败: %1").arg(path));
+        }
+    });
+    auto *openDashBtn = new QPushButton(QString::fromUtf8("打开面板"));
+    openDashBtn->setObjectName("nodeButton");
+    openDashBtn->setFixedSize(120, 30);
+    connect(openDashBtn, &QPushButton::clicked, this, [host = config.host, port = config.uiPort] {
+        QDesktopServices::openUrl(
+            QUrl(QString("https://yacd.metacubex.one/?hostname=%1&port=%2").arg(host).arg(port)));
+    });
+    sysLayout->addWidget(row(QString::fromUtf8("配置目录"), openCfgBtn));
+    sysLayout->addWidget(row(QString::fromUtf8("节点导出"), exportBtn));
+    sysLayout->addWidget(row(QString::fromUtf8("Clash 面板"), openDashBtn));
     sysLayout->addStretch();
     systemScroll->setWidget(sysBody);
     tabs->addTab(systemScroll, QString::fromUtf8("系统"));
@@ -1105,31 +1174,10 @@ QWidget *MainWindow::buildLogsPage()
     auto *header = new QHBoxLayout();
     header->setContentsMargins(0, 0, 0, 0);
     header->addStretch();
-    auto *clearBtn = new QPushButton(QString::fromUtf8("清空"), page);
-    clearBtn->setObjectName("iconButton");
-    header->addWidget(clearBtn);
     auto *openDir = new QPushButton(QString::fromUtf8("打开日志目录"), page);
     openDir->setObjectName("iconButton");
     header->addWidget(openDir);
     layout->addLayout(header);
-
-    connect(clearBtn, &QPushButton::clicked, this, [this] {
-        auto clear = [](QVBoxLayout *l) {
-            if (!l) {
-                return;
-            }
-            for (int i = l->count() - 1; i >= 0; --i) {
-                QLayoutItem *item = l->itemAt(i);
-                if (item && item->widget()) {
-                    QWidget *w = item->widget();
-                    l->removeWidget(w);
-                    w->deleteLater();
-                }
-            }
-        };
-        clear(m_logTimeline);
-        clear(m_clashTimeline);
-    });
 
     auto *tabs = new QTabWidget(page);
     tabs->setObjectName("logsTabs");
@@ -1199,66 +1247,17 @@ QWidget *MainWindow::buildAboutPage()
         layout->addWidget(l);
     };
 
-    auto *actionRow = new QHBoxLayout();
-    actionRow->setContentsMargins(0, 0, 0, 0);
-    auto *checkUpdate = new QPushButton(QString::fromUtf8("检查更新"), page);
-    checkUpdate->setObjectName("primaryButton");
-    checkUpdate->setFixedSize(96, 30);
-    connect(checkUpdate, &QPushButton::clicked, this, &MainWindow::showUpdateDialog);
-    auto *openCfg = new QPushButton(QString::fromUtf8("打开配置目录"), page);
-    openCfg->setObjectName("nodeButton");
-    openCfg->setFixedSize(120, 30);
-    connect(openCfg, &QPushButton::clicked, this, [this] {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(m_userDir));
-    });
-    auto *exportBtn = new QPushButton(QString::fromUtf8("导出节点"), page);
-    exportBtn->setObjectName("nodeButton");
-    exportBtn->setFixedSize(96, 30);
-    connect(exportBtn, &QPushButton::clicked, this, [this] {
-        if (m_currentNodes.isEmpty()) {
-            appendLog(QString::fromUtf8("当前无节点可导出（请先在状态页加载节点）"));
-            return;
-        }
-        QJsonArray arr;
-        for (const NodeInfo &n : m_currentNodes) {
-            arr.append(QJsonObject{{"name", n.name}, {"delay", n.delay}});
-        }
-        QJsonObject root;
-        root.insert("selected", m_selectedNode);
-        root.insert("nodes", arr);
-        QString dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-        if (dir.isEmpty()) {
-            dir = QDir::homePath();
-        }
-        const QString path = QDir(dir).filePath("clashauto-nodes.json");
-        QFile file(path);
-        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
-            file.close();
-            appendLog(QString::fromUtf8("已导出 %1 个节点: %2")
-                          .arg(QString::number(m_currentNodes.size()), path));
-            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
-        } else {
-            appendLog(QString::fromUtf8("导出失败: %1").arg(path));
-        }
-    });
-    auto *openDash = new QPushButton(QString::fromUtf8("打开面板"), page);
-    openDash->setObjectName("nodeButton");
-    openDash->setFixedSize(96, 30);
-    connect(openDash, &QPushButton::clicked, this, [host = config.host, port = config.uiPort] {
-        QDesktopServices::openUrl(
-            QUrl(QString("https://yacd.metacubex.one/?hostname=%1&port=%2").arg(host).arg(port)));
-    });
-    actionRow->addWidget(checkUpdate);
-    actionRow->addWidget(openCfg);
-    actionRow->addWidget(exportBtn);
-    actionRow->addWidget(openDash);
-    actionRow->addStretch();
-    layout->addLayout(actionRow);
-
-    addTitle(QString::fromUtf8("Clash Auto:"));
-    addValue(version, "versionValue");
-    addLink(QString::fromUtf8("用户讨论和 bug 提交:"), "https://t.me/clashr_auto");
+    // 复刻旧项目 about：版本信息 / 版本(绿粗，点击查更新) / Clash 核心 / 链接 / 路径
+    addTitle(QString::fromUtf8("版本信息:"));
+    auto *verLabel = new QLabel(page);
+    verLabel->setFixedHeight(40);
+    verLabel->setTextFormat(Qt::RichText);
+    verLabel->setText(QString("Clash Auto: <a href='update' style='color:green;font-weight:bold;text-decoration:none;'>%1</a>").arg(version));
+    verLabel->setToolTip(QString::fromUtf8("点击检查更新"));
+    connect(verLabel, &QLabel::linkActivated, this, [this](const QString &) { showUpdateDialog(); });
+    layout->addWidget(verLabel);
+    addTitle("Clash:");
+    addLink(QString::fromUtf8("用户讨论和bug提交:"), "https://t.me/clashr_auto");
     addLink(QString::fromUtf8("项目地址:"), "https://github.com/clashrauto/clashr-auto-desktop");
     addLink("Read Me:", "https://clashr-auto.gitbook.io");
     addTitle("Exe path:");
@@ -2157,6 +2156,8 @@ QString MainWindow::appStyle() const
         QTabBar::tab:selected { color:#fff; border-bottom:2px solid #4898f8; }
         QCheckBox, QLabel { color:#ccc; }
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
+        #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
+        #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
         #nodeRow, #plainCard { background:#252525; border:0; border-left:3px solid transparent; border-radius:0; min-height:56px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #83bdff; }
         #nodeName { color:#ccc; font-size:12px; }
@@ -2244,6 +2245,8 @@ QString MainWindow::lightStyle() const
         QTabBar::tab:selected { color:#333; border-bottom:2px solid #4898f8; }
         QCheckBox, QLabel { color:#333; }
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
+        #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
+        #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
         #nodeRow, #plainCard { background:#eee; border:0; border-left:3px solid transparent; border-radius:0; min-height:56px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #1f6fd2; }
         #nodeName { color:#333; font-size:12px; }
