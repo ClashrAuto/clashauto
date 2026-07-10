@@ -66,7 +66,7 @@ private:
     QString appStyle() const;
     QString lightStyle() const;
     void applyTheme(const QString &theme);
-    void applyAcrylic(); // 整窗 Windows 亚克力毛玻璃
+    void applyTitleBarColor(); // 通过 DWM 给系统原生标题栏着色
     QFrame *createSubscriptionCard(const SubscriptionSummary &subscription, int index);
     QWidget *buildRuleTableTab(const QString &section);
     void reloadRuleTable(const QString &section);

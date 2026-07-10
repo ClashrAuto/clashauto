@@ -41,6 +41,7 @@ add_executable(clashauto-cpp
 target_link_libraries(clashauto-cpp PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
+    $<$<PLATFORM_ID:Windows>:dwmapi>
 )
 
 target_compile_options(clashauto-cpp PRIVATE

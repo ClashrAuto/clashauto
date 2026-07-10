@@ -69,6 +69,7 @@
 #endif
 #include <windows.h>
 #include <windowsx.h> // GET_X_LPARAM / GET_Y_LPARAM
+#include <dwmapi.h>   // DwmSetWindowAttribute（系统标题栏着色）
 #endif
 
 // Version.h 由 CMake 从 src/Version.h.in 生成（CI 用 major.minor.<提交数>）
@@ -150,8 +151,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
     setWindowTitle("Clash Auto");
     setWindowIcon(QIcon(":/assets/icon.ico"));
-    setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
-    setAttribute(Qt::WA_TranslucentBackground, true);
+    // 使用系统原生标题栏（不再无边框）；标题栏配色由 applyTitleBarColor() 通过 DWM 设置
     resize(MainWidth, MainHeight);
     setMinimumSize(MainWidth, MainHeight);
     // 恢复上次窗口位置/大小（对应旧项目 config.bounds）
@@ -166,8 +166,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     outer->setContentsMargins(0, 0, 0, 0);
     outer->setSpacing(0);
 
-    outer->addWidget(buildTitleBar());
-
+    // 顶部自绘标题栏已移除，改用系统原生标题栏
     // 侧栏跨整个高度到窗口最底部；页脚放到右侧列（页面下方）
     auto *body = new QFrame(root);
     body->setObjectName("body");
@@ -1969,35 +1968,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
 void MainWindow::showEvent(QShowEvent *event)
 {
     QMainWindow::showEvent(event);
-    applyAcrylic(); // 窗口显示后应用亚克力（部分系统需窗口已实体化）
+    applyTitleBarColor(); // 窗口显示后给系统标题栏着色（需窗口已实体化）
 }
 
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
 {
-#if defined(Q_OS_WIN)
-    // 无边框窗口的原生缩放：命中窗口边缘时返回 HT* 让系统接管拉伸（含正确光标）
-    MSG *msg = static_cast<MSG *>(message);
-    if (msg && msg->message == WM_NCHITTEST) {
-        const qreal dpr = devicePixelRatioF();
-        const QPoint gp(qRound(GET_X_LPARAM(msg->lParam) / dpr), qRound(GET_Y_LPARAM(msg->lParam) / dpr));
-        const QPoint p = mapFromGlobal(gp);
-        const int b = 6; // 边缘感应宽度
-        const int w = width();
-        const int h = height();
-        const bool left = p.x() >= 0 && p.x() < b;
-        const bool right = p.x() <= w && p.x() > w - b;
-        const bool top = p.y() >= 0 && p.y() < b;
-        const bool bottom = p.y() <= h && p.y() > h - b;
-        if (top && left) { *result = HTTOPLEFT; return true; }
-        if (top && right) { *result = HTTOPRIGHT; return true; }
-        if (bottom && left) { *result = HTBOTTOMLEFT; return true; }
-        if (bottom && right) { *result = HTBOTTOMRIGHT; return true; }
-        if (left) { *result = HTLEFT; return true; }
-        if (right) { *result = HTRIGHT; return true; }
-        if (top) { *result = HTTOP; return true; }
-        if (bottom) { *result = HTBOTTOM; return true; }
-    }
-#endif
+    // 系统标题栏/边框由系统负责缩放与移动，这里不再拦截 WM_NCHITTEST
     return QMainWindow::nativeEvent(eventType, message, result);
 }
 
@@ -2168,13 +2144,8 @@ void MainWindow::populateNodeList()
 
 void MainWindow::mousePressEvent(QMouseEvent *event)
 {
-    // 标题栏 + 侧栏空白处都可拖拽窗口（菜单按钮自行消费点击，不会触发拖拽）
-    if (event->button() == Qt::LeftButton
-        && (event->pos().y() <= TitleHeight || event->pos().x() < SidebarWidth)) {
-        m_dragging = true;
-        m_dragStart = event->globalPosition().toPoint() - frameGeometry().topLeft();
-        event->accept();
-    }
+    // 窗口移动由系统原生标题栏负责，这里不再自绘拖拽
+    QMainWindow::mousePressEvent(event);
 }
 
 void MainWindow::mouseMoveEvent(QMouseEvent *event)
@@ -2193,7 +2164,7 @@ void MainWindow::mouseReleaseEvent(QMouseEvent *)
 QString MainWindow::appStyle() const
 {
     return R"(
-        #root { background:transparent; border-radius:10px; }
+        #root { background:#242425; }
         #titleBar { background:#222; border-top-left-radius:10px; border-top-right-radius:10px; }
         #windowTitle { color:#ccc; font-size:12px; padding-left:0; }
         #titleButton, #closeButton { color:#ccc; background:#222; border:0; border-radius:0; }
@@ -2201,7 +2172,7 @@ QString MainWindow::appStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
         #rightPane { background:#242425; }
-        #sidebar { background:#222; border-bottom-left-radius:10px; }
+        #sidebar { background:#222; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
@@ -2245,7 +2216,7 @@ QString MainWindow::appStyle() const
         #nodeButton { color:#ccc; background:transparent; border:0; border-left:1px solid #000; border-radius:0; font-size:12px; }
         #nodeButton:hover { background:#333; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
-        #footer { background:#303032; border-bottom-right-radius:10px; }
+        #footer { background:#303032; }
         #usersBadge { color:#fff; background:#000; border-radius:3px; padding:3px 5px; font-size:12px; }
         #footerArrow { color:#666; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#ccc; font-size:12px; }
@@ -2291,7 +2262,7 @@ QString MainWindow::appStyle() const
 QString MainWindow::lightStyle() const
 {
     return R"(
-        #root { background:transparent; border-radius:10px; }
+        #root { background:#ffffff; }
         #titleBar { background:#eee; border-top-left-radius:10px; border-top-right-radius:10px; }
         #windowTitle { color:#333; font-size:12px; }
         #titleButton, #closeButton { color:#333; background:#eee; border:0; border-radius:0; }
@@ -2299,7 +2270,7 @@ QString MainWindow::lightStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
         #rightPane { background:#ffffff; }
-        #sidebar { background:#eee; border-bottom-left-radius:10px; }
+        #sidebar { background:#eee; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
@@ -2343,7 +2314,7 @@ QString MainWindow::lightStyle() const
         #nodeButton { color:#333; background:transparent; border:0; border-left:1px solid #fff; border-radius:0; font-size:12px; }
         #nodeButton:hover { background:#c1c1c1; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
-        #footer { background:#fafafa; border-bottom-right-radius:10px; }
+        #footer { background:#fafafa; }
         #usersBadge { color:#333; background:#fff; border-radius:3px; padding:3px 5px; font-size:12px; }
         #footerArrow { color:#e8e8e8; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#333; font-size:12px; }
@@ -2392,30 +2363,27 @@ void MainWindow::applyTheme(const QString &theme)
                        || theme.compare("white", Qt::CaseInsensitive) == 0;
     m_theme = light ? "white" : "black";
     setStyleSheet(light ? lightStyle() : appStyle());
-    applyAcrylic(); // 主题变化时重新着色亚克力
+    applyTitleBarColor(); // 主题变化时重新给系统标题栏着色
 }
 
-void MainWindow::applyAcrylic()
+void MainWindow::applyTitleBarColor()
 {
 #if defined(Q_OS_WIN)
-    // 整窗亚克力毛玻璃：调用未文档化的 user32!SetWindowCompositionAttribute
-    enum { ACCENT_ENABLE_ACRYLICBLURBEHIND = 4, WCA_ACCENT_POLICY = 19 };
-    struct AccentPolicy { int AccentState; int AccentFlags; unsigned int GradientColor; int AnimationId; };
-    struct WinCompAttrData { int Attrib; void *pvData; size_t cbData; };
-    using SetWCA = BOOL(WINAPI *)(HWND, WinCompAttrData *);
-
-    HMODULE user32 = GetModuleHandleW(L"user32.dll");
-    if (!user32) {
-        return;
-    }
-    auto setWCA = reinterpret_cast<SetWCA>(GetProcAddress(user32, "SetWindowCompositionAttribute"));
-    if (!setWCA) {
-        return;
-    }
-    // GradientColor 为 ABGR：标题色 + 0.9 不透明（0xE6）。侧栏本身透明，由亚克力提供 0.9 标题色 + 模糊
-    const unsigned int tint = (m_theme == "white") ? 0xE6EEEEEE : 0xE6222222;
-    AccentPolicy accent{ ACCENT_ENABLE_ACRYLICBLURBEHIND, 0, tint, 0 };
-    WinCompAttrData data{ WCA_ACCENT_POLICY, &accent, sizeof(accent) };
-    setWCA(reinterpret_cast<HWND>(winId()), &data);
+    // 通过 DWM 让系统原生标题栏与自绘标题栏同色（Windows 11 22000+ 支持）。
+    // 属性值直接用字面量，避免旧 SDK 头文件未定义 DWMWA_CAPTION_COLOR/TEXT_COLOR。
+    constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    constexpr DWORD DWMWA_CAPTION_COLOR = 35;
+    constexpr DWORD DWMWA_TEXT_COLOR = 36;
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    const bool light = (m_theme == "white");
+    // 深色标题（#222）需要浅色的最小化/关闭按钮图标 -> 开启沉浸式深色模式
+    const BOOL dark = light ? FALSE : TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+    // 标题栏背景色，与自绘标题栏一致：浅色 #eee / 深色 #222（COLORREF = 0x00BBGGRR）
+    const COLORREF caption = light ? RGB(0xEE, 0xEE, 0xEE) : RGB(0x22, 0x22, 0x22);
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
+    // 标题文字颜色
+    const COLORREF text = light ? RGB(0x33, 0x33, 0x33) : RGB(0xEE, 0xEE, 0xEE);
+    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
 #endif
 }
