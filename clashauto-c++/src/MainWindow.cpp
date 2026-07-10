@@ -835,9 +835,11 @@ QWidget *MainWindow::buildSettingsPage()
 
     // Tab 5: 系统（分组 + 虚线分隔）
     auto *systemScroll = new QScrollArea(tabs);
+    systemScroll->setObjectName("sysScroll");
     systemScroll->setWidgetResizable(true);
     systemScroll->setFrameShape(QFrame::NoFrame);
     auto *sysBody = new QWidget(systemScroll);
+    sysBody->setObjectName("sysBody");
     auto *sysLayout = new QVBoxLayout(sysBody);
     sysLayout->setContentsMargins(10, 16, 10, 10);
     sysLayout->setSpacing(8);
@@ -2214,6 +2216,7 @@ QString MainWindow::appStyle() const
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
         #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#242425; }
         #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#242425; }
+        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#242425; }
         #nodeRow, #plainCard { background:#252525; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #83bdff; }
         #nodeName { color:#ccc; font-size:12px; }
@@ -2305,6 +2308,7 @@ QString MainWindow::lightStyle() const
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
         #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#ffffff; }
         #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#ffffff; }
+        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#ffffff; }
         #nodeRow, #plainCard { background:#eee; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #1f6fd2; }
         #nodeName { color:#333; font-size:12px; }
