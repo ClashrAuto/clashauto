@@ -30,6 +30,9 @@ class MainWindow final : public QMainWindow
 public:
     explicit MainWindow(QWidget *parent = nullptr);
 
+    // 处理 clash-auto:// 协议链接（导入订阅）；由 main 在启动或二次实例转发时调用
+    void handleProtocolUrl(const QString &url);
+
 protected:
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
@@ -71,6 +74,7 @@ private:
     void setCurrentPage(int page);
     void applyAutoStart(bool enabled);
     void applyAutoUpdate(int minutes);
+    void registerUrlScheme();
 
     ClashService m_service;
     QStackedWidget *m_pages = nullptr;

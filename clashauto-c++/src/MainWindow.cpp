@@ -34,6 +34,7 @@
 #include <QPainter>
 #include <QPen>
 #include <QPointer>
+#include <QProcess>
 #include <QProgressBar>
 #include <QPropertyAnimation>
 #include <QScrollArea>
@@ -53,6 +54,7 @@
 #include <QTextStream>
 #include <QDateTime>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QVBoxLayout>
 
 #include <utility>
@@ -116,6 +118,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_core = new CoreController(config, this);
     m_tray = new TrayController(this, this);
     m_subscriptions = new SubscriptionStore(config, this);
+    registerUrlScheme();
     m_closeToTray = config.closeToTray;
     m_nodeSwitchNote = config.nodeSwitchNote;
     m_autoTheme = config.autoTheme;
@@ -1942,6 +1945,56 @@ void MainWindow::applyAutoUpdate(int minutes)
 {
     // 全局默认周期（供未单独设置的订阅使用）；主定时器始终以 1 分钟节拍运行
     m_autoUpdateMinutes = minutes;
+}
+
+void MainWindow::registerUrlScheme()
+{
+#if defined(Q_OS_WIN)
+    // 注册 clash-auto:// 协议到 HKCU（无需管理员）；每次启动幂等刷新指向当前 exe
+    const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    const QString base = "HKCU\\Software\\Classes\\clash-auto";
+    const QString cmdVal = QLatin1Char('"') + exe + QLatin1String("\" \"%1\"");
+    QProcess::execute("reg", {"add", base, "/ve", "/d", "URL:Clash Auto Protocol", "/f"});
+    // 空数据用 /t REG_SZ 不带 /d，避免 QProcess 传空串参数的 Windows 怪癖
+    QProcess::execute("reg", {"add", base, "/v", "URL Protocol", "/t", "REG_SZ", "/f"});
+    QProcess::execute("reg", {"add", base + "\\shell\\open\\command", "/ve", "/d", cmdVal, "/f"});
+#endif
+}
+
+void MainWindow::handleProtocolUrl(const QString &raw)
+{
+    // 支持 clash-auto://import?url=...&name=...&type=... 及 .../install-config?url=...
+    const QUrl u(raw.trimmed());
+    if (u.scheme().compare("clash-auto", Qt::CaseInsensitive) != 0) {
+        return;
+    }
+    const QUrlQuery q(u);
+    const QString subUrl = q.queryItemValue("url", QUrl::FullyDecoded).trimmed();
+    if (subUrl.isEmpty()) {
+        appendLog(QString::fromUtf8("协议链接缺少 url 参数: %1").arg(raw));
+        return;
+    }
+    const QString name = q.queryItemValue("name", QUrl::FullyDecoded).trimmed();
+    QString type = q.queryItemValue("type", QUrl::FullyDecoded).trimmed();
+    if (type.isEmpty()) {
+        type = "sub";
+    }
+    if (m_subscriptions->addSubscription(name, subUrl, type)) {
+        const int index = m_subscriptions->load().size() - 1;
+        reloadSubscriptions();
+        setCurrentPage(1); // 订阅页
+        const QString label = name.isEmpty() ? subUrl : name;
+        appendLog(QString::fromUtf8("已从链接添加订阅: %1，正在获取节点...").arg(label));
+        if (m_tray) {
+            m_tray->notify(QString::fromUtf8("Clash Auto"),
+                           QString::fromUtf8("已导入订阅 %1").arg(label));
+        }
+        if (index >= 0) {
+            m_subscriptions->updateSubscription(index);
+        }
+    } else {
+        appendLog(QString::fromUtf8("从链接添加订阅失败: %1").arg(raw));
+    }
 }
 
 void MainWindow::reloadSubscriptions()

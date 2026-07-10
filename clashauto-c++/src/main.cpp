@@ -5,12 +5,10 @@
 
 #include <QApplication>
 #include <QCoreApplication>
-#include <QDir>
 #include <QFile>
 #include <QFont>
-#include <QLockFile>
-#include <QMessageBox>
-#include <QStandardPaths>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QTextStream>
 
 int main(int argc, char *argv[])
@@ -113,22 +111,61 @@ int main(int argc, char *argv[])
         return ok ? 0 : 3;
     }
 
-    // 单实例：避免多开导致核心争抢端口（CLI 子命令不受此限制，故放在其后）
-    const QString lockPath = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                                 .filePath("clashauto-cpp.lock");
-    QLockFile lockFile(lockPath);
-    lockFile.setStaleLockTime(5000);
-    if (!lockFile.tryLock(100)) {
-        QMessageBox::information(nullptr, "Clash Auto",
-                                 QString::fromUtf8("Clash Auto 已经在运行中。"));
-        return 0;
+    // 协议启动：从参数里取出 clash-auto:// 链接（若有）
+    QString protocolUrl;
+    for (const QString &arg : app.arguments()) {
+        if (arg.startsWith("clash-auto://", Qt::CaseInsensitive)) {
+            protocolUrl = arg;
+            break;
+        }
     }
+
+    // 单实例 + 链接转发：能连上已运行实例就把链接发过去并退出（CLI 子命令不受此限制）
+    const QString serverName = "clashauto-cpp-singleton";
+    {
+        QLocalSocket probe;
+        probe.connectToServer(serverName);
+        if (probe.waitForConnected(300)) {
+            probe.write(protocolUrl.toUtf8()); // 可能为空 → 仅请求前置窗口
+            probe.flush();
+            probe.waitForBytesWritten(1000);
+            probe.disconnectFromServer();
+            return 0;
+        }
+    }
+
+    // 本进程为主实例：监听命名管道，接收后续实例转发的链接
+    QLocalServer::removeServer(serverName);
+    QLocalServer server;
+    server.listen(serverName);
 
     QFont font("Microsoft YaHei UI");
     app.setFont(font);
 
     MainWindow window;
+
+    QObject::connect(&server, &QLocalServer::newConnection, &window, [&server, &window] {
+        QLocalSocket *conn = server.nextPendingConnection();
+        if (!conn) {
+            return;
+        }
+        window.showNormal();
+        window.raise();
+        window.activateWindow();
+        if (conn->bytesAvailable() > 0 || conn->waitForReadyRead(1000)) {
+            const QString url = QString::fromUtf8(conn->readAll()).trimmed();
+            if (!url.isEmpty()) {
+                window.handleProtocolUrl(url);
+            }
+        }
+        conn->disconnectFromServer();
+        conn->deleteLater();
+    });
+
     window.show();
+    if (!protocolUrl.isEmpty()) {
+        window.handleProtocolUrl(protocolUrl);
+    }
 
     return app.exec();
 }
