@@ -104,6 +104,23 @@ void ClashService::clearConnections()
                });
 }
 
+void ClashService::fetchConnections(std::function<void(QJsonArray)> callback)
+{
+    sendGet(QUrl(QString("http://%1:%2/connections").arg(m_host).arg(m_port)),
+            [callback](const QJsonDocument &doc) {
+                callback(doc.object().value("connections").toArray());
+            });
+}
+
+void ClashService::closeConnection(const QString &id)
+{
+    sendDelete(QUrl(QString("http://%1:%2/connections/%3").arg(m_host).arg(m_port).arg(id)),
+               [this, id](bool ok, const QString &message) {
+                   emit logUpdated(ok ? QString("Connection closed: %1").arg(id)
+                                      : QString("Close connection failed: %1").arg(message));
+               });
+}
+
 void ClashService::refreshNodes()
 {
     pollNodes();

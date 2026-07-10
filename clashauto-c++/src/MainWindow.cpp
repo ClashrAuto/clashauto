@@ -32,6 +32,7 @@
 #include <QNetworkRequest>
 #include <QPainter>
 #include <QPen>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPropertyAnimation>
 #include <QScrollArea>
@@ -381,6 +382,12 @@ QWidget *MainWindow::buildStatusPage()
     speedTest->setFixedWidth(30);
     speedTest->setToolTip(QString::fromUtf8("测速(测试当前分组延迟)"));
     nodeHeaderLayout->addWidget(speedTest);
+    auto *connsBtn = new QPushButton(QString::fromUtf8("🔗"), nodeHeader);
+    connsBtn->setObjectName("iconButton");
+    connsBtn->setFixedWidth(30);
+    connsBtn->setToolTip(QString::fromUtf8("连接管理(查看/关闭活动连接)"));
+    nodeHeaderLayout->addWidget(connsBtn);
+    connect(connsBtn, &QPushButton::clicked, this, &MainWindow::showConnectionsDialog);
     rightLayout->addWidget(nodeHeader);
     connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { populateNodeList(); });
     connect(m_nodeGroupSelector, &QComboBox::currentTextChanged, &m_service, &ClashService::setSelectedGroup);
@@ -947,10 +954,31 @@ QWidget *MainWindow::buildLogsPage()
     auto *header = new QHBoxLayout();
     header->setContentsMargins(0, 0, 0, 0);
     header->addStretch();
+    auto *clearBtn = new QPushButton(QString::fromUtf8("清空"), page);
+    clearBtn->setObjectName("iconButton");
+    header->addWidget(clearBtn);
     auto *openDir = new QPushButton(QString::fromUtf8("打开日志目录"), page);
     openDir->setObjectName("iconButton");
     header->addWidget(openDir);
     layout->addLayout(header);
+
+    connect(clearBtn, &QPushButton::clicked, this, [this] {
+        auto clear = [](QVBoxLayout *l) {
+            if (!l) {
+                return;
+            }
+            for (int i = l->count() - 1; i >= 0; --i) {
+                QLayoutItem *item = l->itemAt(i);
+                if (item && item->widget()) {
+                    QWidget *w = item->widget();
+                    l->removeWidget(w);
+                    w->deleteLater();
+                }
+            }
+        };
+        clear(m_logTimeline);
+        clear(m_clashTimeline);
+    });
 
     auto *tabs = new QTabWidget(page);
     tabs->setObjectName("logsTabs");
@@ -1020,11 +1048,22 @@ QWidget *MainWindow::buildAboutPage()
         layout->addWidget(l);
     };
 
+    auto *actionRow = new QHBoxLayout();
+    actionRow->setContentsMargins(0, 0, 0, 0);
     auto *checkUpdate = new QPushButton(QString::fromUtf8("检查更新"), page);
     checkUpdate->setObjectName("primaryButton");
     checkUpdate->setFixedSize(96, 30);
     connect(checkUpdate, &QPushButton::clicked, this, &MainWindow::showUpdateDialog);
-    layout->addWidget(checkUpdate);
+    auto *openCfg = new QPushButton(QString::fromUtf8("打开配置目录"), page);
+    openCfg->setObjectName("nodeButton");
+    openCfg->setFixedSize(120, 30);
+    connect(openCfg, &QPushButton::clicked, this, [this] {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(m_userDir));
+    });
+    actionRow->addWidget(checkUpdate);
+    actionRow->addWidget(openCfg);
+    actionRow->addStretch();
+    layout->addLayout(actionRow);
 
     addTitle(QString::fromUtf8("Clash Auto:"));
     addValue(version, "versionValue");
@@ -1226,6 +1265,122 @@ void MainWindow::showSubscriptionNodes(int subscriptionIndex)
     connect(close, &QPushButton::clicked, dialog, &QDialog::close);
     dialogLayout->addWidget(close, 0, Qt::AlignRight);
     dialog->setStyleSheet(styleSheet());
+    dialog->show();
+}
+
+void MainWindow::showConnectionsDialog()
+{
+    auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(QString::fromUtf8("连接"));
+    dialog->setStyleSheet(styleSheet());
+    dialog->resize(760, 480);
+    auto *v = new QVBoxLayout(dialog);
+    v->setContentsMargins(10, 10, 10, 10);
+    v->setSpacing(8);
+
+    const QStringList headers = {QString::fromUtf8("主机"), QString::fromUtf8("网络"),
+                                 QString::fromUtf8("代理链"), QString::fromUtf8("上传"),
+                                 QString::fromUtf8("下载"), QString::fromUtf8("规则")};
+    auto *table = new QTableWidget(0, headers.size(), dialog);
+    table->setHorizontalHeaderLabels(headers);
+    table->verticalHeader()->setVisible(false);
+    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    v->addWidget(table, 1);
+
+    auto *countLabel = new QLabel(QString::fromUtf8("正在获取..."), dialog);
+    countLabel->setObjectName("subCardMeta");
+
+    // 用 QPointer 守护对话框：异步回调返回时若已关闭则直接丢弃，避免悬空访问
+    QPointer<QDialog> guard = dialog;
+    auto reload = [this, guard, table, countLabel] {
+        m_service.fetchConnections([this, guard, table, countLabel](QJsonArray conns) {
+            if (!guard) {
+                return;
+            }
+            table->setRowCount(0);
+            for (const QJsonValue &cv : conns) {
+                const QJsonObject c = cv.toObject();
+                const QJsonObject meta = c.value("metadata").toObject();
+                QString host = meta.value("host").toString();
+                if (host.isEmpty()) {
+                    host = meta.value("destinationIP").toString();
+                }
+                const QString port = meta.value("destinationPort").toString();
+                if (!port.isEmpty()) {
+                    host += ":" + port;
+                }
+                QStringList chains;
+                for (const QJsonValue &ch : c.value("chains").toArray()) {
+                    chains << ch.toString();
+                }
+                const int row = table->rowCount();
+                table->insertRow(row);
+                auto *hostItem = new QTableWidgetItem(host);
+                hostItem->setData(Qt::UserRole, c.value("id").toString());
+                table->setItem(row, 0, hostItem);
+                table->setItem(row, 1, new QTableWidgetItem(meta.value("network").toString()));
+                table->setItem(row, 2, new QTableWidgetItem(chains.join(" / ")));
+                table->setItem(row, 3, new QTableWidgetItem(speedText(c.value("upload").toInteger())));
+                table->setItem(row, 4, new QTableWidgetItem(speedText(c.value("download").toInteger())));
+                table->setItem(row, 5, new QTableWidgetItem(c.value("rule").toString()));
+            }
+            countLabel->setText(QString::fromUtf8("共 %1 条连接").arg(table->rowCount()));
+        });
+    };
+
+    auto *bar = new QHBoxLayout();
+    bar->addWidget(countLabel);
+    bar->addStretch();
+    auto *refreshBtn = new QPushButton(QString::fromUtf8("刷新"), dialog);
+    refreshBtn->setObjectName("nodeButton");
+    refreshBtn->setFixedSize(72, 30);
+    auto *closeSelBtn = new QPushButton(QString::fromUtf8("关闭选中"), dialog);
+    closeSelBtn->setObjectName("nodeButton");
+    closeSelBtn->setFixedSize(84, 30);
+    auto *closeAllBtn = new QPushButton(QString::fromUtf8("关闭全部"), dialog);
+    closeAllBtn->setObjectName("primaryButton");
+    closeAllBtn->setFixedSize(84, 30);
+    bar->addWidget(refreshBtn);
+    bar->addWidget(closeSelBtn);
+    bar->addWidget(closeAllBtn);
+    v->addLayout(bar);
+
+    connect(refreshBtn, &QPushButton::clicked, dialog, [reload] { reload(); });
+    connect(closeSelBtn, &QPushButton::clicked, dialog, [this, table, reload] {
+        QList<int> rows;
+        for (QTableWidgetItem *item : table->selectedItems()) {
+            if (!rows.contains(item->row())) {
+                rows << item->row();
+            }
+        }
+        for (int row : rows) {
+            const QString id = table->item(row, 0)->data(Qt::UserRole).toString();
+            if (!id.isEmpty()) {
+                m_service.closeConnection(id);
+            }
+        }
+        QTimer::singleShot(300, dialog, [reload] { reload(); });
+    });
+    connect(closeAllBtn, &QPushButton::clicked, dialog, [this, reload] {
+        m_service.clearConnections();
+        QTimer::singleShot(300, dialog, [reload] { reload(); });
+    });
+
+    // 实时刷新（1.5s）；有选中行时跳过，避免打断「关闭选中」
+    auto *autoTimer = new QTimer(dialog);
+    autoTimer->setInterval(1500);
+    connect(autoTimer, &QTimer::timeout, dialog, [table, reload] {
+        if (table->selectedItems().isEmpty()) {
+            reload();
+        }
+    });
+    autoTimer->start();
+
+    reload();
     dialog->show();
 }
 

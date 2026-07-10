@@ -5,8 +5,12 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QDir>
 #include <QFile>
 #include <QFont>
+#include <QLockFile>
+#include <QMessageBox>
+#include <QStandardPaths>
 #include <QTextStream>
 
 int main(int argc, char *argv[])
@@ -107,6 +111,17 @@ int main(int argc, char *argv[])
         const bool ok = store.updateSubscriptionFromTextForTest(index, QString::fromUtf8(file.readAll()), &message);
         QTextStream(ok ? stdout : stderr) << message << Qt::endl;
         return ok ? 0 : 3;
+    }
+
+    // 单实例：避免多开导致核心争抢端口（CLI 子命令不受此限制，故放在其后）
+    const QString lockPath = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                 .filePath("clashauto-cpp.lock");
+    QLockFile lockFile(lockPath);
+    lockFile.setStaleLockTime(5000);
+    if (!lockFile.tryLock(100)) {
+        QMessageBox::information(nullptr, "Clash Auto",
+                                 QString::fromUtf8("Clash Auto 已经在运行中。"));
+        return 0;
     }
 
     QFont font("Microsoft YaHei UI");

@@ -49,6 +49,7 @@ private:
     QFrame *createNodeRow(const NodeInfo &node);
     void showSubscriptionNodes(int subscriptionIndex);
     void showUpdateDialog();
+    void showConnectionsDialog();
     void appendLog(const QString &message);
     void appendTimeline(QVBoxLayout *layout, QScrollArea *scroll, const QString &message);
     QLabel *createSwitchDot(bool enabled);

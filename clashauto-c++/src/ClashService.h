@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QJsonArray>
 #include <QNetworkAccessManager>
 #include <QObject>
 #include <QTimer>
@@ -28,6 +29,8 @@ public:
     void setSelectedGroup(const QString &group);
     void selectNode(const QString &name);
     void clearConnections();
+    void fetchConnections(std::function<void(QJsonArray)> callback);
+    void closeConnection(const QString &id);
     void refreshNodes();
     void testDelays();
     void testNodeDelays(const QStringList &names);
