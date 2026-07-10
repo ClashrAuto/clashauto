@@ -1418,10 +1418,32 @@ void MainWindow::showSubscriptionNodes(int subscriptionIndex)
     scroll->setWidget(container);
     dialogLayout->addWidget(scroll, 1);
 
+    auto *footer = new QHBoxLayout();
+    footer->setContentsMargins(0, 0, 0, 0);
+    auto bulk = [this, dialog, subscriptionIndex](bool enabled) {
+        if (m_subscriptions->setAllNodesEnabled(subscriptionIndex, enabled)) {
+            reloadSubscriptions();
+            m_core->rebuildConfig();
+            dialog->close();
+            showSubscriptionNodes(subscriptionIndex);
+        }
+    };
+    auto *selectAll = new QPushButton(QString::fromUtf8("全选"), dialog);
+    selectAll->setObjectName("nodeButton");
+    selectAll->setFixedSize(82, 30);
+    connect(selectAll, &QPushButton::clicked, dialog, [bulk] { bulk(true); });
+    auto *selectNone = new QPushButton(QString::fromUtf8("全不选"), dialog);
+    selectNone->setObjectName("nodeButton");
+    selectNone->setFixedSize(82, 30);
+    connect(selectNone, &QPushButton::clicked, dialog, [bulk] { bulk(false); });
     auto *close = new QPushButton("Close", dialog);
     close->setObjectName("primaryButton");
     connect(close, &QPushButton::clicked, dialog, &QDialog::close);
-    dialogLayout->addWidget(close, 0, Qt::AlignRight);
+    footer->addWidget(selectAll);
+    footer->addWidget(selectNone);
+    footer->addStretch();
+    footer->addWidget(close);
+    dialogLayout->addLayout(footer);
     dialog->setStyleSheet(styleSheet());
     dialog->show();
 }

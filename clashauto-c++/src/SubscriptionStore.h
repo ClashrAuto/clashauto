@@ -34,6 +34,7 @@ public:
     QVector<SubscriptionSummary> load();
     QVector<SubscriptionNodeSummary> nodes(int subscriptionIndex);
     bool setNodeEnabled(int subscriptionIndex, int nodeIndex, bool enabled);
+    bool setAllNodesEnabled(int subscriptionIndex, bool enabled);
     bool setSubscriptionEnabled(int index, bool enabled);
     bool addSubscription(const QString &name, const QString &url, const QString &type);
     bool editSubscription(int index, const QString &name, const QString &url, const QString &type);

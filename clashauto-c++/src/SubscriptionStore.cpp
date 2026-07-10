@@ -271,6 +271,19 @@ bool SubscriptionStore::setNodeEnabled(int subscriptionIndex, int nodeIndex, boo
     return false;
 }
 
+bool SubscriptionStore::setAllNodesEnabled(int subscriptionIndex, bool enabled)
+{
+    // 复用逐个 setNodeEnabled（每次读写整份 YAML）；节点数不大，简单可靠
+    const int count = nodes(subscriptionIndex).size();
+    bool any = false;
+    for (int i = 0; i < count; ++i) {
+        if (setNodeEnabled(subscriptionIndex, i, enabled)) {
+            any = true;
+        }
+    }
+    return any;
+}
+
 bool SubscriptionStore::addSubscription(const QString &name, const QString &url, const QString &type)
 {
     ensureFile();
