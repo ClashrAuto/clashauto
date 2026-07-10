@@ -2168,7 +2168,9 @@ void MainWindow::populateNodeList()
 
 void MainWindow::mousePressEvent(QMouseEvent *event)
 {
-    if (event->button() == Qt::LeftButton && event->pos().y() <= TitleHeight) {
+    // 标题栏 + 侧栏空白处都可拖拽窗口（菜单按钮自行消费点击，不会触发拖拽）
+    if (event->button() == Qt::LeftButton
+        && (event->pos().y() <= TitleHeight || event->pos().x() < SidebarWidth)) {
         m_dragging = true;
         m_dragStart = event->globalPosition().toPoint() - frameGeometry().topLeft();
         event->accept();
@@ -2199,7 +2201,7 @@ QString MainWindow::appStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
         #rightPane { background:#242425; }
-        #sidebar { background:transparent; }
+        #sidebar { background:#222; border-bottom-left-radius:10px; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
@@ -2297,7 +2299,7 @@ QString MainWindow::lightStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
         #rightPane { background:#ffffff; }
-        #sidebar { background:transparent; }
+        #sidebar { background:#eee; border-bottom-left-radius:10px; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
