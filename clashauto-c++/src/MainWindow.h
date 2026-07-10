@@ -58,7 +58,7 @@ private:
     void showConnectionsDialog();
     void appendLog(const QString &message);
     void appendTimeline(QVBoxLayout *layout, QScrollArea *scroll, const QString &message);
-    QLabel *createSwitchDot(bool enabled);
+    QWidget *createSwitchDot(bool enabled);
     void reloadSubscriptions();
     void populateNodeList();
     QString speedText(qint64 value) const;
@@ -98,9 +98,9 @@ private:
     QScrollArea *m_clashScroll = nullptr;
     QString m_logFilePath;
     QLabel *m_usersLabel = nullptr;
-    QLabel *m_tunDot = nullptr;
-    QLabel *m_proxyDot = nullptr;
-    QLabel *m_coreDot = nullptr;
+    QWidget *m_tunDot = nullptr; // BreathingDot（自绘呼吸圆点）
+    QWidget *m_proxyDot = nullptr;
+    QWidget *m_coreDot = nullptr;
     QFrame *m_subscriptionList = nullptr;
     QTableWidget *m_areaTable = nullptr;
     QTableWidget *m_ruleTable = nullptr;

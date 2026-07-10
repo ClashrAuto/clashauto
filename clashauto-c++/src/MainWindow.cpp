@@ -37,6 +37,7 @@
 #include <QProcess>
 #include <QProgressBar>
 #include <QPropertyAnimation>
+#include <QVariantAnimation>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -119,6 +120,70 @@ protected:
 private:
     QColor m_dot;
     QColor m_axis;
+};
+
+// 底部开关（增强/网页/核心）的「呼吸圆点」——自绘并开启抗锯齿，
+// 每帧按当前透明度重绘，避免 QGraphicsOpacityEffect 在高分屏下产生毛边。
+class BreathingDot : public QWidget
+{
+public:
+    explicit BreathingDot(QWidget *parent = nullptr) : QWidget(parent)
+    {
+        setFixedSize(16, 16);
+        setAttribute(Qt::WA_TransparentForMouseEvents); // 点击穿透到开关按钮
+        m_anim = new QVariantAnimation(this);
+        m_anim->setDuration(1000);
+        m_anim->setStartValue(1.0);
+        m_anim->setKeyValueAt(0.5, 0.35);
+        m_anim->setEndValue(1.0);
+        m_anim->setLoopCount(-1);
+        connect(m_anim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+            m_opacity = v.toReal();
+            update();
+        });
+    }
+
+    void setLight(bool light)
+    {
+        m_light = light;
+        update();
+    }
+
+    void setOn(bool on)
+    {
+        m_on = on;
+        if (on) {
+            if (m_anim->state() != QAbstractAnimation::Running)
+                m_anim->start();
+        } else {
+            m_anim->stop();
+            m_opacity = 1.0;
+        }
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        const QColor core = m_on ? QColor(0x48, 0x98, 0xf8)
+                                 : (m_light ? QColor(0xff, 0xff, 0xff) : QColor(0x66, 0x66, 0x66));
+        QColor halo = core;
+        halo.setAlphaF(m_on ? 0.30 : 0.15);
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setOpacity(m_opacity);
+        p.setPen(Qt::NoPen);
+        p.setBrush(halo);                                // 外圈光晕（对应旧 4px 半透明边框）
+        p.drawEllipse(QRectF(0.5, 0.5, 15.0, 15.0));
+        p.setBrush(core);                                // 内核实心圆点（8px）
+        p.drawEllipse(QRectF(width() / 2.0 - 4.0, height() / 2.0 - 4.0, 8.0, 8.0));
+    }
+
+private:
+    QVariantAnimation *m_anim = nullptr;
+    qreal m_opacity = 1.0;
+    bool m_on = false;
+    bool m_light = false;
 };
 }
 
@@ -280,27 +345,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         appendLog(message);
     });
     auto applyStatus = [this](bool tun, bool proxy, bool core) {
-        m_tunDot->setProperty("on", tun);
-        m_proxyDot->setProperty("on", proxy);
-        m_coreDot->setProperty("on", core);
-        for (QLabel *dot : {m_tunDot, m_proxyDot, m_coreDot}) {
-            dot->style()->unpolish(dot);
-            dot->style()->polish(dot);
-            auto *anim = dot->findChild<QPropertyAnimation *>();
-            auto *effect = qobject_cast<QGraphicsOpacityEffect *>(dot->graphicsEffect());
-            if (anim) {
-                if (dot->property("on").toBool()) {
-                    if (anim->state() != QAbstractAnimation::Running) {
-                        anim->start();
-                    }
-                } else {
-                    anim->stop();
-                    if (effect) {
-                        effect->setOpacity(1.0);
-                    }
-                }
-            }
-        }
+        static_cast<BreathingDot *>(m_tunDot)->setOn(tun);
+        static_cast<BreathingDot *>(m_proxyDot)->setOn(proxy);
+        static_cast<BreathingDot *>(m_coreDot)->setOn(core);
         if (m_logo) {
             // 旧项目：TUN 开启=红(global)，核心运行=黄(proxy)，否则白
             m_logo->setProperty("state", tun ? "tun" : (core ? "proxy" : "off"));
@@ -375,7 +422,7 @@ QWidget *MainWindow::buildSidebar()
     m_logo->setObjectName("logo");
     m_logo->setProperty("state", "off");
     m_logo->setAlignment(Qt::AlignCenter);
-    logoLayout->addWidget(m_logo);
+    logoLayout->addWidget(m_logo, 0, Qt::AlignHCenter); // 地球图标在侧栏中水平居中
     layout->addWidget(logoWrap);
 
     const QStringList menu = {
@@ -1323,7 +1370,7 @@ QWidget *MainWindow::buildFooter()
     layout->addWidget(footerArrow);
     layout->addWidget(m_logLabel, 1);
 
-    auto addSwitch = [&](const QString &text, QLabel **dot, auto slot) {
+    auto addSwitch = [&](const QString &text, QWidget **dot, auto slot) {
         auto *button = new QPushButton(text, footer);
         button->setObjectName("switchButton");
         *dot = createSwitchDot(false);
@@ -1897,23 +1944,12 @@ void MainWindow::appendTimeline(QVBoxLayout *layout, QScrollArea *scroll, const 
     }
 }
 
-QLabel *MainWindow::createSwitchDot(bool enabled)
+QWidget *MainWindow::createSwitchDot(bool enabled)
 {
-    auto *dot = new QLabel(this);
-    dot->setObjectName("switchDot");
-    dot->setProperty("on", enabled);
-    dot->setFixedSize(16, 16);
-
-    // 旧项目 .quan.on 的 1s 呼吸动画（QSS 不支持 @keyframes，用透明度动画近似）
-    auto *effect = new QGraphicsOpacityEffect(dot);
-    effect->setOpacity(1.0);
-    dot->setGraphicsEffect(effect);
-    auto *anim = new QPropertyAnimation(effect, "opacity", dot);
-    anim->setDuration(1000);
-    anim->setStartValue(1.0);
-    anim->setKeyValueAt(0.5, 0.35);
-    anim->setEndValue(1.0);
-    anim->setLoopCount(-1);
+    // 自绘抗锯齿呼吸圆点（旧项目 .quan.on 的 1s 呼吸动画）
+    auto *dot = new BreathingDot(this);
+    dot->setLight(m_theme == "white");
+    dot->setOn(enabled);
     return dot;
 }
 
@@ -2227,7 +2263,7 @@ QString MainWindow::appStyle() const
         #usersBadge { color:#fff; background:#000; border-radius:3px; padding:3px 5px; font-size:12px; }
         #footerArrow { color:#666; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#ccc; font-size:12px; }
-        #switchButton { color:#eee; background:#000; border:0; border-radius:3px; min-height:28px; padding-left:22px; padding-right:8px; font-size:12px; }
+        #switchButton { color:#eee; background:#000; border:0; border-radius:3px; min-height:28px; padding-left:32px; padding-right:8px; font-size:12px; }
         #switchDot { background:#666; border:4px solid rgba(102,102,102,0.15); border-radius:8px; }
         #switchDot[on="true"] { background:#4898f8; border-color:rgba(72,152,248,0.30); }
         #timelineBody { background:#111; }
@@ -2325,7 +2361,7 @@ QString MainWindow::lightStyle() const
         #usersBadge { color:#333; background:#fff; border-radius:3px; padding:3px 5px; font-size:12px; }
         #footerArrow { color:#e8e8e8; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#333; font-size:12px; }
-        #switchButton { color:#333; background:#eee; border:0; border-radius:3px; min-height:28px; padding-left:22px; padding-right:8px; font-size:12px; }
+        #switchButton { color:#333; background:#eee; border:0; border-radius:3px; min-height:28px; padding-left:32px; padding-right:8px; font-size:12px; }
         #switchDot { background:#fff; border:4px solid rgba(255,255,255,0.15); border-radius:8px; }
         #switchDot[on="true"] { background:#4898f8; border-color:rgba(72,152,248,0.30); }
         #timelineBody { background:#fff; }
@@ -2370,6 +2406,11 @@ void MainWindow::applyTheme(const QString &theme)
                        || theme.compare("white", Qt::CaseInsensitive) == 0;
     m_theme = light ? "white" : "black";
     setStyleSheet(light ? lightStyle() : appStyle());
+    // 呼吸圆点是自绘的，随主题切换刷新其颜色（关/浅色白、关/深色灰、开=蓝）
+    for (QWidget *dot : {m_tunDot, m_proxyDot, m_coreDot}) {
+        if (dot)
+            static_cast<BreathingDot *>(dot)->setLight(light);
+    }
     applyTitleBarColor(); // 主题变化时重新给系统标题栏着色
 }
 
