@@ -1302,7 +1302,7 @@ QWidget *MainWindow::buildFooter()
 
     m_usersLabel = new QLabel(QString::fromUtf8("◉ -"), footer);
     m_usersLabel->setObjectName("usersBadge");
-    auto *footerArrow = new QLabel(QString::fromUtf8("›"), footer);
+    auto *footerArrow = new QLabel(QChar(0xE625), footer); // iconfont icon-arrow-2（方向-向右-粗）
     footerArrow->setObjectName("footerArrow");
     m_logLabel = new QLabel("Ready", footer);
     m_logLabel->setObjectName("footerLog");
@@ -2217,10 +2217,10 @@ QString MainWindow::appStyle() const
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
         #footer { background:#303032; border-bottom-left-radius:10px; border-bottom-right-radius:10px; }
         #usersBadge { color:#fff; background:#000; border-radius:3px; padding:3px 5px; font-size:12px; }
-        #footerArrow { color:#666; font-size:14px; }
+        #footerArrow { color:#666; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#ccc; font-size:12px; }
         #switchButton { color:#eee; background:#000; border:0; border-radius:3px; min-height:28px; padding-left:22px; padding-right:8px; font-size:12px; }
-        #switchDot { background:rgba(102,102,102,0.15); border:4px solid rgba(102,102,102,0.15); border-radius:8px; }
+        #switchDot { background:#666; border:4px solid rgba(102,102,102,0.15); border-radius:8px; }
         #switchDot[on="true"] { background:#4898f8; border-color:rgba(72,152,248,0.30); }
         #timelineBody { background:#111; }
         #timelineTime { color:#888; font-size:11px; }
@@ -2306,10 +2306,10 @@ QString MainWindow::lightStyle() const
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
         #footer { background:#fafafa; border-bottom-left-radius:10px; border-bottom-right-radius:10px; }
         #usersBadge { color:#333; background:#fff; border-radius:3px; padding:3px 5px; font-size:12px; }
-        #footerArrow { color:#e8e8e8; font-size:14px; }
+        #footerArrow { color:#e8e8e8; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#333; font-size:12px; }
         #switchButton { color:#333; background:#eee; border:0; border-radius:3px; min-height:28px; padding-left:22px; padding-right:8px; font-size:12px; }
-        #switchDot { background:rgba(255,255,255,0.15); border:4px solid rgba(255,255,255,0.15); border-radius:8px; }
+        #switchDot { background:#fff; border:4px solid rgba(255,255,255,0.15); border-radius:8px; }
         #switchDot[on="true"] { background:#4898f8; border-color:rgba(72,152,248,0.30); }
         #timelineBody { background:#fff; }
         #timelineTime { color:#999; font-size:11px; }
