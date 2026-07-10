@@ -2239,7 +2239,7 @@ QString MainWindow::appStyle() const
         #subCard[on="true"] { border-left:3px solid #4898f8; }
         #subCardTitle { color:#eee; font-size:16px; }
         #subCardMeta { color:#999; font-size:12px; }
-        #addCard { background:#222; border:0; border-radius:5px; color:#888; font-size:64px; }
+        #addCard { background:#222; border:0; border-radius:5px; color:#888; font-size:80px; }
         QDialog { background:#333; }
         QTableWidget { background:#333; color:#fff; border:1px solid #464646; gridline-color:#464646; }
         QTableWidget::item { padding:4px; }
@@ -2328,7 +2328,7 @@ QString MainWindow::lightStyle() const
         #subCard[on="true"] { border-left:3px solid #4898f8; }
         #subCardTitle { color:#333; font-size:16px; }
         #subCardMeta { color:#999; font-size:12px; }
-        #addCard { background:#eee; border:0; border-radius:5px; color:#333; font-size:64px; }
+        #addCard { background:#eee; border:0; border-radius:5px; color:#333; font-size:80px; }
         QDialog { background:#fff; }
         QTableWidget { background:#fff; color:#333; border:1px solid #ebeef5; gridline-color:#ebeef5; }
         QTableWidget::item { padding:4px; }
