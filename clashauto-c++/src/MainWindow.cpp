@@ -54,6 +54,14 @@
 
 #include <utility>
 
+// Version.h 由 CMake 从 src/Version.h.in 生成（CI 用 major.minor.<提交数>）
+#if __has_include("Version.h")
+#include "Version.h"
+#endif
+#ifndef APP_VERSION
+#define APP_VERSION "dev"
+#endif
+
 namespace {
 constexpr int TitleHeight = 28;
 constexpr int SidebarWidth = 120;
@@ -304,7 +312,7 @@ QWidget *MainWindow::buildSidebar()
     layout->addLayout(menuLayout);
     layout->addStretch();
 
-    auto *version = new QLabel("Ver: 3.0.2", side);
+    auto *version = new QLabel("Ver: " APP_VERSION, side);
     version->setObjectName("version");
     version->setAlignment(Qt::AlignCenter);
     version->setFixedHeight(24);
@@ -978,14 +986,7 @@ QWidget *MainWindow::buildLogsPage()
 QWidget *MainWindow::buildAboutPage()
 {
     const AppConfig config = AppConfigLoader::load();
-    QString version = "3.0.2";
-    QFile versionFile(QDir(config.sourceRoot).filePath("version"));
-    if (versionFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        const QString text = QString::fromUtf8(versionFile.readAll()).trimmed();
-        if (!text.isEmpty()) {
-            version = text;
-        }
-    }
+    const QString version = QString::fromUtf8(APP_VERSION);
 
     auto *scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);

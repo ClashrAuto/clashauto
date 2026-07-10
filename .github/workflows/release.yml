@@ -205,7 +205,8 @@ jobs:
             "-B", $env:BUILD_DIR,
             "-G", "Visual Studio 17 2022",
             "-A", "${{ matrix.cmake_arch }}",
-            "-DCMAKE_PREFIX_PATH=$env:QT_ROOT"
+            "-DCMAKE_PREFIX_PATH=$env:QT_ROOT",
+            "-DAPP_VERSION=$env:APP_VERSION"
           )
           if ("${{ matrix.arch }}" -eq "arm64") {
             $args += "-DQT_HOST_PATH=$env:QT_HOST_ROOT"
@@ -452,7 +453,7 @@ jobs:
 
       - name: Configure
         shell: bash
-        run: cmake -S clashauto-c++ -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S clashauto-c++ -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release -DAPP_VERSION="$APP_VERSION"
 
       - name: Build
         shell: bash

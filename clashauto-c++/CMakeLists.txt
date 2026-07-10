@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.20)
 
 project(clashauto_cpp VERSION 0.1.1 LANGUAGES CXX)
 
+# Version string shown in the app UI. Defaults to the project version for
+# local builds; CI overrides it with -DAPP_VERSION=<major.minor.commitcount>.
+if(NOT APP_VERSION)
+    set(APP_VERSION "${PROJECT_VERSION}")
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -40,3 +46,11 @@ target_link_libraries(clashauto-cpp PRIVATE
 target_compile_options(clashauto-cpp PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
+
+# Generate Version.h with the resolved APP_VERSION (bulletproof quoting across generators)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Version.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.h"
+    @ONLY
+)
+target_include_directories(clashauto-cpp PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
