@@ -40,6 +40,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
+#include <QShowEvent>
 #include <QTimer>
 #include <QSignalBlocker>
 #include <QSizePolicy>
@@ -1957,6 +1958,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
     qApp->quit();
 }
 
+void MainWindow::showEvent(QShowEvent *event)
+{
+    QMainWindow::showEvent(event);
+    applyAcrylic(); // 窗口显示后应用亚克力（部分系统需窗口已实体化）
+}
+
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
 {
 #if defined(Q_OS_WIN)
@@ -2176,14 +2183,15 @@ void MainWindow::mouseReleaseEvent(QMouseEvent *)
 QString MainWindow::appStyle() const
 {
     return R"(
-        #root { background:#242425; border-radius:10px; }
+        #root { background:transparent; border-radius:10px; }
         #titleBar { background:#222; border-top-left-radius:10px; border-top-right-radius:10px; }
         #windowTitle { color:#ccc; font-size:12px; padding-left:0; }
         #titleButton, #closeButton { color:#ccc; background:#222; border:0; border-radius:0; }
         #titleButton:hover { background:#333; }
         #closeButton:hover { background:red; color:white; }
-        #body, #rightPane, #page { background:rgba(0,0,0,0); }
-        #sidebar { background:#303032; }
+        #body, #page { background:rgba(0,0,0,0); }
+        #rightPane { background:#242425; }
+        #sidebar { background:rgba(34,34,34,0.9); }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
@@ -2268,14 +2276,15 @@ QString MainWindow::appStyle() const
 QString MainWindow::lightStyle() const
 {
     return R"(
-        #root { background:#ffffff; border-radius:10px; }
+        #root { background:transparent; border-radius:10px; }
         #titleBar { background:#eee; border-top-left-radius:10px; border-top-right-radius:10px; }
         #windowTitle { color:#333; font-size:12px; }
         #titleButton, #closeButton { color:#333; background:#eee; border:0; border-radius:0; }
         #titleButton:hover { background:#fff; }
         #closeButton:hover { background:red; color:white; }
-        #body, #rightPane, #page { background:rgba(0,0,0,0); }
-        #sidebar { background:#fafafa; }
+        #body, #page { background:rgba(0,0,0,0); }
+        #rightPane { background:#ffffff; }
+        #sidebar { background:rgba(238,238,238,0.9); }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
@@ -2363,4 +2372,30 @@ void MainWindow::applyTheme(const QString &theme)
                        || theme.compare("white", Qt::CaseInsensitive) == 0;
     m_theme = light ? "white" : "black";
     setStyleSheet(light ? lightStyle() : appStyle());
+    applyAcrylic(); // 主题变化时重新着色亚克力
+}
+
+void MainWindow::applyAcrylic()
+{
+#if defined(Q_OS_WIN)
+    // 整窗亚克力毛玻璃：调用未文档化的 user32!SetWindowCompositionAttribute
+    enum { ACCENT_ENABLE_ACRYLICBLURBEHIND = 4, WCA_ACCENT_POLICY = 19 };
+    struct AccentPolicy { int AccentState; int AccentFlags; unsigned int GradientColor; int AnimationId; };
+    struct WinCompAttrData { int Attrib; void *pvData; size_t cbData; };
+    using SetWCA = BOOL(WINAPI *)(HWND, WinCompAttrData *);
+
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (!user32) {
+        return;
+    }
+    auto setWCA = reinterpret_cast<SetWCA>(GetProcAddress(user32, "SetWindowCompositionAttribute"));
+    if (!setWCA) {
+        return;
+    }
+    // GradientColor 为 ABGR：标题色 + 中等透明，让毛玻璃模糊透出（侧栏 0.9 叠在其上）
+    const unsigned int tint = (m_theme == "white") ? 0x99EEEEEE : 0x99222222;
+    AccentPolicy accent{ ACCENT_ENABLE_ACRYLICBLURBEHIND, 0, tint, 0 };
+    WinCompAttrData data{ WCA_ACCENT_POLICY, &accent, sizeof(accent) };
+    setWCA(reinterpret_cast<HWND>(winId()), &data);
+#endif
 }

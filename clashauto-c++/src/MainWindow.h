@@ -38,6 +38,7 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 
 private:
@@ -65,6 +66,7 @@ private:
     QString appStyle() const;
     QString lightStyle() const;
     void applyTheme(const QString &theme);
+    void applyAcrylic(); // 整窗 Windows 亚克力毛玻璃
     QFrame *createSubscriptionCard(const SubscriptionSummary &subscription, int index);
     QWidget *buildRuleTableTab(const QString &section);
     void reloadRuleTable(const QString &section);
