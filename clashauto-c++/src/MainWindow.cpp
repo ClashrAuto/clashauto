@@ -453,23 +453,37 @@ QWidget *MainWindow::buildStatusPage()
     m_nodeTitle = new QLabel(QString::fromUtf8("节点 <span style='font-size:9px'>(0)</span>"), nodeHeader);
     m_nodeTitle->setObjectName("sectionTitle");
     nodeHeaderLayout->addWidget(m_nodeTitle);
-    nodeHeaderLayout->addStretch();
-    // 旧项目节点栏：搜索(el-icon-search) + 测速(el-icon-refresh-right) + 帮助(el-icon-question)
+    // 旧项目节点栏：搜索图标(el-icon-search)紧邻标题，点开展开输入框；测速/帮助在最右
+    auto *searchIcon = new QPushButton(QString::fromUtf8("🔍"), nodeHeader); // 放大镜（U+1F50D 需 UTF-8，超出 BMP）
+    searchIcon->setObjectName("iconButton");
+    searchIcon->setFixedWidth(28);
+    searchIcon->setToolTip(QString::fromUtf8("搜索"));
+    nodeHeaderLayout->addWidget(searchIcon);
     m_nodeSearch = new QLineEdit(nodeHeader);
-    m_nodeSearch->setPlaceholderText(QString::fromUtf8("搜索"));
-    m_nodeSearch->setFixedWidth(160);
+    m_nodeSearch->setPlaceholderText(QString::fromUtf8("搜索节点"));
+    m_nodeSearch->setFixedWidth(180);
+    m_nodeSearch->hide(); // 默认隐藏，点放大镜展开
     nodeHeaderLayout->addWidget(m_nodeSearch);
-    auto *speedTest = new QPushButton(QChar(0x21BB), nodeHeader); // ↻ 测速/刷新（el-icon-refresh-right 对应）
+    nodeHeaderLayout->addStretch();
+    auto *speedTest = new QPushButton(QChar(0x21BB), nodeHeader); // ↻ 测速/刷新
     speedTest->setObjectName("iconButton");
     speedTest->setFixedWidth(30);
     speedTest->setToolTip(QString::fromUtf8("测速"));
     nodeHeaderLayout->addWidget(speedTest);
-    auto *helpBtn = new QPushButton(QChar(0x003F), nodeHeader); // ? 帮助（el-icon-question 对应）
+    auto *helpBtn = new QPushButton(QChar(0x003F), nodeHeader); // ? 帮助
     helpBtn->setObjectName("iconButton");
     helpBtn->setFixedWidth(30);
     helpBtn->setToolTip(QString::fromUtf8("帮助"));
     nodeHeaderLayout->addWidget(helpBtn);
     rightLayout->addWidget(nodeHeader);
+    connect(searchIcon, &QPushButton::clicked, this, [this] {
+        m_nodeSearch->setVisible(!m_nodeSearch->isVisible());
+        if (m_nodeSearch->isVisible()) {
+            m_nodeSearch->setFocus();
+        } else {
+            m_nodeSearch->clear();
+        }
+    });
     connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { populateNodeList(); });
     connect(speedTest, &QPushButton::clicked, this, [this] {
         appendLog(QString::fromUtf8("开始测速..."));
@@ -2189,7 +2203,7 @@ QString MainWindow::appStyle() const
         #subCard[on="true"] { border-left:3px solid #4898f8; }
         #subCardTitle { color:#eee; font-size:16px; }
         #subCardMeta { color:#999; font-size:12px; }
-        #addCard { background:#222; border:2px dashed #444; border-radius:5px; color:#4898f8; font-size:48px; }
+        #addCard { background:#222; border:0; border-radius:5px; color:#888; font-size:64px; }
         QDialog { background:#333; }
         QTableWidget { background:#333; color:#fff; border:1px solid #464646; gridline-color:#464646; }
         QTableWidget::item { padding:4px; }
@@ -2278,7 +2292,7 @@ QString MainWindow::lightStyle() const
         #subCard[on="true"] { border-left:3px solid #4898f8; }
         #subCardTitle { color:#333; font-size:16px; }
         #subCardMeta { color:#999; font-size:12px; }
-        #addCard { background:#eee; border:2px dashed #ccc; border-radius:5px; color:#4898f8; font-size:48px; }
+        #addCard { background:#eee; border:0; border-radius:5px; color:#333; font-size:64px; }
         QDialog { background:#fff; }
         QTableWidget { background:#fff; color:#333; border:1px solid #ebeef5; gridline-color:#ebeef5; }
         QTableWidget::item { padding:4px; }
