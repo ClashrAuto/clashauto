@@ -1320,7 +1320,8 @@ void MainWindow::showUpdateDialog()
         }
         const QString savePath = QDir(dir).filePath(name);
 
-        QNetworkRequest req(QUrl(url));
+        const QUrl assetUrl(url);
+        QNetworkRequest req(assetUrl);
         req.setRawHeader("User-Agent", "clashauto-cpp");
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply *reply = nam->get(req);
