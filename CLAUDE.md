@@ -72,7 +72,7 @@ User-writable state lives under the Qt `AppDataLocation`, i.e. `%AppData%/ClashA
 
 ## Releases & CI (`.github/workflows/release.yml`)
 
-- The release **version is read from `project(... VERSION x.y.z)` in `clashauto-c++/CMakeLists.txt`** — bump it there to cut a new release; the tag becomes `v<version>`.
+- The release version **auto-increments per commit**: the "Resolve build version" step takes `major.minor` from `project(... VERSION x.y.z)` in `clashauto-c++/CMakeLists.txt` and uses the git commit count (`git rev-list --count HEAD`) as the patch/build number → `major.minor.<count>` (e.g. `0.1.15`), tag `v<version>`. Bump `major`/`minor` in CMakeLists to start a new line; the build number rises on its own each commit. This is why both checkout steps use `fetch-depth: 0` (full history is needed for the count), and both jobs compute the same version from the same `github.sha`.
 - Any **push to `master`/`main`** builds and publishes a GitHub Release (Windows x64 + ARM64 portable zip & NSIS installer; Linux x64 + ARM64 tar.gz/zip & `.deb`). PRs build artifacts but do not publish.
 - CI does **not** build `Clashr-Auto/`; it downloads the runtime bundle from `Clashr-Auto-Desktop` release `v2.5.7` and, for ARM64, pulls the matching mihomo core. It then stages `clashauto-cpp.exe` (via `windeployqt`) alongside a trimmed `Clashr-Auto/` resource dir, preserving the sibling-directory layout the app expects.
 - Windows CI builds with **MSVC (Visual Studio 17 2022)**, not MinGW; Linux CI uses Ninja + system Qt6. ARM64 Windows is a cross-compile and passes `-DQT_HOST_PATH`.
