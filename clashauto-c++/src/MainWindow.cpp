@@ -176,6 +176,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     applyTheme(config.theme);
     setCurrentPage(0);
 
+    // 订阅自动定时更新（对应旧项目 updateTime；这里用全局间隔，0=关）
+    m_autoUpdateTimer = new QTimer(this);
+    connect(m_autoUpdateTimer, &QTimer::timeout, this, [this] {
+        const QVector<SubscriptionSummary> subs = m_subscriptions->load();
+        for (int i = 0; i < subs.size(); ++i) {
+            m_subscriptions->updateSubscription(i);
+        }
+        appendLog(QString::fromUtf8("订阅自动更新已触发（%1 个）").arg(subs.size()));
+    });
+    applyAutoUpdate(config.autoUpdateMinutes);
+
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     // 跟随系统深浅色（config.autoTheme）：启动应用 + 监听系统切换
     auto applySystemScheme = [this] {
@@ -634,6 +645,11 @@ QWidget *MainWindow::buildSettingsPage()
     nodeNote->setChecked(config.nodeSwitchNote);
     auto *autoTheme = new QCheckBox();
     autoTheme->setChecked(config.autoTheme);
+    auto *autoUpdateSpin = new QSpinBox();
+    autoUpdateSpin->setRange(0, 1440);
+    autoUpdateSpin->setSuffix(QString::fromUtf8(" 分钟"));
+    autoUpdateSpin->setValue(config.autoUpdateMinutes);
+    autoUpdateSpin->setFixedWidth(200);
     auto *geoipBtn = new QPushButton(QString::fromUtf8("更新 GeoIP"));
     geoipBtn->setObjectName("nodeButton");
     geoipBtn->setFixedSize(110, 30);
@@ -764,6 +780,7 @@ QWidget *MainWindow::buildSettingsPage()
     sysLayout->addWidget(row(QString::fromUtf8("仅可用节点"), nodeOnly));
     sysLayout->addWidget(row(QString::fromUtf8("增量更新"), increment));
     sysLayout->addWidget(row(QString::fromUtf8("切换通知"), nodeNote));
+    sysLayout->addWidget(row(QString::fromUtf8("订阅自动更新"), autoUpdateSpin));
     addDivider();
     addGroup(QString::fromUtf8("内核"));
     sysLayout->addWidget(row(QString::fromUtf8("API 端口"), uiPort));
@@ -816,6 +833,7 @@ QWidget *MainWindow::buildSettingsPage()
         out << "mini: " << (closeToTray->isChecked() ? "true" : "false") << "\n";
         out << "sys: " << (autoStart->isChecked() ? "true" : "false") << "\n";
         out << "note: " << (nodeNote->isChecked() ? "true" : "false") << "\n";
+        out << "autoUpdate: " << autoUpdateSpin->value() << "\n";
         out << "theme: " << (light ? "light" : "black") << "\n";
         out << "autoTheme: " << (autoTheme->isChecked() ? "true" : "false") << "\n";
         out << "language: " << language->currentText() << "\n";
@@ -829,6 +847,7 @@ QWidget *MainWindow::buildSettingsPage()
         m_nodeSwitchNote = nodeNote->isChecked();
         m_autoTheme = autoTheme->isChecked();
         applyAutoStart(autoStart->isChecked());
+        applyAutoUpdate(autoUpdateSpin->value());
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
         if (m_autoTheme) {
             applyTheme(QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark
@@ -1873,6 +1892,19 @@ void MainWindow::applyAutoStart(bool enabled)
     Q_UNUSED(enabled);
     appendLog(QString::fromUtf8("开机自启当前仅支持 Windows"));
 #endif
+}
+
+void MainWindow::applyAutoUpdate(int minutes)
+{
+    m_autoUpdateMinutes = minutes;
+    if (!m_autoUpdateTimer) {
+        return;
+    }
+    if (minutes > 0) {
+        m_autoUpdateTimer->start(minutes * 60 * 1000);
+    } else {
+        m_autoUpdateTimer->stop();
+    }
 }
 
 void MainWindow::reloadSubscriptions()

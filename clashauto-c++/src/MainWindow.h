@@ -21,6 +21,7 @@ class QVBoxLayout;
 class QTableWidget;
 class QJsonArray;
 class QCloseEvent;
+class QTimer;
 
 class MainWindow final : public QMainWindow
 {
@@ -69,6 +70,7 @@ private:
     bool saveRuleSection(const QString &section, const QJsonArray &array);
     void setCurrentPage(int page);
     void applyAutoStart(bool enabled);
+    void applyAutoUpdate(int minutes);
 
     ClashService m_service;
     QStackedWidget *m_pages = nullptr;
@@ -110,5 +112,7 @@ private:
     bool m_nodeSwitchNote = true;
     bool m_nodeInitialized = false;
     bool m_autoTheme = false;
+    int m_autoUpdateMinutes = 0;
+    QTimer *m_autoUpdateTimer = nullptr;
     QPoint m_dragStart;
 };

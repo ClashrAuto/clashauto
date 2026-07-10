@@ -10,6 +10,7 @@ struct AppConfig {
     QString host = "127.0.0.1";
     int uiPort = 9090;
     int mixedPort = 7890;
+    int autoUpdateMinutes = 0;
     bool webProxy = true;
     bool tun = false;
     bool nodeOnlyAvailable = true;
