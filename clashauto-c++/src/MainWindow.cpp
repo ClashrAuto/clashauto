@@ -1381,7 +1381,7 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     row->setObjectName("nodeRow");
     row->setProperty("active", node.active);
     auto *layout = new QHBoxLayout(row);
-    layout->setContentsMargins(8, 0, 0, 0);
+    layout->setContentsMargins(2, 0, 0, 0); // + 3px 透明左条 = 名称左内边距 5（对齐旧项目 padding-left:5）
     layout->setSpacing(8);
 
     auto *name = new QLabel(node.active ? QString("[%1] %2").arg(node.name, node.now.isEmpty() ? node.name : node.now) : node.name, row);
@@ -2208,7 +2208,7 @@ QString MainWindow::appStyle() const
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
-        #nodeRow, #plainCard { background:#252525; border:0; border-left:3px solid transparent; border-radius:0; min-height:56px; }
+        #nodeRow, #plainCard { background:#252525; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #83bdff; }
         #nodeName { color:#ccc; font-size:12px; }
         #delayBadge { color:#222; border-radius:5px; padding:3px 5px; font-size:12px; }
@@ -2297,7 +2297,7 @@ QString MainWindow::lightStyle() const
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
-        #nodeRow, #plainCard { background:#eee; border:0; border-left:3px solid transparent; border-radius:0; min-height:56px; }
+        #nodeRow, #plainCard { background:#eee; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #1f6fd2; }
         #nodeName { color:#333; font-size:12px; }
         #delayBadge { color:#333; border-radius:5px; padding:3px 5px; font-size:12px; }
