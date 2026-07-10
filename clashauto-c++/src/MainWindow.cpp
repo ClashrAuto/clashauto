@@ -59,6 +59,17 @@
 
 #include <utility>
 
+#if defined(Q_OS_WIN)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <windowsx.h> // GET_X_LPARAM / GET_Y_LPARAM
+#endif
+
 // Version.h 由 CMake 从 src/Version.h.in 生成（CI 用 major.minor.<提交数>）
 #if __has_include("Version.h")
 #include "Version.h"
@@ -1939,6 +1950,35 @@ void MainWindow::closeEvent(QCloseEvent *event)
     }
     event->accept();
     qApp->quit();
+}
+
+bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
+{
+#if defined(Q_OS_WIN)
+    // 无边框窗口的原生缩放：命中窗口边缘时返回 HT* 让系统接管拉伸（含正确光标）
+    MSG *msg = static_cast<MSG *>(message);
+    if (msg && msg->message == WM_NCHITTEST) {
+        const qreal dpr = devicePixelRatioF();
+        const QPoint gp(qRound(GET_X_LPARAM(msg->lParam) / dpr), qRound(GET_Y_LPARAM(msg->lParam) / dpr));
+        const QPoint p = mapFromGlobal(gp);
+        const int b = 6; // 边缘感应宽度
+        const int w = width();
+        const int h = height();
+        const bool left = p.x() >= 0 && p.x() < b;
+        const bool right = p.x() <= w && p.x() > w - b;
+        const bool top = p.y() >= 0 && p.y() < b;
+        const bool bottom = p.y() <= h && p.y() > h - b;
+        if (top && left) { *result = HTTOPLEFT; return true; }
+        if (top && right) { *result = HTTOPRIGHT; return true; }
+        if (bottom && left) { *result = HTBOTTOMLEFT; return true; }
+        if (bottom && right) { *result = HTBOTTOMRIGHT; return true; }
+        if (left) { *result = HTLEFT; return true; }
+        if (right) { *result = HTRIGHT; return true; }
+        if (top) { *result = HTTOP; return true; }
+        if (bottom) { *result = HTBOTTOM; return true; }
+    }
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
 }
 
 void MainWindow::applyAutoStart(bool enabled)
