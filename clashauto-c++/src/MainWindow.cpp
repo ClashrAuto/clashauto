@@ -1393,7 +1393,7 @@ void MainWindow::showConnectionsDialog()
     v->addLayout(bar);
 
     connect(refreshBtn, &QPushButton::clicked, dialog, [reload] { reload(); });
-    connect(closeSelBtn, &QPushButton::clicked, dialog, [this, table, reload] {
+    connect(closeSelBtn, &QPushButton::clicked, dialog, [this, table, reload, dialog] {
         QList<int> rows;
         for (QTableWidgetItem *item : table->selectedItems()) {
             if (!rows.contains(item->row())) {
@@ -1408,7 +1408,7 @@ void MainWindow::showConnectionsDialog()
         }
         QTimer::singleShot(300, dialog, [reload] { reload(); });
     });
-    connect(closeAllBtn, &QPushButton::clicked, dialog, [this, reload] {
+    connect(closeAllBtn, &QPushButton::clicked, dialog, [this, reload, dialog] {
         m_service.clearConnections();
         QTimer::singleShot(300, dialog, [reload] { reload(); });
     });
