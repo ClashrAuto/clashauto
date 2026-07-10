@@ -2144,7 +2144,14 @@ void MainWindow::populateNodeList()
 
 void MainWindow::mousePressEvent(QMouseEvent *event)
 {
-    // 窗口移动由系统原生标题栏负责，这里不再自绘拖拽
+    // 系统标题栏之外，允许按住侧栏空白处拖拽移动窗口
+    // （菜单按钮自行消费点击，不会触发拖拽；用 pos() 与 move() 配对，避免带框窗口跳变）
+    if (event->button() == Qt::LeftButton && event->pos().x() < SidebarWidth) {
+        m_dragging = true;
+        m_dragStart = event->globalPosition().toPoint() - pos();
+        event->accept();
+        return;
+    }
     QMainWindow::mousePressEvent(event);
 }
 
