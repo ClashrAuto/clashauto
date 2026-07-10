@@ -2191,7 +2191,7 @@ QString MainWindow::appStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
         #rightPane { background:#242425; }
-        #sidebar { background:rgba(34,34,34,0.9); }
+        #sidebar { background:transparent; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
@@ -2284,7 +2284,7 @@ QString MainWindow::lightStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
         #rightPane { background:#ffffff; }
-        #sidebar { background:rgba(238,238,238,0.9); }
+        #sidebar { background:transparent; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
@@ -2392,8 +2392,8 @@ void MainWindow::applyAcrylic()
     if (!setWCA) {
         return;
     }
-    // GradientColor 为 ABGR：标题色 + 中等透明，让毛玻璃模糊透出（侧栏 0.9 叠在其上）
-    const unsigned int tint = (m_theme == "white") ? 0x99EEEEEE : 0x99222222;
+    // GradientColor 为 ABGR：标题色 + 0.9 不透明（0xE6）。侧栏本身透明，由亚克力提供 0.9 标题色 + 模糊
+    const unsigned int tint = (m_theme == "white") ? 0xE6EEEEEE : 0xE6222222;
     AccentPolicy accent{ ACCENT_ENABLE_ACRYLICBLURBEHIND, 0, tint, 0 };
     WinCompAttrData data{ WCA_ACCENT_POLICY, &accent, sizeof(accent) };
     setWCA(reinterpret_cast<HWND>(winId()), &data);
