@@ -72,6 +72,27 @@ int main(int argc, char *argv[])
         return ok ? 0 : 4;
     }
 
+    const int removeArg = app.arguments().indexOf("--remove-subscription");
+    if (removeArg >= 0 && app.arguments().size() > removeArg + 1) {
+        const AppConfig config = AppConfigLoader::load();
+        SubscriptionStore store(config);
+        const bool ok = store.removeSubscription(app.arguments().at(removeArg + 1).toInt());
+        QTextStream(ok ? stdout : stderr) << (ok ? "ok" : "failed") << Qt::endl;
+        return ok ? 0 : 5;
+    }
+
+    const int editArg = app.arguments().indexOf("--edit-subscription");
+    if (editArg >= 0 && app.arguments().size() > editArg + 4) {
+        const AppConfig config = AppConfigLoader::load();
+        SubscriptionStore store(config);
+        const bool ok = store.editSubscription(app.arguments().at(editArg + 1).toInt(),
+                                               app.arguments().at(editArg + 2),
+                                               app.arguments().at(editArg + 3),
+                                               app.arguments().at(editArg + 4));
+        QTextStream(ok ? stdout : stderr) << (ok ? "ok" : "failed") << Qt::endl;
+        return ok ? 0 : 6;
+    }
+
     const int updateArg = app.arguments().indexOf("--update-subscription");
     if (updateArg >= 0 && app.arguments().size() > updateArg + 2) {
         const int index = app.arguments().at(updateArg + 1).toInt();

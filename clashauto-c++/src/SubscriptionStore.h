@@ -36,6 +36,8 @@ public:
     bool setNodeEnabled(int subscriptionIndex, int nodeIndex, bool enabled);
     bool setSubscriptionEnabled(int index, bool enabled);
     bool addSubscription(const QString &name, const QString &url, const QString &type);
+    bool editSubscription(int index, const QString &name, const QString &url, const QString &type);
+    bool removeSubscription(int index);
     void updateSubscription(int index);
     bool updateSubscriptionFromTextForTest(int index, const QString &yaml, QString *message = nullptr);
     QString effectiveUrlForTest(int index);

@@ -55,6 +55,8 @@ $env:Path='C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.8.3\mingw_64\bin;' + $env:Path
 .\build-ninja\clashauto-cpp.exe --list-subscriptions
 .\build-ninja\clashauto-cpp.exe --list-nodes 0
 .\build-ninja\clashauto-cpp.exe --set-node-use 0 1 false
+.\build-ninja\clashauto-cpp.exe --edit-subscription 0 名称 http://url clash
+.\build-ninja\clashauto-cpp.exe --remove-subscription 1
 ```
 
 生成的 Clash 配置默认位于：

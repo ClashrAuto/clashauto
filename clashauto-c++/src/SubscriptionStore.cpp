@@ -293,6 +293,125 @@ bool SubscriptionStore::addSubscription(const QString &name, const QString &url,
     return writeText(text);
 }
 
+bool SubscriptionStore::editSubscription(int index, const QString &name, const QString &url, const QString &type)
+{
+    if (index < 0) {
+        return false;
+    }
+    ensureFile();
+    QStringList lines = readText().split('\n');
+    int current = -1;
+    bool inTarget = false;
+    bool nameSet = false;
+    bool urlSet = false;
+    bool typeSet = false;
+    int insertAt = -1;
+    const QString finalName = name.isEmpty() ? url : name;
+    const QString finalType = type.isEmpty() ? "sub" : type;
+
+    for (int i = 0; i < lines.size(); ++i) {
+        QString line = lines[i];
+        if (!line.isEmpty() && line.front() == QChar::ByteOrderMark) {
+            line.remove(0, 1);
+            lines[i] = line;
+        }
+        if (line.startsWith("- ")) {
+            if (inTarget) {
+                break;
+            }
+            current++;
+            if (current == index) {
+                inTarget = true;
+                insertAt = i + 1;
+                const QString rest = line.mid(2).trimmed();
+                if (rest.startsWith("name:")) {
+                    lines[i] = QString("- name: %1").arg(quote(finalName));
+                    nameSet = true;
+                }
+            }
+            continue;
+        }
+        if (!inTarget) {
+            continue;
+        }
+        if (line.startsWith("  ") && !line.startsWith("    ")) {
+            const QString field = line.trimmed();
+            if (field.startsWith("name:")) {
+                lines[i] = QString("  name: %1").arg(quote(finalName));
+                nameSet = true;
+            } else if (field.startsWith("url:")) {
+                lines[i] = QString("  url: %1").arg(quote(url));
+                urlSet = true;
+            } else if (field.startsWith("type:")) {
+                lines[i] = QString("  type: %1").arg(quote(finalType));
+                typeSet = true;
+            }
+        }
+    }
+
+    if (!inTarget) {
+        return false;
+    }
+
+    QStringList missing;
+    if (!nameSet) {
+        missing << QString("  name: %1").arg(quote(finalName));
+    }
+    if (!urlSet) {
+        missing << QString("  url: %1").arg(quote(url));
+    }
+    if (!typeSet) {
+        missing << QString("  type: %1").arg(quote(finalType));
+    }
+    for (int j = missing.size() - 1; j >= 0 && insertAt >= 0; --j) {
+        lines.insert(insertAt, missing[j]);
+    }
+    return writeText(lines.join('\n'));
+}
+
+bool SubscriptionStore::removeSubscription(int index)
+{
+    if (index < 0) {
+        return false;
+    }
+    ensureFile();
+    QStringList lines = readText().split('\n');
+    int current = -1;
+    int blockStart = -1;
+    int blockEnd = -1;
+
+    for (int i = 0; i < lines.size(); ++i) {
+        QString line = lines[i];
+        if (!line.isEmpty() && line.front() == QChar::ByteOrderMark) {
+            line.remove(0, 1);
+            lines[i] = line;
+        }
+        if (line.startsWith("- ")) {
+            current++;
+            if (current == index) {
+                blockStart = i;
+            } else if (current == index + 1) {
+                blockEnd = i;
+                break;
+            }
+        }
+    }
+
+    if (blockStart < 0) {
+        return false;
+    }
+    if (blockEnd < 0) {
+        blockEnd = lines.size();
+    }
+    lines.erase(lines.begin() + blockStart, lines.begin() + blockEnd);
+
+    QString text = lines.join('\n').trimmed();
+    if (text.isEmpty()) {
+        text = "[]";
+    }
+    return writeText(text);
+}
+
 void SubscriptionStore::updateSubscription(int index)
 {
     const SubscriptionSummary summary = summaryAt(index);

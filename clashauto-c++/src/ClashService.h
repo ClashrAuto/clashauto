@@ -29,6 +29,8 @@ public:
     void selectNode(const QString &name);
     void clearConnections();
     void refreshNodes();
+    void testDelays();
+    void testNodeDelays(const QStringList &names);
 
 signals:
     void trafficUpdated(qint64 up, qint64 down);

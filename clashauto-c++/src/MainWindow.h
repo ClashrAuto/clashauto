@@ -16,6 +16,10 @@
 class QTextEdit;
 class QComboBox;
 class QLineEdit;
+class QScrollArea;
+class QVBoxLayout;
+class QTableWidget;
+class QJsonArray;
 
 class MainWindow final : public QMainWindow
 {
@@ -34,7 +38,6 @@ private:
     QWidget *buildSidebar();
     QWidget *buildStatusPage();
     QWidget *buildSubscriptionsPage();
-    QWidget *buildSubscriptionsPageLegacy();
     QWidget *buildSettingsPage();
     QWidget *buildLogsPage();
     QWidget *buildVipPage();
@@ -43,19 +46,31 @@ private:
     QFrame *createMetricCard(const QString &icon, const QString &title, QLabel **valueLabel, const QString &className);
     QPushButton *createMenuButton(const QString &text, int page);
     QFrame *createNodeRow(const NodeInfo &node);
-    QFrame *createSubscriptionRow(const SubscriptionSummary &subscription, int index);
     void showSubscriptionNodes(int subscriptionIndex);
+    void showUpdateDialog();
     void appendLog(const QString &message);
+    void appendTimeline(QVBoxLayout *layout, QScrollArea *scroll, const QString &message);
     QLabel *createSwitchDot(bool enabled);
     void reloadSubscriptions();
     void populateNodeList();
     QString speedText(qint64 value) const;
     QColor delayColor(int delay) const;
     QString appStyle() const;
+    QString lightStyle() const;
+    void applyTheme(const QString &theme);
+    QFrame *createSubscriptionCard(const SubscriptionSummary &subscription, int index);
+    QWidget *buildRuleTableTab(const QString &section);
+    void reloadRuleTable(const QString &section);
+    void openRuleEditor(const QString &section, int editIndex);
+    QString rulesFilePath() const;
+    QJsonArray loadRuleSection(const QString &section) const;
+    bool saveRuleSection(const QString &section, const QJsonArray &array);
     void setCurrentPage(int page);
 
     ClashService m_service;
     QStackedWidget *m_pages = nullptr;
+    QLabel *m_logo = nullptr;
+    QString m_theme = "black";
     QFrame *m_nodeList = nullptr;
     QLabel *m_nodeTitle = nullptr;
     QComboBox *m_nodeGroupSelector = nullptr;
@@ -65,13 +80,19 @@ private:
     QLabel *m_processValue = nullptr;
     QLabel *m_totalDownValue = nullptr;
     QLabel *m_logLabel = nullptr;
-    QTextEdit *m_logView = nullptr;
+    QVBoxLayout *m_logTimeline = nullptr;
+    QVBoxLayout *m_clashTimeline = nullptr;
+    QScrollArea *m_logScroll = nullptr;
+    QScrollArea *m_clashScroll = nullptr;
     QString m_logFilePath;
     QLabel *m_usersLabel = nullptr;
     QLabel *m_tunDot = nullptr;
     QLabel *m_proxyDot = nullptr;
     QLabel *m_coreDot = nullptr;
     QFrame *m_subscriptionList = nullptr;
+    QTableWidget *m_areaTable = nullptr;
+    QTableWidget *m_ruleTable = nullptr;
+    QString m_userDir;
     TrafficChart *m_upChart = nullptr;
     TrafficChart *m_downChart = nullptr;
     CoreController *m_core = nullptr;

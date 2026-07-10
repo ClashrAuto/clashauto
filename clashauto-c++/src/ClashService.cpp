@@ -8,6 +8,9 @@
 #include <QRandomGenerator>
 #include <QUrl>
 
+#include <algorithm>
+#include <limits>
+
 ClashService::ClashService(QObject *parent) : QObject(parent)
 {
     connect(&m_trafficTimer, &QTimer::timeout, this, &ClashService::pollTraffic);
@@ -106,6 +109,48 @@ void ClashService::refreshNodes()
     pollNodes();
 }
 
+void ClashService::testDelays()
+{
+    sendGet(QUrl(QString("http://%1:%2/proxies").arg(m_host).arg(m_port)), [this](const QJsonDocument &doc) {
+        const QJsonObject proxies = doc.object().value("proxies").toObject();
+        const QString groupName = m_selectedGroup.isEmpty() ? QStringLiteral("GLOBAL") : m_selectedGroup;
+        const QJsonArray all = proxies.value(groupName).toObject().value("all").toArray();
+        QStringList names;
+        for (const QJsonValue &value : all) {
+            const QString name = value.toString();
+            if (!name.isEmpty()) {
+                names << name;
+            }
+        }
+        testNodeDelays(names);
+    });
+}
+
+void ClashService::testNodeDelays(const QStringList &names)
+{
+    if (names.isEmpty()) {
+        emit logUpdated("No nodes to test.");
+        return;
+    }
+    emit logUpdated(QString("Testing %1 nodes...").arg(names.size()));
+    const QString target = QString::fromLatin1(QUrl::toPercentEncoding("http://www.gstatic.com/generate_204"));
+    auto *pending = new int(names.size());
+    for (const QString &name : names) {
+        const QString encoded = QString::fromLatin1(QUrl::toPercentEncoding(name));
+        const QUrl url(QString("http://%1:%2/proxies/%3/delay?timeout=5000&url=%4")
+                           .arg(m_host).arg(m_port).arg(encoded, target));
+        QNetworkReply *reply = m_network.get(QNetworkRequest(url));
+        connect(reply, &QNetworkReply::finished, this, [this, reply, pending] {
+            reply->deleteLater();
+            if (--(*pending) <= 0) {
+                delete pending;
+                emit logUpdated("Delay test finished.");
+                pollNodes();
+            }
+        });
+    }
+}
+
 void ClashService::pollTraffic()
 {
     sendGet(QUrl(QString("http://%1:%2/traffic").arg(m_host).arg(m_port)), [this](const QJsonDocument &doc) {
@@ -198,6 +243,22 @@ void ClashService::pollNodes()
         if (nodes.isEmpty()) {
             nodes = fallbackNodes();
         }
+
+        // 排序：对齐旧项目 clash.js getProxies —— 当前节点置顶，其次速度降序，再延迟升序，超时/无延迟垫底
+        auto sortKey = [&selected](const NodeInfo &n) -> double {
+            double key = (n.delay <= 0) ? 0.0 : (10000.0 - n.delay);
+            if (n.speed > 0) {
+                key = static_cast<double>(n.speed);
+            }
+            if (n.name == selected) {
+                key = std::numeric_limits<double>::max();
+            }
+            return key;
+        };
+        std::stable_sort(nodes.begin(), nodes.end(), [&sortKey](const NodeInfo &a, const NodeInfo &b) {
+            return sortKey(a) > sortKey(b);
+        });
+
         emit nodesUpdated(nodes, selected);
     });
 }
