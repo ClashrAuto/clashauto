@@ -7,6 +7,7 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QFont>
+#include <QFontDatabase>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QTextStream>
@@ -16,6 +17,8 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName("Clash Auto");
     QApplication::setOrganizationName("ClashAuto");
+    // 载入旧项目 iconfont（family "iconfont"），供 logo / 流量卡 / 页脚等图标复用
+    QFontDatabase::addApplicationFont(":/assets/iconfont.ttf");
 
     if (app.arguments().contains("--build-config")) {
         const AppConfig config = AppConfigLoader::load();

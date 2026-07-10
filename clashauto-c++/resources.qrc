@@ -1,5 +1,6 @@
 <RCC>
     <qresource prefix="/">
         <file>assets/icon.ico</file>
+        <file>assets/iconfont.ttf</file>
     </qresource>
 </RCC>

@@ -352,7 +352,7 @@ QWidget *MainWindow::buildSidebar()
     logoWrap->setFixedHeight(118);
     auto *logoLayout = new QVBoxLayout(logoWrap);
     logoLayout->setContentsMargins(0, 0, 5, 0);
-    m_logo = new QLabel(QString::fromUtf8("☁"), logoWrap);
+    m_logo = new QLabel(QChar(0xE600), logoWrap); // iconfont icon-wangluo（网络）
     m_logo->setObjectName("logo");
     m_logo->setProperty("state", "off");
     m_logo->setAlignment(Qt::AlignCenter);
@@ -403,10 +403,10 @@ QWidget *MainWindow::buildStatusPage()
     metrics->setContentsMargins(0, 0, 0, 0);
     metrics->setHorizontalSpacing(MetricGutter);
     metrics->setVerticalSpacing(MetricGutter);
-    metrics->addWidget(createMetricCard(QString::fromUtf8("☁"), QString::fromUtf8("上传"), &m_upValue, "up"), 0, 0);
-    metrics->addWidget(createMetricCard(QString::fromUtf8("☁"), QString::fromUtf8("下载"), &m_downValue, "down"), 0, 1);
-    metrics->addWidget(createMetricCard(QString::fromUtf8("⌁"), QString::fromUtf8("进程数"), &m_processValue, "process"), 1, 0);
-    metrics->addWidget(createMetricCard(QString::fromUtf8("▾"), QString::fromUtf8("总下载"), &m_totalDownValue, "download"), 1, 1);
+    metrics->addWidget(createMetricCard(QChar(0xE6CC), QString::fromUtf8("上传"), &m_upValue, "up"), 0, 0);
+    metrics->addWidget(createMetricCard(QChar(0xE6CD), QString::fromUtf8("下载"), &m_downValue, "down"), 0, 1);
+    metrics->addWidget(createMetricCard(QChar(0xE6BC), QString::fromUtf8("进程数"), &m_processValue, "process"), 1, 0);
+    metrics->addWidget(createMetricCard(QChar(0xE7A3), QString::fromUtf8("总下载"), &m_totalDownValue, "download"), 1, 1);
     leftLayout->addWidget(metricsBox);
 
     auto *bandTitle = new QLabel("实时带宽", left);
@@ -497,12 +497,12 @@ QWidget *MainWindow::buildSubscriptionsPage()
 
     auto *bottom = new QHBoxLayout();
     bottom->setContentsMargins(0, 0, 0, 0);
-    auto *applyButton = new QPushButton(QString::fromUtf8("应用配置"), page);
+    auto *applyButton = new QPushButton(QString::fromUtf8("应用"), page);
     applyButton->setObjectName("primaryButton");
     applyButton->setFixedSize(96, 30);
-    auto *updateAll = new QPushButton(QString::fromUtf8("更新全部"), page);
+    auto *updateAll = new QPushButton(QString::fromUtf8("更新所有订阅"), page);
     updateAll->setObjectName("primaryButton");
-    updateAll->setFixedSize(96, 30);
+    updateAll->setFixedSize(120, 30);
     bottom->addWidget(applyButton);
     bottom->addStretch();
     bottom->addWidget(updateAll);
@@ -1150,7 +1150,7 @@ QWidget *MainWindow::buildLogsPage()
         return scroll;
     };
 
-    tabs->addTab(makeTimelineTab(m_logScroll, m_logTimeline), QString::fromUtf8("主日志"));
+    tabs->addTab(makeTimelineTab(m_logScroll, m_logTimeline), QString::fromUtf8("主要"));
     tabs->addTab(makeTimelineTab(m_clashScroll, m_clashTimeline), "Clash");
 
     layout->addWidget(tabs, 1);
@@ -2130,7 +2130,7 @@ QString MainWindow::appStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #rightPane, #page { background:rgba(0,0,0,0); }
         #sidebar { background:#303032; }
-        #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; }
+        #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
         #logo[state="off"] { color:#ffffff; }
@@ -2139,7 +2139,7 @@ QString MainWindow::appStyle() const
         #menuButton:checked { background:#000; color:#ccc; border-left:3px solid #4898f8; }
         #version { color:#666; font-size:12px; }
         #metricCard { background:#222; border:0; border-radius:4px; min-height:70px; }
-        #metricIcon { font-size:30px; color:#aaa; }
+        #metricIcon { font-size:30px; color:#aaa; font-family:'iconfont'; }
         #metricTitle { color:#bfbfbf; font-size:12px; }
         #metricValue { color:#bfbfbf; font-size:20px; }
         #metricCard[kind="up"] QLabel { color:rgb(168,67,67); }
@@ -2217,7 +2217,7 @@ QString MainWindow::lightStyle() const
         #closeButton:hover { background:red; color:white; }
         #body, #rightPane, #page { background:rgba(0,0,0,0); }
         #sidebar { background:#fafafa; }
-        #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; }
+        #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
         #logo[state="proxy"] { color:#ffff00; }
         #logo[state="off"] { color:#333; }
@@ -2226,7 +2226,7 @@ QString MainWindow::lightStyle() const
         #menuButton:checked { background:#fff; color:#333; border-left:3px solid #4898f8; }
         #version { color:#666; font-size:12px; }
         #metricCard { background:#eee; border:0; border-radius:4px; min-height:70px; }
-        #metricIcon { font-size:30px; color:#888; }
+        #metricIcon { font-size:30px; color:#888; font-family:'iconfont'; }
         #metricTitle { color:#3d3d3d; font-size:12px; }
         #metricValue { color:#3d3d3d; font-size:20px; }
         #metricCard[kind="up"] QLabel { color:rgb(168,67,67); }
