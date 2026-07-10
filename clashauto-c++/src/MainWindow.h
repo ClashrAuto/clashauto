@@ -107,5 +107,7 @@ private:
     bool m_dragging = false;
     bool m_closeToTray = true;
     bool m_trayHintShown = false;
+    bool m_nodeSwitchNote = true;
+    bool m_nodeInitialized = false;
     QPoint m_dragStart;
 };

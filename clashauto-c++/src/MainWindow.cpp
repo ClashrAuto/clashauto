@@ -115,6 +115,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_tray = new TrayController(this, this);
     m_subscriptions = new SubscriptionStore(config, this);
     m_closeToTray = config.closeToTray;
+    m_nodeSwitchNote = config.nodeSwitchNote;
 
     // 退出时停止核心并还原系统代理（关闭到托盘或从托盘退出都会走到这里）
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
@@ -180,6 +181,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     });
     connect(&m_service, &ClashService::nodesUpdated, this, [this](const QVector<NodeInfo> &nodes, const QString &selected) {
         m_currentNodes = nodes;
+        // 节点切换通知（对应旧项目 config.note）；跳过首次填充，避免启动即误报
+        if (m_nodeSwitchNote && m_nodeInitialized && m_tray && !selected.isEmpty() && selected != m_selectedNode) {
+            m_tray->notify(QString::fromUtf8("节点切换"), QString::fromUtf8("已切换到 %1").arg(selected));
+        }
+        m_nodeInitialized = true;
         m_selectedNode = selected;
         populateNodeList();
     });
@@ -598,6 +604,8 @@ QWidget *MainWindow::buildSettingsPage()
     closeToTray->setChecked(config.closeToTray);
     auto *autoStart = new QCheckBox();
     autoStart->setChecked(config.autoStart);
+    auto *nodeNote = new QCheckBox();
+    nodeNote->setChecked(config.nodeSwitchNote);
     auto *theme = new QComboBox();
     theme->addItems({QString::fromUtf8("黑色"), QString::fromUtf8("白色")});
     theme->setFixedWidth(200);
@@ -679,6 +687,7 @@ QWidget *MainWindow::buildSettingsPage()
     addGroup(QString::fromUtf8("节点"));
     sysLayout->addWidget(row(QString::fromUtf8("仅可用节点"), nodeOnly));
     sysLayout->addWidget(row(QString::fromUtf8("增量更新"), increment));
+    sysLayout->addWidget(row(QString::fromUtf8("切换通知"), nodeNote));
     addDivider();
     addGroup(QString::fromUtf8("内核"));
     sysLayout->addWidget(row(QString::fromUtf8("API 端口"), uiPort));
@@ -729,6 +738,7 @@ QWidget *MainWindow::buildSettingsPage()
         out << "increment: " << (increment->isChecked() ? "true" : "false") << "\n";
         out << "mini: " << (closeToTray->isChecked() ? "true" : "false") << "\n";
         out << "sys: " << (autoStart->isChecked() ? "true" : "false") << "\n";
+        out << "note: " << (nodeNote->isChecked() ? "true" : "false") << "\n";
         out << "theme: " << (light ? "light" : "black") << "\n";
         out << "language: " << language->currentText() << "\n";
         out << "use_rule:\n";
@@ -738,6 +748,7 @@ QWidget *MainWindow::buildSettingsPage()
         out << "  noallowUse: " << (blockUse->isChecked() ? "true" : "false") << "\n";
         appendLog(QString("Settings saved: %1").arg(path));
         m_closeToTray = closeToTray->isChecked();
+        m_nodeSwitchNote = nodeNote->isChecked();
         applyAutoStart(autoStart->isChecked());
         applyTheme(light ? "light" : "black");
         m_core->rebuildConfig();
@@ -1060,8 +1071,40 @@ QWidget *MainWindow::buildAboutPage()
     connect(openCfg, &QPushButton::clicked, this, [this] {
         QDesktopServices::openUrl(QUrl::fromLocalFile(m_userDir));
     });
+    auto *exportBtn = new QPushButton(QString::fromUtf8("导出节点"), page);
+    exportBtn->setObjectName("nodeButton");
+    exportBtn->setFixedSize(96, 30);
+    connect(exportBtn, &QPushButton::clicked, this, [this] {
+        if (m_currentNodes.isEmpty()) {
+            appendLog(QString::fromUtf8("当前无节点可导出（请先在状态页加载节点）"));
+            return;
+        }
+        QJsonArray arr;
+        for (const NodeInfo &n : m_currentNodes) {
+            arr.append(QJsonObject{{"name", n.name}, {"delay", n.delay}});
+        }
+        QJsonObject root;
+        root.insert("selected", m_selectedNode);
+        root.insert("nodes", arr);
+        QString dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (dir.isEmpty()) {
+            dir = QDir::homePath();
+        }
+        const QString path = QDir(dir).filePath("clashauto-nodes.json");
+        QFile file(path);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+            file.close();
+            appendLog(QString::fromUtf8("已导出 %1 个节点: %2")
+                          .arg(QString::number(m_currentNodes.size()), path));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+        } else {
+            appendLog(QString::fromUtf8("导出失败: %1").arg(path));
+        }
+    });
     actionRow->addWidget(checkUpdate);
     actionRow->addWidget(openCfg);
+    actionRow->addWidget(exportBtn);
     actionRow->addStretch();
     layout->addLayout(actionRow);
 

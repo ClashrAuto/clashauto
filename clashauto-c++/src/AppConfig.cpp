@@ -82,6 +82,7 @@ AppConfig AppConfigLoader::load()
     config.increment = boolFromYaml(yaml, "increment", config.increment);
     config.closeToTray = boolFromYaml(yaml, "mini", config.closeToTray);
     config.autoStart = boolFromYaml(yaml, "sys", config.autoStart);
+    config.nodeSwitchNote = boolFromYaml(yaml, "note", config.nodeSwitchNote);
     config.allowRule = nestedValueFromYaml(yaml, "use_rule", "allow", config.allowRule);
     config.noAllowRule = nestedValueFromYaml(yaml, "use_rule", "noallow", config.noAllowRule);
     config.allowRuleEnabled = nestedBoolFromYaml(yaml, "use_rule", "allowUse", false);

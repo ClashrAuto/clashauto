@@ -17,6 +17,7 @@ struct AppConfig {
     bool increment = false;
     bool closeToTray = true;
     bool autoStart = false;
+    bool nodeSwitchNote = true;
     bool allowRuleEnabled = false;
     bool noAllowRuleEnabled = false;
     QString allowRule;
