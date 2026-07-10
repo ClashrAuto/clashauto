@@ -918,10 +918,14 @@ QWidget *MainWindow::buildSettingsPage()
     auto *layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 10);
     layout->setSpacing(4);
-    auto *save = new QPushButton(QString::fromUtf8("应用"), tabs);
+    auto *save = new QPushButton(QString::fromUtf8("应用"));
     save->setObjectName("primaryButton");
     save->setFixedSize(82, 28);
-    tabs->setCornerWidget(save, Qt::TopRightCorner);
+    auto *saveCorner = new QWidget(tabs); // 加右边距，避免按钮贴边被裁
+    auto *saveCornerLayout = new QHBoxLayout(saveCorner);
+    saveCornerLayout->setContentsMargins(0, 0, 8, 0);
+    saveCornerLayout->addWidget(save);
+    tabs->setCornerWidget(saveCorner, Qt::TopRightCorner);
     layout->addWidget(tabs, 1);
 
     connect(save, &QPushButton::clicked, this, [=] {
