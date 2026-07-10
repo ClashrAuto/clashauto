@@ -532,9 +532,11 @@ QWidget *MainWindow::buildSubscriptionsPage()
     layout->setSpacing(6);
 
     auto *scroll = new QScrollArea(page);
+    scroll->setObjectName("subScroll");
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     m_subscriptionList = new QFrame(scroll);
+    m_subscriptionList->setObjectName("subListBody");
     auto *grid = new QGridLayout(m_subscriptionList);
     grid->setContentsMargins(0, 0, 5, 0);
     grid->setHorizontalSpacing(10);
@@ -2211,6 +2213,7 @@ QString MainWindow::appStyle() const
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
         #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#242425; }
+        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#242425; }
         #nodeRow, #plainCard { background:#252525; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #83bdff; }
         #nodeName { color:#ccc; font-size:12px; }
@@ -2301,6 +2304,7 @@ QString MainWindow::lightStyle() const
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
         #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#ffffff; }
+        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#ffffff; }
         #nodeRow, #plainCard { background:#eee; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #1f6fd2; }
         #nodeName { color:#333; font-size:12px; }
