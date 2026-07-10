@@ -130,6 +130,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     setAttribute(Qt::WA_TranslucentBackground, true);
     resize(MainWidth, MainHeight);
     setMinimumSize(MainWidth, MainHeight);
+    // 恢复上次窗口位置/大小（对应旧项目 config.bounds）
+    const QByteArray savedGeometry = QSettings().value("window/geometry").toByteArray();
+    if (!savedGeometry.isEmpty()) {
+        restoreGeometry(savedGeometry);
+    }
 
     auto *root = new QFrame(this);
     root->setObjectName("root");
@@ -1102,9 +1107,17 @@ QWidget *MainWindow::buildAboutPage()
             appendLog(QString::fromUtf8("导出失败: %1").arg(path));
         }
     });
+    auto *openDash = new QPushButton(QString::fromUtf8("打开面板"), page);
+    openDash->setObjectName("nodeButton");
+    openDash->setFixedSize(96, 30);
+    connect(openDash, &QPushButton::clicked, this, [host = config.host, port = config.uiPort] {
+        QDesktopServices::openUrl(
+            QUrl(QString("https://yacd.metacubex.one/?hostname=%1&port=%2").arg(host).arg(port)));
+    });
     actionRow->addWidget(checkUpdate);
     actionRow->addWidget(openCfg);
     actionRow->addWidget(exportBtn);
+    actionRow->addWidget(openDash);
     actionRow->addStretch();
     layout->addLayout(actionRow);
 
@@ -1332,15 +1345,30 @@ void MainWindow::showConnectionsDialog()
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
     table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
     table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+
+    auto *search = new QLineEdit(dialog);
+    search->setPlaceholderText(QString::fromUtf8("按主机过滤"));
+    v->addWidget(search);
     v->addWidget(table, 1);
 
     auto *countLabel = new QLabel(QString::fromUtf8("正在获取..."), dialog);
     countLabel->setObjectName("subCardMeta");
 
+    // 按主机名过滤（隐藏不匹配行）；每次刷新后需重新应用
+    auto applyFilter = [table, search] {
+        const QString f = search->text().trimmed();
+        for (int r = 0; r < table->rowCount(); ++r) {
+            QTableWidgetItem *hostItem = table->item(r, 0);
+            const QString host = hostItem ? hostItem->text() : QString();
+            table->setRowHidden(r, !f.isEmpty() && !host.contains(f, Qt::CaseInsensitive));
+        }
+    };
+    connect(search, &QLineEdit::textChanged, dialog, [applyFilter] { applyFilter(); });
+
     // 用 QPointer 守护对话框：异步回调返回时若已关闭则直接丢弃，避免悬空访问
     QPointer<QDialog> guard = dialog;
-    auto reload = [this, guard, table, countLabel] {
-        m_service.fetchConnections([this, guard, table, countLabel](QJsonArray conns) {
+    auto reload = [this, guard, table, countLabel, applyFilter] {
+        m_service.fetchConnections([this, guard, table, countLabel, applyFilter](QJsonArray conns) {
             if (!guard) {
                 return;
             }
@@ -1372,6 +1400,7 @@ void MainWindow::showConnectionsDialog()
                 table->setItem(row, 5, new QTableWidgetItem(c.value("rule").toString()));
             }
             countLabel->setText(QString::fromUtf8("共 %1 条连接").arg(table->rowCount()));
+            applyFilter();
         });
     };
 
@@ -1729,6 +1758,7 @@ void MainWindow::setCurrentPage(int page)
 
 void MainWindow::closeEvent(QCloseEvent *event)
 {
+    QSettings().setValue("window/geometry", saveGeometry());
     // 关闭到托盘：隐藏窗口、核心继续运行；真正退出走托盘「退出程序」
     if (m_closeToTray && QSystemTrayIcon::isSystemTrayAvailable()) {
         hide();
