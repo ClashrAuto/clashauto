@@ -86,6 +86,8 @@ QVector<SubscriptionSummary> SubscriptionStore::load()
                 current.type = scalar(field.mid(5));
             } else if (field.startsWith("use:")) {
                 current.use = scalar(field.mid(4)).toLower() == "true";
+            } else if (field.startsWith("updateTime:")) {
+                current.updateTime = scalar(field.mid(11)).toInt();
             } else if (field.startsWith("list:")) {
                 inList = true;
             }
@@ -142,6 +144,45 @@ bool SubscriptionStore::setSubscriptionEnabled(int index, bool enabled)
 
     if (index >= 0 && insertAt >= 0) {
         lines.insert(insertAt, QString("  use: %1").arg(enabled ? "true" : "false"));
+        return writeText(lines.join('\n'));
+    }
+    return false;
+}
+
+bool SubscriptionStore::setSubscriptionUpdateTime(int index, int minutes)
+{
+    // 替换目标订阅块的 updateTime: 标量；缺失时插到该块内（不越界到下一订阅）
+    ensureFile();
+    QStringList lines = readText().split('\n');
+    int current = -1;
+    int insertAt = -1;
+    for (int i = 0; i < lines.size(); ++i) {
+        QString line = lines[i];
+        if (!line.isEmpty() && line.front() == QChar::ByteOrderMark) {
+            line.remove(0, 1);
+            lines[i] = line;
+        }
+        if (line.startsWith("- ")) {
+            if (current == index) {
+                break; // 已离开目标订阅，停在其块末尾记录的 insertAt
+            }
+            current++;
+            if (current == index) {
+                insertAt = i + 1;
+            }
+            continue;
+        }
+        if (current == index && line.startsWith("  ") && !line.startsWith("    ")) {
+            if (line.trimmed().startsWith("updateTime:")) {
+                lines[i] = QString("  updateTime: %1").arg(minutes);
+                return writeText(lines.join('\n'));
+            }
+            insertAt = i + 1;
+        }
+    }
+
+    if (index >= 0 && insertAt >= 0) {
+        lines.insert(insertAt, QString("  updateTime: %1").arg(minutes));
         return writeText(lines.join('\n'));
     }
     return false;

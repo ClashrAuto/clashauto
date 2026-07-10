@@ -176,16 +176,26 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     applyTheme(config.theme);
     setCurrentPage(0);
 
-    // 订阅自动定时更新（对应旧项目 updateTime；这里用全局间隔，0=关）
+    // 订阅自动定时更新（对应旧项目 updateTime）：每分钟一跳，按各订阅自己的周期取模；
+    // 订阅未设周期（updateTime==0）时沿用设置里的全局默认 m_autoUpdateMinutes。
+    m_autoUpdateMinutes = config.autoUpdateMinutes;
     m_autoUpdateTimer = new QTimer(this);
     connect(m_autoUpdateTimer, &QTimer::timeout, this, [this] {
+        ++m_runMinutes;
         const QVector<SubscriptionSummary> subs = m_subscriptions->load();
+        int updated = 0;
         for (int i = 0; i < subs.size(); ++i) {
-            m_subscriptions->updateSubscription(i);
+            const int period = subs[i].updateTime > 0 ? subs[i].updateTime : m_autoUpdateMinutes;
+            if (period > 0 && m_runMinutes % period == 0) {
+                m_subscriptions->updateSubscription(i);
+                ++updated;
+            }
         }
-        appendLog(QString::fromUtf8("订阅自动更新已触发（%1 个）").arg(subs.size()));
+        if (updated > 0) {
+            appendLog(QString::fromUtf8("订阅自动更新已触发（%1 个）").arg(updated));
+        }
     });
-    applyAutoUpdate(config.autoUpdateMinutes);
+    m_autoUpdateTimer->start(60 * 1000);
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
     // 跟随系统深浅色（config.autoTheme）：启动应用 + 监听系统切换
@@ -518,7 +528,12 @@ QFrame *MainWindow::createSubscriptionCard(const SubscriptionSummary &subscripti
     titleLabel->setToolTip(subscription.url);
     v->addWidget(titleLabel);
 
-    auto *meta = new QLabel(QString::fromUtf8("%1 / %2 节点").arg(subscription.enabledNodeCount).arg(subscription.nodeCount), card);
+    const QString period = subscription.updateTime > 0
+                               ? QString::fromUtf8(" · 每 %1 分钟").arg(subscription.updateTime)
+                               : QString();
+    auto *meta = new QLabel(QString::fromUtf8("%1 / %2 节点%3")
+                                .arg(QString::number(subscription.enabledNodeCount),
+                                     QString::number(subscription.nodeCount), period), card);
     meta->setObjectName("subCardMeta");
     v->addWidget(meta);
     v->addStretch();
@@ -580,10 +595,17 @@ QFrame *MainWindow::createSubscriptionCard(const SubscriptionSummary &subscripti
         if (!ok) {
             return;
         }
+        const int updateTime = QInputDialog::getInt(this, QString::fromUtf8("编辑订阅"),
+                                                    QString::fromUtf8("自动更新周期(分钟, 0=用全局默认):"),
+                                                    subscription.updateTime, 0, 1440, 5, &ok);
+        if (!ok) {
+            return;
+        }
         if (m_subscriptions->editSubscription(index, name.trimmed(), url.trimmed(), type)) {
+            m_subscriptions->setSubscriptionUpdateTime(index, updateTime);
             reloadSubscriptions();
             m_core->rebuildConfig();
-            appendLog(QString::fromUtf8("订阅已更新"));
+            appendLog(QString::fromUtf8("订阅已更新（自动更新周期 %1 分钟）").arg(updateTime));
         }
     });
     addCircle(QString::fromUtf8("⟳"), QString::fromUtf8("更新"), false, false, [this, index] {
@@ -780,7 +802,7 @@ QWidget *MainWindow::buildSettingsPage()
     sysLayout->addWidget(row(QString::fromUtf8("仅可用节点"), nodeOnly));
     sysLayout->addWidget(row(QString::fromUtf8("增量更新"), increment));
     sysLayout->addWidget(row(QString::fromUtf8("切换通知"), nodeNote));
-    sysLayout->addWidget(row(QString::fromUtf8("订阅自动更新"), autoUpdateSpin));
+    sysLayout->addWidget(row(QString::fromUtf8("订阅自动更新(默认)"), autoUpdateSpin));
     addDivider();
     addGroup(QString::fromUtf8("内核"));
     sysLayout->addWidget(row(QString::fromUtf8("API 端口"), uiPort));
@@ -1918,15 +1940,8 @@ void MainWindow::applyAutoStart(bool enabled)
 
 void MainWindow::applyAutoUpdate(int minutes)
 {
+    // 全局默认周期（供未单独设置的订阅使用）；主定时器始终以 1 分钟节拍运行
     m_autoUpdateMinutes = minutes;
-    if (!m_autoUpdateTimer) {
-        return;
-    }
-    if (minutes > 0) {
-        m_autoUpdateTimer->start(minutes * 60 * 1000);
-    } else {
-        m_autoUpdateTimer->stop();
-    }
 }
 
 void MainWindow::reloadSubscriptions()

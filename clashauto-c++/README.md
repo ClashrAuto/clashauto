@@ -27,7 +27,7 @@
 - 窗口位置/大小记忆（`QSettings`，对应旧项目 `config.bounds`）：退出时保存、启动时恢复。
 - 设置「内核」组「更新 GeoIP」按钮：下载最新 `Country.mmdb`（带进度）到用户目录与 bundle config 目录，重启核心生效。
 - 跟随系统深浅色（`autoTheme`，设置「界面」组）：Qt 6.5+ 用 `QStyleHints::colorScheme` 启动应用并监听系统切换；低版本回退手动主题。
-- 订阅自动定时更新（设置「节点」组「订阅自动更新」，`autoUpdate` 分钟，0=关）：`QTimer` 到点更新全部订阅（旧项目 per-sub `updateTime` 的全局化简版）。
+- 订阅自动定时更新：每分钟一跳的主定时器，按**每个订阅各自的 `updateTime`（分钟）**取模更新（编辑订阅对话框可设，卡片上显示「每 N 分钟」）；订阅未单独设置时沿用设置「节点」组「订阅自动更新(默认)」的全局值（`autoUpdate`，0=关）。
 - 订阅节点详情对话框加「全选 / 全不选」：一次启用/停用该订阅全部节点（`SubscriptionStore::setAllNodesEnabled`）。
 - 关于页新增「打开配置目录」按钮；侧栏与关于页版本号统一取自编译期 `APP_VERSION`（与 Release 版本一致）。
 - 日志页已从占位页变成真实日志视图，并同步写入用户目录 `logs/qt-main.log`。

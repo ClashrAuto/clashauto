@@ -15,6 +15,7 @@ struct SubscriptionSummary {
     bool use = false;
     int nodeCount = 0;
     int enabledNodeCount = 0;
+    int updateTime = 0; // 该订阅的自动更新周期（分钟）；0 表示沿用全局默认
 };
 
 struct SubscriptionNodeSummary {
@@ -36,6 +37,7 @@ public:
     bool setNodeEnabled(int subscriptionIndex, int nodeIndex, bool enabled);
     bool setAllNodesEnabled(int subscriptionIndex, bool enabled);
     bool setSubscriptionEnabled(int index, bool enabled);
+    bool setSubscriptionUpdateTime(int index, int minutes);
     bool addSubscription(const QString &name, const QString &url, const QString &type);
     bool editSubscription(int index, const QString &name, const QString &url, const QString &type);
     bool removeSubscription(int index);

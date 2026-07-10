@@ -113,6 +113,7 @@ private:
     bool m_nodeInitialized = false;
     bool m_autoTheme = false;
     int m_autoUpdateMinutes = 0;
+    int m_runMinutes = 0;
     QTimer *m_autoUpdateTimer = nullptr;
     QPoint m_dragStart;
 };
