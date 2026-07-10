@@ -168,6 +168,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
     outer->addWidget(buildTitleBar());
 
+    // 侧栏跨整个高度到窗口最底部；页脚放到右侧列（页面下方）
     auto *body = new QFrame(root);
     body->setObjectName("body");
     auto *bodyLayout = new QHBoxLayout(body);
@@ -175,7 +176,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     bodyLayout->setSpacing(0);
     bodyLayout->addWidget(buildSidebar());
 
-    auto *right = new QFrame(body);
+    auto *rightColumn = new QFrame(body);
+    rightColumn->setObjectName("rightColumn");
+    auto *rightColLayout = new QVBoxLayout(rightColumn);
+    rightColLayout->setContentsMargins(0, 0, 0, 0);
+    rightColLayout->setSpacing(0);
+
+    auto *right = new QFrame(rightColumn);
     right->setObjectName("rightPane");
     auto *rightLayout = new QVBoxLayout(right);
     rightLayout->setContentsMargins(10, 10, 10, 0);
@@ -189,9 +196,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_pages->addWidget(buildAboutPage());
 
     rightLayout->addWidget(m_pages, 1);
-    bodyLayout->addWidget(right, 1);
+    rightColLayout->addWidget(right, 1);
+    rightColLayout->addWidget(buildFooter());
+    bodyLayout->addWidget(rightColumn, 1);
     outer->addWidget(body, 1);
-    outer->addWidget(buildFooter());
     setCentralWidget(root);
 
     applyTheme(config.theme);
@@ -1303,7 +1311,7 @@ QWidget *MainWindow::buildFooter()
     footer->setObjectName("footer");
     footer->setFixedHeight(FooterHeight);
     auto *layout = new QHBoxLayout(footer);
-    layout->setContentsMargins(SidebarWidth, 0, 5, 0);
+    layout->setContentsMargins(10, 0, 5, 0); // 页脚已在右侧列内，无需再为侧栏留 120 左边距
     layout->setSpacing(5);
 
     m_usersLabel = new QLabel(QString::fromUtf8("◉ -"), footer);
@@ -2231,7 +2239,7 @@ QString MainWindow::appStyle() const
         #nodeButton { color:#ccc; background:transparent; border:0; border-left:1px solid #000; border-radius:0; font-size:12px; }
         #nodeButton:hover { background:#333; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
-        #footer { background:#303032; border-bottom-left-radius:10px; border-bottom-right-radius:10px; }
+        #footer { background:#303032; border-bottom-right-radius:10px; }
         #usersBadge { color:#fff; background:#000; border-radius:3px; padding:3px 5px; font-size:12px; }
         #footerArrow { color:#666; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#ccc; font-size:12px; }
@@ -2324,7 +2332,7 @@ QString MainWindow::lightStyle() const
         #nodeButton { color:#333; background:transparent; border:0; border-left:1px solid #fff; border-radius:0; font-size:12px; }
         #nodeButton:hover { background:#c1c1c1; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
-        #footer { background:#fafafa; border-bottom-left-radius:10px; border-bottom-right-radius:10px; }
+        #footer { background:#fafafa; border-bottom-right-radius:10px; }
         #usersBadge { color:#333; background:#fff; border-radius:3px; padding:3px 5px; font-size:12px; }
         #footerArrow { color:#e8e8e8; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#333; font-size:12px; }
