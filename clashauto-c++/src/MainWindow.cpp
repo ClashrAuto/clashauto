@@ -398,6 +398,7 @@ QWidget *MainWindow::buildStatusPage()
 
     auto *metricsBox = new QFrame(left);
     metricsBox->setObjectName("metricsBox");
+    metricsBox->setFixedHeight(200); // 旧项目：左上流量卡区固定 200px（每卡 ~95px），防止被折线图挤扁
     auto *metrics = new QGridLayout(metricsBox);
     metrics->setContentsMargins(0, 0, 0, 0);
     metrics->setHorizontalSpacing(MetricGutter);
@@ -1321,8 +1322,8 @@ QFrame *MainWindow::createMetricCard(const QString &icon, const QString &title, 
     card->setProperty("kind", className);
     card->setMinimumHeight(70);
     auto *layout = new QHBoxLayout(card);
-    // 旧项目 el-card__body 8px 10px + 卡内 .el-row padding 20px 0 → 水平10、垂直28
-    layout->setContentsMargins(10, 28, 10, 28);
+    // 旧项目 el-card__body 8px 10px（真机验证：垂直 28 会在 ~65px 高的卡里把两行文字挤重叠）
+    layout->setContentsMargins(10, 8, 10, 8);
     layout->setSpacing(16);
 
     auto *iconLabel = new QLabel(icon, card);
