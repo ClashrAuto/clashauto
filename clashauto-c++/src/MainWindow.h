@@ -109,5 +109,6 @@ private:
     bool m_trayHintShown = false;
     bool m_nodeSwitchNote = true;
     bool m_nodeInitialized = false;
+    bool m_autoTheme = false;
     QPoint m_dragStart;
 };

@@ -16,6 +16,7 @@
 #include <QGraphicsDropShadowEffect>
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
@@ -44,6 +45,7 @@
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QStyle>
+#include <QStyleHints>
 #include <QSystemTrayIcon>
 #include <QTabWidget>
 #include <QTableWidget>
@@ -116,6 +118,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_subscriptions = new SubscriptionStore(config, this);
     m_closeToTray = config.closeToTray;
     m_nodeSwitchNote = config.nodeSwitchNote;
+    m_autoTheme = config.autoTheme;
 
     // 退出时停止核心并还原系统代理（关闭到托盘或从托盘退出都会走到这里）
     connect(qApp, &QCoreApplication::aboutToQuit, this, [this] {
@@ -172,6 +175,24 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
     applyTheme(config.theme);
     setCurrentPage(0);
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    // 跟随系统深浅色（config.autoTheme）：启动应用 + 监听系统切换
+    auto applySystemScheme = [this] {
+        applyTheme(QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark
+                       ? QStringLiteral("black")
+                       : QStringLiteral("light"));
+    };
+    if (m_autoTheme) {
+        applySystemScheme();
+    }
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
+            [this, applySystemScheme](Qt::ColorScheme) {
+                if (m_autoTheme) {
+                    applySystemScheme();
+                }
+            });
+#endif
 
     connect(&m_service, &ClashService::trafficUpdated, this, [this](qint64 up, qint64 down) {
         m_upValue->setText(speedText(up));
@@ -611,6 +632,55 @@ QWidget *MainWindow::buildSettingsPage()
     autoStart->setChecked(config.autoStart);
     auto *nodeNote = new QCheckBox();
     nodeNote->setChecked(config.nodeSwitchNote);
+    auto *autoTheme = new QCheckBox();
+    autoTheme->setChecked(config.autoTheme);
+    auto *geoipBtn = new QPushButton(QString::fromUtf8("更新 GeoIP"));
+    geoipBtn->setObjectName("nodeButton");
+    geoipBtn->setFixedSize(110, 30);
+    connect(geoipBtn, &QPushButton::clicked, this, [this, geoipBtn] {
+        geoipBtn->setEnabled(false);
+        geoipBtn->setText(QString::fromUtf8("下载中..."));
+        const AppConfig cfg = AppConfigLoader::load();
+        auto *nam = new QNetworkAccessManager(this);
+        const QUrl mmdbUrl(QStringLiteral(
+            "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb"));
+        QNetworkRequest req(mmdbUrl);
+        req.setRawHeader("User-Agent", "clashauto-cpp");
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply *reply = nam->get(req);
+        connect(reply, &QNetworkReply::downloadProgress, geoipBtn, [geoipBtn](qint64 r, qint64 t) {
+            if (t > 0) {
+                geoipBtn->setText(QString::fromUtf8("下载中 %1%").arg(int(r * 100 / t)));
+            }
+        });
+        connect(reply, &QNetworkReply::finished, this, [this, reply, nam, geoipBtn, cfg] {
+            const bool ok = reply->error() == QNetworkReply::NoError;
+            const QByteArray data = reply->readAll();
+            const QString err = reply->errorString();
+            reply->deleteLater();
+            nam->deleteLater();
+            geoipBtn->setEnabled(true);
+            geoipBtn->setText(QString::fromUtf8("更新 GeoIP"));
+            if (!ok || data.isEmpty()) {
+                appendLog(QString::fromUtf8("GeoIP 更新失败: %1").arg(err));
+                return;
+            }
+            int saved = 0;
+            const QStringList targets = {QDir(cfg.userDir).filePath("Country.mmdb"),
+                                         QDir(cfg.sourceRoot).filePath("config/Country.mmdb")};
+            for (const QString &path : targets) {
+                QDir().mkpath(QFileInfo(path).absolutePath());
+                QFile out(path);
+                if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    out.write(data);
+                    out.close();
+                    ++saved;
+                }
+            }
+            appendLog(QString::fromUtf8("GeoIP 已更新（%1 处，%2 KB），重启核心生效")
+                          .arg(QString::number(saved), QString::number(data.size() / 1024)));
+        });
+    });
     auto *theme = new QComboBox();
     theme->addItems({QString::fromUtf8("黑色"), QString::fromUtf8("白色")});
     theme->setFixedWidth(200);
@@ -687,6 +757,7 @@ QWidget *MainWindow::buildSettingsPage()
     };
     addGroup(QString::fromUtf8("界面"));
     sysLayout->addWidget(row(QString::fromUtf8("主题"), theme));
+    sysLayout->addWidget(row(QString::fromUtf8("跟随系统深浅色"), autoTheme));
     sysLayout->addWidget(row(QString::fromUtf8("语言"), language));
     addDivider();
     addGroup(QString::fromUtf8("节点"));
@@ -700,6 +771,7 @@ QWidget *MainWindow::buildSettingsPage()
     sysLayout->addWidget(row(QString::fromUtf8("TUN"), tun));
     sysLayout->addWidget(row(QString::fromUtf8("系统代理"), webProxy));
     sysLayout->addWidget(row(QString::fromUtf8("切换时清理连接"), clearConnections));
+    sysLayout->addWidget(row(QString::fromUtf8("GeoIP 数据"), geoipBtn));
     addDivider();
     addGroup(QString::fromUtf8("托盘 / 启动"));
     sysLayout->addWidget(row(QString::fromUtf8("关闭到托盘"), closeToTray));
@@ -745,6 +817,7 @@ QWidget *MainWindow::buildSettingsPage()
         out << "sys: " << (autoStart->isChecked() ? "true" : "false") << "\n";
         out << "note: " << (nodeNote->isChecked() ? "true" : "false") << "\n";
         out << "theme: " << (light ? "light" : "black") << "\n";
+        out << "autoTheme: " << (autoTheme->isChecked() ? "true" : "false") << "\n";
         out << "language: " << language->currentText() << "\n";
         out << "use_rule:\n";
         out << "  allow: " << allowRule->text() << "\n";
@@ -754,8 +827,18 @@ QWidget *MainWindow::buildSettingsPage()
         appendLog(QString("Settings saved: %1").arg(path));
         m_closeToTray = closeToTray->isChecked();
         m_nodeSwitchNote = nodeNote->isChecked();
+        m_autoTheme = autoTheme->isChecked();
         applyAutoStart(autoStart->isChecked());
-        applyTheme(light ? "light" : "black");
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+        if (m_autoTheme) {
+            applyTheme(QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark
+                           ? QStringLiteral("black")
+                           : QStringLiteral("light"));
+        } else
+#endif
+        {
+            applyTheme(light ? "light" : "black");
+        }
         m_core->rebuildConfig();
     });
 

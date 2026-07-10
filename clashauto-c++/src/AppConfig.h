@@ -23,6 +23,7 @@ struct AppConfig {
     QString allowRule;
     QString noAllowRule;
     QString theme = "black";
+    bool autoTheme = false;
     QString language = "zh-CN";
 
     QString clashExecutable() const;

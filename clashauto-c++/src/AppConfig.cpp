@@ -88,6 +88,7 @@ AppConfig AppConfigLoader::load()
     config.allowRuleEnabled = nestedBoolFromYaml(yaml, "use_rule", "allowUse", false);
     config.noAllowRuleEnabled = nestedBoolFromYaml(yaml, "use_rule", "noallowUse", false);
     config.theme = valueFromYaml(yaml, "theme", config.theme);
+    config.autoTheme = boolFromYaml(yaml, "autoTheme", config.autoTheme);
     config.language = valueFromYaml(yaml, "language", config.language);
     return config;
 }
