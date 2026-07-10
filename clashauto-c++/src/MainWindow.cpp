@@ -2282,7 +2282,7 @@ QString MainWindow::appStyle() const
         QListWidget { background:#222; color:#ccc; border:1px solid #333; border-radius:5px; font-size:12px; }
         QListWidget::item { padding:5px; border-radius:5px; }
         QListWidget::item:selected { background:#4898f8; color:white; }
-        #footer QComboBox { background:#111; border:1px solid #222; }
+        #footer QComboBox { background:#111; border:0; font-size:12px; }
     )";
 }
 
@@ -2380,7 +2380,7 @@ QString MainWindow::lightStyle() const
         QListWidget { background:#eee; color:#333; border:1px solid #ccc; border-radius:5px; font-size:12px; }
         QListWidget::item { padding:5px; border-radius:5px; }
         QListWidget::item:selected { background:#4898f8; color:white; }
-        #footer QComboBox { background:#eee; border:1px solid #ccc; }
+        #footer QComboBox { background:#eee; border:0; font-size:12px; }
     )";
 }
 
