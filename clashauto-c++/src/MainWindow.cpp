@@ -1321,7 +1321,8 @@ QFrame *MainWindow::createMetricCard(const QString &icon, const QString &title, 
     card->setProperty("kind", className);
     card->setMinimumHeight(70);
     auto *layout = new QHBoxLayout(card);
-    layout->setContentsMargins(14, 18, 14, 18);
+    // 旧项目 el-card__body 8px 10px + 卡内 .el-row padding 20px 0 → 水平10、垂直28
+    layout->setContentsMargins(10, 28, 10, 28);
     layout->setSpacing(16);
 
     auto *iconLabel = new QLabel(icon, card);
@@ -2187,6 +2188,20 @@ QString MainWindow::appStyle() const
         #subCardTitle { color:#eee; font-size:16px; }
         #subCardMeta { color:#999; font-size:12px; }
         #addCard { background:#222; border:2px dashed #444; border-radius:5px; color:#4898f8; font-size:48px; }
+        QDialog { background:#333; }
+        QTableWidget { background:#333; color:#fff; border:1px solid #464646; gridline-color:#464646; }
+        QTableWidget::item { padding:4px; }
+        QTableWidget::item:selected { background:#222; color:#fff; }
+        QHeaderView::section { background:#333; color:#fff; border:1px solid #464646; padding:4px 6px; }
+        QTableCornerButton::section { background:#333; border:1px solid #464646; }
+        QComboBox QAbstractItemView { color:#ccc; background:#000; border:1px solid #333; selection-background-color:#4898f8; selection-color:#fff; outline:0; }
+        QProgressBar { background:#444; border:0; border-radius:5px; color:#fff; text-align:center; font-size:12px; }
+        QProgressBar::chunk { background:#4898f8; border-radius:5px; }
+        QSpinBox::up-button, QSpinBox::down-button { background:#333; border:1px solid #000; width:16px; }
+        QListWidget { background:#222; color:#ccc; border:1px solid #333; border-radius:5px; font-size:12px; }
+        QListWidget::item { padding:5px; border-radius:5px; }
+        QListWidget::item:selected { background:#4898f8; color:white; }
+        #footer QComboBox { background:#111; border:1px solid #222; }
     )";
 }
 
@@ -2260,6 +2275,20 @@ QString MainWindow::lightStyle() const
         #subCardTitle { color:#333; font-size:16px; }
         #subCardMeta { color:#999; font-size:12px; }
         #addCard { background:#eee; border:2px dashed #ccc; border-radius:5px; color:#4898f8; font-size:48px; }
+        QDialog { background:#fff; }
+        QTableWidget { background:#fff; color:#333; border:1px solid #ebeef5; gridline-color:#ebeef5; }
+        QTableWidget::item { padding:4px; }
+        QTableWidget::item:selected { background:#f5f8ff; color:#333; }
+        QHeaderView::section { background:#fff; color:#333; border:1px solid #ebeef5; padding:4px 6px; }
+        QTableCornerButton::section { background:#fff; border:1px solid #ebeef5; }
+        QComboBox QAbstractItemView { color:#333; background:#fff; border:1px solid #ccc; selection-background-color:#4898f8; selection-color:#fff; outline:0; }
+        QProgressBar { background:#eaeaea; border:0; border-radius:5px; color:#333; text-align:center; font-size:12px; }
+        QProgressBar::chunk { background:#4898f8; border-radius:5px; }
+        QSpinBox::up-button, QSpinBox::down-button { background:#ccc; border:1px solid #eaeaea; width:16px; }
+        QListWidget { background:#eee; color:#333; border:1px solid #ccc; border-radius:5px; font-size:12px; }
+        QListWidget::item { padding:5px; border-radius:5px; }
+        QListWidget::item:selected { background:#4898f8; color:white; }
+        #footer QComboBox { background:#eee; border:1px solid #ccc; }
     )";
 }
 

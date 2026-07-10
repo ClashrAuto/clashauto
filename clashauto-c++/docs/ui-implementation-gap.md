@@ -25,6 +25,15 @@
 | 主题 | ❌ | ✅ | **深/浅双主题 + 切换**（启动读 config，设置保存实时切换） |
 | 更新弹窗 update | ❌ | ✅ | 独立 **QDialog 600×660**：左侧 tabs 正式/测试版 + 版本说明 + 资源列表 + 进度条(26) + 底部；拉 GitHub releases，「打开下载页」 + **双击资源应用内下载**（进度条 + 跟随重定向 + 存至「下载」目录并打开所在文件夹） |
 
+### 本轮追加（2026-07，按 legacy-ui-spec 二次校准）
+- **对话框** `QDialog`：深 `#333` / 浅 `#fff`（spec 4.1 `.el-dialog`）——此前所有弹窗（规则编辑/连接/节点详情/更新）在深色主题下是系统默认白底。
+- **表格** `QTableWidget/QHeaderView`：深色 bg`#333` 边框`#464646` 文字`#fff` 选中行`#222`；浅色 `#ebeef5` 边框、选中 `#f5f8ff`（spec 4.5）。
+- **下拉弹层** `QComboBox QAbstractItemView`：深色 文字`#ccc` bg`#000` 边框`#333`，选中 `#4898f8`（spec 4.1 dropdown-menu）。
+- **进度条** `QProgressBar`：text-inside、chunk `#4898f8`、圆角 5（spec 5.9 stroke-width 26 已由 setFixedHeight(26) 保证）。
+- **资源列表** `QListWidget`：`li.asset` radius5/padding5/fs12，选中 `#4898f8`（spec 5.9）。
+- **流量卡内边距** `(14,18,14,18)` → `(10,28,10,28)`（spec el-card__body `8px 10px` + 卡内 `.el-row` padding `20px 0` 合成；卡高恢复旧项目 ~95px）。
+- **页脚模式下拉**：深色 bg`#111` 边框`#222`（spec 3.2 `.el-footer .el-input__inner`）。
+
 ### 仍未做（明确清单）
 - **区域/规则 → full.yaml 路由注入**：✅ 已完成。`ConfigBuilder::applyCustomRules` 读取 `userDir/rules.json`：`area` 项按正则匹配节点名生成自定义 `proxy-group`（原名，非旧项目的「 自定义」后缀，因 C++ 规则目标为自由文本、需与组名一致）并加入首个选择组；`rule` 项按 `MATCH,<node>` / `<type>,<value>,<node>` 前插到 `rules:` 顶部。**验证**：本机无 Qt/核心可跑，改用 PyYAML 对等移植的字符串手术在真实 `default.yaml` 上跑通（区域分组/去重/选择组接线/规则前插均断言通过、输出可被 YAML 解析）。
 - **会员页已按需求整页移除**（不再实现会员/VIP 相关任何功能）。
