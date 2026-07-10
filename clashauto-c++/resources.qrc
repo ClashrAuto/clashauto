@@ -2,5 +2,7 @@
     <qresource prefix="/">
         <file>assets/icon.ico</file>
         <file>assets/iconfont.ttf</file>
+        <file>assets/chevron-dark.svg</file>
+        <file>assets/chevron-light.svg</file>
     </qresource>
 </RCC>

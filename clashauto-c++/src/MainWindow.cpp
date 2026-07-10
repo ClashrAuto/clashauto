@@ -2222,6 +2222,10 @@ QString MainWindow::appStyle() const
         QScrollBar::handle:vertical { background:#555; border-radius:5px; min-height:24px; }
         QLineEdit, QComboBox, QTextEdit, QSpinBox { color:#fff; background:#444; border:1px solid #333; border-radius:3px; min-height:28px; padding:0 8px; }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border:1px solid #4898f8; }
+        QComboBox { padding-right:24px; }
+        QComboBox::drop-down { subcontrol-origin:padding; subcontrol-position:center right; width:24px; border:0; background:transparent; }
+        QComboBox::down-arrow { image:url(:/assets/chevron-dark.svg); width:12px; height:12px; }
+        QComboBox::down-arrow:on { top:1px; }
         QTabWidget::pane { border:0; }
         QTabBar::tab { color:#999; background:transparent; padding:8px 16px; }
         QTabBar::tab:selected { color:#fff; border-bottom:2px solid #4898f8; }
@@ -2270,7 +2274,8 @@ QString MainWindow::appStyle() const
         QTableWidget::item:selected { background:#222; color:#fff; }
         QHeaderView::section { background:#333; color:#fff; border:1px solid #464646; padding:4px 6px; }
         QTableCornerButton::section { background:#333; border:1px solid #464646; }
-        QComboBox QAbstractItemView { color:#ccc; background:#000; border:1px solid #333; selection-background-color:#4898f8; selection-color:#fff; outline:0; }
+        QComboBox QAbstractItemView { color:#eee; background:#333; border:1px solid #000; border-radius:3px; padding:2px; selection-background-color:#555; selection-color:#eee; outline:0; }
+        QComboBox QAbstractItemView::item { min-height:26px; padding:0 6px; }
         QProgressBar { background:#444; border:0; border-radius:5px; color:#fff; text-align:center; font-size:12px; }
         QProgressBar::chunk { background:#4898f8; border-radius:5px; }
         QSpinBox::up-button, QSpinBox::down-button { background:#333; border:1px solid #000; width:16px; }
@@ -2315,6 +2320,10 @@ QString MainWindow::lightStyle() const
         QScrollBar::handle:vertical { background:#ccc; border-radius:5px; min-height:24px; }
         QLineEdit, QComboBox, QTextEdit, QSpinBox { color:#333; background:#eaeaea; border:1px solid #ccc; border-radius:3px; min-height:28px; padding:0 8px; }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border:1px solid #4898f8; }
+        QComboBox { padding-right:24px; }
+        QComboBox::drop-down { subcontrol-origin:padding; subcontrol-position:center right; width:24px; border:0; background:transparent; }
+        QComboBox::down-arrow { image:url(:/assets/chevron-light.svg); width:12px; height:12px; }
+        QComboBox::down-arrow:on { top:1px; }
         QTabWidget::pane { border:0; }
         QTabBar::tab { color:#999; background:transparent; padding:8px 16px; }
         QTabBar::tab:selected { color:#333; border-bottom:2px solid #4898f8; }
@@ -2363,7 +2372,8 @@ QString MainWindow::lightStyle() const
         QTableWidget::item:selected { background:#f5f8ff; color:#333; }
         QHeaderView::section { background:#fff; color:#333; border:1px solid #ebeef5; padding:4px 6px; }
         QTableCornerButton::section { background:#fff; border:1px solid #ebeef5; }
-        QComboBox QAbstractItemView { color:#333; background:#fff; border:1px solid #ccc; selection-background-color:#4898f8; selection-color:#fff; outline:0; }
+        QComboBox QAbstractItemView { color:#606266; background:#fff; border:1px solid #e4e7ed; border-radius:3px; padding:2px; selection-background-color:#f5f7fa; selection-color:#4898f8; outline:0; }
+        QComboBox QAbstractItemView::item { min-height:26px; padding:0 6px; }
         QProgressBar { background:#eaeaea; border:0; border-radius:5px; color:#333; text-align:center; font-size:12px; }
         QProgressBar::chunk { background:#4898f8; border-radius:5px; }
         QSpinBox::up-button, QSpinBox::down-button { background:#ccc; border:1px solid #eaeaea; width:16px; }
