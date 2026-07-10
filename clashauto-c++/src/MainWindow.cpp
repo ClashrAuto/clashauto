@@ -115,10 +115,16 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     QDir().mkpath(config.userDir + "/logs");
     m_userDir = config.userDir;
     m_logFilePath = config.userDir + "/logs/qt-main.log";
+    // 简单轮转：超 2MB 滚动为 .old（保留一代），防止无限增长
+    if (QFileInfo(m_logFilePath).size() > 2 * 1024 * 1024) {
+        QFile::remove(m_logFilePath + ".old");
+        QFile::rename(m_logFilePath, m_logFilePath + ".old");
+    }
     m_core = new CoreController(config, this);
     m_tray = new TrayController(this, this);
     m_subscriptions = new SubscriptionStore(config, this);
     registerUrlScheme();
+    m_service.setClearConnectionsOnSwitch(config.clearConnections);
     m_closeToTray = config.closeToTray;
     m_nodeSwitchNote = config.nodeSwitchNote;
     m_autoTheme = config.autoTheme;
@@ -871,6 +877,7 @@ QWidget *MainWindow::buildSettingsPage()
         m_closeToTray = closeToTray->isChecked();
         m_nodeSwitchNote = nodeNote->isChecked();
         m_autoTheme = autoTheme->isChecked();
+        m_service.setClearConnectionsOnSwitch(clearConnections->isChecked());
         applyAutoStart(autoStart->isChecked());
         applyAutoUpdate(autoUpdateSpin->value());
 #if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)

@@ -2,12 +2,14 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QSysInfo>
 
 CoreController::CoreController(AppConfig config, QObject *parent)
     : QObject(parent),
@@ -70,8 +72,31 @@ void CoreController::startCore()
         return;
     }
 
+    // 固定核心家目录为 userDir（-d）：Country.mmdb/cache 等都从这里读，
+    // 与设置页「更新 GeoIP」的落盘路径一致（否则老核心默认 ~/.config/clash）。
+    const QString mmdb = QDir(m_config.userDir).filePath("Country.mmdb");
+    const QString bundledMmdb = QDir(m_config.sourceRoot).filePath("config/Country.mmdb");
+    if (!QFileInfo::exists(mmdb) && QFileInfo::exists(bundledMmdb)) {
+        QFile::copy(bundledMmdb, mmdb);
+        emit logUpdated(QString("Country.mmdb 已就位: %1").arg(mmdb));
+    }
+
+#if defined(Q_OS_WIN)
+    // TUN 依赖 wintun.dll：从 bundle 按架构复制到核心 exe 同目录（DLL 搜索首选路径）
+    const QString wintunTo = QDir(QFileInfo(exe).absolutePath()).filePath("wintun.dll");
+    if (!QFileInfo::exists(wintunTo)) {
+        const QString cpu = QSysInfo::currentCpuArchitecture();
+        const QString archDir = cpu.contains("arm") ? (cpu.contains("64") ? "arm64" : "arm")
+                                                    : (cpu.contains("64") ? "x64" : "x86");
+        const QString wintunFrom = QDir(m_config.sourceRoot).filePath(QString("command/wintun/bin/%1/wintun.dll").arg(archDir));
+        if (QFileInfo::exists(wintunFrom) && QFile::copy(wintunFrom, wintunTo)) {
+            emit logUpdated(QString("wintun.dll 已部署: %1").arg(wintunTo));
+        }
+    }
+#endif
+
     m_core.setProgram(exe);
-    m_core.setArguments({"-f", cfg, "-token", QString::number(QDateTime::currentMSecsSinceEpoch())});
+    m_core.setArguments({"-d", m_config.userDir, "-f", cfg, "-token", QString::number(QDateTime::currentMSecsSinceEpoch())});
     m_core.setWorkingDirectory(QFileInfo(exe).absolutePath());
     m_core.start();
     if (!m_core.waitForStarted(3000)) {

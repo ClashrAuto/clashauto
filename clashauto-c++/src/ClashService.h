@@ -27,6 +27,7 @@ public:
     void start();
     void setMode(const QString &mode);
     void setSelectedGroup(const QString &group);
+    void setClearConnectionsOnSwitch(bool enabled);
     void selectNode(const QString &name);
     void clearConnections();
     void fetchConnections(std::function<void(QJsonArray)> callback);
@@ -60,4 +61,5 @@ private:
     int m_port = 9090;
     QString m_selectedGroup = "GLOBAL";
     QString m_selectedNode;
+    bool m_clearOnSwitch = true;
 };

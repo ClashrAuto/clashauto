@@ -27,6 +27,8 @@
 - 连接对话框加「按主机过滤」搜索框（隐藏不匹配行，刷新后保持）。
 - 窗口位置/大小记忆（`QSettings`，对应旧项目 `config.bounds`）：退出时保存、启动时恢复。
 - 设置「内核」组「更新 GeoIP」按钮：下载最新 `Country.mmdb`（带进度）到用户目录与 bundle config 目录，重启核心生效。
+- 核心以 `-d userDir` 启动（家目录固定为用户配置目录）：GeoIP/缓存路径由构造保证一致；首启自动从 bundle 种子 `Country.mmdb`；Windows 按架构自动部署 `wintun.dll` 到核心 exe 旁（TUN 前置条件）。
+- 「切换时清理连接」设置真正生效（此前无条件清理）；`qt-main.log` 超 2MB 自动滚动为 `.old`。
 - 跟随系统深浅色（`autoTheme`，设置「界面」组）：Qt 6.5+ 用 `QStyleHints::colorScheme` 启动应用并监听系统切换；低版本回退手动主题。
 - 订阅自动定时更新：每分钟一跳的主定时器，按**每个订阅各自的 `updateTime`（分钟）**取模更新（编辑订阅对话框可设，卡片上显示「每 N 分钟」）；订阅未单独设置时沿用设置「节点」组「订阅自动更新(默认)」的全局值（`autoUpdate`，0=关）。
 - 订阅节点详情对话框加「全选 / 全不选」：一次启用/停用该订阅全部节点（`SubscriptionStore::setAllNodesEnabled`）。

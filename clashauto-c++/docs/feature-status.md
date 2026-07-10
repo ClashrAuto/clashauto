@@ -64,8 +64,8 @@
 
 ### P0 — 核心链路（必测）
 - [ ] **配置注入被核心接受**：带自定义 area/rule 的 `full.yaml` 用真核心 `clash -t -f` 校验通过、`/configs` 热重载成功。（本机核心无法运行，只用 PyYAML 断言了结构正确性）
-- [ ] **系统代理 / TUN / 核心生命周期**：启停核心、开关系统代理、TUN 切换、退出还原代理——整条 `CoreController` + `sysproxy.exe` 链路。
-- [ ] **GeoIP 落盘路径正确**：核心以 `-f userDir/full.yaml`（无 `-d`）启动，需确认它确实从 `userDir/Country.mmdb` 读取；若读别处需调整落盘路径。
+- [ ] **系统代理 / TUN / 核心生命周期**：启停核心、开关系统代理、TUN 切换、退出还原代理——整条 `CoreController` + `sysproxy.exe` 链路。TUN 需确认 `wintun.dll` 自动部署后（核心 exe 同目录）能真正建虚拟网卡。
+- [x] ~~GeoIP 落盘路径正确~~ → **已按构造修正**：核心现以 `-d userDir` 启动（家目录固定），GeoIP 更新/种子都写 `userDir/Country.mmdb`，路径一致；真机只需 smoke 确认老核心接受 `-d`（clash 标准标志）。
 
 ### P1 — 协议 & 单实例（新机制，重点测）
 - [ ] **`clash-auto://` 点击链路**：真实 Windows 上注册成功、浏览器/资源管理器点击链接 → 唤起运行中实例 → 导入订阅并拉节点。

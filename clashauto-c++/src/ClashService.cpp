@@ -68,6 +68,11 @@ void ClashService::setSelectedGroup(const QString &group)
     pollNodes();
 }
 
+void ClashService::setClearConnectionsOnSwitch(bool enabled)
+{
+    m_clearOnSwitch = enabled;
+}
+
 void ClashService::selectNode(const QString &name)
 {
     if (name.isEmpty()) {
@@ -83,7 +88,9 @@ void ClashService::selectNode(const QString &name)
                         if (ok) {
                             m_selectedNode = name;
                             emit logUpdated(QString("Node selected: %1 -> %2").arg(group, name));
-                            clearConnections();
+                            if (m_clearOnSwitch) { // 对应设置「切换时清理连接」
+                                clearConnections();
+                            }
                             pollNodes();
                         } else {
                             emit logUpdated(QString("Select node failed: %1").arg(message));
