@@ -506,12 +506,12 @@ QWidget *MainWindow::buildStatusPage()
     });
 
     auto *scroll = new QScrollArea(right);
+    scroll->setObjectName("nodeScroll");
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    scroll->viewport()->setAutoFillBackground(false); // 列表容器透明：只有列表项有背景，容器/间隙露出页面
     m_nodeList = new QFrame(scroll);
-    m_nodeList->setAttribute(Qt::WA_TranslucentBackground);
+    m_nodeList->setObjectName("nodeListBody");
     auto *nodeLayout = new QVBoxLayout(m_nodeList);
     nodeLayout->setContentsMargins(0, 0, 0, 0);
     nodeLayout->setSpacing(10);
@@ -2210,6 +2210,7 @@ QString MainWindow::appStyle() const
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
+        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#242425; }
         #nodeRow, #plainCard { background:#252525; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #83bdff; }
         #nodeName { color:#ccc; font-size:12px; }
@@ -2299,6 +2300,7 @@ QString MainWindow::lightStyle() const
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
+        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#ffffff; }
         #nodeRow, #plainCard { background:#eee; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #1f6fd2; }
         #nodeName { color:#333; font-size:12px; }
