@@ -10,6 +10,7 @@
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -52,10 +53,12 @@
 #include <QStandardPaths>
 #include <QStyle>
 #include <QStyleHints>
+#include <QSysInfo>
 #include <QSystemTrayIcon>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTextEdit>
+#include <QThread>
 #include <QTextStream>
 #include <QDateTime>
 #include <QUrl>
@@ -843,6 +846,12 @@ QWidget *MainWindow::buildSettingsPage()
                           .arg(QString::number(saved), QString::number(data.size() / 1024)));
         });
     });
+    auto *coreBtn = new QPushButton(QString::fromUtf8("更新内核"));
+    coreBtn->setObjectName("nodeButton");
+    coreBtn->setFixedSize(110, 30);
+    coreBtn->setToolTip(QString::fromUtf8("从 GitHub 获取最新 mihomo 内核并替换"));
+    connect(coreBtn, &QPushButton::clicked, this, [this, coreBtn] { updateMihomoCore(coreBtn); });
+
     auto *theme = new QComboBox();
     theme->addItems({QString::fromUtf8("黑色"), QString::fromUtf8("白色")});
     theme->setFixedWidth(200);
@@ -937,6 +946,7 @@ QWidget *MainWindow::buildSettingsPage()
     sysLayout->addWidget(row(QString::fromUtf8("系统代理"), webProxy));
     sysLayout->addWidget(row(QString::fromUtf8("切换时清理连接"), clearConnections));
     sysLayout->addWidget(row(QString::fromUtf8("GeoIP 数据"), geoipBtn));
+    sysLayout->addWidget(row(QString::fromUtf8("mihomo 内核"), coreBtn));
     addDivider();
     addGroup(QString::fromUtf8("托盘 / 启动"));
     sysLayout->addWidget(row(QString::fromUtf8("关闭到托盘"), closeToTray));
@@ -2173,6 +2183,176 @@ void MainWindow::registerUrlScheme()
     QProcess::execute("reg", {"add", base, "/v", "URL Protocol", "/t", "REG_SZ", "/f"});
     QProcess::execute("reg", {"add", base + "\\shell\\open\\command", "/ve", "/d", cmdVal, "/f"});
 #endif
+}
+
+QString MainWindow::extractCoreBinary(const QString &archivePath, const QString &tmpDir)
+{
+    const QString outDir = QDir(tmpDir).filePath("extract");
+    QDir(outDir).removeRecursively();
+    QDir().mkpath(outDir);
+#if defined(Q_OS_WIN)
+    // .zip：优先用系统自带 tar.exe（Win10 1803+/Win11），失败回退 PowerShell Expand-Archive
+    int code = QProcess::execute("tar", {"-xf", archivePath, "-C", outDir});
+    if (code != 0) {
+        code = QProcess::execute("powershell", {"-NoProfile", "-Command",
+            QString("Expand-Archive -LiteralPath '%1' -DestinationPath '%2' -Force").arg(archivePath, outDir)});
+    }
+    if (code != 0) {
+        return QString();
+    }
+    QDirIterator it(outDir, {"*.exe"}, QDir::Files, QDirIterator::Subdirectories);
+    return it.hasNext() ? it.next() : QString();
+#else
+    // .gz：单成员 gzip，用 gzip -dc 解到目标文件
+    const QString outBin = QDir(outDir).filePath("mihomo");
+    QProcess gz;
+    gz.setStandardOutputFile(outBin);
+    gz.start("gzip", {"-dc", archivePath});
+    if (!gz.waitForFinished(30000) || gz.exitCode() != 0) {
+        return QString();
+    }
+    return QFileInfo(outBin).size() > 0 ? outBin : QString();
+#endif
+}
+
+void MainWindow::updateMihomoCore(QPushButton *btn)
+{
+    btn->setEnabled(false);
+    btn->setText(QString::fromUtf8("检查中..."));
+    const AppConfig cfg = AppConfigLoader::load();
+    auto restore = [btn] {
+        btn->setEnabled(true);
+        btn->setText(QString::fromUtf8("更新内核"));
+    };
+
+    auto *nam = new QNetworkAccessManager(this);
+    QNetworkRequest req(QUrl("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"));
+    req.setRawHeader("User-Agent", "clashauto-cpp");
+    req.setRawHeader("Accept", "application/vnd.github+json");
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply *reply = nam->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, nam, btn, cfg, restore] {
+        const bool ok = reply->error() == QNetworkReply::NoError;
+        const QByteArray body = reply->readAll();
+        const QString err = reply->errorString();
+        reply->deleteLater();
+        if (!ok) {
+            nam->deleteLater();
+            restore();
+            appendLog(QString::fromUtf8("内核更新失败: 查询版本出错 %1").arg(err));
+            return;
+        }
+        const QJsonObject rel = QJsonDocument::fromJson(body).object();
+        const QString tag = rel.value("tag_name").toString();
+
+#if defined(Q_OS_WIN)
+        const QString os = QStringLiteral("windows");
+        const QString ext = QStringLiteral(".zip");
+#elif defined(Q_OS_MACOS)
+        const QString os = QStringLiteral("darwin");
+        const QString ext = QStringLiteral(".gz");
+#else
+        const QString os = QStringLiteral("linux");
+        const QString ext = QStringLiteral(".gz");
+#endif
+        const QString arch = QSysInfo::currentCpuArchitecture().contains("arm") ? QStringLiteral("arm64")
+                                                                                : QStringLiteral("amd64");
+        // 资源名形如 mihomo-windows-amd64-v1.18.9.zip；排除 compatible/go1xx 变体，取标准版
+        const QString prefix = QString("mihomo-%1-%2-v").arg(os, arch);
+        QString url, assetName;
+        for (const QJsonValue &av : rel.value("assets").toArray()) {
+            const QString n = av.toObject().value("name").toString();
+            if (n.startsWith(prefix) && !n.contains("compatible") && n.endsWith(ext)) {
+                url = av.toObject().value("browser_download_url").toString();
+                assetName = n;
+                break;
+            }
+        }
+        if (url.isEmpty()) {
+            nam->deleteLater();
+            restore();
+            appendLog(QString::fromUtf8("内核更新失败: 未找到匹配的 mihomo 资源 (%1/%2)").arg(os, arch));
+            return;
+        }
+
+        appendLog(QString::fromUtf8("下载 mihomo %1 ...").arg(tag));
+        btn->setText(QString::fromUtf8("下载中..."));
+        QNetworkRequest dreq{QUrl(url)};
+        dreq.setRawHeader("User-Agent", "clashauto-cpp");
+        dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply *dl = nam->get(dreq);
+        connect(dl, &QNetworkReply::downloadProgress, btn, [btn](qint64 r, qint64 t) {
+            if (t > 0) {
+                btn->setText(QString::fromUtf8("下载中 %1%").arg(int(r * 100 / t)));
+            }
+        });
+        connect(dl, &QNetworkReply::finished, this, [this, dl, nam, btn, cfg, tag, assetName, restore] {
+            const bool ok2 = dl->error() == QNetworkReply::NoError;
+            const QByteArray data = dl->readAll();
+            const QString err2 = dl->errorString();
+            dl->deleteLater();
+            nam->deleteLater();
+            if (!ok2 || data.isEmpty()) {
+                restore();
+                appendLog(QString::fromUtf8("内核下载失败: %1").arg(err2));
+                return;
+            }
+            const QString tmpDir = QDir(cfg.userDir).filePath("core-update");
+            QDir().mkpath(tmpDir);
+            const QString archivePath = QDir(tmpDir).filePath(assetName);
+            QFile f(archivePath);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                restore();
+                appendLog(QString::fromUtf8("内核更新失败: 无法写入临时文件"));
+                return;
+            }
+            f.write(data);
+            f.close();
+
+            btn->setText(QString::fromUtf8("安装中..."));
+            const QString extracted = extractCoreBinary(archivePath, tmpDir);
+            if (extracted.isEmpty()) {
+                QDir(tmpDir).removeRecursively();
+                restore();
+                appendLog(QString::fromUtf8("内核更新失败: 解压失败（缺少 tar/gzip 或压缩包异常）"));
+                return;
+            }
+
+            // 停核心 → 替换二进制（保留原文件名）→ 恢复运行
+            const QString target = cfg.clashExecutable();
+            const bool wasRunning = m_core && m_core->isRunning();
+            if (wasRunning) {
+                m_core->stopCore();
+            }
+            QDir().mkpath(QFileInfo(target).absolutePath());
+            bool replaced = false;
+            for (int attempt = 0; attempt < 8 && !replaced; ++attempt) {
+                QFile::remove(target);
+                if (QFile::copy(extracted, target)) {
+                    replaced = true;
+                } else {
+                    QThread::msleep(150); // Windows 下核心退出后句柄释放可能有短暂延迟
+                }
+            }
+#if !defined(Q_OS_WIN)
+            if (replaced) {
+                QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
+                                                  | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                                  | QFileDevice::ReadOther | QFileDevice::ExeOther);
+            }
+#endif
+            QDir(tmpDir).removeRecursively();
+            if (wasRunning) {
+                m_core->startCore();
+            }
+            restore();
+            if (replaced) {
+                appendLog(QString::fromUtf8("内核已更新到 mihomo %1%2").arg(tag, wasRunning ? QString::fromUtf8("，已重启核心") : QString()));
+            } else {
+                appendLog(QString::fromUtf8("内核更新失败: 无法替换文件（可能被占用）"));
+            }
+        });
+    });
 }
 
 void MainWindow::handleProtocolUrl(const QString &raw)

@@ -78,6 +78,8 @@ private:
     void applyAutoStart(bool enabled);
     void applyAutoUpdate(int minutes);
     void registerUrlScheme();
+    void updateMihomoCore(QPushButton *btn); // 从 GitHub 下载最新 mihomo 内核并替换
+    QString extractCoreBinary(const QString &archivePath, const QString &tmpDir); // 解压 zip/gz 得到内核二进制
 
     ClashService m_service;
     QStackedWidget *m_pages = nullptr;
