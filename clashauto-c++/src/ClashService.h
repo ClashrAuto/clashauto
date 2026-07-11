@@ -15,6 +15,13 @@ struct NodeInfo {
     int delay = 0;
     qint64 speed = 0;
     bool active = false;
+
+    bool operator==(const NodeInfo &o) const
+    {
+        return name == o.name && now == o.now && delay == o.delay
+               && speed == o.speed && active == o.active;
+    }
+    bool operator!=(const NodeInfo &o) const { return !(*this == o); }
 };
 
 class ClashService final : public QObject

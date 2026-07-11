@@ -320,6 +320,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         m_totalDownValue->setText(speedText(total));
     });
     connect(&m_service, &ClashService::nodesUpdated, this, [this](const QVector<NodeInfo> &nodes, const QString &selected) {
+        // 仅当节点数据真正变化时才重建列表——轮询大多返回相同数据，
+        // 每次都重建会让状态列表刷新时闪烁。
+        const bool changed = (nodes != m_currentNodes);
         m_currentNodes = nodes;
         // 节点切换通知（对应旧项目 config.note）；跳过首次填充，避免启动即误报
         if (m_nodeSwitchNote && m_nodeInitialized && m_tray && !selected.isEmpty() && selected != m_selectedNode) {
@@ -327,7 +330,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         }
         m_nodeInitialized = true;
         m_selectedNode = selected;
-        populateNodeList();
+        if (changed) {
+            populateNodeList();
+        }
     });
     connect(&m_service, &ClashService::proxyGroupsUpdated, this, [this](const QStringList &groups, const QString &selectedGroup) {
         if (!m_nodeGroupSelector) {
@@ -2147,6 +2152,8 @@ void MainWindow::populateNodeList()
         return;
     }
     auto *layout = qobject_cast<QVBoxLayout *>(m_nodeList->layout());
+    // 重建期间关闭重绘，整批完成后一次性刷新，避免列表清空→重填的闪烁
+    m_nodeList->setUpdatesEnabled(false);
     while (QLayoutItem *item = layout->takeAt(0)) {
         delete item->widget();
         delete item;
@@ -2170,6 +2177,7 @@ void MainWindow::populateNodeList()
         layout->addWidget(empty);
     }
     layout->addStretch();
+    m_nodeList->setUpdatesEnabled(true);
 
     if (m_nodeTitle) {
         m_nodeTitle->setText(QString::fromUtf8("节点 <span style='font-size:9px'>(%1/%2)</span>")
