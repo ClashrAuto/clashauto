@@ -476,6 +476,9 @@ QWidget *MainWindow::buildStatusPage()
     metrics->setContentsMargins(0, 0, 0, 0);
     metrics->setHorizontalSpacing(MetricGutter);
     metrics->setVerticalSpacing(MetricGutter);
+    // 两列固定各占 50%，卡片宽度不再随数值文本长度变化（消除刷新时的宽度抖动）
+    metrics->setColumnStretch(0, 1);
+    metrics->setColumnStretch(1, 1);
     metrics->addWidget(createMetricCard(QChar(0xE6CC), QString::fromUtf8("上传"), &m_upValue, "up"), 0, 0);
     metrics->addWidget(createMetricCard(QChar(0xE6CD), QString::fromUtf8("下载"), &m_downValue, "down"), 0, 1);
     // 进程数卡：右上角「查看全部连接 / 关闭全部」两个图标（复刻旧项目 .look 角标）
@@ -1426,6 +1429,9 @@ QFrame *MainWindow::createMetricCard(const QString &icon, const QString &title, 
     titleLabel->setObjectName("metricTitle");
     *valueLabel = new QLabel("0.00 B", card);
     (*valueLabel)->setObjectName("metricValue");
+    // 数值宽度不参与卡片最小宽度计算，避免长短数值互相挤压导致抖动
+    (*valueLabel)->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    titleLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     texts->addWidget(titleLabel);
     texts->addWidget(*valueLabel);
     layout->addLayout(texts, 1);
@@ -2348,7 +2354,7 @@ QString MainWindow::appStyle() const
         #metricCard { background:#222; border:0; border-radius:4px; min-height:70px; }
         #metricIcon { font-size:30px; color:#aaa; font-family:'iconfont'; }
         #metricTitle { color:#bfbfbf; font-size:12px; }
-        #metricValue { color:#bfbfbf; font-size:20px; }
+        #metricValue { color:#bfbfbf; font-size:18px; }
         #metricCard[kind="up"] QLabel { color:rgb(168,67,67); }
         #metricCard[kind="down"] QLabel { color:rgb(77,161,62); }
         #metricCard[kind="process"] QLabel { color:rgb(70,110,168); }
@@ -2446,7 +2452,7 @@ QString MainWindow::lightStyle() const
         #metricCard { background:#eee; border:0; border-radius:4px; min-height:70px; }
         #metricIcon { font-size:30px; color:#888; font-family:'iconfont'; }
         #metricTitle { color:#3d3d3d; font-size:12px; }
-        #metricValue { color:#3d3d3d; font-size:20px; }
+        #metricValue { color:#3d3d3d; font-size:18px; }
         #metricCard[kind="up"] QLabel { color:rgb(168,67,67); }
         #metricCard[kind="down"] QLabel { color:rgb(77,161,62); }
         #metricCard[kind="process"] QLabel { color:rgb(70,110,168); }
