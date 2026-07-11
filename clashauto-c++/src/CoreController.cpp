@@ -17,14 +17,15 @@ CoreController::CoreController(AppConfig config, QObject *parent)
       m_proxyEnabled(m_config.webProxy),
       m_tunEnabled(m_config.tun)
 {
+    // mihomo 的 stdout/stderr 是 UTF-8：必须用 fromUtf8，否则中文 Windows 会按 GBK 解码成乱码
     connect(&m_core, &QProcess::readyReadStandardOutput, this, [this] {
-        const QString output = QString::fromLocal8Bit(m_core.readAllStandardOutput()).trimmed();
+        const QString output = QString::fromUtf8(m_core.readAllStandardOutput()).trimmed();
         if (!output.isEmpty()) {
             emit logUpdated(output.split(QRegularExpression("[\\r\\n]+")).last());
         }
     });
     connect(&m_core, &QProcess::readyReadStandardError, this, [this] {
-        const QString output = QString::fromLocal8Bit(m_core.readAllStandardError()).trimmed();
+        const QString output = QString::fromUtf8(m_core.readAllStandardError()).trimmed();
         if (!output.isEmpty()) {
             emit logUpdated(output.split(QRegularExpression("[\\r\\n]+")).last());
         }
