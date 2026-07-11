@@ -2256,27 +2256,38 @@ void MainWindow::updateMihomoCore(QPushButton *btn)
         const QString os = QStringLiteral("linux");
         const QString ext = QStringLiteral(".gz");
 #endif
-        const QString arch = QSysInfo::currentCpuArchitecture().contains("arm") ? QStringLiteral("arm64")
-                                                                                : QStringLiteral("amd64");
-        // 标准资源名恰为 mihomo-<os>-<arch>-<tag><ext>（基线版）。发布里还有 v1/v2/v3 微架构
-        // 及 goNNN 变体，它们都以 mihomo-<os>-<arch>-v 开头——微架构版在老 CPU 上会「非法指令」
-        // 崩溃，故必须精确匹配基线名，不能用 startsWith。
+        const bool isArm = QSysInfo::currentCpuArchitecture().contains("arm");
+        const QString arch = isArm ? QStringLiteral("arm64") : QStringLiteral("amd64");
         const QJsonArray assets = rel.value("assets").toArray();
-        const QString wantExact = QString("mihomo-%1-%2-%3%4").arg(os, arch, tag, ext);
+        // amd64 优先用 compatible 构建：默认/微架构版针对较新 CPU 指令集，在虚拟机或老 CPU
+        // （如 QEMU Virtual CPU）上启动即 0xC0000005 崩溃；compatible 版兼容所有 amd64。
+        // arm64 无微架构分级，直接用标准资源名。按优先级精确匹配（不能 startsWith，避免命中 v1/v2/v3/goNNN 变体）。
+        QStringList candidates;
+        if (!isArm) {
+            candidates << QString("mihomo-%1-amd64-compatible-%2%3").arg(os, tag, ext);
+        }
+        candidates << QString("mihomo-%1-%2-%3%4").arg(os, arch, tag, ext);
         QString url, assetName;
-        for (const QJsonValue &av : assets) {
-            if (av.toObject().value("name").toString() == wantExact) {
-                url = av.toObject().value("browser_download_url").toString();
-                assetName = wantExact;
+        for (const QString &want : candidates) {
+            for (const QJsonValue &av : assets) {
+                if (av.toObject().value("name").toString() == want) {
+                    url = av.toObject().value("browser_download_url").toString();
+                    assetName = want;
+                    break;
+                }
+            }
+            if (!url.isEmpty()) {
                 break;
             }
         }
         if (url.isEmpty()) {
-            // 兜底：版本号紧跟 arch（mihomo-<os>-<arch>-vX.Y…），排除 -v1-/-v2-/-v3-/-goNNN/compatible
-            const QRegularExpression re(QString("^mihomo-%1-%2-v\\d+\\.\\d").arg(os, arch));
+            // 兜底：amd64 取 compatible-vX.Y…，arm64 取基线 vX.Y…（排除 v1/v2/v3 微架构与 goNNN 变体）
+            const QString pat = isArm ? QString("^mihomo-%1-arm64-v\\d+\\.\\d").arg(os)
+                                      : QString("^mihomo-%1-amd64-compatible-v\\d+\\.\\d").arg(os);
+            const QRegularExpression re(pat);
             for (const QJsonValue &av : assets) {
                 const QString n = av.toObject().value("name").toString();
-                if (re.match(n).hasMatch() && !n.contains("compatible") && n.endsWith(ext)) {
+                if (re.match(n).hasMatch() && n.endsWith(ext)) {
                     url = av.toObject().value("browser_download_url").toString();
                     assetName = n;
                     break;
