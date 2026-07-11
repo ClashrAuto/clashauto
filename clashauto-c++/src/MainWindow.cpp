@@ -839,10 +839,19 @@ QWidget *MainWindow::buildSettingsPage()
     mixedPort->setFixedWidth(200);
     auto *allowUse = new QCheckBox();
     allowUse->setChecked(config.allowRuleEnabled);
-    auto *allowRule = new QLineEdit(config.allowRule.isEmpty() ? "\\[0\\.[0-9]+\\]" : config.allowRule);
+    // 允许/排除规则改为可编辑下拉，预置项对齐旧项目 use_rule.allows / noallows
+    auto *allowRule = new QComboBox();
+    allowRule->setEditable(true);
+    allowRule->addItems({QStringLiteral("\\[0\\.[0-9]+\\]")});
+    allowRule->setCurrentText(config.allowRule.isEmpty() ? QStringLiteral("\\[0\\.[0-9]+\\]") : config.allowRule);
     auto *blockUse = new QCheckBox();
     blockUse->setChecked(config.noAllowRuleEnabled);
-    auto *blockRule = new QLineEdit(config.noAllowRule.isEmpty() ? "CN|^CN|CN_" : config.noAllowRule);
+    auto *blockRule = new QComboBox();
+    blockRule->setEditable(true);
+    blockRule->addItems({QStringLiteral("\\[[0-9]+\\]"), QStringLiteral("[0-9\\[\\]]+"),
+                         QStringLiteral("[\\[0-9\\]]+$"), QStringLiteral("[0-9]{1}\\]$"),
+                         QStringLiteral("CN"), QStringLiteral("^CN"), QStringLiteral("CN_"), QStringLiteral(" ")});
+    blockRule->setCurrentText(config.noAllowRule.isEmpty() ? QStringLiteral("CN|^CN|CN_") : config.noAllowRule);
     auto *nodeOnly = new QCheckBox();
     nodeOnly->setChecked(config.nodeOnlyAvailable);
     auto *webProxy = new QCheckBox();
@@ -1112,8 +1121,8 @@ QWidget *MainWindow::buildSettingsPage()
         out << "autoTheme: " << (autoTheme->isChecked() ? "true" : "false") << "\n";
         out << "language: " << language->currentText() << "\n";
         out << "use_rule:\n";
-        out << "  allow: " << allowRule->text() << "\n";
-        out << "  noallow: " << blockRule->text() << "\n";
+        out << "  allow: " << allowRule->currentText() << "\n";
+        out << "  noallow: " << blockRule->currentText() << "\n";
         out << "  allowUse: " << (allowUse->isChecked() ? "true" : "false") << "\n";
         out << "  noallowUse: " << (blockUse->isChecked() ? "true" : "false") << "\n";
         appendLog(QString("Settings saved: %1").arg(path));
