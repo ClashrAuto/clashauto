@@ -1,6 +1,5 @@
 #include "CoreController.h"
 
-#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -96,7 +95,9 @@ void CoreController::startCore()
 #endif
 
     m_core.setProgram(exe);
-    m_core.setArguments({"-d", m_config.userDir, "-f", cfg, "-token", QString::number(QDateTime::currentMSecsSinceEpoch())});
+    // 仅传 -d/-f：stock mihomo 无 -token 参数（原 Clashr 定制核心才有），传了会「flag provided
+    // but not defined: -token」→ 打印用法并以退出码 2 结束，导致核心起不来。
+    m_core.setArguments({"-d", m_config.userDir, "-f", cfg});
     m_core.setWorkingDirectory(QFileInfo(exe).absolutePath());
     m_core.start();
     if (!m_core.waitForStarted(3000)) {
