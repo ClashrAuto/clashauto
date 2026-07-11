@@ -192,6 +192,72 @@ private:
     bool m_on = false;
     bool m_light = false;
 };
+
+// ---- default.yaml 规则/分组解析辅助（无 YAML 库，按文本处理，见 CLAUDE.md 约定）----
+
+// YAML 双引号标量反转义：\UXXXXXXXX / \uXXXX / \n \t \" \\ \/（default.yaml 里 emoji 被转义成 \U....）
+QString yamlUnescapeDq(const QString &in)
+{
+    QString out;
+    out.reserve(in.size());
+    for (int i = 0; i < in.size(); ++i) {
+        const QChar c = in.at(i);
+        if (c == QLatin1Char('\\') && i + 1 < in.size()) {
+            const QChar n = in.at(i + 1);
+            if (n == QLatin1Char('U') && i + 9 < in.size()) {
+                bool ok = false;
+                const char32_t cp = in.mid(i + 2, 8).toUInt(&ok, 16);
+                if (ok) { out += QString::fromUcs4(&cp, 1); i += 9; continue; }
+            } else if (n == QLatin1Char('u') && i + 5 < in.size()) {
+                bool ok = false;
+                const uint cp = in.mid(i + 2, 4).toUInt(&ok, 16);
+                if (ok) { out += QChar(cp); i += 5; continue; }
+            } else if (n == QLatin1Char('n')) { out += QLatin1Char('\n'); ++i; continue; }
+            else if (n == QLatin1Char('t')) { out += QLatin1Char('\t'); ++i; continue; }
+            else if (n == QLatin1Char('"')) { out += QLatin1Char('"'); ++i; continue; }
+            else if (n == QLatin1Char('\\')) { out += QLatin1Char('\\'); ++i; continue; }
+            else if (n == QLatin1Char('/')) { out += QLatin1Char('/'); ++i; continue; }
+        }
+        out += c;
+    }
+    return out;
+}
+
+// 取列表项 "  - xxx" 中 "- " 之后的原始文本（保留引号/转义，供原样回写）
+QString yamlListItemRaw(const QString &line)
+{
+    const int dash = line.indexOf(QLatin1String("- "));
+    return dash < 0 ? QString() : line.mid(dash + 2).trimmed();
+}
+
+// 把（可能带引号的）标量还原成明文，供显示与逗号分割
+QString yamlScalarText(const QString &raw)
+{
+    if (raw.size() >= 2 && raw.startsWith(QLatin1Char('"')) && raw.endsWith(QLatin1Char('"'))) {
+        return yamlUnescapeDq(raw.mid(1, raw.size() - 2));
+    }
+    if (raw.size() >= 2 && raw.startsWith(QLatin1Char('\'')) && raw.endsWith(QLatin1Char('\''))) {
+        return raw.mid(1, raw.size() - 2).replace(QLatin1String("''"), QLatin1String("'"));
+    }
+    return raw;
+}
+
+// 双引号转义（回写新增/编辑的规则）
+QString yamlEscapeDq(const QString &in)
+{
+    QString out = in;
+    out.replace(QLatin1Char('\\'), QLatin1String("\\\\"));
+    out.replace(QLatin1Char('"'), QLatin1String("\\\""));
+    return out;
+}
+
+// 取 "    type: select" 这类行的值（去掉 key: 前缀与引号）
+QString yamlInlineValue(const QString &line)
+{
+    const int colon = line.indexOf(QLatin1Char(':'));
+    if (colon < 0) return QString();
+    return yamlScalarText(line.mid(colon + 1).trimmed());
+}
 }
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
@@ -904,7 +970,7 @@ QWidget *MainWindow::buildSettingsPage()
     filterLayout->addStretch();
     tabs->addTab(filter, QString::fromUtf8("过滤"));
 
-    // Tab 3 / 4: 区域 / 规则（真数据 CRUD，持久化到 userDir/rules.json）
+    // Tab 3 / 4: 区域 / 规则（读写 userDir/default.yaml；ConfigBuilder 再生成 full.yaml 给核心）
     tabs->addTab(buildRuleTableTab("area"), QString::fromUtf8("区域"));
     tabs->addTab(buildRuleTableTab("rule"), QString::fromUtf8("规则"));
 
@@ -1073,69 +1139,268 @@ QWidget *MainWindow::buildSettingsPage()
     return page;
 }
 
-QString MainWindow::rulesFilePath() const
+QString MainWindow::defaultConfigPath() const
 {
-    return QDir(m_userDir).filePath("rules.json");
+    // 规则/分组的持久化源 = userDir/default.yaml（对齐旧项目 def）；缺失时从 bundle 复制
+    const QString userDef = QDir(m_userDir).filePath("default.yaml");
+    if (!QFile::exists(userDef)) {
+        const AppConfig cfg = AppConfigLoader::load();
+        const QString bundled = QDir(cfg.sourceRoot).filePath("config/default.yaml");
+        if (QFile::exists(bundled)) {
+            QDir().mkpath(m_userDir);
+            QFile::copy(bundled, userDef);
+        }
+    }
+    return userDef;
 }
 
 QJsonArray MainWindow::loadRuleSection(const QString &section) const
 {
-    QFile file(rulesFilePath());
-    if (!file.open(QIODevice::ReadOnly)) {
+    QFile f(defaultConfigPath());
+    if (!f.open(QIODevice::ReadOnly)) {
         return {};
     }
-    const QJsonObject root = QJsonDocument::fromJson(file.readAll()).object();
-    return root.value(section).toArray();
+    const QString yaml = QString::fromUtf8(f.readAll());
+    f.close();
+    const QStringList lines = yaml.split(QLatin1Char('\n'));
+    QJsonArray arr;
+
+    if (section == QLatin1String("rule")) {
+        // 解析 rules: 块，每条 "  - TYPE,VALUE,NODE[,opts]"（MATCH 只有 2 段）；raw 原样保留以便回写
+        bool inRules = false;
+        for (const QString &line : lines) {
+            if (!inRules) {
+                if (line.startsWith(QLatin1String("rules:"))) {
+                    inRules = true;
+                }
+                continue;
+            }
+            if (line.startsWith(QLatin1String("  - "))) {
+                const QString raw = yamlListItemRaw(line);
+                const QStringList p = yamlScalarText(raw).split(QLatin1Char(','));
+                QJsonObject o;
+                o["raw"] = raw;
+                if (p.value(0) == QLatin1String("MATCH")) {
+                    o["type"] = QStringLiteral("MATCH");
+                    o["node"] = p.value(1);
+                    o["value"] = QString();
+                } else {
+                    o["type"] = p.value(0);
+                    o["value"] = p.value(1);
+                    o["node"] = p.value(2);
+                }
+                arr.append(o);
+            } else if (!line.trimmed().isEmpty() && !line.startsWith(QLatin1Char(' '))) {
+                break; // 下一个顶层键
+            }
+        }
+        return arr;
+    }
+
+    if (section == QLatin1String("area")) {
+        // 解析 proxy-groups：每组从 "  - name:" 到下一个 "  - " 或块结束；raw 保留整组文本
+        bool inGroups = false;
+        QJsonObject cur;
+        QStringList curRaw;
+        QStringList curProxies;
+        auto flush = [&]() {
+            if (!curRaw.isEmpty()) {
+                cur["raw"] = curRaw.join(QLatin1Char('\n'));
+                if (cur.value("rule").toString().isEmpty()) {
+                    cur["rule"] = curProxies.join(QLatin1String(", "));
+                }
+                arr.append(cur);
+            }
+            cur = QJsonObject();
+            curRaw.clear();
+            curProxies.clear();
+        };
+        for (const QString &line : lines) {
+            if (!inGroups) {
+                if (line.startsWith(QLatin1String("proxy-groups:"))) {
+                    inGroups = true;
+                }
+                continue;
+            }
+            if (!line.trimmed().isEmpty() && !line.startsWith(QLatin1Char(' '))) {
+                flush();
+                break; // 到 rules: 等下一个顶层键
+            }
+            if (line.startsWith(QLatin1String("  - "))) {
+                flush();
+                curRaw << line;
+                const QString afterDash = yamlListItemRaw(line);
+                if (afterDash.startsWith(QLatin1String("name:"))) {
+                    cur["name"] = yamlInlineValue(afterDash);
+                }
+            } else {
+                curRaw << line;
+                const QString t = line.trimmed();
+                if (t.startsWith(QLatin1String("name:"))) {
+                    cur["name"] = yamlInlineValue(t);
+                } else if (t.startsWith(QLatin1String("type:"))) {
+                    cur["type"] = yamlInlineValue(t);
+                } else if (t.startsWith(QLatin1String("rule:"))) {
+                    cur["rule"] = yamlInlineValue(t);
+                } else if (t.startsWith(QLatin1String("- "))) {
+                    curProxies << yamlScalarText(yamlListItemRaw(t));
+                }
+            }
+        }
+        flush();
+        return arr;
+    }
+    return {};
 }
 
 bool MainWindow::saveRuleSection(const QString &section, const QJsonArray &array)
 {
-    QFile file(rulesFilePath());
-    QJsonObject root;
-    if (file.open(QIODevice::ReadOnly)) {
-        root = QJsonDocument::fromJson(file.readAll()).object();
-        file.close();
-    }
-    root[section] = array;
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+    // 目前仅 rule 支持回写（区域为只读展示：mihomo 无分组 rule 字段，且改动嵌套组易产生悬空引用）
+    if (section != QLatin1String("rule")) {
         return false;
     }
-    file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    const QString path = defaultConfigPath();
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    QString yaml = QString::fromUtf8(f.readAll());
+    f.close();
+
+    // 构建新的 rules 块：未改动项用原始 raw（保留转义/选项），新增/编辑项按 3 段序列化
+    QString block = QStringLiteral("rules:\n");
+    for (const QJsonValue &v : array) {
+        const QJsonObject o = v.toObject();
+        const QString raw = o.value("raw").toString();
+        if (!raw.isEmpty()) {
+            block += QStringLiteral("  - ") + raw + QLatin1Char('\n');
+        } else {
+            const QString type = o.value("type").toString();
+            const QString node = o.value("node").toString();
+            const QString value = o.value("value").toString();
+            const QString s = (type == QLatin1String("MATCH"))
+                                  ? type + QLatin1Char(',') + node
+                                  : type + QLatin1Char(',') + value + QLatin1Char(',') + node;
+            block += QStringLiteral("  - \"") + yamlEscapeDq(s) + QStringLiteral("\"\n");
+        }
+    }
+
+    // 定位并替换旧 rules 块（rules: 行起点 → 下一个顶层键 / EOF）
+    int start = -1;
+    if (yaml.startsWith(QLatin1String("rules:"))) {
+        start = 0;
+    } else {
+        const int p = yaml.indexOf(QLatin1String("\nrules:"));
+        if (p >= 0) {
+            start = p + 1;
+        }
+    }
+    if (start < 0) {
+        if (!yaml.endsWith(QLatin1Char('\n'))) {
+            yaml += QLatin1Char('\n');
+        }
+        yaml += block;
+    } else {
+        int end = yaml.size();
+        int pos = yaml.indexOf(QLatin1Char('\n'), start); // rules: 行末
+        while (pos >= 0) {
+            const int lineStart = pos + 1;
+            if (lineStart >= yaml.size()) {
+                end = yaml.size();
+                break;
+            }
+            const int nextNl = yaml.indexOf(QLatin1Char('\n'), lineStart);
+            const QString ln = yaml.mid(lineStart, (nextNl < 0 ? yaml.size() : nextNl) - lineStart);
+            if (ln.startsWith(QLatin1Char(' ')) || ln.trimmed().isEmpty()) {
+                if (nextNl < 0) {
+                    end = yaml.size();
+                    break;
+                }
+                pos = nextNl;
+            } else {
+                end = lineStart; // 下一个顶层键起点
+                break;
+            }
+        }
+        yaml.replace(start, end - start, block);
+    }
+
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    f.write(yaml.toUtf8());
+    f.close();
     return true;
+}
+
+QStringList MainWindow::proxyGroupNames() const
+{
+    QStringList names;
+    const QJsonArray groups = loadRuleSection("area");
+    for (const QJsonValue &v : groups) {
+        const QString n = v.toObject().value("name").toString();
+        if (!n.isEmpty()) {
+            names << n;
+        }
+    }
+    return names;
 }
 
 QWidget *MainWindow::buildRuleTableTab(const QString &section)
 {
     const bool isArea = section == "area";
+    // 区域为只读展示（无「操作」列）；规则支持增删改
     const QStringList headers = isArea
-        ? QStringList{QString::fromUtf8("名称"), QString::fromUtf8("类型"), QString::fromUtf8("节点"), QString::fromUtf8("操作")}
+        ? QStringList{QString::fromUtf8("名称"), QString::fromUtf8("类型"), QString::fromUtf8("节点/成员")}
         : QStringList{QString::fromUtf8("类型"), QString::fromUtf8("节点"), QString::fromUtf8("值"), QString::fromUtf8("操作")};
-    const int stretchCol = 2;
+    const int keyCount = isArea ? 3 : 3;
+    const int colCount = isArea ? 3 : 4;
 
     auto *w = new QWidget();
     auto *l = new QVBoxLayout(w);
     l->setContentsMargins(10, 10, 10, 10);
     l->setSpacing(8);
 
-    auto *addBtn = new QPushButton(QString::fromUtf8("＋ 添加"), w);
-    addBtn->setObjectName("primaryButton");
-    addBtn->setFixedSize(96, 30);
-    connect(addBtn, &QPushButton::clicked, this, [this, section] { openRuleEditor(section, -1); });
     auto *bar = new QHBoxLayout();
     bar->setContentsMargins(0, 0, 0, 0);
-    bar->addWidget(addBtn);
+    bar->setSpacing(8);
+    if (!isArea) {
+        auto *addBtn = new QPushButton(QString::fromUtf8("＋ 添加"), w);
+        addBtn->setObjectName("primaryButton");
+        addBtn->setFixedSize(96, 30);
+        connect(addBtn, &QPushButton::clicked, this, [this, section] { openRuleEditor(section, -1); });
+        bar->addWidget(addBtn);
+        auto *filter = new QLineEdit(w);
+        filter->setPlaceholderText(QString::fromUtf8("搜索规则（类型/节点/值）"));
+        filter->setFixedWidth(220);
+        connect(filter, &QLineEdit::textChanged, this, [this] { reloadRuleTable("rule"); });
+        m_ruleFilter = filter;
+        bar->addWidget(filter);
+    } else {
+        auto *note = new QLabel(QString::fromUtf8("代理组来自 default.yaml（只读）"), w);
+        note->setObjectName("subCardMeta");
+        bar->addWidget(note);
+    }
+    auto *count = new QLabel(w);
+    count->setObjectName("subCardMeta");
+    if (isArea) {
+        m_areaCountLabel = count;
+    } else {
+        m_ruleCountLabel = count;
+    }
     bar->addStretch();
+    bar->addWidget(count);
     l->addLayout(bar);
 
-    auto *table = new QTableWidget(0, headers.size(), w);
+    auto *table = new QTableWidget(0, colCount, w);
     table->setHorizontalHeaderLabels(headers);
     table->verticalHeader()->setVisible(false);
     table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    for (int c = 0; c < headers.size(); ++c) {
-        if (c == stretchCol) {
+    for (int c = 0; c < colCount; ++c) {
+        if (c == keyCount - 1) { // 最后一个数据列拉伸（值 / 节点成员）
             table->horizontalHeader()->setSectionResizeMode(c, QHeaderView::Stretch);
-        } else if (c == headers.size() - 1) {
+        } else if (!isArea && c == colCount - 1) { // 规则的操作列
             table->horizontalHeader()->setSectionResizeMode(c, QHeaderView::Fixed);
             table->setColumnWidth(c, 100);
         } else {
@@ -1156,83 +1421,119 @@ QWidget *MainWindow::buildRuleTableTab(const QString &section)
 
 void MainWindow::reloadRuleTable(const QString &section)
 {
-    QTableWidget *table = section == "area" ? m_areaTable : m_ruleTable;
+    const bool isArea = section == "area";
+    QTableWidget *table = isArea ? m_areaTable : m_ruleTable;
     if (!table) {
         return;
     }
-    const QStringList keys = section == "area"
+    const QStringList keys = isArea
         ? QStringList{"name", "type", "rule"}
         : QStringList{"type", "node", "value"};
     const QJsonArray array = loadRuleSection(section);
+    const QString filter = (!isArea && m_ruleFilter) ? m_ruleFilter->text().trimmed() : QString();
+    const int cap = 400; // 规则可达上千条，超出用搜索缩小范围，避免一次性建太多行
 
+    table->setUpdatesEnabled(false);
     table->setRowCount(0);
+    int shown = 0;
     for (int i = 0; i < array.size(); ++i) {
         const QJsonObject obj = array[i].toObject();
+        if (!filter.isEmpty()) {
+            bool match = false;
+            for (const QString &k : keys) {
+                if (obj.value(k).toString().contains(filter, Qt::CaseInsensitive)) {
+                    match = true;
+                    break;
+                }
+            }
+            if (!match) {
+                continue;
+            }
+        }
+        if (shown >= cap) {
+            break;
+        }
         const int row = table->rowCount();
         table->insertRow(row);
         for (int c = 0; c < keys.size(); ++c) {
             table->setItem(row, c, new QTableWidgetItem(obj.value(keys[c]).toString()));
         }
 
-        auto *actions = new QWidget();
-        auto *ah = new QHBoxLayout(actions);
-        ah->setContentsMargins(0, 0, 0, 0);
-        ah->setSpacing(4);
-        auto *edit = new QPushButton(QString::fromUtf8("✎"), actions);
-        edit->setObjectName("iconButton");
-        edit->setFixedWidth(28);
-        auto *del = new QPushButton(QString::fromUtf8("✕"), actions);
-        del->setObjectName("iconButton");
-        del->setFixedWidth(28);
-        ah->addStretch();
-        ah->addWidget(edit);
-        ah->addWidget(del);
-        ah->addStretch();
-        connect(edit, &QPushButton::clicked, this, [this, section, i] { openRuleEditor(section, i); });
-        connect(del, &QPushButton::clicked, this, [this, section, i] {
-            QJsonArray current = loadRuleSection(section);
-            if (i >= 0 && i < current.size()) {
-                current.removeAt(i);
-                saveRuleSection(section, current);
-                reloadRuleTable(section);
-                if (m_core) {
-                    m_core->rebuildConfig();
+        if (!isArea) {
+            auto *actions = new QWidget();
+            auto *ah = new QHBoxLayout(actions);
+            ah->setContentsMargins(0, 0, 0, 0);
+            ah->setSpacing(4);
+            auto *edit = new QPushButton(QString::fromUtf8("✎"), actions);
+            edit->setObjectName("iconButton");
+            edit->setFixedWidth(28);
+            auto *del = new QPushButton(QString::fromUtf8("✕"), actions);
+            del->setObjectName("iconButton");
+            del->setFixedWidth(28);
+            ah->addStretch();
+            ah->addWidget(edit);
+            ah->addWidget(del);
+            ah->addStretch();
+            const int fullIndex = i; // 过滤/截断下仍指向完整数组的真实下标
+            connect(edit, &QPushButton::clicked, this, [this, section, fullIndex] { openRuleEditor(section, fullIndex); });
+            connect(del, &QPushButton::clicked, this, [this, section, fullIndex] {
+                QJsonArray current = loadRuleSection(section);
+                if (fullIndex >= 0 && fullIndex < current.size()) {
+                    current.removeAt(fullIndex);
+                    saveRuleSection(section, current);
+                    reloadRuleTable(section);
+                    if (m_core) {
+                        m_core->rebuildConfig();
+                    }
+                    appendLog(QString::fromUtf8("已删除一条规则并重建配置"));
                 }
-                appendLog(QString::fromUtf8("已删除一条%1").arg(section == "area" ? QString::fromUtf8("区域") : QString::fromUtf8("规则")));
-            }
-        });
-        table->setCellWidget(row, keys.size(), actions);
+            });
+            table->setCellWidget(row, keys.size(), actions);
+        }
+        ++shown;
+    }
+    table->setUpdatesEnabled(true);
+
+    QLabel *count = isArea ? m_areaCountLabel : m_ruleCountLabel;
+    if (count) {
+        QString txt = QString::fromUtf8("共 %1 条").arg(array.size());
+        if (shown < array.size()) {
+            txt += QString::fromUtf8("，显示前 %1 条").arg(shown);
+        }
+        count->setText(txt);
     }
 }
 
 void MainWindow::openRuleEditor(const QString &section, int editIndex)
 {
-    const bool isArea = section == "area";
-    const QStringList keys = isArea ? QStringList{"name", "type", "rule"} : QStringList{"type", "node", "value"};
-    const QStringList labels = isArea
-        ? QStringList{QString::fromUtf8("名称"), QString::fromUtf8("类型 (select/url-test/fallback)"), QString::fromUtf8("节点匹配 (正则)")}
-        : QStringList{QString::fromUtf8("类型 (DOMAIN-SUFFIX/IP-CIDR/...)"), QString::fromUtf8("节点/策略"), QString::fromUtf8("值")};
-
+    // 区域只读，此编辑器仅用于「规则」的增/改
     const QJsonArray array = loadRuleSection(section);
     const QJsonObject cur = (editIndex >= 0 && editIndex < array.size()) ? array[editIndex].toObject() : QJsonObject{};
 
     auto *dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(isArea ? QString::fromUtf8("区域分组") : QString::fromUtf8("自定义规则"));
+    dialog->setWindowTitle(editIndex >= 0 ? QString::fromUtf8("编辑规则") : QString::fromUtf8("新增规则"));
     dialog->setStyleSheet(styleSheet());
-    dialog->resize(380, 260);
+    dialog->resize(400, 250);
     auto *dl = new QVBoxLayout(dialog);
     dl->setContentsMargins(12, 12, 12, 12);
     dl->setSpacing(6);
 
-    QVector<QLineEdit *> edits;
-    for (int i = 0; i < keys.size(); ++i) {
-        auto *lab = new QLabel(labels[i], dialog);
-        auto *ed = new QLineEdit(cur.value(keys[i]).toString(), dialog);
-        dl->addWidget(lab);
-        dl->addWidget(ed);
-        edits << ed;
-    }
+    dl->addWidget(new QLabel(QString::fromUtf8("类型 (DOMAIN-SUFFIX / IP-CIDR / MATCH ...)"), dialog));
+    auto *typeEd = new QLineEdit(cur.value("type").toString(), dialog);
+    typeEd->setPlaceholderText("DOMAIN-SUFFIX");
+    dl->addWidget(typeEd);
+
+    dl->addWidget(new QLabel(QString::fromUtf8("值 (域名 / IP 段；MATCH 留空)"), dialog));
+    auto *valueEd = new QLineEdit(cur.value("value").toString(), dialog);
+    dl->addWidget(valueEd);
+
+    dl->addWidget(new QLabel(QString::fromUtf8("节点/策略组"), dialog));
+    auto *nodeBox = new QComboBox(dialog);
+    nodeBox->setEditable(true);
+    nodeBox->addItems(proxyGroupNames());
+    nodeBox->setCurrentText(cur.value("node").toString());
+    dl->addWidget(nodeBox);
     dl->addStretch();
 
     auto *btnRow = new QHBoxLayout();
@@ -1248,23 +1549,28 @@ void MainWindow::openRuleEditor(const QString &section, int editIndex)
     dl->addLayout(btnRow);
 
     connect(cancel, &QPushButton::clicked, dialog, &QDialog::reject);
-    connect(ok, &QPushButton::clicked, dialog, [this, dialog, section, editIndex, keys, edits] {
-        QJsonObject obj;
-        for (int i = 0; i < keys.size(); ++i) {
-            obj[keys[i]] = edits[i]->text().trimmed();
+    connect(ok, &QPushButton::clicked, dialog, [this, dialog, section, editIndex, typeEd, valueEd, nodeBox] {
+        const QString type = typeEd->text().trimmed();
+        const QString node = nodeBox->currentText().trimmed();
+        if (type.isEmpty() || node.isEmpty()) {
+            return; // 类型/节点必填
         }
+        QJsonObject obj; // 不含 raw → 回写按 3 段（或 MATCH 2 段）重新序列化
+        obj["type"] = type;
+        obj["node"] = node;
+        obj["value"] = valueEd->text().trimmed();
         QJsonArray current = loadRuleSection(section);
         if (editIndex >= 0 && editIndex < current.size()) {
             current[editIndex] = obj;
         } else {
-            current.append(obj);
+            current.prepend(obj); // 新增前插（对齐旧项目 def.rules.unshift）
         }
         saveRuleSection(section, current);
         reloadRuleTable(section);
         if (m_core) {
             m_core->rebuildConfig();
         }
-        appendLog(QString::fromUtf8("已保存一条%1").arg(section == "area" ? QString::fromUtf8("区域") : QString::fromUtf8("规则")));
+        appendLog(QString::fromUtf8("已保存一条规则并重建配置"));
         dialog->accept();
     });
     dialog->show();

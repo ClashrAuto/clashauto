@@ -71,7 +71,8 @@ private:
     QWidget *buildRuleTableTab(const QString &section);
     void reloadRuleTable(const QString &section);
     void openRuleEditor(const QString &section, int editIndex);
-    QString rulesFilePath() const;
+    QString defaultConfigPath() const; // userDir/default.yaml：规则/分组的读写源
+    QStringList proxyGroupNames() const; // 供规则「节点」下拉选择
     QJsonArray loadRuleSection(const QString &section) const;
     bool saveRuleSection(const QString &section, const QJsonArray &array);
     void setCurrentPage(int page);
@@ -106,6 +107,9 @@ private:
     QFrame *m_subscriptionList = nullptr;
     QTableWidget *m_areaTable = nullptr;
     QTableWidget *m_ruleTable = nullptr;
+    QLineEdit *m_ruleFilter = nullptr;   // 规则搜索过滤
+    QLabel *m_ruleCountLabel = nullptr;  // 规则条数/显示上限提示
+    QLabel *m_areaCountLabel = nullptr;
     QString m_userDir;
     TrafficChart *m_upChart = nullptr;
     TrafficChart *m_downChart = nullptr;
