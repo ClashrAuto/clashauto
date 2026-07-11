@@ -42,6 +42,7 @@
 #include <QProgressBar>
 #include <QPropertyAnimation>
 #include <QVariantAnimation>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -2257,15 +2258,29 @@ void MainWindow::updateMihomoCore(QPushButton *btn)
 #endif
         const QString arch = QSysInfo::currentCpuArchitecture().contains("arm") ? QStringLiteral("arm64")
                                                                                 : QStringLiteral("amd64");
-        // 资源名形如 mihomo-windows-amd64-v1.18.9.zip；排除 compatible/go1xx 变体，取标准版
-        const QString prefix = QString("mihomo-%1-%2-v").arg(os, arch);
+        // 标准资源名恰为 mihomo-<os>-<arch>-<tag><ext>（基线版）。发布里还有 v1/v2/v3 微架构
+        // 及 goNNN 变体，它们都以 mihomo-<os>-<arch>-v 开头——微架构版在老 CPU 上会「非法指令」
+        // 崩溃，故必须精确匹配基线名，不能用 startsWith。
+        const QJsonArray assets = rel.value("assets").toArray();
+        const QString wantExact = QString("mihomo-%1-%2-%3%4").arg(os, arch, tag, ext);
         QString url, assetName;
-        for (const QJsonValue &av : rel.value("assets").toArray()) {
-            const QString n = av.toObject().value("name").toString();
-            if (n.startsWith(prefix) && !n.contains("compatible") && n.endsWith(ext)) {
+        for (const QJsonValue &av : assets) {
+            if (av.toObject().value("name").toString() == wantExact) {
                 url = av.toObject().value("browser_download_url").toString();
-                assetName = n;
+                assetName = wantExact;
                 break;
+            }
+        }
+        if (url.isEmpty()) {
+            // 兜底：版本号紧跟 arch（mihomo-<os>-<arch>-vX.Y…），排除 -v1-/-v2-/-v3-/-goNNN/compatible
+            const QRegularExpression re(QString("^mihomo-%1-%2-v\\d+\\.\\d").arg(os, arch));
+            for (const QJsonValue &av : assets) {
+                const QString n = av.toObject().value("name").toString();
+                if (re.match(n).hasMatch() && !n.contains("compatible") && n.endsWith(ext)) {
+                    url = av.toObject().value("browser_download_url").toString();
+                    assetName = n;
+                    break;
+                }
             }
         }
         if (url.isEmpty()) {
