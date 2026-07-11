@@ -22,6 +22,9 @@
 #include <QIcon>
 #include <QInputDialog>
 #include <QJsonArray>
+#include <algorithm>
+#include <functional>
+#include <memory>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLineEdit>
@@ -1569,133 +1572,243 @@ void MainWindow::showSubscriptionNodes(int subscriptionIndex)
 
 void MainWindow::showConnectionsDialog()
 {
+    // 对齐旧项目 connections.vue：卡片列表（非表格），顶部 Online/Offline 切换 + 搜索，
+    // 每张卡片显示 [type] host + 代理链/下载/上传 徽标 + 删除按钮；断开的连接保留为灰色「离线」。
+    const bool light = (m_theme == "white");
     auto *dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(QString::fromUtf8("连接"));
     dialog->setStyleSheet(styleSheet());
-    dialog->resize(760, 480);
+    dialog->resize(720, 480);
     auto *v = new QVBoxLayout(dialog);
-    v->setContentsMargins(10, 10, 10, 10);
-    v->setSpacing(8);
+    v->setContentsMargins(5, 5, 5, 5);
+    v->setSpacing(5);
 
-    const QStringList headers = {QString::fromUtf8("主机"), QString::fromUtf8("网络"),
-                                 QString::fromUtf8("代理链"), QString::fromUtf8("上传"),
-                                 QString::fromUtf8("下载"), QString::fromUtf8("规则")};
-    auto *table = new QTableWidget(0, headers.size(), dialog);
-    table->setHorizontalHeaderLabels(headers);
-    table->verticalHeader()->setVisible(false);
-    table->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    table->setSelectionBehavior(QAbstractItemView::SelectRows);
-    table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-    table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    // --- 顶部工具栏：Online/Offline 切换按钮组 + Search 输入 ---
+    auto *form = new QHBoxLayout();
+    form->setContentsMargins(5, 0, 5, 0);
+    form->setSpacing(0);
+    auto *onlineBtn = new QPushButton(QString::fromUtf8("Online (0)"), dialog);
+    auto *offlineBtn = new QPushButton(QString::fromUtf8("Offline (0)"), dialog);
+    for (QPushButton *b : {onlineBtn, offlineBtn}) {
+        b->setCheckable(true);
+        b->setChecked(true);
+        b->setCursor(Qt::PointingHandCursor);
+    }
+    onlineBtn->setStyleSheet("QPushButton{background:#909399;color:#fff;border:0;min-height:26px;padding:0 12px;font-size:12px;border-radius:3px 0 0 3px;} QPushButton:checked{background:#4898f8;}");
+    offlineBtn->setStyleSheet("QPushButton{background:#909399;color:#fff;border:0;min-height:26px;padding:0 12px;font-size:12px;border-radius:0 3px 3px 0;} QPushButton:checked{background:#4898f8;}");
+    form->addWidget(onlineBtn);
+    form->addWidget(offlineBtn);
+    form->addSpacing(10);
 
+    auto *prepend = new QLabel(QString::fromUtf8("Search"), dialog);
+    prepend->setAlignment(Qt::AlignCenter);
+    prepend->setStyleSheet(light
+        ? "background:#eaeaea;color:#333;border:1px solid #ccc;border-right:0;border-radius:3px 0 0 3px;padding:0 10px;min-height:26px;"
+        : "background:#444;color:#fff;border:1px solid #333;border-right:0;border-radius:3px 0 0 3px;padding:0 10px;min-height:26px;");
     auto *search = new QLineEdit(dialog);
-    search->setPlaceholderText(QString::fromUtf8("按主机过滤"));
-    v->addWidget(search);
-    v->addWidget(table, 1);
+    search->setStyleSheet(light
+        ? "background:#eaeaea;color:#333;border:1px solid #ccc;border-radius:0 3px 3px 0;min-height:26px;padding:0 8px;"
+        : "background:#444;color:#fff;border:1px solid #333;border-radius:0 3px 3px 0;min-height:26px;padding:0 8px;");
+    form->addWidget(prepend);
+    form->addWidget(search, 1);
+    v->addLayout(form);
 
-    auto *countLabel = new QLabel(QString::fromUtf8("正在获取..."), dialog);
-    countLabel->setObjectName("subCardMeta");
+    // --- 可滚动卡片列表（复用 subScroll/subListBody 的主题背景）---
+    auto *scroll = new QScrollArea(dialog);
+    scroll->setObjectName("subScroll");
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    auto *listBody = new QFrame(scroll);
+    listBody->setObjectName("subListBody");
+    auto *listLayout = new QVBoxLayout(listBody);
+    listLayout->setContentsMargins(5, 5, 5, 5);
+    listLayout->setSpacing(8);
+    scroll->setWidget(listBody);
+    v->addWidget(scroll, 1);
 
-    // 按主机名过滤（隐藏不匹配行）；每次刷新后需重新应用
-    auto applyFilter = [table, search] {
-        const QString f = search->text().trimmed();
-        for (int r = 0; r < table->rowCount(); ++r) {
-            QTableWidgetItem *hostItem = table->item(r, 0);
-            const QString host = hostItem ? hostItem->text() : QString();
-            table->setRowHidden(r, !f.isEmpty() && !host.contains(f, Qt::CaseInsensitive));
-        }
-    };
-    connect(search, &QLineEdit::textChanged, dialog, [applyFilter] { applyFilter(); });
-
-    // 用 QPointer 守护对话框：异步回调返回时若已关闭则直接丢弃，避免悬空访问
     QPointer<QDialog> guard = dialog;
-    auto reload = [this, guard, table, countLabel, applyFilter] {
-        m_service.fetchConnections([this, guard, table, countLabel, applyFilter](QJsonArray conns) {
-            if (!guard) {
-                return;
-            }
-            table->setRowCount(0);
-            for (const QJsonValue &cv : conns) {
-                const QJsonObject c = cv.toObject();
-                const QJsonObject meta = c.value("metadata").toObject();
-                QString host = meta.value("host").toString();
-                if (host.isEmpty()) {
-                    host = meta.value("destinationIP").toString();
-                }
-                const QString port = meta.value("destinationPort").toString();
-                if (!port.isEmpty()) {
-                    host += ":" + port;
-                }
-                QStringList chains;
-                for (const QJsonValue &ch : c.value("chains").toArray()) {
-                    chains << ch.toString();
-                }
-                const int row = table->rowCount();
-                table->insertRow(row);
-                auto *hostItem = new QTableWidgetItem(host);
-                hostItem->setData(Qt::UserRole, c.value("id").toString());
-                table->setItem(row, 0, hostItem);
-                table->setItem(row, 1, new QTableWidgetItem(meta.value("network").toString()));
-                table->setItem(row, 2, new QTableWidgetItem(chains.join(" / ")));
-                table->setItem(row, 3, new QTableWidgetItem(speedText(c.value("upload").toInteger())));
-                table->setItem(row, 4, new QTableWidgetItem(speedText(c.value("download").toInteger())));
-                table->setItem(row, 5, new QTableWidgetItem(c.value("rule").toString()));
-            }
-            countLabel->setText(QString::fromUtf8("共 %1 条连接").arg(table->rowCount()));
-            applyFilter();
-        });
+    // 累积的连接列表（保留离线项，模拟旧项目按 id 合并 + 离线标记 + 下载增量排序）
+    auto acc = std::make_shared<QList<QJsonObject>>();
+    auto reloadFn = std::make_shared<std::function<void()>>();
+
+    // 速度/流量格式（旧项目 connections 无空格：1.50KB）
+    auto spd = [](qint64 value) -> QString {
+        double n = value < 0 ? 0 : static_cast<double>(value);
+        const char *units[] = {"B", "KB", "MB", "GB", "TB"};
+        int i = 0;
+        while (n >= 1024.0 && i < 4) { n /= 1024.0; ++i; }
+        return QString::number(n, 'f', 2) + units[i];
     };
-
-    auto *bar = new QHBoxLayout();
-    bar->addWidget(countLabel);
-    bar->addStretch();
-    auto *refreshBtn = new QPushButton(QString::fromUtf8("刷新"), dialog);
-    refreshBtn->setObjectName("nodeButton");
-    refreshBtn->setFixedSize(72, 30);
-    auto *closeSelBtn = new QPushButton(QString::fromUtf8("关闭选中"), dialog);
-    closeSelBtn->setObjectName("nodeButton");
-    closeSelBtn->setFixedSize(84, 30);
-    auto *closeAllBtn = new QPushButton(QString::fromUtf8("关闭全部"), dialog);
-    closeAllBtn->setObjectName("primaryButton");
-    closeAllBtn->setFixedSize(84, 30);
-    bar->addWidget(refreshBtn);
-    bar->addWidget(closeSelBtn);
-    bar->addWidget(closeAllBtn);
-    v->addLayout(bar);
-
-    connect(refreshBtn, &QPushButton::clicked, dialog, [reload] { reload(); });
-    connect(closeSelBtn, &QPushButton::clicked, dialog, [this, table, reload, dialog] {
-        QList<int> rows;
-        for (QTableWidgetItem *item : table->selectedItems()) {
-            if (!rows.contains(item->row())) {
-                rows << item->row();
-            }
+    // 小徽标：iconfont 图标 + 文本，固定配色（与旧项目一致，不随主题变化）
+    auto makeBadge = [](QChar glyph, const QString &text, const QString &bg, const QString &fg) -> QWidget * {
+        auto *badge = new QFrame();
+        badge->setStyleSheet(QString("QFrame{background:%1;border-radius:5px;}").arg(bg));
+        auto *h = new QHBoxLayout(badge);
+        h->setContentsMargins(6, 3, 6, 3);
+        h->setSpacing(4);
+        auto *ico = new QLabel(glyph, badge);
+        ico->setStyleSheet(QString("font-family:'iconfont';color:%1;font-size:12px;background:transparent;").arg(fg));
+        auto *t = new QLabel(text, badge);
+        t->setStyleSheet(QString("color:%1;font-size:12px;background:transparent;").arg(fg));
+        h->addWidget(ico);
+        h->addWidget(t);
+        return badge;
+    };
+    // 单张连接卡片
+    auto makeCard = [this, dialog, light, spd, makeBadge](const QJsonObject &c) -> QFrame * {
+        const QJsonObject meta = c.value("metadata").toObject();
+        const bool offline = c.value("offline").toBool();
+        QString host = meta.value("host").toString();
+        if (host.isEmpty()) {
+            host = meta.value("destinationIP").toString();
         }
-        for (int row : rows) {
-            const QString id = table->item(row, 0)->data(Qt::UserRole).toString();
+        QString type = meta.value("type").toString();
+        if (type.isEmpty()) {
+            type = meta.value("network").toString();
+        }
+        QStringList chains;
+        for (const QJsonValue &ch : c.value("chains").toArray()) {
+            chains << ch.toString();
+        }
+        const QString chain0 = chains.isEmpty() ? QStringLiteral("-") : chains.first();
+        const qint64 dl = c.value("download").toInteger();
+        const qint64 ul = c.value("upload").toInteger();
+
+        auto *card = new QFrame();
+        card->setObjectName("subCard");
+        auto *h = new QHBoxLayout(card);
+        h->setContentsMargins(10, 6, 10, 6);
+        h->setSpacing(10);
+
+        auto *dot = new QLabel(QString::fromUtf8("●"), card);
+        dot->setStyleSheet(offline ? "color:#999;font-size:10px;background:transparent;"
+                                   : "color:#67c23a;font-size:10px;background:transparent;");
+        h->addWidget(dot);
+
+        auto *title = new QLabel(QString("[%1] %2").arg(type, host), card);
+        title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        title->setStyleSheet(offline
+            ? "color:#999;font-size:14px;background:transparent;"
+            : (light ? "color:#333;font-size:14px;background:transparent;"
+                     : "color:#eee;font-size:14px;background:transparent;"));
+        h->addWidget(title, 1);
+
+        // 代理链（深底白字）/ 下载（绿底 #333）/ 上传（红底 #333）——配色对齐旧项目
+        h->addWidget(makeBadge(QChar(0xE6BC), chain0, "rgba(0,0,0,0.35)", "#fff"));
+        h->addWidget(makeBadge(QChar(0xE6CD), dl ? spd(dl) : QStringLiteral("-"), "rgba(0,255,0,0.5)", "#333"));
+        h->addWidget(makeBadge(QChar(0xE6CC), ul ? spd(ul) : QStringLiteral("-"), "rgba(255,0,0,0.5)", "#333"));
+
+        auto *del = new QPushButton(QString::fromUtf8("✕"), card);
+        del->setFixedSize(30, 30);
+        del->setEnabled(!offline);
+        del->setCursor(Qt::PointingHandCursor);
+        del->setStyleSheet(light
+            ? "QPushButton{background:#eee;color:#f56c6c;border:1px solid #ddd;border-radius:3px;font-size:12px;} QPushButton:hover{background:#f56c6c;color:#fff;} QPushButton:disabled{color:#ccc;background:#f5f5f5;}"
+            : "QPushButton{background:#333;color:#f56c6c;border:0;border-radius:3px;font-size:12px;} QPushButton:hover{background:#f56c6c;color:#fff;} QPushButton:disabled{color:#666;background:#2a2a2a;}");
+        const QString id = c.value("id").toString();
+        // 删除后靠 1s 自动轮询刷新列表（对齐旧项目 closeProcess）
+        connect(del, &QPushButton::clicked, dialog, [this, id] {
             if (!id.isEmpty()) {
                 m_service.closeConnection(id);
             }
-        }
-        QTimer::singleShot(300, dialog, [reload] { reload(); });
-    });
-    connect(closeAllBtn, &QPushButton::clicked, dialog, [this, reload, dialog] {
-        m_service.clearConnections();
-        QTimer::singleShot(300, dialog, [reload] { reload(); });
-    });
+        });
+        h->addWidget(del);
+        return card;
+    };
 
-    // 实时刷新（1.5s）；有选中行时跳过，避免打断「关闭选中」
-    auto *autoTimer = new QTimer(dialog);
-    autoTimer->setInterval(1500);
-    connect(autoTimer, &QTimer::timeout, dialog, [table, reload] {
-        if (table->selectedItems().isEmpty()) {
-            reload();
+    // 根据切换/搜索状态重建卡片列表，并更新按钮上的计数
+    auto buildList = [guard, acc, listBody, listLayout, onlineBtn, offlineBtn, search, makeCard]() {
+        if (!guard) {
+            return;
         }
+        listBody->setUpdatesEnabled(false);
+        while (QLayoutItem *item = listLayout->takeAt(0)) {
+            delete item->widget();
+            delete item;
+        }
+        const bool showOnline = onlineBtn->isChecked();
+        const bool showOffline = offlineBtn->isChecked();
+        const QString f = search->text().trimmed();
+        int onlineCount = 0, offlineCount = 0;
+        for (const QJsonObject &c : std::as_const(*acc)) {
+            const bool off = c.value("offline").toBool();
+            if (off) { ++offlineCount; } else { ++onlineCount; }
+            if (off && !showOffline) { continue; }
+            if (!off && !showOnline) { continue; }
+            const QJsonObject meta = c.value("metadata").toObject();
+            QString host = meta.value("host").toString();
+            if (host.isEmpty()) {
+                host = meta.value("destinationIP").toString();
+            }
+            if (!f.isEmpty() && !host.contains(f, Qt::CaseInsensitive)) {
+                continue;
+            }
+            listLayout->addWidget(makeCard(c));
+        }
+        listLayout->addStretch();
+        listBody->setUpdatesEnabled(true);
+        onlineBtn->setText(QString::fromUtf8("Online (%1)").arg(onlineCount));
+        offlineBtn->setText(QString::fromUtf8("Offline (%1)").arg(offlineCount));
+    };
+
+    // 拉取连接：按 id 合并进 acc（新增/更新在线，缺失标记离线），按下载增量降序
+    *reloadFn = [this, guard, acc, buildList]() {
+        m_service.fetchConnections([guard, acc, buildList](QJsonArray conns) {
+            if (!guard) {
+                return;
+            }
+            for (QJsonObject &o : *acc) {
+                o.insert("offline", true);
+            }
+            for (const QJsonValue &cv : conns) {
+                QJsonObject c = cv.toObject();
+                const QString id = c.value("id").toString();
+                int idx = -1;
+                for (int i = 0; i < acc->size(); ++i) {
+                    if (acc->at(i).value("id").toString() == id) { idx = i; break; }
+                }
+                if (idx >= 0) {
+                    const double prevDl = acc->at(idx).value("download").toDouble();
+                    c.insert("sort", c.value("download").toDouble() - prevDl);
+                    c.insert("offline", false);
+                    (*acc)[idx] = c;
+                } else {
+                    c.insert("sort", 0);
+                    c.insert("offline", false);
+                    acc->append(c);
+                }
+            }
+            std::sort(acc->begin(), acc->end(), [](const QJsonObject &a, const QJsonObject &b) {
+                return a.value("sort").toDouble() > b.value("sort").toDouble();
+            });
+            buildList();
+        });
+    };
+
+    // 切换按钮：不允许两个都关（对齐旧项目 setOnline/setOffline）
+    connect(onlineBtn, &QPushButton::clicked, dialog, [onlineBtn, offlineBtn, buildList] {
+        if (!onlineBtn->isChecked() && !offlineBtn->isChecked()) {
+            offlineBtn->setChecked(true);
+        }
+        buildList();
     });
+    connect(offlineBtn, &QPushButton::clicked, dialog, [onlineBtn, offlineBtn, buildList] {
+        if (!offlineBtn->isChecked() && !onlineBtn->isChecked()) {
+            onlineBtn->setChecked(true);
+        }
+        buildList();
+    });
+    connect(search, &QLineEdit::textChanged, dialog, [buildList] { buildList(); });
+
+    // 实时刷新（对齐旧项目 1s 轮询）
+    auto *autoTimer = new QTimer(dialog);
+    autoTimer->setInterval(1000);
+    connect(autoTimer, &QTimer::timeout, dialog, [reloadFn] { (*reloadFn)(); });
     autoTimer->start();
 
-    reload();
+    (*reloadFn)();
     dialog->show();
 }
 
