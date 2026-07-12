@@ -48,6 +48,9 @@ target_compile_options(clashauto-cpp PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 
+# GUI 子系统：Windows 上不弹控制台窗口（CLI 子命令改由 main.cpp 附着父控制台输出）
+set_target_properties(clashauto-cpp PROPERTIES WIN32_EXECUTABLE ON)
+
 # Generate Version.h with the resolved APP_VERSION (bulletproof quoting across generators)
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/Version.h.in"

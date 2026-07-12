@@ -258,6 +258,23 @@ QString yamlInlineValue(const QString &line)
     if (colon < 0) return QString();
     return yamlScalarText(line.mid(colon + 1).trimmed());
 }
+
+// 同步执行子进程且不弹控制台窗口（GUI 子系统下需 CREATE_NO_WINDOW）
+int runHidden(const QString &program, const QStringList &args, int timeoutMs = 30000)
+{
+    QProcess p;
+#if defined(Q_OS_WIN)
+    p.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *a) {
+        a->flags |= 0x08000000u; // CREATE_NO_WINDOW
+    });
+#endif
+    p.start(program, args);
+    if (!p.waitForFinished(timeoutMs)) {
+        p.kill();
+        return -1;
+    }
+    return p.exitCode();
+}
 }
 
 MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
@@ -2600,10 +2617,10 @@ void MainWindow::registerUrlScheme()
     const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
     const QString base = "HKCU\\Software\\Classes\\clash-auto";
     const QString cmdVal = QLatin1Char('"') + exe + QLatin1String("\" \"%1\"");
-    QProcess::execute("reg", {"add", base, "/ve", "/d", "URL:Clash Auto Protocol", "/f"});
+    runHidden("reg", {"add", base, "/ve", "/d", "URL:Clash Auto Protocol", "/f"});
     // 空数据用 /t REG_SZ 不带 /d，避免 QProcess 传空串参数的 Windows 怪癖
-    QProcess::execute("reg", {"add", base, "/v", "URL Protocol", "/t", "REG_SZ", "/f"});
-    QProcess::execute("reg", {"add", base + "\\shell\\open\\command", "/ve", "/d", cmdVal, "/f"});
+    runHidden("reg", {"add", base, "/v", "URL Protocol", "/t", "REG_SZ", "/f"});
+    runHidden("reg", {"add", base + "\\shell\\open\\command", "/ve", "/d", cmdVal, "/f"});
 #endif
 }
 
@@ -2614,9 +2631,9 @@ QString MainWindow::extractCoreBinary(const QString &archivePath, const QString 
     QDir().mkpath(outDir);
 #if defined(Q_OS_WIN)
     // .zip：优先用系统自带 tar.exe（Win10 1803+/Win11），失败回退 PowerShell Expand-Archive
-    int code = QProcess::execute("tar", {"-xf", archivePath, "-C", outDir});
+    int code = runHidden("tar", {"-xf", archivePath, "-C", outDir});
     if (code != 0) {
-        code = QProcess::execute("powershell", {"-NoProfile", "-Command",
+        code = runHidden("powershell", {"-NoProfile", "-Command",
             QString("Expand-Archive -LiteralPath '%1' -DestinationPath '%2' -Force").arg(archivePath, outDir)});
     }
     if (code != 0) {

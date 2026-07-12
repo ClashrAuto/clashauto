@@ -12,8 +12,32 @@
 #include <QLocalSocket>
 #include <QTextStream>
 
+#if defined(Q_OS_WIN)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <cstdio>
+#endif
+
 int main(int argc, char *argv[])
 {
+#if defined(Q_OS_WIN)
+    // GUI 子系统：双击不弹控制台；但从终端启动时附着父控制台，让 --build-config 等 CLI 子命令能打印
+    if (::AttachConsole(ATTACH_PARENT_PROCESS)) {
+#if defined(_MSC_VER)
+        FILE *f = nullptr;
+        freopen_s(&f, "CONOUT$", "w", stdout);
+        freopen_s(&f, "CONOUT$", "w", stderr);
+#else
+        std::freopen("CONOUT$", "w", stdout);
+        std::freopen("CONOUT$", "w", stderr);
+#endif
+    }
+#endif
     QApplication app(argc, argv);
     QApplication::setApplicationName("Clash Auto");
     QApplication::setOrganizationName("ClashAuto");

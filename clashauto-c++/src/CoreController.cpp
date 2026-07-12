@@ -7,8 +7,31 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QProcess>
 #include <QRegularExpression>
 #include <QSysInfo>
+
+namespace {
+#if defined(Q_OS_WIN)
+constexpr unsigned kCreateNoWindow = 0x08000000; // CREATE_NO_WINDOW
+#endif
+// 同步执行子进程且不弹控制台窗口（GUI 子系统下 QProcess::execute 会给控制台子进程新开窗口）
+int runHidden(const QString &program, const QStringList &args, int timeoutMs = 30000)
+{
+    QProcess p;
+#if defined(Q_OS_WIN)
+    p.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *a) {
+        a->flags |= kCreateNoWindow;
+    });
+#endif
+    p.start(program, args);
+    if (!p.waitForFinished(timeoutMs)) {
+        p.kill();
+        return -1;
+    }
+    return p.exitCode();
+}
+}
 
 CoreController::CoreController(AppConfig config, QObject *parent)
     : QObject(parent),
@@ -17,6 +40,12 @@ CoreController::CoreController(AppConfig config, QObject *parent)
       m_proxyEnabled(m_config.webProxy),
       m_tunEnabled(m_config.tun)
 {
+#if defined(Q_OS_WIN)
+    // 核心为控制台程序，GUI 子系统下启动会新开控制台窗口——用 CREATE_NO_WINDOW 隐藏
+    m_core.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *a) {
+        a->flags |= kCreateNoWindow;
+    });
+#endif
     // mihomo 的 stdout/stderr 是 UTF-8：必须用 fromUtf8，否则中文 Windows 会按 GBK 解码成乱码
     connect(&m_core, &QProcess::readyReadStandardOutput, this, [this] {
         const QString output = QString::fromUtf8(m_core.readAllStandardOutput()).trimmed();
@@ -167,7 +196,7 @@ void CoreController::startProxy()
     }
 
     const QString sysproxy = m_config.sysproxyExecutable();
-    QProcess::execute(sysproxy, {"global", QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort), "localhost;127.*;10.*;172.16.*;192.168.*;<local>"});
+    runHidden(sysproxy, {"global", QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort), "localhost;127.*;10.*;172.16.*;192.168.*;<local>"});
     emit logUpdated("Start sysproxy ok!");
 }
 
@@ -175,7 +204,7 @@ void CoreController::stopProxy()
 {
     const QString sysproxy = m_config.sysproxyExecutable();
     if (QFileInfo::exists(sysproxy)) {
-        QProcess::execute(sysproxy, {"set", "1"});
+        runHidden(sysproxy, {"set", "1"});
         emit logUpdated("Stop sysproxy ok!");
     }
 }
@@ -199,7 +228,7 @@ bool CoreController::ensureSysproxy()
     QString escapedOutputDir = outputDir;
     escapedArchive.replace("'", "''");
     escapedOutputDir.replace("'", "''");
-    const int code = QProcess::execute("powershell", {
+    const int code = runHidden("powershell", {
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-Command",
@@ -207,7 +236,7 @@ bool CoreController::ensureSysproxy()
             .arg(escapedArchive, escapedOutputDir)
     });
 #else
-    const int code = QProcess::execute("unzip", {"-o", archive, "-d", outputDir});
+    const int code = runHidden("unzip", {"-o", archive, "-d", outputDir});
 #endif
 
     if (code != 0 || !QFileInfo::exists(sysproxy)) {
