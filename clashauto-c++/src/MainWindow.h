@@ -17,6 +17,7 @@ class QTextEdit;
 class QComboBox;
 class QLineEdit;
 class QScrollArea;
+class QTabWidget;
 class QVBoxLayout;
 class QTableWidget;
 class QJsonArray;
@@ -82,6 +83,8 @@ private:
     void registerUrlScheme();
     void updateMihomoCore(QPushButton *btn, bool useMirror); // 从 GitHub 下载最新 mihomo 内核并替换（useMirror=国内加速）
     QString extractCoreBinary(const QString &archivePath, const QString &tmpDir); // 解压 zip/gz 得到内核二进制
+    void promptDownloadCore();  // 未检测到内核时弹窗提示，确认后跳转设置下载
+    void goToCoreDownload();    // 跳到「设置 → 系统」并滚动/高亮「更新内核」按钮
     void onToggleTunRequested(); // 增强/TUN 开关入口：开启且非管理员时先提权（对齐旧项目按需提权）
 #if defined(Q_OS_WIN)
     static bool isProcessElevated();     // 当前进程是否已提权（管理员）
@@ -113,6 +116,10 @@ private:
     QFrame *m_subscriptionList = nullptr;
     QTableWidget *m_areaTable = nullptr;
     QTableWidget *m_ruleTable = nullptr;
+    QTabWidget *m_settingsTabs = nullptr;      // 设置页 tab（过滤/区域/规则/系统）
+    QScrollArea *m_sysScroll = nullptr;        // 系统 tab 的滚动区（用于滚到「更新内核」）
+    QPushButton *m_coreUpdateBtn = nullptr;    // 「更新内核」按钮（无内核时高亮引导）
+    bool m_coreMissingPrompted = false;        // 避免重复弹「未检测到内核」窗
     QLineEdit *m_ruleFilter = nullptr;   // 规则搜索过滤
     QLabel *m_ruleCountLabel = nullptr;  // 规则条数/显示上限提示
     QLabel *m_areaCountLabel = nullptr;

@@ -459,6 +459,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         appendLog(message);
         appendTimeline(m_clashTimeline, m_clashScroll, message);
     });
+    // 未检测到内核（不再预装）→ 弹窗引导用户去设置下载
+    connect(m_core, &CoreController::coreMissing, this, [this](const QString &) { promptDownloadCore(); });
     connect(m_tray, &TrayController::toggleCoreRequested, m_core, &CoreController::toggleCore);
     connect(m_tray, &TrayController::toggleProxyRequested, m_core, &CoreController::toggleProxy);
     connect(m_tray, &TrayController::toggleTunRequested, this, &MainWindow::onToggleTunRequested);
@@ -484,6 +486,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         });
     }
 #endif
+
+    // 不再预装内核：首启若未检测到内核，延迟弹窗引导去「设置 → 系统」下载
+    // （提权重启场景下内核必已就位，isCoreInstalled 会跳过）
+    if (m_core && !m_core->isCoreInstalled()) {
+        QTimer::singleShot(600, this, [this] { promptDownloadCore(); });
+    }
 }
 
 QWidget *MainWindow::buildTitleBar()
@@ -965,6 +973,7 @@ QWidget *MainWindow::buildSettingsPage()
 
     auto *tabs = new QTabWidget(this);
     tabs->setObjectName("settingsTabs");
+    m_settingsTabs = tabs; // 供「未检测到内核」引导跳到系统 tab
 
     auto row = [](const QString &label, QWidget *w) -> QWidget * {
         auto *r = new QWidget();
@@ -999,6 +1008,7 @@ QWidget *MainWindow::buildSettingsPage()
 
     // Tab 5: 系统（分组 + 虚线分隔）
     auto *systemScroll = new QScrollArea(tabs);
+    m_sysScroll = systemScroll;
     systemScroll->setObjectName("sysScroll");
     systemScroll->setWidgetResizable(true);
     systemScroll->setFrameShape(QFrame::NoFrame);
@@ -1039,6 +1049,7 @@ QWidget *MainWindow::buildSettingsPage()
     auto *coreBtn = new QPushButton(QString::fromUtf8("更新内核"));
     coreBtn->setObjectName("nodeButton");
     coreBtn->setFixedSize(110, 30);
+    m_coreUpdateBtn = coreBtn; // 无内核时的下载入口，供引导高亮
     coreBtn->setToolTip(QString::fromUtf8("从 GitHub 获取最新 mihomo 内核并替换（amd64 使用兼容版）"));
     connect(coreBtn, &QPushButton::clicked, this, [this, coreBtn, cnAccel] { updateMihomoCore(coreBtn, cnAccel->isChecked()); });
     auto *coreRow = new QWidget();
@@ -3231,10 +3242,15 @@ void MainWindow::onToggleTunRequested()
     if (!m_core) {
         return;
     }
+    const bool turningOn = !m_core->isTunEnabled();
+    // 未预装内核：开启增强前先确保内核已下载，否则提权重启也没有核心可跑，先引导下载
+    if (turningOn && !m_core->isCoreInstalled()) {
+        promptDownloadCore();
+        return;
+    }
 #if defined(Q_OS_WIN)
     // 增强(TUN) 需要管理员权限创建虚拟网卡：若正要开启且当前非提权，先以管理员身份重启自身
     // （对齐旧项目 runAsRoot → restart 的「按需提权」）。关闭 TUN 或已提权时走正常热重载。
-    const bool turningOn = !m_core->isTunEnabled();
     if (turningOn && !isProcessElevated()) {
         relaunchElevatedForTun();
         return;
@@ -3293,3 +3309,38 @@ void MainWindow::relaunchElevatedForTun()
     }
 }
 #endif
+
+void MainWindow::promptDownloadCore()
+{
+    if (m_coreMissingPrompted) {
+        return; // 防重入：模态框已开着时别再叠一个
+    }
+    if (m_core && m_core->isCoreInstalled()) {
+        return; // 期间内核已就位，无需提示
+    }
+    m_coreMissingPrompted = true;
+    const auto choice = QMessageBox::question(
+        this,
+        QString::fromUtf8("未检测到内核"),
+        QString::fromUtf8("未检测到 mihomo 内核，无法启动核心。\n是否前往「设置 → 系统」下载内核？"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    m_coreMissingPrompted = false;
+    if (choice == QMessageBox::Yes) {
+        goToCoreDownload();
+    }
+}
+
+void MainWindow::goToCoreDownload()
+{
+    setCurrentPage(2); // 设置页（0状态 / 1订阅 / 2设置 / 3日志 / 4关于）
+    if (m_settingsTabs) {
+        m_settingsTabs->setCurrentIndex(m_settingsTabs->count() - 1); // 系统 tab（最后一个）
+    }
+    if (m_coreUpdateBtn && m_sysScroll) {
+        // 等 tab 布局完成后再滚动到「更新内核」按钮并聚焦，帮助用户定位
+        QTimer::singleShot(0, this, [this] {
+            m_sysScroll->ensureWidgetVisible(m_coreUpdateBtn);
+            m_coreUpdateBtn->setFocus(Qt::OtherFocusReason);
+        });
+    }
+}

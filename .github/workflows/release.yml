@@ -82,6 +82,10 @@ jobs:
               if (-not ($name -eq "version" -or $name.StartsWith("command/") -or $name.StartsWith("config/") -or $name.StartsWith("language/"))) {
                 continue
               }
+              # 不再预装内核：跳过 command/clash/ 下的核心二进制（用户在设置里按需下载）
+              if ($name.StartsWith("command/clash/")) {
+                continue
+              }
 
               $target = Join-Path "Clashr-Auto" $name
               if ($name.EndsWith("/")) {
@@ -100,63 +104,12 @@ jobs:
             throw "Runtime resources did not contain config/config.yaml"
           }
 
-      - name: Normalize Windows runtime core
+      - name: Prepare runtime core dir (no pre-bundled core)
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          # 不再预装内核：不下载、不校验核心，仅保留空的 clash 目录占位。
+          # 用户首次运行时由应用引导到「设置 → 系统」按需下载 mihomo（amd64 取兼容版）。
           New-Item -ItemType Directory -Force "Clashr-Auto\command\clash" | Out-Null
-
-          if ("${{ matrix.arch }}" -eq "arm64") {
-            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$env:MIHOMO_REPO/releases/latest"
-            $asset = $release.assets |
-              Where-Object { $_.name -like "mihomo-windows-arm64-*.zip" } |
-              Select-Object -First 1
-            if (-not $asset) {
-              $asset = $release.assets |
-                Where-Object { $_.name -like "mihomo-windows-arm64-compatible-*.gz" -or $_.name -like "mihomo-windows-arm64-*.gz" } |
-                Select-Object -First 1
-            }
-            if (-not $asset) {
-              throw "Cannot find a Windows ARM64 mihomo release asset"
-            }
-
-            $archive = Join-Path $env:RUNNER_TEMP $asset.name
-            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $archive
-
-            $output = "Clashr-Auto\command\clash\${{ matrix.clash_core }}"
-            if ($asset.name.EndsWith(".zip")) {
-              $extractDir = Join-Path $env:RUNNER_TEMP "mihomo-windows-arm64"
-              Remove-Item -Recurse -Force $extractDir -ErrorAction SilentlyContinue
-              Expand-Archive -Path $archive -DestinationPath $extractDir -Force
-              $exe = Get-ChildItem $extractDir -Recurse -Filter "*.exe" |
-                Select-Object -First 1
-              if (-not $exe) {
-                throw "Windows ARM64 mihomo zip did not contain an exe"
-              }
-              Copy-Item $exe.FullName $output -Force
-            } else {
-              $inputStream = [System.IO.File]::OpenRead($archive)
-              try {
-                $gzipStream = [System.IO.Compression.GZipStream]::new($inputStream, [System.IO.Compression.CompressionMode]::Decompress)
-                try {
-                  $outputStream = [System.IO.File]::Create($output)
-                  try {
-                    $gzipStream.CopyTo($outputStream)
-                  } finally {
-                    $outputStream.Dispose()
-                  }
-                } finally {
-                  $gzipStream.Dispose()
-                }
-              } finally {
-                $inputStream.Dispose()
-              }
-            }
-          }
-
-          if (-not (Test-Path "Clashr-Auto\command\clash\${{ matrix.clash_core }}")) {
-            throw "Missing Windows runtime core: ${{ matrix.clash_core }}"
-          }
 
       - name: Install Qt
         shell: pwsh
@@ -286,9 +239,7 @@ jobs:
           if (-not (Test-Path "$resourceDir\config\config.yaml")) {
             throw "Missing staged Clashr-Auto config resources"
           }
-          if (-not (Test-Path "$resourceDir\command\clash\${{ matrix.clash_core }}")) {
-            throw "Missing staged Windows runtime core: ${{ matrix.clash_core }}"
-          }
+          # 内核不再随包分发：不校验 command\clash 下的核心是否存在
 
       - name: Create portable zip
         shell: pwsh
@@ -419,6 +370,9 @@ jobs:
                   name = entry.filename.replace("\\", "/")
                   if not (name == "version" or name.startswith(prefixes)):
                       continue
+                  # 不再预装内核：跳过 command/clash/ 下的核心二进制（用户在设置里按需下载）
+                  if name.startswith("command/clash/"):
+                      continue
                   target = target_root / name
                   if entry.is_dir():
                       target.mkdir(parents=True, exist_ok=True)
@@ -433,27 +387,13 @@ jobs:
             exit 1
           fi
 
-      - name: Normalize Linux runtime core
+      - name: Prepare runtime core dir (no pre-bundled core)
         shell: bash
         run: |
           set -euo pipefail
+          # 不再预装内核：不下载、不校验核心，仅保留空的 clash 目录占位。
+          # 用户首次运行时由应用引导到「设置 → 系统」按需下载 mihomo。
           mkdir -p Clashr-Auto/command/clash
-
-          if [ "${{ matrix.arch }}" = "arm64" ]; then
-            core_archive="${RUNNER_TEMP}/${{ matrix.clash_core }}.gz"
-            curl -L --fail --retry 3 \
-              -o "$core_archive" \
-              "https://raw.githubusercontent.com/ClashrAuto/Clashr-Auto-Desktop/master/clash/clash-linux-armv8-2021.07.03.gz"
-            gzip -dc "$core_archive" > "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
-            chmod +x "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
-          elif [ ! -f "Clashr-Auto/command/clash/${{ matrix.clash_core }}" ]; then
-            core_archive="${RUNNER_TEMP}/${{ matrix.clash_core }}.gz"
-            curl -L --fail --retry 3 \
-              -o "$core_archive" \
-              "https://raw.githubusercontent.com/ClashrAuto/Clashr-Auto-Desktop/master/clash/clash-linux-amd64-2021.07.03.gz"
-            gzip -dc "$core_archive" > "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
-          fi
-          chmod +x "Clashr-Auto/command/clash/${{ matrix.clash_core }}"
 
       - name: Install build dependencies
         shell: bash
@@ -500,7 +440,7 @@ jobs:
 
           test -x "$app_dir/clashauto-cpp"
           test -f "$resource_dir/config/config.yaml"
-          test -x "$resource_dir/command/clash/${{ matrix.clash_core }}"
+          # 内核不再随包分发：不校验 command/clash 下的核心是否存在
 
       - name: Create portable tar.gz
         shell: bash

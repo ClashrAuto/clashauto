@@ -17,6 +17,7 @@ public:
     bool isRunning() const;
     bool isProxyEnabled() const;
     bool isTunEnabled() const;
+    bool isCoreInstalled() const; // 内核二进制是否已就位（不再预装内核，需用户从设置下载）
 
     // 设置 TUN 标志但不重载（用于核心尚未启动时预置状态，例如提权重启后带 TUN 冷启动）
     void setTunEnabled(bool enabled);
@@ -34,6 +35,7 @@ public slots:
 signals:
     void statusChanged(bool tun, bool proxy, bool core);
     void logUpdated(QString message);
+    void coreMissing(QString path); // 启动时未找到内核二进制 → UI 引导用户去设置下载
 
 private:
     void startProxy();

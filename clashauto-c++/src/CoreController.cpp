@@ -81,6 +81,11 @@ bool CoreController::isTunEnabled() const
     return m_tunEnabled;
 }
 
+bool CoreController::isCoreInstalled() const
+{
+    return QFileInfo::exists(m_config.clashExecutable());
+}
+
 void CoreController::startCore()
 {
     if (isRunning()) {
@@ -91,7 +96,9 @@ void CoreController::startCore()
     m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
     const QString cfg = m_fullConfigPath.isEmpty() ? m_config.clashConfig() : m_fullConfigPath;
     if (!QFileInfo::exists(exe)) {
-        emit logUpdated(QString("找不到 Clash 核心: %1").arg(exe));
+        // 不再预装内核：未找到时提示用户去「设置 → 系统」下载，而不是静默失败
+        emit logUpdated(QString::fromUtf8("未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1").arg(exe));
+        emit coreMissing(exe);
         emitStatus();
         return;
     }
