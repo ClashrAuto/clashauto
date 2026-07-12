@@ -1002,12 +1002,21 @@ QWidget *MainWindow::buildSettingsPage()
     sysLayout->addWidget(row(QString::fromUtf8("系统代理"), webProxy));
     sysLayout->addWidget(row(QString::fromUtf8("GeoIP 数据"), geoipBtn));
     // 从 GitHub 拉取最新 mihomo（amd64 取 compatible 版）替换内核——虚拟机/老 CPU 上必需
+    auto *cnAccel = new QCheckBox(QString::fromUtf8("国内加速"));
+    cnAccel->setToolTip(QString::fromUtf8("勾选后经国内镜像加速下载 GitHub 内核（网络不佳/被墙时使用）"));
     auto *coreBtn = new QPushButton(QString::fromUtf8("更新内核"));
     coreBtn->setObjectName("nodeButton");
     coreBtn->setFixedSize(110, 30);
     coreBtn->setToolTip(QString::fromUtf8("从 GitHub 获取最新 mihomo 内核并替换（amd64 使用兼容版）"));
-    connect(coreBtn, &QPushButton::clicked, this, [this, coreBtn] { updateMihomoCore(coreBtn); });
-    sysLayout->addWidget(row(QString::fromUtf8("mihomo 内核"), coreBtn));
+    connect(coreBtn, &QPushButton::clicked, this, [this, coreBtn, cnAccel] { updateMihomoCore(coreBtn, cnAccel->isChecked()); });
+    auto *coreRow = new QWidget();
+    auto *coreRowLayout = new QHBoxLayout(coreRow);
+    coreRowLayout->setContentsMargins(0, 0, 0, 0);
+    coreRowLayout->setSpacing(10);
+    coreRowLayout->addWidget(cnAccel); // 复选框在「更新内核」按钮前
+    coreRowLayout->addWidget(coreBtn);
+    coreRowLayout->addStretch();
+    sysLayout->addWidget(row(QString::fromUtf8("mihomo 内核"), coreRow));
     addDivider();
     addGroup(QString::fromUtf8("界面"));
     sysLayout->addWidget(row(QString::fromUtf8("主题"), theme));
@@ -2628,23 +2637,26 @@ QString MainWindow::extractCoreBinary(const QString &archivePath, const QString 
 #endif
 }
 
-void MainWindow::updateMihomoCore(QPushButton *btn)
+void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
 {
     btn->setEnabled(false);
     btn->setText(QString::fromUtf8("检查中..."));
     const AppConfig cfg = AppConfigLoader::load();
+    // 国内加速：ghproxy 系镜像只代理下载（github.com 发布资源），不代理 api.github.com（返回 403），
+    // 故仅给下载链接加镜像前缀；查询版本仍直连 api.github.com（国内通常可达）。
+    const QString mirror = useMirror ? QStringLiteral("https://ghfast.top/") : QString();
     auto restore = [btn] {
         btn->setEnabled(true);
         btn->setText(QString::fromUtf8("更新内核"));
     };
 
     auto *nam = new QNetworkAccessManager(this);
-    QNetworkRequest req(QUrl("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"));
+    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")));
     req.setRawHeader("User-Agent", "clashauto-cpp");
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, nam, btn, cfg, restore] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, nam, btn, cfg, restore, mirror] {
         const bool ok = reply->error() == QNetworkReply::NoError;
         const QByteArray body = reply->readAll();
         const QString err = reply->errorString();
@@ -2713,9 +2725,9 @@ void MainWindow::updateMihomoCore(QPushButton *btn)
             return;
         }
 
-        appendLog(QString::fromUtf8("下载 mihomo %1 ...").arg(tag));
+        appendLog(QString::fromUtf8("下载 mihomo %1 ...%2").arg(tag, mirror.isEmpty() ? QString() : QString::fromUtf8("（国内加速）")));
         btn->setText(QString::fromUtf8("下载中..."));
-        QNetworkRequest dreq{QUrl(url)};
+        QNetworkRequest dreq{QUrl(mirror + url)};
         dreq.setRawHeader("User-Agent", "clashauto-cpp");
         dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply *dl = nam->get(dreq);
