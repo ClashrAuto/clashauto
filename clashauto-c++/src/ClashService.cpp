@@ -5,7 +5,6 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QRandomGenerator>
 #include <QUrl>
 
 #include <algorithm>
@@ -261,9 +260,7 @@ void ClashService::pollNodes()
             }
         }
 
-        if (nodes.isEmpty()) {
-            nodes = fallbackNodes();
-        }
+        // 节点为空就如实显示为空（列表显示 No nodes），不再回退到演示节点
 
         // 排序：对齐旧项目 clash.js getProxies —— 当前节点置顶，其次速度降序，再延迟升序，超时/无延迟垫底
         auto sortKey = [&selected](const NodeInfo &n) -> double {
@@ -294,9 +291,10 @@ void ClashService::sendGet(const QUrl &url, std::function<void(const QJsonDocume
 
         if (!ok) {
             if (body.isEmpty()) {
-                emit trafficUpdated(QRandomGenerator::global()->bounded(60000), QRandomGenerator::global()->bounded(120000));
-                emit connectionsUpdated(QRandomGenerator::global()->bounded(12), QRandomGenerator::global()->bounded(5000000));
-                emit nodesUpdated(fallbackNodes(), "Hong Kong 01");
+                // 核心未启动/连不上：显示真实的空状态（清零、无节点），不再输出随机演示数据
+                emit trafficUpdated(0, 0);
+                emit connectionsUpdated(0, 0);
+                emit nodesUpdated({}, QString());
             }
             return;
         }
@@ -335,19 +333,3 @@ void ClashService::sendDelete(const QUrl &url, std::function<void(bool, QString)
     });
 }
 
-QVector<NodeInfo> ClashService::fallbackNodes() const
-{
-    QVector<NodeInfo> nodes;
-    const QStringList names = {
-        "Hong Kong 01", "Hong Kong 02", "Japan Tokyo", "Singapore SG", "US Los Angeles", "DIRECT"
-    };
-    for (int i = 0; i < names.size(); ++i) {
-        NodeInfo node;
-        node.name = names[i];
-        node.delay = i == 5 ? 0 : 38 + i * 47;
-        node.speed = i == 5 ? 0 : (i + 1) * 192000;
-        node.active = i == 0;
-        nodes.push_back(node);
-    }
-    return nodes;
-}

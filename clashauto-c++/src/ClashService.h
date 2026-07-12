@@ -58,7 +58,6 @@ private:
     void sendGet(const QUrl &url, std::function<void(const QJsonDocument &)> onJson);
     void sendJsonRequest(const QUrl &url, const QByteArray &method, const QJsonObject &payload, std::function<void(bool, QString)> onDone);
     void sendDelete(const QUrl &url, std::function<void(bool, QString)> onDone);
-    QVector<NodeInfo> fallbackNodes() const;
 
     QNetworkAccessManager m_network;
     QTimer m_trafficTimer;
