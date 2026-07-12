@@ -1001,6 +1001,13 @@ QWidget *MainWindow::buildSettingsPage()
     addGroup(QString::fromUtf8("增强"));
     sysLayout->addWidget(row(QString::fromUtf8("系统代理"), webProxy));
     sysLayout->addWidget(row(QString::fromUtf8("GeoIP 数据"), geoipBtn));
+    // 从 GitHub 拉取最新 mihomo（amd64 取 compatible 版）替换内核——虚拟机/老 CPU 上必需
+    auto *coreBtn = new QPushButton(QString::fromUtf8("更新内核"));
+    coreBtn->setObjectName("nodeButton");
+    coreBtn->setFixedSize(110, 30);
+    coreBtn->setToolTip(QString::fromUtf8("从 GitHub 获取最新 mihomo 内核并替换（amd64 使用兼容版）"));
+    connect(coreBtn, &QPushButton::clicked, this, [this, coreBtn] { updateMihomoCore(coreBtn); });
+    sysLayout->addWidget(row(QString::fromUtf8("mihomo 内核"), coreBtn));
     addDivider();
     addGroup(QString::fromUtf8("界面"));
     sysLayout->addWidget(row(QString::fromUtf8("主题"), theme));
