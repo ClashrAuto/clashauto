@@ -1168,6 +1168,8 @@ QJsonArray MainWindow::loadRuleSection(const QString &section) const
         auto flush = [&]() {
             if (!curRaw.isEmpty()) {
                 cur["raw"] = curRaw.join(QLatin1Char('\n'));
+                cur["proxies"] = QJsonArray::fromStringList(curProxies);
+                // 「节点/成员」列显示：有 rule 字段用 rule，否则用成员列表
                 if (cur.value("rule").toString().isEmpty()) {
                     cur["rule"] = curProxies.join(QLatin1String(", "));
                 }
@@ -1204,6 +1206,10 @@ QJsonArray MainWindow::loadRuleSection(const QString &section) const
                     cur["type"] = yamlInlineValue(t);
                 } else if (t.startsWith(QLatin1String("rule:"))) {
                     cur["rule"] = yamlInlineValue(t);
+                } else if (t.startsWith(QLatin1String("url:"))) {
+                    cur["url"] = yamlInlineValue(t);
+                } else if (t.startsWith(QLatin1String("interval:"))) {
+                    cur["interval"] = yamlInlineValue(t);
                 } else if (t.startsWith(QLatin1String("- "))) {
                     curProxies << yamlScalarText(yamlListItemRaw(t));
                 }
@@ -1217,8 +1223,7 @@ QJsonArray MainWindow::loadRuleSection(const QString &section) const
 
 bool MainWindow::saveRuleSection(const QString &section, const QJsonArray &array)
 {
-    // 目前仅 rule 支持回写（区域为只读展示：mihomo 无分组 rule 字段，且改动嵌套组易产生悬空引用）
-    if (section != QLatin1String("rule")) {
+    if (section != QLatin1String("rule") && section != QLatin1String("area")) {
         return false;
     }
     const QString path = defaultConfigPath();
@@ -1229,30 +1234,67 @@ bool MainWindow::saveRuleSection(const QString &section, const QJsonArray &array
     QString yaml = QString::fromUtf8(f.readAll());
     f.close();
 
-    // 构建新的 rules 块：未改动项用原始 raw（保留转义/选项），新增/编辑项按 3 段序列化
-    QString block = QStringLiteral("rules:\n");
+    const QString key = section == QLatin1String("area") ? QStringLiteral("proxy-groups:")
+                                                         : QStringLiteral("rules:");
+    QString block = key + QLatin1Char('\n');
+    // 未改动项用原始 raw（保留转义/结构）；新增/编辑项重新序列化
     for (const QJsonValue &v : array) {
         const QJsonObject o = v.toObject();
         const QString raw = o.value("raw").toString();
-        if (!raw.isEmpty()) {
-            block += QStringLiteral("  - ") + raw + QLatin1Char('\n');
-        } else {
-            const QString type = o.value("type").toString();
-            const QString node = o.value("node").toString();
-            const QString value = o.value("value").toString();
-            const QString s = (type == QLatin1String("MATCH"))
-                                  ? type + QLatin1Char(',') + node
-                                  : type + QLatin1Char(',') + value + QLatin1Char(',') + node;
-            block += QStringLiteral("  - \"") + yamlEscapeDq(s) + QStringLiteral("\"\n");
+        if (section == QLatin1String("area")) {
+            if (!raw.isEmpty()) {
+                block += raw + QLatin1Char('\n'); // raw 为整组多行文本（以 "  - name:" 开头）
+            } else {
+                QString type = o.value("type").toString();
+                if (type.isEmpty()) {
+                    type = QStringLiteral("select");
+                }
+                block += QStringLiteral("  - name: \"") + yamlEscapeDq(o.value("name").toString()) + QStringLiteral("\"\n");
+                block += QStringLiteral("    type: ") + type + QLatin1Char('\n');
+                if (type == QLatin1String("url-test") || type == QLatin1String("fallback")
+                    || type == QLatin1String("load-balance")) {
+                    QString url = o.value("url").toString();
+                    if (url.isEmpty()) {
+                        url = QStringLiteral("http://www.gstatic.com/generate_204");
+                    }
+                    QString interval = o.value("interval").toString();
+                    if (interval.isEmpty()) {
+                        interval = QStringLiteral("300");
+                    }
+                    block += QStringLiteral("    url: ") + url + QLatin1Char('\n');
+                    block += QStringLiteral("    interval: ") + interval + QLatin1Char('\n');
+                }
+                block += QStringLiteral("    proxies:\n");
+                const QJsonArray proxies = o.value("proxies").toArray();
+                if (proxies.isEmpty()) {
+                    block += QStringLiteral("      - DIRECT\n"); // 空成员会导致校验失败，兜底 DIRECT
+                } else {
+                    for (const QJsonValue &pv : proxies) {
+                        block += QStringLiteral("      - \"") + yamlEscapeDq(pv.toString()) + QStringLiteral("\"\n");
+                    }
+                }
+            }
+        } else { // rule
+            if (!raw.isEmpty()) {
+                block += QStringLiteral("  - ") + raw + QLatin1Char('\n');
+            } else {
+                const QString type = o.value("type").toString();
+                const QString node = o.value("node").toString();
+                const QString value = o.value("value").toString();
+                const QString s = (type == QLatin1String("MATCH"))
+                                      ? type + QLatin1Char(',') + node
+                                      : type + QLatin1Char(',') + value + QLatin1Char(',') + node;
+                block += QStringLiteral("  - \"") + yamlEscapeDq(s) + QStringLiteral("\"\n");
+            }
         }
     }
 
-    // 定位并替换旧 rules 块（rules: 行起点 → 下一个顶层键 / EOF）
+    // 定位并替换旧块（<key> 行起点 → 下一个顶层键 / EOF）
     int start = -1;
-    if (yaml.startsWith(QLatin1String("rules:"))) {
+    if (yaml.startsWith(key)) {
         start = 0;
     } else {
-        const int p = yaml.indexOf(QLatin1String("\nrules:"));
+        const int p = yaml.indexOf(QLatin1Char('\n') + key);
         if (p >= 0) {
             start = p + 1;
         }
@@ -1311,12 +1353,12 @@ QStringList MainWindow::proxyGroupNames() const
 QWidget *MainWindow::buildRuleTableTab(const QString &section)
 {
     const bool isArea = section == "area";
-    // 区域为只读展示（无「操作」列）；规则支持增删改
+    // 区域/规则都支持增/改（区域不删，避免删除被引用的组导致悬空引用）
     const QStringList headers = isArea
-        ? QStringList{QString::fromUtf8("名称"), QString::fromUtf8("类型"), QString::fromUtf8("节点/成员")}
+        ? QStringList{QString::fromUtf8("名称"), QString::fromUtf8("类型"), QString::fromUtf8("节点/成员"), QString::fromUtf8("操作")}
         : QStringList{QString::fromUtf8("类型"), QString::fromUtf8("节点"), QString::fromUtf8("值"), QString::fromUtf8("操作")};
-    const int keyCount = isArea ? 3 : 3;
-    const int colCount = isArea ? 3 : 4;
+    const int keyCount = 3;
+    const int colCount = 4;
 
     auto *w = new QWidget();
     auto *l = new QVBoxLayout(w);
@@ -1326,22 +1368,22 @@ QWidget *MainWindow::buildRuleTableTab(const QString &section)
     auto *bar = new QHBoxLayout();
     bar->setContentsMargins(0, 0, 0, 0);
     bar->setSpacing(8);
-    if (!isArea) {
-        auto *addBtn = new QPushButton(QString::fromUtf8("＋ 添加"), w);
-        addBtn->setObjectName("primaryButton");
-        addBtn->setFixedSize(96, 30);
+    auto *addBtn = new QPushButton(QString::fromUtf8("＋ 添加"), w);
+    addBtn->setObjectName("primaryButton");
+    addBtn->setFixedSize(96, 30);
+    if (isArea) {
+        connect(addBtn, &QPushButton::clicked, this, [this] { openAreaEditor(-1); });
+    } else {
         connect(addBtn, &QPushButton::clicked, this, [this, section] { openRuleEditor(section, -1); });
-        bar->addWidget(addBtn);
+    }
+    bar->addWidget(addBtn);
+    if (!isArea) {
         auto *filter = new QLineEdit(w);
         filter->setPlaceholderText(QString::fromUtf8("搜索规则（类型/节点/值）"));
         filter->setFixedWidth(220);
         connect(filter, &QLineEdit::textChanged, this, [this] { reloadRuleTable("rule"); });
         m_ruleFilter = filter;
         bar->addWidget(filter);
-    } else {
-        auto *note = new QLabel(QString::fromUtf8("代理组来自 default.yaml（只读）"), w);
-        note->setObjectName("subCardMeta");
-        bar->addWidget(note);
     }
     auto *count = new QLabel(w);
     count->setObjectName("subCardMeta");
@@ -1362,7 +1404,7 @@ QWidget *MainWindow::buildRuleTableTab(const QString &section)
     for (int c = 0; c < colCount; ++c) {
         if (c == keyCount - 1) { // 最后一个数据列拉伸（值 / 节点成员）
             table->horizontalHeader()->setSectionResizeMode(c, QHeaderView::Stretch);
-        } else if (!isArea && c == colCount - 1) { // 规则的操作列
+        } else if (c == colCount - 1) { // 操作列
             table->horizontalHeader()->setSectionResizeMode(c, QHeaderView::Fixed);
             table->setColumnWidth(c, 100);
         } else {
@@ -1421,23 +1463,24 @@ void MainWindow::reloadRuleTable(const QString &section)
             table->setItem(row, c, new QTableWidgetItem(obj.value(keys[c]).toString()));
         }
 
-        if (!isArea) {
-            auto *actions = new QWidget();
-            auto *ah = new QHBoxLayout(actions);
-            ah->setContentsMargins(0, 0, 0, 0);
-            ah->setSpacing(4);
-            auto *edit = new QPushButton(QString::fromUtf8("✎"), actions);
-            edit->setObjectName("iconButton");
-            edit->setFixedWidth(28);
+        auto *actions = new QWidget();
+        auto *ah = new QHBoxLayout(actions);
+        ah->setContentsMargins(0, 0, 0, 0);
+        ah->setSpacing(4);
+        auto *edit = new QPushButton(QString::fromUtf8("✎"), actions);
+        edit->setObjectName("iconButton");
+        edit->setFixedWidth(28);
+        ah->addStretch();
+        ah->addWidget(edit);
+        const int fullIndex = i; // 过滤/截断下仍指向完整数组的真实下标
+        if (isArea) {
+            connect(edit, &QPushButton::clicked, this, [this, fullIndex] { openAreaEditor(fullIndex); });
+        } else {
+            connect(edit, &QPushButton::clicked, this, [this, section, fullIndex] { openRuleEditor(section, fullIndex); });
             auto *del = new QPushButton(QString::fromUtf8("✕"), actions);
             del->setObjectName("iconButton");
             del->setFixedWidth(28);
-            ah->addStretch();
-            ah->addWidget(edit);
             ah->addWidget(del);
-            ah->addStretch();
-            const int fullIndex = i; // 过滤/截断下仍指向完整数组的真实下标
-            connect(edit, &QPushButton::clicked, this, [this, section, fullIndex] { openRuleEditor(section, fullIndex); });
             connect(del, &QPushButton::clicked, this, [this, section, fullIndex] {
                 QJsonArray current = loadRuleSection(section);
                 if (fullIndex >= 0 && fullIndex < current.size()) {
@@ -1450,8 +1493,9 @@ void MainWindow::reloadRuleTable(const QString &section)
                     appendLog(QString::fromUtf8("已删除一条规则并重建配置"));
                 }
             });
-            table->setCellWidget(row, keys.size(), actions);
         }
+        ah->addStretch();
+        table->setCellWidget(row, keys.size(), actions);
         ++shown;
     }
     table->setUpdatesEnabled(true);
@@ -1533,6 +1577,106 @@ void MainWindow::openRuleEditor(const QString &section, int editIndex)
             m_core->rebuildConfig();
         }
         appendLog(QString::fromUtf8("已保存一条规则并重建配置"));
+        dialog->accept();
+    });
+    dialog->show();
+}
+
+void MainWindow::openAreaEditor(int editIndex)
+{
+    const QJsonArray array = loadRuleSection("area");
+    const bool isEdit = editIndex >= 0 && editIndex < array.size();
+    const QJsonObject cur = isEdit ? array[editIndex].toObject() : QJsonObject{};
+
+    auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(isEdit ? QString::fromUtf8("编辑区域分组") : QString::fromUtf8("新增区域分组"));
+    dialog->setStyleSheet(styleSheet());
+    dialog->resize(420, 380);
+    auto *dl = new QVBoxLayout(dialog);
+    dl->setContentsMargins(12, 12, 12, 12);
+    dl->setSpacing(6);
+
+    dl->addWidget(new QLabel(QString::fromUtf8("名称"), dialog));
+    auto *nameEd = new QLineEdit(cur.value("name").toString(), dialog);
+    if (isEdit) {
+        nameEd->setReadOnly(true); // 重命名会破坏 rules/其它组的引用，编辑时锁定名称
+        nameEd->setToolTip(QString::fromUtf8("编辑时不支持改名（会破坏引用）；如需改名请新增一个组"));
+    }
+    dl->addWidget(nameEd);
+
+    dl->addWidget(new QLabel(QString::fromUtf8("类型"), dialog));
+    auto *typeBox = new QComboBox(dialog);
+    typeBox->addItems({"select", "url-test", "fallback", "load-balance", "relay"});
+    typeBox->setCurrentText(cur.value("type").toString().isEmpty() ? QStringLiteral("select") : cur.value("type").toString());
+    dl->addWidget(typeBox);
+
+    dl->addWidget(new QLabel(QString::fromUtf8("成员（每行一个：DIRECT / REJECT / 其它组名 / 节点名）"), dialog));
+    auto *proxiesEd = new QTextEdit(dialog);
+    QStringList members;
+    for (const QJsonValue &pv : cur.value("proxies").toArray()) {
+        members << pv.toString();
+    }
+    proxiesEd->setPlainText(members.join(QLatin1Char('\n')));
+    proxiesEd->setFixedHeight(120);
+    dl->addWidget(proxiesEd);
+
+    auto *urlRow = new QHBoxLayout();
+    auto *urlEd = new QLineEdit(cur.value("url").toString(), dialog);
+    urlEd->setPlaceholderText(QString::fromUtf8("url（url-test/fallback，可留空用默认）"));
+    auto *intervalEd = new QLineEdit(cur.value("interval").toString(), dialog);
+    intervalEd->setPlaceholderText(QString::fromUtf8("间隔秒"));
+    intervalEd->setFixedWidth(90);
+    urlRow->addWidget(urlEd);
+    urlRow->addWidget(intervalEd);
+    dl->addLayout(urlRow);
+    dl->addStretch();
+
+    auto *btnRow = new QHBoxLayout();
+    btnRow->addStretch();
+    auto *cancel = new QPushButton(QString::fromUtf8("取消"), dialog);
+    cancel->setObjectName("nodeButton");
+    cancel->setFixedSize(72, 30);
+    auto *ok = new QPushButton(QString::fromUtf8("确定"), dialog);
+    ok->setObjectName("primaryButton");
+    ok->setFixedSize(72, 30);
+    btnRow->addWidget(cancel);
+    btnRow->addWidget(ok);
+    dl->addLayout(btnRow);
+
+    connect(cancel, &QPushButton::clicked, dialog, &QDialog::reject);
+    connect(ok, &QPushButton::clicked, dialog, [this, dialog, editIndex, isEdit, nameEd, typeBox, proxiesEd, urlEd, intervalEd] {
+        const QString name = nameEd->text().trimmed();
+        if (name.isEmpty()) {
+            return;
+        }
+        QJsonObject obj; // 不含 raw → 回写时重新序列化整组
+        obj["name"] = name;
+        obj["type"] = typeBox->currentText();
+        obj["url"] = urlEd->text().trimmed();
+        obj["interval"] = intervalEd->text().trimmed();
+        QJsonArray proxies;
+        const QStringList lines = proxiesEd->toPlainText().split(QLatin1Char('\n'));
+        for (const QString &m : lines) {
+            const QString t = m.trimmed();
+            if (!t.isEmpty()) {
+                proxies.append(t);
+            }
+        }
+        obj["proxies"] = proxies;
+
+        QJsonArray current = loadRuleSection("area");
+        if (isEdit && editIndex >= 0 && editIndex < current.size()) {
+            current[editIndex] = obj;
+        } else {
+            current.append(obj);
+        }
+        saveRuleSection("area", current);
+        reloadRuleTable("area");
+        if (m_core) {
+            m_core->rebuildConfig();
+        }
+        appendLog(QString::fromUtf8("已保存区域分组并重建配置"));
         dialog->accept();
     });
     dialog->show();

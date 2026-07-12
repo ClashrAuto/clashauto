@@ -71,6 +71,7 @@ private:
     QWidget *buildRuleTableTab(const QString &section);
     void reloadRuleTable(const QString &section);
     void openRuleEditor(const QString &section, int editIndex);
+    void openAreaEditor(int editIndex); // 新增/编辑 default.yaml 里的代理组
     QString defaultConfigPath() const; // userDir/default.yaml：规则/分组的读写源
     QStringList proxyGroupNames() const; // 供规则「节点」下拉选择
     QJsonArray loadRuleSection(const QString &section) const;
