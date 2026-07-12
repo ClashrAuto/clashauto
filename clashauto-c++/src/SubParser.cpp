@@ -1,6 +1,7 @@
 #include "SubParser.h"
 
 #include <QByteArray>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
@@ -607,6 +608,262 @@ QString parseTuic(const QString &uri)
     return buildProxy(name, QStringLiteral("tuic"), server, QString::number(portNum), f);
 }
 
+// ---- sing-box JSON（Hiddify 等）→ Clash ------------------------------------
+
+QString sbAlpn(const QJsonArray &arr)
+{
+    if (arr.isEmpty()) {
+        return {};
+    }
+    QStringList out;
+    for (const QJsonValue &v : arr) {
+        out << yq(v.toString());
+    }
+    return '[' + out.join(QStringLiteral(", ")) + ']';
+}
+
+// sing-box transport.headers.Host 可能是字符串或字符串数组
+QString sbHeaderHost(const QJsonObject &headers)
+{
+    QJsonValue h = headers.value(QStringLiteral("Host"));
+    if (h.isUndefined()) {
+        h = headers.value(QStringLiteral("host"));
+    }
+    if (h.isString()) {
+        return h.toString();
+    }
+    if (h.isArray() && !h.toArray().isEmpty()) {
+        return h.toArray().first().toString();
+    }
+    return {};
+}
+
+// tls 对象 → tls/servername/skip-cert-verify/alpn/client-fingerprint/reality-opts（vmess/vless/trojan 用）
+void appendSbTls(QVector<Field> &f, const QJsonObject &tls)
+{
+    f.push_back({QStringLiteral("tls"), QStringLiteral("true")});
+    const QString sn = tls.value(QStringLiteral("server_name")).toString();
+    if (!sn.isEmpty()) {
+        f.push_back({QStringLiteral("servername"), yq(sn)});
+    }
+    if (tls.value(QStringLiteral("insecure")).toBool()) {
+        f.push_back({QStringLiteral("skip-cert-verify"), QStringLiteral("true")});
+    }
+    const QString a = sbAlpn(tls.value(QStringLiteral("alpn")).toArray());
+    if (!a.isEmpty()) {
+        f.push_back({QStringLiteral("alpn"), a});
+    }
+    const QString fp = tls.value(QStringLiteral("utls")).toObject().value(QStringLiteral("fingerprint")).toString();
+    if (!fp.isEmpty()) {
+        f.push_back({QStringLiteral("client-fingerprint"), fp});
+    }
+    const QJsonObject reality = tls.value(QStringLiteral("reality")).toObject();
+    if (reality.value(QStringLiteral("enabled")).toBool()) {
+        const QString pbk = reality.value(QStringLiteral("public_key")).toString();
+        const QString sid = reality.value(QStringLiteral("short_id")).toString();
+        if (!pbk.isEmpty()) {
+            QString ro = QStringLiteral("{public-key: ") + yq(pbk);
+            if (!sid.isEmpty()) {
+                ro += QStringLiteral(", short-id: ") + yq(sid);
+            }
+            ro += '}';
+            f.push_back({QStringLiteral("reality-opts"), ro});
+        }
+    }
+}
+
+void appendSbTransport(QVector<Field> &f, const QJsonObject &tr)
+{
+    const QString type = tr.value(QStringLiteral("type")).toString();
+    if (type.isEmpty() || type == QStringLiteral("tcp")) {
+        return;
+    }
+    const QString path = tr.value(QStringLiteral("path")).toString();
+    const QString host = sbHeaderHost(tr.value(QStringLiteral("headers")).toObject());
+    if (type == QStringLiteral("ws") || type == QStringLiteral("httpupgrade")) {
+        f.push_back({QStringLiteral("network"), QStringLiteral("ws")});
+        QString ws = QStringLiteral("{path: ") + yq(path.isEmpty() ? QStringLiteral("/") : path);
+        if (!host.isEmpty()) {
+            ws += QStringLiteral(", headers: {Host: ") + yq(host) + '}';
+        }
+        ws += '}';
+        f.push_back({QStringLiteral("ws-opts"), ws});
+    } else if (type == QStringLiteral("grpc")) {
+        f.push_back({QStringLiteral("network"), QStringLiteral("grpc")});
+        const QString svc = tr.value(QStringLiteral("service_name")).toString();
+        if (!svc.isEmpty()) {
+            f.push_back({QStringLiteral("grpc-opts"), QStringLiteral("{grpc-service-name: ") + yq(svc) + '}'});
+        }
+    } else if (type == QStringLiteral("http")) {
+        // sing-box 的 http transport 即 HTTP/2 → mihomo h2
+        f.push_back({QStringLiteral("network"), QStringLiteral("h2")});
+        QString h2 = QStringLiteral("{path: ") + yq(path.isEmpty() ? QStringLiteral("/") : path);
+        if (!host.isEmpty()) {
+            h2 += QStringLiteral(", host: [") + yq(host) + ']';
+        }
+        h2 += '}';
+        f.push_back({QStringLiteral("h2-opts"), h2});
+    }
+}
+
+// hy2/hysteria/tuic 恒 TLS：直接取 sni/skip-cert-verify/alpn（无独立 tls: 字段）
+void appendSbBareTls(QVector<Field> &f, const QJsonObject &tls)
+{
+    if (tls.isEmpty()) {
+        return;
+    }
+    const QString sn = tls.value(QStringLiteral("server_name")).toString();
+    if (!sn.isEmpty()) {
+        f.push_back({QStringLiteral("sni"), yq(sn)});
+    }
+    if (tls.value(QStringLiteral("insecure")).toBool()) {
+        f.push_back({QStringLiteral("skip-cert-verify"), QStringLiteral("true")});
+    }
+    const QString a = sbAlpn(tls.value(QStringLiteral("alpn")).toArray());
+    if (!a.isEmpty()) {
+        f.push_back({QStringLiteral("alpn"), a});
+    }
+}
+
+QString singBoxOutbound(const QJsonObject &o)
+{
+    const QString type = o.value(QStringLiteral("type")).toString();
+    const QString name = o.value(QStringLiteral("tag")).toString();
+    const QString server = o.value(QStringLiteral("server")).toString();
+    const int portNum = o.value(QStringLiteral("server_port")).toInt();
+    if (name.isEmpty() || server.isEmpty() || portNum <= 0) {
+        return {};
+    }
+    const QString port = QString::number(portNum);
+    const QJsonObject tls = o.value(QStringLiteral("tls")).toObject();
+    const bool tlsOn = tls.value(QStringLiteral("enabled")).toBool();
+    const QJsonObject tr = o.value(QStringLiteral("transport")).toObject();
+    QVector<Field> f;
+
+    if (type == QStringLiteral("shadowsocks")) {
+        f.push_back({QStringLiteral("cipher"), o.value(QStringLiteral("method")).toString()});
+        f.push_back({QStringLiteral("password"), yq(o.value(QStringLiteral("password")).toString())});
+        f.push_back({QStringLiteral("udp"), QStringLiteral("true")});
+        return buildProxy(name, QStringLiteral("ss"), server, port, f);
+    }
+    if (type == QStringLiteral("vmess")) {
+        f.push_back({QStringLiteral("uuid"), yq(o.value(QStringLiteral("uuid")).toString())});
+        f.push_back({QStringLiteral("alterId"), QString::number(o.value(QStringLiteral("alter_id")).toInt())});
+        const QString sec = o.value(QStringLiteral("security")).toString();
+        f.push_back({QStringLiteral("cipher"), sec.isEmpty() ? QStringLiteral("auto") : sec});
+        f.push_back({QStringLiteral("udp"), QStringLiteral("true")});
+        if (tlsOn) {
+            appendSbTls(f, tls);
+        }
+        appendSbTransport(f, tr);
+        return buildProxy(name, QStringLiteral("vmess"), server, port, f);
+    }
+    if (type == QStringLiteral("vless")) {
+        f.push_back({QStringLiteral("uuid"), yq(o.value(QStringLiteral("uuid")).toString())});
+        f.push_back({QStringLiteral("udp"), QStringLiteral("true")});
+        const QString flow = o.value(QStringLiteral("flow")).toString();
+        if (!flow.isEmpty()) {
+            f.push_back({QStringLiteral("flow"), flow});
+        }
+        const QString pe = o.value(QStringLiteral("packet_encoding")).toString();
+        if (!pe.isEmpty()) {
+            f.push_back({QStringLiteral("packet-encoding"), pe});
+        }
+        if (tlsOn) {
+            appendSbTls(f, tls);
+        }
+        appendSbTransport(f, tr);
+        return buildProxy(name, QStringLiteral("vless"), server, port, f);
+    }
+    if (type == QStringLiteral("trojan")) {
+        f.push_back({QStringLiteral("password"), yq(o.value(QStringLiteral("password")).toString())});
+        f.push_back({QStringLiteral("udp"), QStringLiteral("true")});
+        if (tlsOn) {
+            appendSbTls(f, tls);
+        }
+        appendSbTransport(f, tr);
+        return buildProxy(name, QStringLiteral("trojan"), server, port, f);
+    }
+    if (type == QStringLiteral("hysteria2")) {
+        f.push_back({QStringLiteral("password"), yq(o.value(QStringLiteral("password")).toString())});
+        const QJsonObject obfs = o.value(QStringLiteral("obfs")).toObject();
+        const QString ot = obfs.value(QStringLiteral("type")).toString();
+        if (!ot.isEmpty()) {
+            f.push_back({QStringLiteral("obfs"), ot});
+            const QString op = obfs.value(QStringLiteral("password")).toString();
+            if (!op.isEmpty()) {
+                f.push_back({QStringLiteral("obfs-password"), yq(op)});
+            }
+        }
+        const int up = o.value(QStringLiteral("up_mbps")).toInt();
+        if (up > 0) {
+            f.push_back({QStringLiteral("up"), yq(QString::number(up))});
+        }
+        const int down = o.value(QStringLiteral("down_mbps")).toInt();
+        if (down > 0) {
+            f.push_back({QStringLiteral("down"), yq(QString::number(down))});
+        }
+        appendSbBareTls(f, tls);
+        return buildProxy(name, QStringLiteral("hysteria2"), server, port, f);
+    }
+    if (type == QStringLiteral("hysteria")) {
+        f.push_back({QStringLiteral("auth-str"), yq(o.value(QStringLiteral("auth_str")).toString())});
+        const int up = o.value(QStringLiteral("up_mbps")).toInt();
+        if (up > 0) {
+            f.push_back({QStringLiteral("up"), yq(QString::number(up))});
+        }
+        const int down = o.value(QStringLiteral("down_mbps")).toInt();
+        if (down > 0) {
+            f.push_back({QStringLiteral("down"), yq(QString::number(down))});
+        }
+        const QString obfs = o.value(QStringLiteral("obfs")).toString();
+        if (!obfs.isEmpty()) {
+            f.push_back({QStringLiteral("obfs"), yq(obfs)});
+        }
+        f.push_back({QStringLiteral("protocol"), QStringLiteral("udp")});
+        appendSbBareTls(f, tls);
+        return buildProxy(name, QStringLiteral("hysteria"), server, port, f);
+    }
+    if (type == QStringLiteral("tuic")) {
+        f.push_back({QStringLiteral("uuid"), yq(o.value(QStringLiteral("uuid")).toString())});
+        const QString pw = o.value(QStringLiteral("password")).toString();
+        if (!pw.isEmpty()) {
+            f.push_back({QStringLiteral("password"), yq(pw)});
+        }
+        const QString cc = o.value(QStringLiteral("congestion_control")).toString();
+        if (!cc.isEmpty()) {
+            f.push_back({QStringLiteral("congestion-controller"), cc});
+        }
+        const QString urm = o.value(QStringLiteral("udp_relay_mode")).toString();
+        if (!urm.isEmpty()) {
+            f.push_back({QStringLiteral("udp-relay-mode"), urm});
+        }
+        if (o.value(QStringLiteral("zero_rtt_handshake")).toBool()) {
+            f.push_back({QStringLiteral("reduce-rtt"), QStringLiteral("true")});
+        }
+        appendSbBareTls(f, tls);
+        return buildProxy(name, QStringLiteral("tuic"), server, port, f);
+    }
+    return {}; // selector/urltest/direct/block/dns 及未支持类型 → 跳过
+}
+
+// 整个 sing-box 配置 → proxies: 块
+QString parseSingBox(const QJsonObject &root)
+{
+    const QJsonArray outs = root.value(QStringLiteral("outbounds")).toArray();
+    if (outs.isEmpty()) {
+        return {};
+    }
+    QString body;
+    for (const QJsonValue &v : outs) {
+        const QString node = singBoxOutbound(v.toObject());
+        if (!node.isEmpty()) {
+            body += node;
+        }
+    }
+    return body;
+}
+
 QString parseOne(const QString &uriRaw)
 {
     const QString uri = uriRaw.trimmed();
@@ -641,10 +898,27 @@ QString parseOne(const QString &uriRaw)
 
 QString SubParser::toClashProxies(const QString &rawContent)
 {
-    const QString trimmed = rawContent.trimmed();
+    QString trimmed = rawContent.trimmed();
+    // 去掉可能的 UTF-8 BOM（Hiddify 等返回的 JSON 带 BOM，会干扰 startsWith('{') 与 JSON 解析）
+    while (!trimmed.isEmpty() && trimmed.at(0) == QChar(0xFEFF)) {
+        trimmed.remove(0, 1);
+        trimmed = trimmed.trimmed();
+    }
     if (trimmed.isEmpty()) {
         return {};
     }
+
+    // sing-box JSON（Hiddify app=hiddify_app 等）：解析 outbounds → proxies:
+    if (trimmed.startsWith('{')) {
+        const QJsonDocument doc = QJsonDocument::fromJson(trimmed.toUtf8());
+        if (doc.isObject()) {
+            const QString body = parseSingBox(doc.object());
+            if (!body.isEmpty()) {
+                return QStringLiteral("proxies:\n") + body;
+            }
+        }
+    }
+
     // 已是 Clash YAML → 原样交给上层解析
     static const QRegularExpression proxiesKey(QStringLiteral("(?m)^\\s*proxies\\s*:"));
     if (proxiesKey.match(trimmed).hasMatch()) {
