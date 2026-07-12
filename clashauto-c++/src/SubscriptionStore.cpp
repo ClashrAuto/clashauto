@@ -1,5 +1,7 @@
 #include "SubscriptionStore.h"
 
+#include "SubParser.h"
+
 #include <QDir>
 #include <QFile>
 #include <QNetworkReply>
@@ -476,7 +478,12 @@ void SubscriptionStore::updateSubscription(int index)
 
     const QUrl url = effectiveUrl(summary);
     if (url.isValid() && (url.scheme() == "http" || url.scheme() == "https")) {
-        QNetworkReply *reply = m_network.get(QNetworkRequest(url));
+        QNetworkRequest request(url);
+        // 订阅服务器常按 UA 返回不同格式；用 clash 系 UA 避免被拦，且本地解析器同时兼容
+        // Clash YAML 与 base64 URI 列表两种响应。
+        request.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("clash.meta"));
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply *reply = m_network.get(request);
         connect(reply, &QNetworkReply::finished, this, [this, reply, index] {
             const QByteArray body = reply->readAll();
             const bool ok = reply->error() == QNetworkReply::NoError;
@@ -511,7 +518,10 @@ SubscriptionSummary SubscriptionStore::summaryAt(int index)
 void SubscriptionStore::updateSubscriptionFromText(int index, const QString &yaml)
 {
     int count = 0;
-    const QString nodeList = parseProxyList(yaml, existingNodeUseByEndpoint(index), existingNodeYamlByEndpoint(index), &count);
+    // 本地解析：把订阅原始内容（base64 URI 列表 / Clash YAML）转成 Clash proxies:，再抽取节点
+    const QString clash = SubParser::toClashProxies(yaml);
+    const QString source = clash.isEmpty() ? yaml : clash;
+    const QString nodeList = parseProxyList(source, existingNodeUseByEndpoint(index), existingNodeYamlByEndpoint(index), &count);
     if (count <= 0 || nodeList.trimmed().isEmpty()) {
         emit subscriptionUpdated(index, false, "No proxies found in subscription");
         return;
@@ -523,7 +533,9 @@ void SubscriptionStore::updateSubscriptionFromText(int index, const QString &yam
 bool SubscriptionStore::updateSubscriptionFromTextForTest(int index, const QString &yaml, QString *message)
 {
     int count = 0;
-    const QString nodeList = parseProxyList(yaml, existingNodeUseByEndpoint(index), existingNodeYamlByEndpoint(index), &count);
+    const QString clash = SubParser::toClashProxies(yaml);
+    const QString source = clash.isEmpty() ? yaml : clash;
+    const QString nodeList = parseProxyList(source, existingNodeUseByEndpoint(index), existingNodeYamlByEndpoint(index), &count);
     if (count <= 0 || nodeList.trimmed().isEmpty()) {
         if (message) {
             *message = "No proxies found in subscription";
@@ -544,33 +556,9 @@ QString SubscriptionStore::effectiveUrlForTest(int index)
 
 QUrl SubscriptionStore::effectiveUrl(const SubscriptionSummary &summary) const
 {
-    const QUrl original(summary.url);
-    const QString type = summary.type.trimmed().toLower();
-    if (!original.isValid() || (original.scheme() != "http" && original.scheme() != "https")) {
-        return original;
-    }
-    if (type == "clash") {
-        return original;
-    }
-
-    QUrl converted("https://api.v1.mk/sub");
-    QUrlQuery query;
-    query.addQueryItem("target", "clash");
-    query.addQueryItem("url", summary.url);
-    query.addQueryItem("insert", "true");
-    query.addQueryItem("config", "https://raw.githubusercontent.com/ACL4SSR/ACL4SSR/master/Clash/config/ACL4SSR_Online_Mini.ini");
-    query.addQueryItem("emoji", "true");
-    query.addQueryItem("list", "true");
-    query.addQueryItem("tfo", "false");
-    query.addQueryItem("scv", "false");
-    query.addQueryItem("fdn", "false");
-    query.addQueryItem("sort", "true");
-    query.addQueryItem("udp", "true");
-    query.addQueryItem("surge.doh", "true");
-    query.addQueryItem("clash.doh", "true");
-    query.addQueryItem("new_name", "true");
-    converted.setQuery(query);
-    return converted;
+    // 一律取订阅原始 URL 直接抓取，节点信息改为本地解析（SubParser），
+    // 不再经远程 subconverter（api.v1.mk）转换——更快、更隐私，也不依赖第三方服务。
+    return QUrl(summary.url);
 }
 
 QMap<QString, bool> SubscriptionStore::existingNodeUseByEndpoint(int index) const

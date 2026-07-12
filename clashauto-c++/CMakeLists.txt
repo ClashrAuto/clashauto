@@ -35,6 +35,8 @@ add_executable(clashauto-cpp
     src/ConfigBuilder.cpp
     src/SubscriptionStore.h
     src/SubscriptionStore.cpp
+    src/SubParser.h
+    src/SubParser.cpp
     resources.qrc
 )
 
