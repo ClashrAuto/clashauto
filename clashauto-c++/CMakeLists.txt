@@ -42,6 +42,8 @@ target_link_libraries(clashauto-cpp PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
     $<$<PLATFORM_ID:Windows>:dwmapi>
+    $<$<PLATFORM_ID:Windows>:shell32>   # ShellExecuteEx（runas 提权重启）
+    $<$<PLATFORM_ID:Windows>:advapi32>  # OpenProcessToken/GetTokenInformation（提权判定）
 )
 
 target_compile_options(clashauto-cpp PRIVATE

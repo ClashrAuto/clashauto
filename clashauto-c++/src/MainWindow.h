@@ -82,6 +82,11 @@ private:
     void registerUrlScheme();
     void updateMihomoCore(QPushButton *btn, bool useMirror); // 从 GitHub 下载最新 mihomo 内核并替换（useMirror=国内加速）
     QString extractCoreBinary(const QString &archivePath, const QString &tmpDir); // 解压 zip/gz 得到内核二进制
+    void onToggleTunRequested(); // 增强/TUN 开关入口：开启且非管理员时先提权（对齐旧项目按需提权）
+#if defined(Q_OS_WIN)
+    static bool isProcessElevated();     // 当前进程是否已提权（管理员）
+    void relaunchElevatedForTun();       // 以管理员身份重启自身并带 --tun-elevated
+#endif
 
     ClashService m_service;
     QStackedWidget *m_pages = nullptr;

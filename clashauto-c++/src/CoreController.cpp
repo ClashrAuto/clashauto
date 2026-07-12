@@ -153,6 +153,24 @@ void CoreController::stopCore()
     emitStatus();
 }
 
+void CoreController::setTunEnabled(bool enabled)
+{
+    // 仅置位，不重载：核心还没起时用它预置 TUN，随后 startCore() 会按此写入 full.yaml
+    m_tunEnabled = enabled;
+}
+
+void CoreController::killCoreNow()
+{
+    // 硬杀：mihomo 是无窗口控制台程序，terminate() 的 WM_CLOSE 对它无效，只能 kill()。
+    // 提权重启时用它立刻释放 9090 与系统代理，避免与新（提权）实例的核心抢端口。
+    stopProxy();
+    if (isRunning()) {
+        m_core.kill();
+        m_core.waitForFinished(1500);
+    }
+    emitStatus();
+}
+
 void CoreController::toggleCore()
 {
     isRunning() ? stopCore() : startCore();

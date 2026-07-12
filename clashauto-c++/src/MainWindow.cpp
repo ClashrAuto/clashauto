@@ -66,6 +66,7 @@
 #include <QUrlQuery>
 #include <QVBoxLayout>
 
+#include <functional>
 #include <utility>
 
 #if defined(Q_OS_WIN)
@@ -78,6 +79,7 @@
 #include <windows.h>
 #include <windowsx.h> // GET_X_LPARAM / GET_Y_LPARAM
 #include <dwmapi.h>   // DwmSetWindowAttribute（系统标题栏着色）
+#include <shellapi.h> // ShellExecuteEx（runas 提权重启）
 #endif
 
 // Version.h 由 CMake 从 src/Version.h.in 生成（CI 用 major.minor.<提交数>）
@@ -459,7 +461,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     });
     connect(m_tray, &TrayController::toggleCoreRequested, m_core, &CoreController::toggleCore);
     connect(m_tray, &TrayController::toggleProxyRequested, m_core, &CoreController::toggleProxy);
-    connect(m_tray, &TrayController::toggleTunRequested, m_core, &CoreController::toggleTun);
+    connect(m_tray, &TrayController::toggleTunRequested, this, &MainWindow::onToggleTunRequested);
     connect(m_subscriptions, &SubscriptionStore::subscriptionUpdated, this, [this](int, bool ok, const QString &message) {
         appendLog(message);
         reloadSubscriptions();
@@ -469,6 +471,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     });
 
     m_service.start();
+
+#if defined(Q_OS_WIN)
+    // 由「增强」提权重启而来：等旧实例硬杀核心、释放 9090/系统代理并退出后，带 TUN 冷启动核心。
+    if (QCoreApplication::arguments().contains(QStringLiteral("--tun-elevated"))) {
+        QTimer::singleShot(1000, this, [this] {
+            if (m_core && !m_core->isRunning()) {
+                m_core->setTunEnabled(true);
+                m_core->startCore();
+                appendLog(QString::fromUtf8("已以管理员身份重启，正在开启增强(TUN)模式"));
+            }
+        });
+    }
+#endif
 }
 
 QWidget *MainWindow::buildTitleBar()
@@ -1830,7 +1845,7 @@ QWidget *MainWindow::buildFooter()
     layout->addWidget(footerArrow);
     layout->addWidget(m_logLabel, 1);
 
-    auto addSwitch = [&](const QString &text, QWidget **dot, auto slot) {
+    auto addSwitch = [&](const QString &text, QWidget **dot, std::function<void()> onClick) {
         auto *button = new QPushButton(text, footer);
         button->setObjectName("switchButton");
         *dot = createSwitchDot(false);
@@ -1839,13 +1854,14 @@ QWidget *MainWindow::buildFooter()
         buttonLayout->setSpacing(5);
         buttonLayout->addWidget(*dot);
         buttonLayout->addStretch();
-        connect(button, &QPushButton::clicked, m_core, slot);
+        connect(button, &QPushButton::clicked, this, [onClick] { onClick(); });
         layout->addWidget(button);
     };
 
-    addSwitch("增强", &m_tunDot, &CoreController::toggleTun);
-    addSwitch("网页", &m_proxyDot, &CoreController::toggleProxy);
-    addSwitch("核心", &m_coreDot, &CoreController::toggleCore);
+    // 增强(TUN) 走 onToggleTunRequested：需要管理员权限，非提权时先弹 UAC 提权重启
+    addSwitch("增强", &m_tunDot, [this] { onToggleTunRequested(); });
+    addSwitch("网页", &m_proxyDot, [this] { if (m_core) m_core->toggleProxy(); });
+    addSwitch("核心", &m_coreDot, [this] { if (m_core) m_core->toggleCore(); });
 
     auto *mode = new QComboBox(footer);
     mode->addItems({QString::fromUtf8("规则"), QString::fromUtf8("全局"), QString::fromUtf8("直连")});
@@ -3209,3 +3225,71 @@ void MainWindow::applyTitleBarColor()
     DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
 #endif
 }
+
+void MainWindow::onToggleTunRequested()
+{
+    if (!m_core) {
+        return;
+    }
+#if defined(Q_OS_WIN)
+    // 增强(TUN) 需要管理员权限创建虚拟网卡：若正要开启且当前非提权，先以管理员身份重启自身
+    // （对齐旧项目 runAsRoot → restart 的「按需提权」）。关闭 TUN 或已提权时走正常热重载。
+    const bool turningOn = !m_core->isTunEnabled();
+    if (turningOn && !isProcessElevated()) {
+        relaunchElevatedForTun();
+        return;
+    }
+#endif
+    m_core->toggleTun();
+}
+
+#if defined(Q_OS_WIN)
+bool MainWindow::isProcessElevated()
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        return false;
+    }
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const bool ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size);
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated != 0;
+}
+
+void MainWindow::relaunchElevatedForTun()
+{
+    const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    const std::wstring exeW = exe.toStdWString();
+    const std::wstring paramsW = L"--tun-elevated";
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    // NOASYNC：本线程随后即退出，必须等 shell 操作（含 UAC）完成再返回，否则可能启动不了
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    sei.lpVerb = L"runas"; // 触发 UAC 以管理员身份运行
+    sei.lpFile = exeW.c_str();
+    sei.lpParameters = paramsW.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+
+    if (ShellExecuteExW(&sei)) {
+        if (sei.hProcess) {
+            CloseHandle(sei.hProcess);
+        }
+        // 提权实例已启动：立即硬杀本(非提权)核心并还原系统代理，把 9090/代理让给新实例，再退出。
+        m_core->killCoreNow();
+        qApp->quit();
+    } else {
+        const DWORD err = GetLastError();
+        if (err == ERROR_CANCELLED) {
+            appendLog(QString::fromUtf8("增强(TUN) 需要管理员权限：已取消授权，未开启"));
+            if (m_tray) {
+                m_tray->notify(QString::fromUtf8("增强模式"),
+                               QString::fromUtf8("需要管理员权限，已取消授权，未开启"));
+            }
+        } else {
+            appendLog(QString::fromUtf8("增强(TUN) 提权失败（错误码 %1）").arg(err));
+        }
+    }
+}
+#endif

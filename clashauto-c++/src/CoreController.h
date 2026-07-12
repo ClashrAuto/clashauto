@@ -18,6 +18,11 @@ public:
     bool isProxyEnabled() const;
     bool isTunEnabled() const;
 
+    // 设置 TUN 标志但不重载（用于核心尚未启动时预置状态，例如提权重启后带 TUN 冷启动）
+    void setTunEnabled(bool enabled);
+    // 立即硬杀核心并还原系统代理（提权重启时用，避免旧核心占用 9090 与新实例冲突）
+    void killCoreNow();
+
 public slots:
     void startCore();
     void stopCore();

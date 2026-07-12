@@ -11,6 +11,7 @@
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QTextStream>
+#include <QThread>
 
 #if defined(Q_OS_WIN)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -147,9 +148,13 @@ int main(int argc, char *argv[])
         }
     }
 
+    // 提权重启（--tun-elevated）：跳过单实例转发探测，否则会连到正在退出的旧(非提权)实例
+    // 并把自己当成二次启动直接退出，导致提权实例起不来。
+    const bool elevatedRestart = app.arguments().contains("--tun-elevated");
+
     // 单实例 + 链接转发：能连上已运行实例就把链接发过去并退出（CLI 子命令不受此限制）
     const QString serverName = "clashauto-cpp-singleton";
-    {
+    if (!elevatedRestart) {
         QLocalSocket probe;
         probe.connectToServer(serverName);
         if (probe.waitForConnected(300)) {
@@ -165,6 +170,15 @@ int main(int argc, char *argv[])
     QLocalServer::removeServer(serverName);
     QLocalServer server;
     server.listen(serverName);
+    // 提权重启时旧(非提权)实例可能还没退出、仍占用命名管道 → listen 失败；短暂重试直到它释放，
+    // 保证提权实例也能建起单实例服务器（否则后续链接转发/防重复启动会失效）。
+    if (elevatedRestart) {
+        for (int i = 0; i < 10 && !server.isListening(); ++i) {
+            QThread::msleep(150);
+            QLocalServer::removeServer(serverName);
+            server.listen(serverName);
+        }
+    }
 
     QFont font("Microsoft YaHei UI");
     app.setFont(font);
