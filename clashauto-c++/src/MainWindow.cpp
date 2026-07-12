@@ -922,12 +922,6 @@ QWidget *MainWindow::buildSettingsPage()
                           .arg(QString::number(saved), QString::number(data.size() / 1024)));
         });
     });
-    auto *coreBtn = new QPushButton(QString::fromUtf8("更新内核"));
-    coreBtn->setObjectName("nodeButton");
-    coreBtn->setFixedSize(110, 30);
-    coreBtn->setToolTip(QString::fromUtf8("从 GitHub 获取最新 mihomo 内核并替换"));
-    connect(coreBtn, &QPushButton::clicked, this, [this, coreBtn] { updateMihomoCore(coreBtn); });
-
     auto *theme = new QComboBox();
     theme->addItems({QString::fromUtf8("黑色"), QString::fromUtf8("白色")});
     theme->setFixedWidth(200);
@@ -952,20 +946,8 @@ QWidget *MainWindow::buildSettingsPage()
         return r;
     };
 
-    // Tab 1: 远程
-    auto *remote = new QWidget(tabs);
-    auto *remoteLayout = new QVBoxLayout(remote);
-    remoteLayout->setContentsMargins(10, 16, 10, 10);
-    remoteLayout->setSpacing(8);
-    auto *remoteTitle = new QLabel(QString::fromUtf8("远程 API 地址"), remote);
-    remoteTitle->setObjectName("settingGroupTitle");
-    remoteLayout->addWidget(remoteTitle);
-    host->setMinimumWidth(300);
-    remoteLayout->addWidget(row(QString::fromUtf8("Host"), host));
-    remoteLayout->addStretch();
-    tabs->addTab(remote, QString::fromUtf8("远程"));
-
-    // Tab 2: 过滤
+    // 对齐旧项目：设置页仅 4 个 tab（过滤/区域/规则/系统）；原「远程」的 Host 并入系统 tab 内核分组
+    // Tab 1: 过滤
     auto *filter = new QWidget(tabs);
     auto *filterLayout = new QVBoxLayout(filter);
     filterLayout->setContentsMargins(10, 16, 10, 10);
@@ -1004,78 +986,42 @@ QWidget *MainWindow::buildSettingsPage()
         d->setFixedHeight(12);
         sysLayout->addWidget(d);
     };
-    addGroup(QString::fromUtf8("界面"));
-    sysLayout->addWidget(row(QString::fromUtf8("主题"), theme));
-    sysLayout->addWidget(row(QString::fromUtf8("跟随系统深浅色"), autoTheme));
-    sysLayout->addWidget(row(QString::fromUtf8("语言"), language));
+    // 分组与项目严格对齐旧项目 setting.vue 系统 tab（system/node/note/increase/ui/core/other）
+    addGroup(QString::fromUtf8("系统"));
+    sysLayout->addWidget(row(QString::fromUtf8("开机自启"), autoStart));
+    sysLayout->addWidget(row(QString::fromUtf8("关闭到托盘"), closeToTray));
     addDivider();
     addGroup(QString::fromUtf8("节点"));
     sysLayout->addWidget(row(QString::fromUtf8("仅可用节点"), nodeOnly));
     sysLayout->addWidget(row(QString::fromUtf8("增量更新"), increment));
+    addDivider();
+    addGroup(QString::fromUtf8("通知"));
     sysLayout->addWidget(row(QString::fromUtf8("切换通知"), nodeNote));
-    sysLayout->addWidget(row(QString::fromUtf8("订阅自动更新(默认)"), autoUpdateSpin));
+    addDivider();
+    addGroup(QString::fromUtf8("增强"));
+    sysLayout->addWidget(row(QString::fromUtf8("系统代理"), webProxy));
+    sysLayout->addWidget(row(QString::fromUtf8("GeoIP 数据"), geoipBtn));
+    addDivider();
+    addGroup(QString::fromUtf8("界面"));
+    sysLayout->addWidget(row(QString::fromUtf8("主题"), theme));
+    sysLayout->addWidget(row(QString::fromUtf8("跟随系统深浅色"), autoTheme));
     addDivider();
     addGroup(QString::fromUtf8("内核"));
-    sysLayout->addWidget(row(QString::fromUtf8("API 端口"), uiPort));
-    sysLayout->addWidget(row(QString::fromUtf8("混合端口"), mixedPort));
-    sysLayout->addWidget(row(QString::fromUtf8("TUN"), tun));
-    sysLayout->addWidget(row(QString::fromUtf8("系统代理"), webProxy));
+    host->setMinimumWidth(200);
+    sysLayout->addWidget(row(QString::fromUtf8("Host"), host));       // 原「远程」tab 的 Host 并入此处
+    sysLayout->addWidget(row(QString::fromUtf8("端口"), mixedPort));  // http(s)&socks 混合端口
     sysLayout->addWidget(row(QString::fromUtf8("切换时清理连接"), clearConnections));
-    sysLayout->addWidget(row(QString::fromUtf8("GeoIP 数据"), geoipBtn));
-    sysLayout->addWidget(row(QString::fromUtf8("mihomo 内核"), coreBtn));
-    addDivider();
-    addGroup(QString::fromUtf8("托盘 / 启动"));
-    sysLayout->addWidget(row(QString::fromUtf8("关闭到托盘"), closeToTray));
-    sysLayout->addWidget(row(QString::fromUtf8("开机自启"), autoStart));
     addDivider();
     addGroup(QString::fromUtf8("其他"));
-    // 旧项目系统页的工具：打开配置目录 / 导出节点 / 打开面板
-    auto *openCfgBtn = new QPushButton(QString::fromUtf8("打开配置目录"));
-    openCfgBtn->setObjectName("nodeButton");
-    openCfgBtn->setFixedSize(120, 30);
-    connect(openCfgBtn, &QPushButton::clicked, this, [this] {
-        QDesktopServices::openUrl(QUrl::fromLocalFile(m_userDir));
-    });
-    auto *exportBtn = new QPushButton(QString::fromUtf8("导出节点"));
-    exportBtn->setObjectName("nodeButton");
-    exportBtn->setFixedSize(120, 30);
-    connect(exportBtn, &QPushButton::clicked, this, [this] {
-        if (m_currentNodes.isEmpty()) {
-            appendLog(QString::fromUtf8("当前无节点可导出（请先在状态页加载节点）"));
-            return;
-        }
-        QJsonArray arr;
-        for (const NodeInfo &n : m_currentNodes) {
-            arr.append(QJsonObject{{"name", n.name}, {"delay", n.delay}});
-        }
-        QJsonObject exp;
-        exp.insert("selected", m_selectedNode);
-        exp.insert("nodes", arr);
-        QString dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-        if (dir.isEmpty()) {
-            dir = QDir::homePath();
-        }
-        const QString path = QDir(dir).filePath("clashauto-nodes.json");
-        QFile file(path);
-        if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            file.write(QJsonDocument(exp).toJson(QJsonDocument::Indented));
-            file.close();
-            appendLog(QString::fromUtf8("已导出 %1 个节点: %2").arg(QString::number(m_currentNodes.size()), path));
-            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
-        } else {
-            appendLog(QString::fromUtf8("导出失败: %1").arg(path));
-        }
-    });
-    auto *openDashBtn = new QPushButton(QString::fromUtf8("打开面板"));
-    openDashBtn->setObjectName("nodeButton");
-    openDashBtn->setFixedSize(120, 30);
-    connect(openDashBtn, &QPushButton::clicked, this, [host = config.host, port = config.uiPort] {
-        QDesktopServices::openUrl(
-            QUrl(QString("https://yacd.metacubex.one/?hostname=%1&port=%2").arg(host).arg(port)));
-    });
-    sysLayout->addWidget(row(QString::fromUtf8("配置目录"), openCfgBtn));
-    sysLayout->addWidget(row(QString::fromUtf8("节点导出"), exportBtn));
-    sysLayout->addWidget(row(QString::fromUtf8("Clash 面板"), openDashBtn));
+    sysLayout->addWidget(row(QString::fromUtf8("语言"), language));
+    // 以下项已按旧项目从界面移除（API 端口固定、TUN 由底部开关控制、订阅周期用默认），
+    // 但控件仍存活以便「应用」时把原值写回，避免重置。
+    uiPort->setParent(sysBody);
+    uiPort->hide();
+    tun->setParent(sysBody);
+    tun->hide();
+    autoUpdateSpin->setParent(sysBody);
+    autoUpdateSpin->hide();
     sysLayout->addStretch();
     systemScroll->setWidget(sysBody);
     tabs->addTab(systemScroll, QString::fromUtf8("系统"));
