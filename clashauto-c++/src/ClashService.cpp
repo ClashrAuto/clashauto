@@ -180,7 +180,7 @@ void ClashService::testNodeDelays(const QStringList &names)
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
         request.setTransferTimeout(9000); // 略大于核心侧 5s，避免任何一条延迟请求挂死占用连接槽
 #endif
-        QNetworkReply *reply = m_network.get(request);
+        QNetworkReply *reply = m_delayNetwork.get(request); // 专用连接池，不挤占轮询/切换
         connect(reply, &QNetworkReply::finished, this, [this, reply, pending] {
             reply->deleteLater();
             if (--(*pending) <= 0) {
@@ -403,12 +403,14 @@ void ClashService::sendGet(const QUrl &url, std::function<void(const QJsonDocume
     QNetworkReply *reply = m_network.get(request);
     connect(reply, &QNetworkReply::finished, this, [this, reply, onJson = std::move(onJson)] {
         const QByteArray body = reply->readAll();
-        const bool ok = reply->error() == QNetworkReply::NoError;
+        const QNetworkReply::NetworkError err = reply->error();
         reply->deleteLater();
 
-        if (!ok) {
-            if (body.isEmpty()) {
-                // 核心未启动/连不上：显示真实的空状态（清零、无节点），不再输出随机演示数据
+        if (err != QNetworkReply::NoError) {
+            // 只有「核心确实连不上」(连接被拒/对端关闭) 才清空 UI 并允许下次自动测延迟。
+            // 请求超时/被取消(连接池一时繁忙)不代表核心掉线——若在此清空列表或重置 m_autoTested，
+            // 会造成「列表闪空」以及与自动测延迟的死循环（超时→重置→再测→占满池→再超时）。
+            if (err == QNetworkReply::ConnectionRefusedError || err == QNetworkReply::RemoteHostClosedError) {
                 emit trafficUpdated(0, 0);
                 emit connectionsUpdated(0, 0);
                 emit nodesUpdated({}, QString());

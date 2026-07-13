@@ -66,6 +66,8 @@ private:
     void sendDelete(const QUrl &url, std::function<void(bool, QString)> onDone);
 
     QNetworkAccessManager m_network;
+    QNetworkAccessManager m_delayNetwork;    // 延迟测速专用：与轮询/切换分开连接池，避免 63 个测速请求
+                                             // 占满 6 连接/主机导致 pollNodes/selectNode 排队卡住
     QNetworkReply *m_trafficReply = nullptr; // 常开的 /traffic 流；nullptr 表示未连/已断
     QTimer m_trafficTimer;                    // 看门狗：定期确保 /traffic 流还活着，断了就重连
     QTimer m_connectionsTimer;

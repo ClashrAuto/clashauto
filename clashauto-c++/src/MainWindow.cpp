@@ -3268,7 +3268,13 @@ void MainWindow::beginNodeSwitch(const QString &target)
     if (m_spinnerTimer) {
         m_spinnerTimer->start(120);
     }
-    populateNodeList(); // 立即重画：目标按钮转圈、其余全部禁用（对齐旧项目 disableLoading）
+    // 延后重画：此刻正处在「被点按钮」的 clicked 槽内，直接 populateNodeList 会 delete 掉这个按钮
+    // ——删除正在发信号的对象是未定义行为。放到下一轮事件循环再重画即安全（目标转圈、其余禁用）。
+    QTimer::singleShot(0, this, [this] {
+        if (m_nodeSwitching) {
+            populateNodeList();
+        }
+    });
     // 兜底：6s 内未确认（PUT 失败/网络异常）自动解除，避免按钮永久卡在加载态
     QTimer::singleShot(6000, this, [this, target] {
         if (m_nodeSwitching && m_nodeSwitchTarget == target) {
