@@ -103,7 +103,6 @@ constexpr int MainHeight = 510;
 // UI 尺寸对齐旧项目实测值（见 docs/legacy-ui-spec.md）
 constexpr int MenuSpacing = 5;    // 菜单项 margin-bottom
 constexpr int MetricGutter = 10;  // 流量卡网格 gutter（旧值 16）
-constexpr int DelayBadgeW = 120;  // 节点速度/延迟列宽（旧值 104）
 
 // 日志时间线左侧「圆点 + 竖轴线」——复刻 el-timeline 视觉
 class TimelineRail : public QWidget
@@ -1981,12 +1980,11 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     name->setFullText(display); // 超出列宽用「…」省略，完整名进 tooltip
     layout->addWidget(name, 1);
 
-    // 速度/延迟：内容大小的药丸，右对齐在 120px 列内（对应旧项目 span width:120px + 内层 padding 徽标）
+    // 速度/延迟药丸：内容大小、不再占固定 120px 列——名称(stretch)因此能一直伸到药丸左侧，
+    // 消除名称与延迟标签间的空隙；名称列宽自适应，各行药丸右缘仍对齐（在「应用」按钮前）。
     auto *badgeWrap = new QWidget(row);
-    badgeWrap->setFixedWidth(DelayBadgeW);
     auto *badgeLayout = new QHBoxLayout(badgeWrap);
     badgeLayout->setContentsMargins(0, 0, 0, 0);
-    badgeLayout->addStretch();
     auto *delay = new QLabel(QString("%1/%2").arg(speedText(node.speed), node.delay == 0 ? "-" : QString::number(node.delay)), badgeWrap);
     delay->setObjectName("delayBadge");
     delay->setStyleSheet(QString("background:%1;").arg(delayColor(node.delay).name(QColor::HexArgb)));
