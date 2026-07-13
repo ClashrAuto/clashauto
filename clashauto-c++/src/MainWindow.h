@@ -145,6 +145,7 @@ private:
     // 切换加载态（对齐旧项目 disableLoading）：点应用/禁用后，目标按钮转圈、其余按钮禁用，
     // 直到轮询确认「当前节点==目标」或超时才解除（防重入、给用户明确反馈）
     bool m_nodeSwitching = false;
+    bool m_speedTesting = false;                       // 下载测速进行中：测速按钮禁用+显示⏳，忽略重复点击
     QString m_nodeSwitchTarget;                       // 被点击的节点名（该按钮转圈）
     QString m_nodeSwitchFrom;                          // 点击前的活动节点；当前活动 != 它即视为切换完成
     QPointer<QPushButton> m_spinnerButton;            // 正在转圈的目标按钮

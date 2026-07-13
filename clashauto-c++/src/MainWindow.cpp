@@ -330,6 +330,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_subscriptions = new SubscriptionStore(config, this);
     registerUrlScheme();
     m_service.setEndpoint(config.host, config.uiPort); // 让轮询/切换走配置里的 API 端口（默认 9191）
+    m_service.setMixedPort(config.mixedPort);          // 下载测速经此混合端口走代理
     m_service.setClearConnectionsOnSwitch(config.clearConnections);
     // 切换加载态的转圈动画：只更新那个目标按钮的文字，不整表重建
     m_spinnerTimer = new QTimer(this);
@@ -758,9 +759,21 @@ QWidget *MainWindow::buildStatusPage()
     });
     connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { populateNodeList(); });
     connect(speedTest, &QPushButton::clicked, this, [this] {
-        appendLog(QString::fromUtf8("开始测速..."));
+        if (m_speedTesting) {
+            return; // 测速进行中：忽略重复点击
+        }
+        appendLog(QString::fromUtf8("开始测速（先测延迟，再对有效节点测下载速度）..."));
         m_service.refreshNodes();
-        m_service.testDelays();
+        m_service.testDelays(/*thenSpeed=*/true); // 延迟测完 → 有效延迟节点逐个测下载速度（并发 5）
+    });
+    // 测速进行中：按钮转为「⏳」并禁用，结束后复位为「↻」——给用户明确的进行/完成反馈
+    connect(&m_service, &ClashService::speedTestRunning, this, [this, speedTest](bool running) {
+        m_speedTesting = running;
+        speedTest->setEnabled(!running);
+        speedTest->setText(running ? QString::fromUtf8("⏳") : QString(QChar(0x21BB)));
+        if (!running && !m_nodeSwitching) {
+            populateNodeList(); // 测速结束整表重排一次，让实测更快的节点按速度冒泡到顶部
+        }
     });
     connect(helpBtn, &QPushButton::clicked, this, [] {
         QDesktopServices::openUrl(QUrl("https://clashr-auto.gitbook.io"));
@@ -1241,6 +1254,10 @@ QWidget *MainWindow::buildSettingsPage()
         if (portChanged) {
             m_core->setUiPort(newPort);
             m_service.setEndpoint(host->currentText().trimmed(), newPort);
+        }
+        const int newMixedPort = mixedPort->text().trimmed().toInt();
+        if (newMixedPort > 0) {
+            m_service.setMixedPort(newMixedPort); // 混合端口改了：下载测速也走新端口
         }
         if (portChanged && m_core->isRunning()) {
             m_core->stopCore();
