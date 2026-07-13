@@ -648,9 +648,17 @@ QWidget *MainWindow::buildSidebar()
     layout->addLayout(menuLayout);
     layout->addStretch();
 
-    auto *version = new QLabel("Ver: " APP_VERSION, side);
+    // 侧栏版本行：平时灰色显示当前版本、点击即检查更新；发现新版本时由 checkForUpdate 改成红色提示。
+    // （之前这里是个临时局部量、从不更新，所以「有新版本」提示永远出不来——存成成员即可原地刷新。）
+    auto *version = new QLabel(side);
     version->setObjectName("version");
     version->setAlignment(Qt::AlignCenter);
+    version->setTextFormat(Qt::RichText);
+    version->setText(QString("<a href='update' style='color:#666;text-decoration:none;'>Ver: %1</a>")
+                         .arg(QString::fromUtf8(APP_VERSION)));
+    version->setToolTip(QString::fromUtf8("点击检查更新"));
+    connect(version, &QLabel::linkActivated, this, [this](const QString &) { checkForUpdate(false); });
+    m_sidebarVersionLabel = version; // 供 checkForUpdate 发现新版本时改红提示
     layout->addWidget(version);
     return side;
 }
@@ -2772,6 +2780,10 @@ void MainWindow::checkForUpdate(bool silent)
             if (m_versionLabel) {
                 m_versionLabel->setText(QString("Clash Auto: <a href='update' style='color:red;font-weight:bold;text-decoration:none;'>%1 → %2 有新版本</a>").arg(local, tag));
                 m_versionLabel->setToolTip(QString::fromUtf8("发现新版本 %1，点击查看/下载").arg(tag));
+            }
+            if (m_sidebarVersionLabel) { // 侧栏版本行变红并加上 ⬆，点击走同一检查/更新流程
+                m_sidebarVersionLabel->setText(QString("<a href='update' style='color:#ff5252;font-weight:bold;text-decoration:none;'>Ver: %1 ⬆</a>").arg(local));
+                m_sidebarVersionLabel->setToolTip(QString::fromUtf8("发现新版本 %1，点击查看/下载").arg(tag));
             }
             if (m_tray) {
                 m_tray->notify(QString::fromUtf8("发现新版本"), QString::fromUtf8("%1 可更新（当前 %2）").arg(tag, local));

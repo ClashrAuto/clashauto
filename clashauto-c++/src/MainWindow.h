@@ -119,6 +119,7 @@ private:
     QString m_logFilePath;
     QLabel *m_usersLabel = nullptr;
     QLabel *m_versionLabel = nullptr; // 关于页版本行；发现新版本时高亮提示
+    QLabel *m_sidebarVersionLabel = nullptr; // 侧栏底部版本行；发现新版本时变红提示（点击检查/更新）
     QWidget *m_tunDot = nullptr; // BreathingDot（自绘呼吸圆点）
     QWidget *m_proxyDot = nullptr;
     QWidget *m_coreDot = nullptr;
