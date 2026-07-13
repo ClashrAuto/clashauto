@@ -47,6 +47,7 @@
 #include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSet>
 #include <QSettings>
 #include <QShowEvent>
 #include <QTimer>
@@ -82,6 +83,7 @@
 #include <windowsx.h> // GET_X_LPARAM / GET_Y_LPARAM
 #include <dwmapi.h>   // DwmSetWindowAttribute（系统标题栏着色）
 #include <shellapi.h> // ShellExecuteEx（runas 提权重启）
+#include <tlhelp32.h> // CreateToolhelp32Snapshot（枚举运行中的进程，供 PROCESS 规则值下拉）
 #endif
 
 // Version.h 由 CMake 从 src/Version.h.in 生成（CI 用 major.minor.<提交数>）
@@ -1691,6 +1693,64 @@ void MainWindow::reloadRuleTable(const QString &section)
     }
 }
 
+namespace {
+// 枚举当前运行的进程，去重+排序后返回：wantPath=false 取进程名(chrome.exe)，true 取可执行完整路径。
+// 供「规则」编辑器里 PROCESS-NAME / PROCESS-PATH 的「值」下拉。Windows 用 Toolhelp 快照（无需提权）；
+// 其它平台退回 `ps`（CI 的 Linux 构建需能编译）。
+QStringList processChoices(bool wantPath)
+{
+    QStringList list;
+    QSet<QString> seen;
+#if defined(Q_OS_WIN)
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry;
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snap, &entry)) {
+            do {
+                QString value;
+                if (!wantPath) {
+                    value = QString::fromWCharArray(entry.szExeFile);
+                } else {
+                    // 完整路径需 OpenProcess；受保护/系统进程可能失败，失败则跳过该项。
+                    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
+                    if (proc) {
+                        wchar_t buf[MAX_PATH];
+                        DWORD sz = MAX_PATH;
+                        if (QueryFullProcessImageNameW(proc, 0, buf, &sz)) {
+                            value = QString::fromWCharArray(buf, static_cast<int>(sz));
+                        }
+                        CloseHandle(proc);
+                    }
+                }
+                if (!value.isEmpty() && !seen.contains(value)) {
+                    seen.insert(value);
+                    list << value;
+                }
+            } while (Process32NextW(snap, &entry));
+        }
+        CloseHandle(snap);
+    }
+#else
+    QProcess ps;
+    ps.start(QStringLiteral("ps"), {QStringLiteral("-eo"), QStringLiteral("comm=")});
+    if (ps.waitForFinished(3000)) {
+        const QList<QByteArray> lines = ps.readAllStandardOutput().split('\n');
+        for (const QByteArray &l : lines) {
+            const QString p = QString::fromUtf8(l).trimmed();
+            const QString value = wantPath ? p : QFileInfo(p).fileName();
+            if (!value.isEmpty() && !seen.contains(value)) {
+                seen.insert(value);
+                list << value;
+            }
+        }
+    }
+#endif
+    list.sort(Qt::CaseInsensitive);
+    return list;
+}
+} // namespace
+
 void MainWindow::openRuleEditor(const QString &section, int editIndex)
 {
     // 区域只读，此编辑器仅用于「规则」的增/改
@@ -1706,14 +1766,51 @@ void MainWindow::openRuleEditor(const QString &section, int editIndex)
     dl->setContentsMargins(12, 12, 12, 12);
     dl->setSpacing(6);
 
-    dl->addWidget(new QLabel(QString::fromUtf8("类型 (DOMAIN-SUFFIX / IP-CIDR / MATCH ...)"), dialog));
-    auto *typeEd = new QLineEdit(cur.value("type").toString(), dialog);
-    typeEd->setPlaceholderText("DOMAIN-SUFFIX");
-    dl->addWidget(typeEd);
+    dl->addWidget(new QLabel(QString::fromUtf8("类型"), dialog));
+    auto *typeBox = new QComboBox(dialog);
+    typeBox->setEditable(true); // 预置常用类型，也允许手输自定义类型
+    typeBox->addItems({"DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD", "DOMAIN-REGEX",
+                       "IP-CIDR", "IP-CIDR6", "GEOIP", "GEOSITE", "IP-ASN",
+                       "SRC-IP-CIDR", "SRC-PORT", "DST-PORT",
+                       "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"});
+    typeBox->setCurrentText(cur.value("type").toString().isEmpty() ? QStringLiteral("DOMAIN-SUFFIX")
+                                                                   : cur.value("type").toString());
+    dl->addWidget(typeBox);
 
-    dl->addWidget(new QLabel(QString::fromUtf8("值 (域名 / IP 段；MATCH 留空)"), dialog));
-    auto *valueEd = new QLineEdit(cur.value("value").toString(), dialog);
-    dl->addWidget(valueEd);
+    dl->addWidget(new QLabel(QString::fromUtf8("值 (域名 / IP 段；进程规则从下拉选运行中的进程；MATCH 留空)"), dialog));
+    auto *valueBox = new QComboBox(dialog);
+    valueBox->setEditable(true); // 可下拉选、也可手输
+    valueBox->setInsertPolicy(QComboBox::NoInsert);
+    valueBox->setCurrentText(cur.value("value").toString());
+    dl->addWidget(valueBox);
+
+    // 类型为 PROCESS-NAME/PROCESS-PATH 时，把「值」下拉填成当前运行的进程名/路径；其它类型清空成普通可输入框。
+    // 用 lastKind 记录已填充的类别，避免可编辑下拉每次按键都重新枚举进程（枚举有系统开销）。
+    auto lastKind = std::make_shared<QString>();
+    auto refreshValueChoices = [valueBox, lastKind](const QString &type) {
+        QString kind;
+        if (type.compare(QLatin1String("PROCESS-NAME"), Qt::CaseInsensitive) == 0) {
+            kind = QStringLiteral("name");
+        } else if (type.compare(QLatin1String("PROCESS-PATH"), Qt::CaseInsensitive) == 0) {
+            kind = QStringLiteral("path");
+        }
+        if (kind == *lastKind) {
+            return; // 类别未变，无需重新枚举
+        }
+        *lastKind = kind;
+        const QString keep = valueBox->currentText(); // 保留用户已填/已存的值
+        QSignalBlocker block(valueBox);
+        valueBox->clear();
+        if (kind == QLatin1String("name")) {
+            valueBox->addItems(processChoices(false));
+        } else if (kind == QLatin1String("path")) {
+            valueBox->addItems(processChoices(true));
+        }
+        valueBox->setCurrentText(keep);
+    };
+    refreshValueChoices(typeBox->currentText()); // 编辑已有 PROCESS 规则时，打开即填充
+    connect(typeBox, &QComboBox::currentTextChanged, dialog,
+            [refreshValueChoices](const QString &t) { refreshValueChoices(t); });
 
     dl->addWidget(new QLabel(QString::fromUtf8("节点/策略组"), dialog));
     auto *nodeBox = new QComboBox(dialog);
@@ -1736,8 +1833,8 @@ void MainWindow::openRuleEditor(const QString &section, int editIndex)
     dl->addLayout(btnRow);
 
     connect(cancel, &QPushButton::clicked, dialog, &QDialog::reject);
-    connect(ok, &QPushButton::clicked, dialog, [this, dialog, section, editIndex, typeEd, valueEd, nodeBox] {
-        const QString type = typeEd->text().trimmed();
+    connect(ok, &QPushButton::clicked, dialog, [this, dialog, section, editIndex, typeBox, valueBox, nodeBox] {
+        const QString type = typeBox->currentText().trimmed();
         const QString node = nodeBox->currentText().trimmed();
         if (type.isEmpty() || node.isEmpty()) {
             return; // 类型/节点必填
@@ -1745,7 +1842,7 @@ void MainWindow::openRuleEditor(const QString &section, int editIndex)
         QJsonObject obj; // 不含 raw → 回写按 3 段（或 MATCH 2 段）重新序列化
         obj["type"] = type;
         obj["node"] = node;
-        obj["value"] = valueEd->text().trimmed();
+        obj["value"] = valueBox->currentText().trimmed();
         QJsonArray current = loadRuleSection(section);
         if (editIndex >= 0 && editIndex < current.size()) {
             current[editIndex] = obj;
