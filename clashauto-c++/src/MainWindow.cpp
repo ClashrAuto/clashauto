@@ -1998,18 +1998,49 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     badgeLayout->addWidget(delay, 0, Qt::AlignVCenter);
     layout->addWidget(badgeWrap);
 
-    auto *apply = new QPushButton(node.active ? "禁用" : "应用", row);
-    apply->setObjectName("nodeButton");
-    apply->setFixedSize(82, 38);
-    connect(apply, &QPushButton::clicked, this, [this, node] {
-        if (node.active) {
-            m_service.clearConnections();
-            return;
-        }
-        m_service.selectNode(node.name);
+    // 两个按钮（对齐旧项目 status.vue）：
+    //  应用 = 切换到该节点/分组（当前不是活动项时才显示）；
+    //  禁用 = 禁用该节点；若是分组则禁用其当前实际使用的节点(now)。
+    if (!node.active) {
+        auto *apply = new QPushButton(QString::fromUtf8("应用"), row);
+        apply->setObjectName("nodeButton");
+        apply->setFixedSize(56, 38);
+        connect(apply, &QPushButton::clicked, this, [this, node] {
+            m_service.selectNode(node.name);
+        });
+        layout->addWidget(apply);
+    }
+    auto *disable = new QPushButton(QString::fromUtf8("禁用"), row);
+    disable->setObjectName("nodeButton");
+    disable->setFixedSize(56, 38);
+    connect(disable, &QPushButton::clicked, this, [this, node] {
+        disableNodeByName(node.now.isEmpty() ? node.name : node.now);
     });
-    layout->addWidget(apply);
+    layout->addWidget(disable);
     return row;
+}
+
+void MainWindow::disableNodeByName(const QString &liveName)
+{
+    // 实时节点名 = 「订阅节点名 - 订阅名[speedtest]」（见 ConfigBuilder）；反查订阅节点后 use:false 并重建。
+    const QVector<SubscriptionSummary> subs = m_subscriptions->load();
+    for (int s = 0; s < subs.size(); ++s) {
+        const QVector<SubscriptionNodeSummary> nodes = m_subscriptions->nodes(s);
+        for (int n = 0; n < nodes.size(); ++n) {
+            const QString base = nodes[n].name + QStringLiteral(" - ") + subs[s].name;
+            if (liveName == base || liveName == base + QStringLiteral("[speedtest]")) {
+                if (m_subscriptions->setNodeEnabled(s, n, false)) {
+                    reloadSubscriptions();
+                    m_core->rebuildConfig(); // 重新生成 full.yaml 并热重载，节点从池中移除
+                    appendLog(QString::fromUtf8("已禁用节点: %1").arg(liveName));
+                } else {
+                    appendLog(QString::fromUtf8("禁用节点失败: %1").arg(liveName));
+                }
+                return;
+            }
+        }
+    }
+    appendLog(QString::fromUtf8("未找到可禁用的订阅节点: %1（可能是 DIRECT/内置组）").arg(liveName));
 }
 
 void MainWindow::showSubscriptionNodes(int subscriptionIndex)

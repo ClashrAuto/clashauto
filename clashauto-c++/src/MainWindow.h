@@ -54,6 +54,7 @@ private:
     QFrame *createMetricCard(const QString &icon, const QString &title, QLabel **valueLabel, const QString &className);
     QPushButton *createMenuButton(const QString &text, int page);
     QFrame *createNodeRow(const NodeInfo &node);
+    void disableNodeByName(const QString &liveName); // 把状态列表的实时节点名映射回订阅节点并 use:false + 重建
     void showSubscriptionNodes(int subscriptionIndex);
     void showUpdateDialog();
     void checkForUpdate(bool silent); // 拉取最新 release 与本地版本比较；silent=启动自动检查

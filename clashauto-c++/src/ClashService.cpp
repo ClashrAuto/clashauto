@@ -212,6 +212,22 @@ void ClashService::pollNodes()
             return {};
         };
 
+        // 沿 now 链走到底，取「最终实际使用的叶子节点名」（如 节点选择→自动选择→HK-6 取 HK-6）：
+        // 供组行显示「组名 → 使用节点」与「禁用」时定位真正在用的节点。
+        auto resolveFinalName = [&proxies](const QString &start) -> QString {
+            QString cur = start;
+            QSet<QString> seen;
+            for (int i = 0; i < 16 && !cur.isEmpty() && !seen.contains(cur); ++i) {
+                seen.insert(cur);
+                const QString next = proxies.value(cur).toObject().value("now").toString();
+                if (next.isEmpty()) {
+                    return cur;
+                }
+                cur = next;
+            }
+            return cur;
+        };
+
         QString groupName = m_selectedGroup;
         QJsonObject group = proxies.value(groupName).toObject();
         QStringList groups;
@@ -251,13 +267,14 @@ void ClashService::pollNodes()
             }
 
             const QJsonObject proxy = proxies.value(name).toObject();
-            const QString now = proxy.value("now").toString();
+            const QString immediateNow = proxy.value("now").toString();
             // 组（url-test/select 等）自身通常没有 history：递归沿 now 链取实际叶子的延迟/速度，
             // 否则国家组、以及 now 指向其它组的选择组（节点选择/漏网之鱼等）都会「无延迟」。
             const QJsonArray history = resolveHistory(name);
             NodeInfo node;
             node.name = name;
-            node.now = now;
+            // now = 最终实际使用的叶子（组）；叶子节点自身无 now
+            node.now = immediateNow.isEmpty() ? QString() : resolveFinalName(name);
             node.delay = history.isEmpty() ? 0 : history.last().toObject().value("delay").toInt();
             node.speed = history.isEmpty() ? 0 : history.last().toObject().value("speed").toInteger();
             node.active = node.name == selected;
