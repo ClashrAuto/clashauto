@@ -41,6 +41,7 @@ private:
     QMap<QString, QStringList> autoGroups(const QStringList &nodeNames) const;
     QString setScalar(QString yaml, const QString &key, const QString &value) const;
     QString setNestedScalar(QString yaml, const QString &section, const QString &key, const QString &value) const;
+    QString ensureProxyServerNameserver(QString yaml) const;
     QString normalizeEmptyProxies(QString yaml) const;
     QString yamlQuote(const QString &value) const;
     QString yamlScalar(const QString &line) const;

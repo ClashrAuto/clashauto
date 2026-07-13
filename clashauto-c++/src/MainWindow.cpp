@@ -527,7 +527,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         }
         m_tray->setStatus(tun, proxy, core);
     };
-    connect(&m_service, &ClashService::statusUpdated, this, applyStatus);
+    // ClashService 只从 REST /traffic 流推断「核心是否在跑」，并不知道 TUN/系统代理的真实开关，
+    // 它每秒发来的是写死的 (tun=false, proxy=true)。若直接采信，会把刚开启的增强(TUN)灯每秒冲掉一次
+    // ——这正是「点增强后标志不亮/提权重启后看着像没开增强」的根因。TUN/代理/核心的真值只在
+    // CoreController（与旧项目一致：status 由 clash 控制器发，而非 API 轮询）。故这里忽略流里的
+    // 布尔值，一律以 CoreController 为准，把每秒一次的轮询当作「自愈式复位」用正确来源刷新灯。
+    connect(&m_service, &ClashService::statusUpdated, this, [this, applyStatus](bool, bool, bool) {
+        const bool running = m_core->isRunning();
+        applyStatus(running && m_core->isTunEnabled(), running && m_core->isProxyEnabled(), running);
+    });
     connect(m_core, &CoreController::statusChanged, this, applyStatus);
     connect(m_core, &CoreController::logUpdated, this, [this](const QString &message) {
         appendLog(message);

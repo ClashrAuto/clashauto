@@ -35,6 +35,7 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = setScalar(yaml, "mixed-port", QString::number(m_config.mixedPort));
     yaml = setScalar(yaml, "external-controller", QString("'%1:%2'").arg(m_config.host).arg(m_config.uiPort));
     yaml = setNestedScalar(yaml, "tun", "enable", tunEnabled ? "true" : "false");
+    yaml = ensureProxyServerNameserver(yaml);
     yaml = normalizeEmptyProxies(yaml);
     yaml = applySubscriptions(yaml, readSubscriptions());
     yaml = applyCustomRules(yaml);
@@ -597,6 +598,26 @@ QString ConfigBuilder::setNestedScalar(QString yaml, const QString &section, con
         block.append(QString("  %1: %2\n").arg(key, value));
     }
     yaml.replace(match.capturedStart(0), match.capturedLength(0), block);
+    return yaml;
+}
+
+QString ConfigBuilder::ensureProxyServerNameserver(QString yaml) const
+{
+    // 开启增强(TUN, auto-route) 后，核心解析「代理服务器域名」若走 dns.fallback 的境外 DoH
+    // （1.0.0.1、iij…），这些 DoH 的出站连接会被核心自己的 TUN 路由捕获 → 命中规则再丢回代理 →
+    // 而拨代理又要先解析代理服务器域名 → 死循环，日志报 "dns resolve failed: couldn't find ip"，
+    // 表现为「所有节点无延迟、境外全打不开」（增强前用系统代理时 DoH 走物理网卡直连，故正常）。
+    // 加 proxy-server-nameserver：核心用境内明文 DNS 直连（绕过隧道与规则）专门解析代理服务器域名，
+    // 打破环路。境内明文 DNS 恒可直连（日志里国内直连流量本就正常），TUN 关时也无副作用。
+    if (yaml.contains(QRegularExpression("(?m)^  proxy-server-nameserver:"))) {
+        return yaml; // 已有（自定义配置里带了）就不再注入
+    }
+    const QRegularExpressionMatch dnsHead = QRegularExpression("(?m)^dns:\\n").match(yaml);
+    if (!dnsHead.hasMatch()) {
+        return yaml; // 没有 dns 块（理论上不会）：不动，避免破坏结构
+    }
+    const QString block = "  proxy-server-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n";
+    yaml.insert(dnsHead.capturedEnd(0), block);
     return yaml;
 }
 

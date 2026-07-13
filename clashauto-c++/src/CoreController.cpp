@@ -306,5 +306,9 @@ void CoreController::reloadConfig()
 
 void CoreController::emitStatus()
 {
-    emit statusChanged(m_tunEnabled, m_proxyEnabled, isRunning());
+    // 核心没在跑时，TUN/系统代理实际都不生效（stopCore 已还原系统代理、TUN 网卡随核心退出消失）。
+    // 故灯以「核心在跑 且 该开关开启」为准（对齐旧项目：core close 时 this.tun/this.web 置 false），
+    // 否则停核心后 增强/网页 灯仍亮着，与实际不符。m_tunEnabled/m_proxyEnabled 仍保留「意图」供开关判定。
+    const bool running = isRunning();
+    emit statusChanged(running && m_tunEnabled, running && m_proxyEnabled, running);
 }
