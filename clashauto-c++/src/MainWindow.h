@@ -67,6 +67,7 @@ private:
     void reloadSubscriptions();
     void populateNodeList();
     void updateNodeBadges(); // 仅延迟/速度变化时原地更新药丸，避免整表重建导致的闪烁/清空
+    void syncNodeRows();     // 集合不变时：原地更新药丸/名称/按钮态并按新次序重排现有行（不销毁 → 不闪现）
     void beginNodeSwitch(const QString &target); // 点应用/禁用后进入加载态（目标转圈、其余禁用）
     void endNodeSwitch();                         // 切换确认或超时后解除加载态
     QString speedText(qint64 value) const;
@@ -141,6 +142,11 @@ private:
     QVector<NodeInfo> m_currentNodes;
     QScrollArea *m_nodeScroll = nullptr;              // 节点列表滚动区（刷新时保留滚动位置）
     QHash<QString, QPointer<QLabel>> m_delayBadges;   // 节点名→延迟药丸，供原地更新（不清空重建）
+    // 以下三张表配合 syncNodeRows 做「原地重排 + 原地改内容」：延迟/速度变化时只移动现有行、改文字，
+    // 绝不销毁重建，从而既能按新次序排序、又不会闪现（对齐旧项目 Vue 的响应式原地更新）。
+    QHash<QString, QPointer<QFrame>> m_nodeRows;       // 节点名→整行
+    QHash<QString, QPointer<QPushButton>> m_nodeButtons; // 节点名→应用/禁用按钮
+    QHash<QString, QPointer<QLabel>> m_nodeNameLabels; // 节点名→名称标签（实为 ElidingLabel，组行的「→子节点」会变）
     QString m_selectedNode;
     // 切换加载态（对齐旧项目 disableLoading）：点应用/禁用后，目标按钮转圈、其余按钮禁用，
     // 直到轮询确认「当前节点==目标」或超时才解除（防重入、给用户明确反馈）

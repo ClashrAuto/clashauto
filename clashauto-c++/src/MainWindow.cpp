@@ -458,24 +458,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         m_totalDownValue->setText(speedText(total));
     });
     connect(&m_service, &ClashService::nodesUpdated, this, [this](const QVector<NodeInfo> &nodes, const QString &selected) {
-        // 结构键 = 节点集合(名字，与顺序无关) + 当前活动节点。
-        //   结构变（增删节点 / 切换活动节点）→ 整表重建（含重新排序、活动置顶）；
-        //   仅延迟/速度变 → 原地更新药丸，列表不清空、不闪烁、不跳滚动（对齐旧项目原地刷新）。
-        // 测速时大量返回都只是延迟在变，正是这里避免了「刷新清空列表」。
-        auto structureKey = [](const QVector<NodeInfo> &v) {
+        // 节点「集合」(名字集，与顺序无关) 变了才需要整表重建（增删节点）；活动节点或延迟/速度/次序变都
+        // 用 syncNodeRows 原地处理：移动现有行到新次序、改药丸/名称/按钮态，既完成排序又不闪现。
+        // 测速/自动测延迟时每秒都在变延迟——正是这里做到「按新延迟重排且不清空列表」。
+        auto nameSet = [](const QVector<NodeInfo> &v) {
             QStringList names;
-            QString active;
             for (const NodeInfo &n : v) {
                 names << n.name;
-                if (n.active) {
-                    active = n.name;
-                }
             }
             names.sort();
-            return names.join(QLatin1Char('\n')) + QLatin1Char('\x1f') + active;
+            return names;
         };
-        const bool structural = structureKey(nodes) != structureKey(m_currentNodes);
-        const bool anyChange = (nodes != m_currentNodes);
+        const bool setChanged = nameSet(nodes) != nameSet(m_currentNodes);
+        const bool anyChange = (nodes != m_currentNodes); // 含次序/延迟/速度/活动/now 任一变化
         m_currentNodes = nodes;
         // 节点切换通知（对应旧项目 config.note）；跳过首次填充，避免启动即误报
         if (m_nodeSwitchNote && m_nodeInitialized && m_tray && !selected.isEmpty() && selected != m_selectedNode) {
@@ -485,13 +480,20 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         m_selectedNode = selected;
         // 加载态确认：当前活动节点已不同于点击前 → 切换/禁用完成，解除转圈+禁用（对齐旧项目 find() 轮询）
         if (m_nodeSwitching && !m_nodeSwitchFrom.isEmpty() && selected != m_nodeSwitchFrom) {
-            endNodeSwitch(); // 内部会 populateNodeList，渲染新的活动节点与可点按钮
+            endNodeSwitch(); // 内部原地渲染新的活动节点与可点按钮（不闪现）
             return;
         }
-        if (structural) {
-            populateNodeList();
+        if (m_nodeSwitching) {
+            // 切换进行中（尚未确认）：只原地刷药丸，不重排/不动按钮，避免扰乱转圈与禁用态
+            if (anyChange) {
+                updateNodeBadges();
+            }
+            return;
+        }
+        if (setChanged) {
+            populateNodeList(); // 仅「增删节点」才整表重建（会重新登记各行）
         } else if (anyChange) {
-            updateNodeBadges();
+            syncNodeRows();     // 集合不变：原地重排 + 原地改内容，不闪现
         }
     });
     connect(&m_service, &ClashService::proxyGroupsUpdated, this, [this](const QStringList &groups, const QString &selectedGroup) {
@@ -771,9 +773,7 @@ QWidget *MainWindow::buildStatusPage()
         m_speedTesting = running;
         speedTest->setEnabled(!running);
         speedTest->setText(running ? QString::fromUtf8("⏳") : QString(QChar(0x21BB)));
-        if (!running && !m_nodeSwitching) {
-            populateNodeList(); // 测速结束整表重排一次，让实测更快的节点按速度冒泡到顶部
-        }
+        // 测速过程中每次 nodesUpdated 已用 syncNodeRows 原地按速度重排（不闪现），无需在此整表重建。
     });
     connect(helpBtn, &QPushButton::clicked, this, [] {
         QDesktopServices::openUrl(QUrl("https://clashr-auto.gitbook.io"));
@@ -2066,6 +2066,7 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); // 自适应：名称随列宽伸缩，不撑宽整行
     name->setFullText(display); // 超出列宽用「…」省略，完整名进 tooltip
     layout->addWidget(name, 1);
+    m_nodeNameLabels.insert(node.name, name); // 登记名称标签，供 syncNodeRows 原地更新「→子节点」
 
     // 速度/延迟药丸：内容大小、不再占固定 120px 列——名称(stretch)因此能一直伸到药丸左侧，
     // 消除名称与延迟标签间的空隙；名称列宽自适应，各行药丸右缘仍对齐（在「应用」按钮前）。
@@ -2094,19 +2095,34 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
             m_spinnerButton = apply;
         }
     }
-    connect(apply, &QPushButton::clicked, this, [this, node] {
+    // 点击槽只捕获节点名，运行时再从 m_currentNodes 查当前活动态——这样 syncNodeRows 原地改按钮文字
+    // （应用↔禁用）后，行不重建、槽不重连，点击仍按「最新」状态走对分支（避免捕获旧 node.active 而误判）。
+    connect(apply, &QPushButton::clicked, this, [this, nodeName = node.name] {
         if (m_nodeSwitching) {
             return; // 防重入：切换进行中忽略点击
         }
-        if (node.active) {
-            beginNodeSwitch(node.name); // 禁用：转圈落在该(活动)节点的按钮上
-            disableNodeByName(node.now.isEmpty() ? node.name : node.now);
+        NodeInfo cur;
+        bool found = false;
+        for (const NodeInfo &n : std::as_const(m_currentNodes)) {
+            if (n.name == nodeName) {
+                cur = n;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return;
+        }
+        beginNodeSwitch(nodeName); // 转圈落在被点节点的按钮上
+        if (cur.active) {
+            disableNodeByName(cur.now.isEmpty() ? nodeName : cur.now); // 禁用：禁其当前实际使用的节点
         } else {
-            beginNodeSwitch(node.name); // 应用：转圈落在目标按钮上
-            m_service.selectNode(node.name);
+            m_service.selectNode(nodeName); // 应用：切换到该节点
         }
     });
     layout->addWidget(apply);
+    m_nodeButtons.insert(node.name, apply); // 登记按钮，供 syncNodeRows 原地改「应用/禁用」与启用态
+    m_nodeRows.insert(node.name, row);      // 登记整行，供 syncNodeRows 原地重排（不销毁）
     return row;
 }
 
@@ -3244,6 +3260,9 @@ void MainWindow::populateNodeList()
     QScrollBar *vbar = m_nodeScroll ? m_nodeScroll->verticalScrollBar() : nullptr;
     const int scrollPos = vbar ? vbar->value() : 0;
     m_delayBadges.clear(); // 下面会销毁旧行（含药丸），先清空登记（QPointer 亦会自动置空，双保险）
+    m_nodeRows.clear();
+    m_nodeButtons.clear();
+    m_nodeNameLabels.clear();
     // 重建期间关闭重绘，整批完成后一次性刷新，避免列表清空→重填的闪烁
     m_nodeList->setUpdatesEnabled(false);
     while (QLayoutItem *item = layout->takeAt(0)) {
@@ -3320,7 +3339,9 @@ void MainWindow::endNodeSwitch()
     if (m_spinnerTimer) {
         m_spinnerTimer->stop();
     }
-    populateNodeList(); // 恢复：活动节点置顶、所有按钮可点
+    // 原地恢复：新活动节点置顶、按钮文字复位(应用/禁用)、全部可点——不销毁重建，切换完成也不闪现。
+    // 若切换伴随节点增删（如「禁用」触发重建订阅），syncNodeRows 会自动退回 populateNodeList。
+    syncNodeRows();
 }
 
 void MainWindow::updateNodeBadges()
@@ -3335,6 +3356,80 @@ void MainWindow::updateNodeBadges()
         badge->setText(QString("%1/%2").arg(speedText(node.speed),
                                             node.delay == 0 ? QStringLiteral("-") : QString::number(node.delay)));
         badge->setStyleSheet(QString("background:%1;").arg(delayColor(node.delay).name(QColor::HexArgb)));
+    }
+}
+
+void MainWindow::syncNodeRows()
+{
+    // 节点集合不变（无增删、过滤条件不变）时的原地更新：更新每行的药丸/名称/按钮态，并把现有行按
+    // m_currentNodes 的新次序重排——只「移动」已存在的行，绝不销毁重建，所以既完成排序又不闪现。
+    if (!m_nodeList) {
+        return;
+    }
+    auto *layout = qobject_cast<QVBoxLayout *>(m_nodeList->layout());
+    if (!layout) {
+        return;
+    }
+
+    const QString filter = m_nodeSearch ? m_nodeSearch->text().trimmed() : QString();
+    QVector<const NodeInfo *> desired; // 目标可见次序（已由 ClashService 按速度/延迟排好）
+    for (const NodeInfo &n : std::as_const(m_currentNodes)) {
+        if (filter.isEmpty() || n.name.contains(filter, Qt::CaseInsensitive)) {
+            desired.push_back(&n);
+        }
+    }
+    // 可见集合与现有行对不上（增删节点，或极少见的行被意外销毁）→ 退回整表重建
+    if (desired.size() != m_nodeRows.size()) {
+        populateNodeList();
+        return;
+    }
+    for (const NodeInfo *n : std::as_const(desired)) {
+        if (!m_nodeRows.value(n->name)) {
+            populateNodeList();
+            return;
+        }
+    }
+
+    // 关重绘，整批移动/改文字后一次性刷新，杜绝逐行移动时的中间态闪烁
+    m_nodeList->setUpdatesEnabled(false);
+    for (int i = 0; i < desired.size(); ++i) {
+        const NodeInfo &node = *desired[i];
+        QFrame *row = m_nodeRows.value(node.name).data();
+        if (!row) {
+            continue;
+        }
+        if (QLabel *badge = m_delayBadges.value(node.name).data()) {
+            badge->setText(QString("%1/%2").arg(speedText(node.speed),
+                                                node.delay == 0 ? QStringLiteral("-") : QString::number(node.delay)));
+            badge->setStyleSheet(QString("background:%1;").arg(delayColor(node.delay).name(QColor::HexArgb)));
+        }
+        if (auto *nameLbl = static_cast<ElidingLabel *>(m_nodeNameLabels.value(node.name).data())) {
+            QString display = node.name; // 组行：now 变了要更新「组名 → 使用节点」
+            if (!node.now.isEmpty() && node.now != node.name) {
+                display = QString::fromUtf8("%1 → %2").arg(node.name, node.now);
+            }
+            nameLbl->setFullText(display);
+        }
+        if (QPushButton *btn = m_nodeButtons.value(node.name).data()) {
+            btn->setText(node.active ? QString::fromUtf8("禁用") : QString::fromUtf8("应用"));
+            btn->setEnabled(true); // 非切换态：确保可点（切换态不会走到这里）
+        }
+        if (row->property("active").toBool() != node.active) {
+            row->setProperty("active", node.active); // 活动态变了，重刷样式（#nodeRow[active]）
+            row->style()->unpolish(row);
+            row->style()->polish(row);
+        }
+        if (layout->indexOf(row) != i) {
+            layout->removeWidget(row); // 仅从布局摘下（不销毁、不改父子），移到目标次序
+            layout->insertWidget(i, row);
+        }
+    }
+    m_nodeList->setUpdatesEnabled(true);
+
+    if (m_nodeTitle) {
+        m_nodeTitle->setText(QString::fromUtf8("节点 <span style='font-size:9px'>(%1/%2)</span>")
+                                 .arg(desired.size())
+                                 .arg(m_currentNodes.size()));
     }
 }
 
