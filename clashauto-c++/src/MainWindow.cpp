@@ -35,6 +35,7 @@
 #include <QMouseEvent>
 #include <QResizeEvent>
 #include <QNetworkAccessManager>
+#include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPainter>
@@ -333,6 +334,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     registerUrlScheme();
     m_service.setEndpoint(config.host, config.uiPort); // 让轮询/切换走配置里的 API 端口（默认 9191）
     m_service.setMixedPort(config.mixedPort);          // 下载测速经此混合端口走代理
+    m_proxyHost = config.host;                         // 下载走代理用的主机/端口（applyDownloadProxy）
+    m_proxyMixedPort = config.mixedPort;
     m_service.setClearConnectionsOnSwitch(config.clearConnections);
     // 切换加载态的转圈动画：只更新那个目标按钮的文字，不整表重建
     m_spinnerTimer = new QTimer(this);
@@ -580,9 +583,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         QTimer::singleShot(600, this, [this] { promptDownloadCore(); });
     }
 
-    // 启动后延迟自动检查更新（对齐旧项目）：有新版本则托盘提示 + 版本号变红 + 弹更新窗，
-    // 已勾选「不再提示该版本」则跳过弹窗。
+    // 更新检查时机：①启动后 3 秒自动检查一次（失败会自动重试）；②之后每 6 小时再查一次，
+    // 长时间挂着也能发现新版；③手动点侧栏/关于页的版本号随时检查。
+    // 有新版本则：托盘提示 + 侧栏与关于页版本号变红 + 弹更新窗（勾了「不再提示该版本」则不弹窗）。
     QTimer::singleShot(3000, this, [this] { checkForUpdate(true); });
+    auto *updateTimer = new QTimer(this);
+    connect(updateTimer, &QTimer::timeout, this, [this] { checkForUpdate(true); });
+    updateTimer->start(6 * 60 * 60 * 1000); // 6 小时
 }
 
 QWidget *MainWindow::buildTitleBar()
@@ -1033,6 +1040,7 @@ QWidget *MainWindow::buildSettingsPage()
         geoipBtn->setText(QString::fromUtf8("下载中..."));
         const AppConfig cfg = AppConfigLoader::load();
         auto *nam = new QNetworkAccessManager(this);
+        applyDownloadProxy(nam); // 核心在跑则经代理下载 mmdb
         const QUrl mmdbUrl(QStringLiteral(
             "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb"));
         QNetworkRequest req(mmdbUrl);
@@ -1268,6 +1276,11 @@ QWidget *MainWindow::buildSettingsPage()
         const int newMixedPort = mixedPort->text().trimmed().toInt();
         if (newMixedPort > 0) {
             m_service.setMixedPort(newMixedPort); // 混合端口改了：下载测速也走新端口
+            m_proxyMixedPort = newMixedPort;      // 下载走代理也用新端口
+        }
+        const QString newHost = host->currentText().trimmed();
+        if (!newHost.isEmpty()) {
+            m_proxyHost = newHost;
         }
         if (portChanged && m_core->isRunning()) {
             m_core->stopCore();
@@ -2657,6 +2670,7 @@ void MainWindow::showUpdateDialog()
 
     connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::reject);
     auto *nam = new QNetworkAccessManager(dialog);
+    applyDownloadProxy(nam); // 核心在跑则经代理拉取 release 列表并下载更新包
 
     // 选中资源即启用「更新」（作用于当前 tab 的当前选中项）
     auto currentAssets = [tabs, rel, beta]() -> QListWidget * {
@@ -2842,22 +2856,40 @@ bool versionNewer(const QString &remote, const QString &local)
 }
 } // namespace
 
-void MainWindow::checkForUpdate(bool silent)
+void MainWindow::applyDownloadProxy(QNetworkAccessManager *nam) const
+{
+    // 核心在跑 = 有可用代理：把该 QNAM 的请求经混合端口转发，GitHub 等被墙资源也能下到。
+    // 核心没跑就保持直连（无从代理，例如首次「更新内核」时核心还不存在）。
+    if (nam && m_core && m_core->isRunning()) {
+        nam->setProxy(QNetworkProxy(QNetworkProxy::HttpProxy, m_proxyHost, static_cast<quint16>(m_proxyMixedPort)));
+    }
+}
+
+void MainWindow::checkForUpdate(bool silent, int retriesLeft)
 {
     auto *nam = new QNetworkAccessManager(this);
+    applyDownloadProxy(nam); // 核心在跑则经代理查更新（墙内直连 api.github.com 也可能不通）
     QNetworkRequest req(QUrl("https://api.github.com/repos/ClashrAuto/clashauto/releases/latest"));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "clashauto-cpp");
-    if (!silent) {
-        appendLog(QString::fromUtf8("正在检查更新..."));
-    }
+    // GitHub 组织/仓库改名会以 301 跳转到新地址——必须跟随，否则拿到空响应而「查不到版本」。
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    req.setTransferTimeout(10000); // 兜底：网络卡住最多等 10s，触发失败重试而不是永远无声
+#endif
+    appendLog(silent ? QString::fromUtf8("自动检查更新...") : QString::fromUtf8("正在检查更新..."));
     QNetworkReply *reply = nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, nam, silent] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, nam, silent, retriesLeft] {
         reply->deleteLater();
         nam->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
-            if (!silent) {
-                appendLog(QString::fromUtf8("检查更新失败: %1").arg(reply->errorString()));
+            // 失败一律记日志（便于排查「到底有没有检查」）；启动静默检查再自动重试几次，
+            // 覆盖开机瞬间网络/DNS/代理尚未就绪导致的一次性失败。
+            appendLog(QString::fromUtf8("检查更新失败: %1").arg(reply->errorString()));
+            if (silent && retriesLeft > 0) {
+                appendLog(QString::fromUtf8("将在 30 秒后重试检查更新（剩余 %1 次）").arg(retriesLeft));
+                QTimer::singleShot(30000, this, [this, retriesLeft] { checkForUpdate(true, retriesLeft - 1); });
+            } else if (!silent) {
                 QMessageBox::warning(this, QString::fromUtf8("检查更新"),
                                      QString::fromUtf8("检查失败：%1").arg(reply->errorString()));
             }
@@ -2867,8 +2899,13 @@ void MainWindow::checkForUpdate(bool silent)
         const QString tag = r.value(QStringLiteral("tag_name")).toString();
         const QString local = QString::fromUtf8(APP_VERSION);
         if (tag.isEmpty()) {
+            // 多半是被限流/返回了错误对象——把 message 也记下来便于排查
+            const QString apiMsg = r.value(QStringLiteral("message")).toString();
+            appendLog(QString::fromUtf8("检查更新失败: 未取到版本号%1")
+                          .arg(apiMsg.isEmpty() ? QString() : QString::fromUtf8("（%1）").arg(apiMsg)));
             if (!silent) {
-                appendLog(QString::fromUtf8("检查更新失败: 未取到版本号"));
+                QMessageBox::warning(this, QString::fromUtf8("检查更新"),
+                                     QString::fromUtf8("检查失败：未取到版本号"));
             }
             return;
         }
@@ -2892,10 +2929,12 @@ void MainWindow::checkForUpdate(bool silent)
                 return;
             }
             showUpdateDialog();
-        } else if (!silent) {
-            appendLog(QString::fromUtf8("已是最新版本 %1").arg(local));
-            QMessageBox::information(this, QString::fromUtf8("检查更新"),
-                                    QString::fromUtf8("已是最新版本 %1").arg(local));
+        } else {
+            appendLog(QString::fromUtf8("已是最新版本 %1（服务器 %2）").arg(local, tag)); // 静默时也记，回答「到底查没查」
+            if (!silent) {
+                QMessageBox::information(this, QString::fromUtf8("检查更新"),
+                                        QString::fromUtf8("已是最新版本 %1").arg(local));
+            }
         }
     });
 }
@@ -3115,6 +3154,7 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
     };
 
     auto *nam = new QNetworkAccessManager(this);
+    applyDownloadProxy(nam); // 若核心已在跑（更新内核而非首装），经代理拉取版本与下载
     QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")));
     req.setRawHeader("User-Agent", "clashauto-cpp");
     req.setRawHeader("Accept", "application/vnd.github+json");

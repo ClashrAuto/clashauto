@@ -25,6 +25,7 @@ class QTableWidget;
 class QJsonArray;
 class QCloseEvent;
 class QTimer;
+class QNetworkAccessManager;
 
 class MainWindow final : public QMainWindow
 {
@@ -59,7 +60,10 @@ private:
     void disableNodeByName(const QString &liveName); // 把状态列表的实时节点名映射回订阅节点并 use:false + 重建
     void showSubscriptionNodes(int subscriptionIndex);
     void showUpdateDialog();
-    void checkForUpdate(bool silent); // 拉取最新 release 与本地版本比较；silent=启动自动检查
+    void checkForUpdate(bool silent, int retriesLeft = 2); // 拉取最新 release 与本地版本比较；silent=启动自动检查；失败时静默重试
+    // 让下载（检查更新/更新包/内核/mmdb 等 GitHub 资源）在核心运行时经混合端口走代理——
+    // 墙内直连 GitHub 常不通，走代理更可靠。核心没跑则保持直连。
+    void applyDownloadProxy(QNetworkAccessManager *nam) const;
     void showConnectionsDialog();
     void appendLog(const QString &message);
     void appendTimeline(QVBoxLayout *layout, QScrollArea *scroll, const QString &message);
@@ -120,6 +124,8 @@ private:
     QLabel *m_usersLabel = nullptr;
     QLabel *m_versionLabel = nullptr; // 关于页版本行；发现新版本时高亮提示
     QLabel *m_sidebarVersionLabel = nullptr; // 侧栏底部版本行；发现新版本时变红提示（点击检查/更新）
+    QString m_proxyHost = QStringLiteral("127.0.0.1"); // 下载走代理用的主机（对齐 config.host）
+    int m_proxyMixedPort = 7890;                        // 下载走代理用的混合端口（对齐 config.mixedPort）
     QWidget *m_tunDot = nullptr; // BreathingDot（自绘呼吸圆点）
     QWidget *m_proxyDot = nullptr;
     QWidget *m_coreDot = nullptr;
