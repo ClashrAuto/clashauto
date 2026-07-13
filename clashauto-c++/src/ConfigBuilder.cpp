@@ -353,6 +353,7 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
         if (type != "select") {
             groupBlock += "    url: 'http://www.gstatic.com/generate_204'\n";
             groupBlock += "    interval: 300\n";
+            groupBlock += "    lazy: false\n"; // 启动即后台测延迟，否则 lazy(默认true)不用不测→列表无延迟
         }
         groupBlock += "    proxies:\n";
         for (const QString &node : matched) {
@@ -528,6 +529,7 @@ QString ConfigBuilder::appendSubscriptionGroups(QString yaml, const QVector<Subs
         groups += "    type: url-test\n";
         groups += "    url: 'http://www.gstatic.com/generate_204'\n";
         groups += "    interval: 300\n";
+        groups += "    lazy: false\n"; // 启动即后台测延迟（lazy 默认 true 时不用不测→节点无延迟）
         groups += "    proxies:\n";
         for (const SubscriptionNode &node : subscription.nodes) {
             const QRegularExpression nameRe("(?m)^  - name:\\s*(.+)$");
@@ -555,6 +557,7 @@ QString ConfigBuilder::appendSubscriptionGroups(QString yaml, const QVector<Subs
         groups += "    type: url-test\n";
         groups += "    url: 'http://www.gstatic.com/generate_204'\n";
         groups += "    interval: 300\n";
+        groups += "    lazy: false\n"; // 启动即后台测延迟（lazy 默认 true 时不用不测→节点无延迟）
         groups += "    proxies:\n";
         for (const QString &nodeName : it.value()) {
             groups += QString("      - %1\n").arg(yamlQuote(nodeName));
