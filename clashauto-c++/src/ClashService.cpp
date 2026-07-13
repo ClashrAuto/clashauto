@@ -27,7 +27,7 @@ void ClashService::start()
     pollNodes();
     m_trafficTimer.start(1000);
     m_connectionsTimer.start(1000);
-    m_nodesTimer.start(5000);
+    m_nodesTimer.start(2000); // 节点列表更实时（原 5s）；配合切换/禁用后的即时刷新
 }
 
 void ClashService::setMode(const QString &mode)
@@ -238,6 +238,23 @@ void ClashService::pollNodes()
             }
         }
 
+        if (group.value("all").toArray().isEmpty()) {
+            // 默认选「主选择组」（🚀 节点选择）：Rule 模式下只有在此组里「应用」才真正切换路由，
+            // 选 GLOBAL 只在 Global 模式生效——否则点应用没反应。
+            for (auto it = proxies.begin(); it != proxies.end(); ++it) {
+                const QJsonObject candidate = it.value().toObject();
+                if (candidate.value("type").toString() != QLatin1String("Selector")
+                    || candidate.value("all").toArray().isEmpty() || it.key() == QLatin1String("GLOBAL")) {
+                    continue;
+                }
+                if (it.key().contains(QString::fromUtf8("节点")) || it.key().contains(QString::fromUtf8("选择"))
+                    || it.key().contains(QString::fromUtf8("代理")) || it.key().contains(QLatin1String("Proxy"), Qt::CaseInsensitive)) {
+                    groupName = it.key();
+                    group = candidate;
+                    break;
+                }
+            }
+        }
         if (group.value("all").toArray().isEmpty()) {
             groupName = "GLOBAL";
             group = proxies.value(groupName).toObject();

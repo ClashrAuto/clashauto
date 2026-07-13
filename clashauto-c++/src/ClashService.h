@@ -65,7 +65,7 @@ private:
     QTimer m_nodesTimer;
     QString m_host = "127.0.0.1";
     int m_port = 9090;
-    QString m_selectedGroup = "GLOBAL";
+    QString m_selectedGroup; // 空 = 未定；首轮 pollNodes 选主选择组（🚀 节点选择）为默认视图
     QString m_selectedNode;
     bool m_clearOnSwitch = true;
 };

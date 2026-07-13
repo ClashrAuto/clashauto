@@ -466,10 +466,17 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             return;
         }
         const QSignalBlocker blocker(m_nodeGroupSelector);
-        m_nodeGroupSelector->clear();
-        m_nodeGroupSelector->addItems(groups);
+        // 组列表没变就不重建下拉，避免 2s 轮询时打断用户正在展开的下拉/选择
+        QStringList current;
+        for (int i = 0; i < m_nodeGroupSelector->count(); ++i) {
+            current << m_nodeGroupSelector->itemText(i);
+        }
+        if (current != groups) {
+            m_nodeGroupSelector->clear();
+            m_nodeGroupSelector->addItems(groups);
+        }
         const int index = m_nodeGroupSelector->findText(selectedGroup);
-        if (index >= 0) {
+        if (index >= 0 && index != m_nodeGroupSelector->currentIndex()) {
             m_nodeGroupSelector->setCurrentIndex(index);
         }
     });
@@ -1998,25 +2005,19 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     badgeLayout->addWidget(delay, 0, Qt::AlignVCenter);
     layout->addWidget(badgeWrap);
 
-    // 两个按钮（对齐旧项目 status.vue）：
-    //  应用 = 切换到该节点/分组（当前不是活动项时才显示）；
-    //  禁用 = 禁用该节点；若是分组则禁用其当前实际使用的节点(now)。
-    if (!node.active) {
-        auto *apply = new QPushButton(QString::fromUtf8("应用"), row);
-        apply->setObjectName("nodeButton");
-        apply->setFixedSize(56, 38);
-        connect(apply, &QPushButton::clicked, this, [this, node] {
-            m_service.selectNode(node.name);
-        });
-        layout->addWidget(apply);
-    }
-    auto *disable = new QPushButton(QString::fromUtf8("禁用"), row);
-    disable->setObjectName("nodeButton");
-    disable->setFixedSize(56, 38);
-    connect(disable, &QPushButton::clicked, this, [this, node] {
-        disableNodeByName(node.now.isEmpty() ? node.name : node.now);
+    // 单个按钮：非活动项显示「应用」= 切换到该节点/分组；活动（正在使用）项显示「禁用」=
+    //  禁用该节点（分组则禁其当前实际使用的节点 now）。只有正在使用的节点才出现「禁用」。
+    auto *apply = new QPushButton(node.active ? QString::fromUtf8("禁用") : QString::fromUtf8("应用"), row);
+    apply->setObjectName("nodeButton");
+    apply->setFixedSize(82, 38);
+    connect(apply, &QPushButton::clicked, this, [this, node] {
+        if (node.active) {
+            disableNodeByName(node.now.isEmpty() ? node.name : node.now);
+        } else {
+            m_service.selectNode(node.name); // 切换到该节点或分组
+        }
     });
-    layout->addWidget(disable);
+    layout->addWidget(apply);
     return row;
 }
 
@@ -2032,6 +2033,7 @@ void MainWindow::disableNodeByName(const QString &liveName)
                 if (m_subscriptions->setNodeEnabled(s, n, false)) {
                     reloadSubscriptions();
                     m_core->rebuildConfig(); // 重新生成 full.yaml 并热重载，节点从池中移除
+                    m_service.refreshNodes(); // 立即向核心重新拉取列表
                     appendLog(QString::fromUtf8("已禁用节点: %1").arg(liveName));
                 } else {
                     appendLog(QString::fromUtf8("禁用节点失败: %1").arg(liveName));
