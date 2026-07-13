@@ -7,9 +7,11 @@
 #include "TrayController.h"
 
 #include <QFrame>
+#include <QHash>
 #include <QLabel>
 #include <QMainWindow>
 #include <QPoint>
+#include <QPointer>
 #include <QPushButton>
 #include <QStackedWidget>
 
@@ -64,6 +66,7 @@ private:
     QWidget *createSwitchDot(bool enabled);
     void reloadSubscriptions();
     void populateNodeList();
+    void updateNodeBadges(); // 仅延迟/速度变化时原地更新药丸，避免整表重建导致的闪烁/清空
     QString speedText(qint64 value) const;
     QColor delayColor(int delay) const;
     QString appStyle() const;
@@ -134,6 +137,8 @@ private:
     SubscriptionStore *m_subscriptions = nullptr;
     QVector<QPushButton *> m_menuButtons;
     QVector<NodeInfo> m_currentNodes;
+    QScrollArea *m_nodeScroll = nullptr;              // 节点列表滚动区（刷新时保留滚动位置）
+    QHash<QString, QPointer<QLabel>> m_delayBadges;   // 节点名→延迟药丸，供原地更新（不清空重建）
     QString m_selectedNode;
     bool m_dragging = false;
     bool m_closeToTray = true;

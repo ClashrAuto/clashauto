@@ -448,9 +448,24 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         m_totalDownValue->setText(speedText(total));
     });
     connect(&m_service, &ClashService::nodesUpdated, this, [this](const QVector<NodeInfo> &nodes, const QString &selected) {
-        // 仅当节点数据真正变化时才重建列表——轮询大多返回相同数据，
-        // 每次都重建会让状态列表刷新时闪烁。
-        const bool changed = (nodes != m_currentNodes);
+        // 结构键 = 节点集合(名字，与顺序无关) + 当前活动节点。
+        //   结构变（增删节点 / 切换活动节点）→ 整表重建（含重新排序、活动置顶）；
+        //   仅延迟/速度变 → 原地更新药丸，列表不清空、不闪烁、不跳滚动（对齐旧项目原地刷新）。
+        // 测速时大量返回都只是延迟在变，正是这里避免了「刷新清空列表」。
+        auto structureKey = [](const QVector<NodeInfo> &v) {
+            QStringList names;
+            QString active;
+            for (const NodeInfo &n : v) {
+                names << n.name;
+                if (n.active) {
+                    active = n.name;
+                }
+            }
+            names.sort();
+            return names.join(QLatin1Char('\n')) + QLatin1Char('\x1f') + active;
+        };
+        const bool structural = structureKey(nodes) != structureKey(m_currentNodes);
+        const bool anyChange = (nodes != m_currentNodes);
         m_currentNodes = nodes;
         // 节点切换通知（对应旧项目 config.note）；跳过首次填充，避免启动即误报
         if (m_nodeSwitchNote && m_nodeInitialized && m_tray && !selected.isEmpty() && selected != m_selectedNode) {
@@ -458,8 +473,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         }
         m_nodeInitialized = true;
         m_selectedNode = selected;
-        if (changed) {
+        if (structural) {
             populateNodeList();
+        } else if (anyChange) {
+            updateNodeBadges();
         }
     });
     connect(&m_service, &ClashService::proxyGroupsUpdated, this, [this](const QStringList &groups, const QString &selectedGroup) {
@@ -732,6 +749,7 @@ QWidget *MainWindow::buildStatusPage()
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_nodeScroll = scroll; // 保存以便刷新时保留滚动位置
     m_nodeList = new QFrame(scroll);
     m_nodeList->setObjectName("nodeListBody");
     auto *nodeLayout = new QVBoxLayout(m_nodeList);
@@ -2022,6 +2040,7 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     delay->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed); // 背景贴合文字，不被行高拉伸
     badgeLayout->addWidget(delay, 0, Qt::AlignVCenter);
     layout->addWidget(badgeWrap);
+    m_delayBadges.insert(node.name, delay); // 登记药丸，供 updateNodeBadges 原地刷新
 
     // 单个按钮：非活动项显示「应用」= 切换到该节点/分组；活动（正在使用）项显示「禁用」=
     //  禁用该节点（分组则禁其当前实际使用的节点 now）。只有正在使用的节点才出现「禁用」。
@@ -3169,6 +3188,10 @@ void MainWindow::populateNodeList()
         return;
     }
     auto *layout = qobject_cast<QVBoxLayout *>(m_nodeList->layout());
+    // 保留滚动位置：整表重建会把滚动条重置到顶部，看着像「列表被清空又跳回去」
+    QScrollBar *vbar = m_nodeScroll ? m_nodeScroll->verticalScrollBar() : nullptr;
+    const int scrollPos = vbar ? vbar->value() : 0;
+    m_delayBadges.clear(); // 下面会销毁旧行（含药丸），先清空登记（QPointer 亦会自动置空，双保险）
     // 重建期间关闭重绘，整批完成后一次性刷新，避免列表清空→重填的闪烁
     m_nodeList->setUpdatesEnabled(false);
     while (QLayoutItem *item = layout->takeAt(0)) {
@@ -3195,11 +3218,29 @@ void MainWindow::populateNodeList()
     }
     layout->addStretch();
     m_nodeList->setUpdatesEnabled(true);
+    if (vbar) {
+        vbar->setValue(scrollPos); // 还原滚动位置
+    }
 
     if (m_nodeTitle) {
         m_nodeTitle->setText(QString::fromUtf8("节点 <span style='font-size:9px'>(%1/%2)</span>")
                                  .arg(shown)
                                  .arg(m_currentNodes.size()));
+    }
+}
+
+void MainWindow::updateNodeBadges()
+{
+    // 仅延迟/速度变化（节点集合与当前活动节点未变）时调用：只改药丸文字/颜色，不动任何行，
+    // 因此列表不会清空、不闪烁、不跳滚动位置（对齐旧项目 Vue 的原地更新）。
+    for (const NodeInfo &node : std::as_const(m_currentNodes)) {
+        QLabel *badge = m_delayBadges.value(node.name).data();
+        if (!badge) {
+            continue; // 该节点被搜索过滤掉、或行已销毁（QPointer 置空）
+        }
+        badge->setText(QString("%1/%2").arg(speedText(node.speed),
+                                            node.delay == 0 ? QStringLiteral("-") : QString::number(node.delay)));
+        badge->setStyleSheet(QString("background:%1;").arg(delayColor(node.delay).name(QColor::HexArgb)));
     }
 }
 
