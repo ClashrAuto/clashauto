@@ -10,7 +10,6 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSysInfo>
-#include <QThread>
 
 namespace {
 #if defined(Q_OS_WIN)
@@ -87,35 +86,11 @@ bool CoreController::isCoreInstalled() const
     return QFileInfo::exists(m_config.clashExecutable());
 }
 
-void CoreController::killOrphanCores()
-{
-    // startCore 已确保自身 m_core 未运行，故系统里同名的核心进程都是孤儿（上次崩溃/被强杀、
-    // 或「更新内核」重启抢端口失败留下的），必须先杀掉，否则新核心 bind 9090 失败：
-    //   "External controller listen error: listen tcp 127.0.0.1:9090: bind: Only one usage..."
-    // 那样 REST API 不监听，app 只能连到僵尸核心 → 点应用/切换节点无反应。
-    const QString base = QFileInfo(m_config.clashExecutable()).fileName();
-    if (base.isEmpty()) {
-        return;
-    }
-#if defined(Q_OS_WIN)
-    const int rc = runHidden("taskkill", {"/F", "/IM", base}, 5000);
-#else
-    const int rc = runHidden("pkill", {"-9", "-f", base}, 5000);
-#endif
-    if (rc == 0) { // 0 = 确实杀掉了进程（Windows 未找到为 128；pkill 未找到为 1）
-        emit logUpdated(QString::fromUtf8("已清理残留核心进程: %1").arg(base));
-        QThread::msleep(300); // 等操作系统释放 9090 监听端口，避免新核心仍抢不到
-    }
-}
-
 void CoreController::startCore()
 {
     if (isRunning()) {
         return;
     }
-
-    // 先清理任何残留核心，确保 9090 空出来给本次要启动的核心
-    killOrphanCores();
 
     const QString exe = m_config.clashExecutable();
     m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
@@ -183,6 +158,17 @@ void CoreController::stopCore()
         }
     }
     emitStatus();
+}
+
+void CoreController::setUiPort(int port)
+{
+    if (port <= 0 || port == m_config.uiPort) {
+        return;
+    }
+    m_config.uiPort = port;
+    // ConfigBuilder 持有 AppConfig 副本，用新端口重建它；下次 ensureFullConfig 会把
+    // external-controller 写成 host:新端口。CoreController 自身的 /configs 调用也走新端口。
+    m_configBuilder = ConfigBuilder(m_config);
 }
 
 void CoreController::setTunEnabled(bool enabled)

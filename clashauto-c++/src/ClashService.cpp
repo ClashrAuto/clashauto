@@ -18,6 +18,16 @@ ClashService::ClashService(QObject *parent) : QObject(parent)
     connect(&m_nodesTimer, &QTimer::timeout, this, &ClashService::pollNodes);
 }
 
+void ClashService::setEndpoint(const QString &host, int port)
+{
+    if (!host.isEmpty()) {
+        m_host = host;
+    }
+    if (port > 0) {
+        m_port = port;
+    }
+}
+
 void ClashService::start()
 {
     emit statusUpdated(false, false, false);

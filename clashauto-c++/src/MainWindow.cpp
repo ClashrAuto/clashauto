@@ -329,6 +329,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_tray = new TrayController(this, this);
     m_subscriptions = new SubscriptionStore(config, this);
     registerUrlScheme();
+    m_service.setEndpoint(config.host, config.uiPort); // 让轮询/切换走配置里的 API 端口（默认 9191）
     m_service.setClearConnectionsOnSwitch(config.clearConnections);
     m_closeToTray = config.closeToTray;
     m_nodeSwitchNote = config.nodeSwitchNote;
@@ -1115,14 +1116,14 @@ QWidget *MainWindow::buildSettingsPage()
     host->setMinimumWidth(200);
     sysLayout->addWidget(row(QString::fromUtf8("Host"), host));       // 原「远程」tab 的 Host 并入此处
     sysLayout->addWidget(row(QString::fromUtf8("端口"), mixedPort));  // http(s)&socks 混合端口
+    uiPort->setToolTip(QString::fromUtf8("mihomo REST API / external-controller 端口；默认 9191（避开原版 9090，可与原版同时运行）"));
+    sysLayout->addWidget(row(QString::fromUtf8("API 端口"), uiPort)); // external-controller，改后会重启核心
     sysLayout->addWidget(row(QString::fromUtf8("切换时清理连接"), clearConnections));
     addDivider();
     addGroup(QString::fromUtf8("其他"));
     sysLayout->addWidget(row(QString::fromUtf8("语言"), language));
-    // 以下项已按旧项目从界面移除（API 端口固定、TUN 由底部开关控制、订阅周期用默认），
+    // 以下项已按旧项目从界面移除（TUN 由底部开关控制、订阅周期用默认），
     // 但控件仍存活以便「应用」时把原值写回，避免重置。
-    uiPort->setParent(sysBody);
-    uiPort->hide();
     tun->setParent(sysBody);
     tun->hide();
     autoUpdateSpin->setParent(sysBody);
@@ -1193,7 +1194,24 @@ QWidget *MainWindow::buildSettingsPage()
         {
             applyTheme(light ? "light" : "black");
         }
-        m_core->rebuildConfig();
+        // API 端口变更：external-controller 无法热重载，必须重启核心才能 bind 新端口；
+        // 同时把轮询/切换指向新端口。与 m_core 当前端口比对，避免重复保存时反复重启。
+        const int newPort = uiPort->text().trimmed().toInt();
+        const bool portChanged = (newPort > 0 && newPort != m_core->uiPort());
+        if (portChanged) {
+            m_core->setUiPort(newPort);
+            m_service.setEndpoint(host->currentText().trimmed(), newPort);
+        }
+        if (portChanged && m_core->isRunning()) {
+            m_core->stopCore();
+            m_core->startCore(); // 重新按新端口生成 full.yaml 并启动核心
+            appendLog(QString::fromUtf8("API 端口已改为 %1，核心已重启").arg(newPort));
+        } else {
+            m_core->rebuildConfig();
+            if (portChanged) {
+                appendLog(QString::fromUtf8("API 端口已改为 %1（下次启动核心生效）").arg(newPort));
+            }
+        }
     });
 
     return page;
@@ -3023,9 +3041,6 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
             const bool wasRunning = m_core && m_core->isRunning();
             if (wasRunning) {
                 m_core->stopCore();
-            }
-            if (m_core) {
-                m_core->killOrphanCores(); // 杀掉可能占着 exe 句柄的残留核心，否则替换文件失败
             }
             QDir().mkpath(QFileInfo(target).absolutePath());
             bool replaced = false;

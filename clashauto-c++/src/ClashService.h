@@ -32,6 +32,7 @@ public:
     explicit ClashService(QObject *parent = nullptr);
 
     void start();
+    void setEndpoint(const QString &host, int port); // REST API 地址（对齐 config.uiPort，默认 9191）
     void setMode(const QString &mode);
     void setSelectedGroup(const QString &group);
     void setClearConnectionsOnSwitch(bool enabled);
@@ -64,7 +65,7 @@ private:
     QTimer m_connectionsTimer;
     QTimer m_nodesTimer;
     QString m_host = "127.0.0.1";
-    int m_port = 9090;
+    int m_port = 9191; // 默认对齐 AppConfig::uiPort / default.yaml；实际由 setEndpoint 按配置设定
     QString m_selectedGroup; // 空 = 未定；首轮 pollNodes 选主组（按模式：Rule→🚀 节点选择, Global→GLOBAL）
     QString m_mode = "Rule";  // 当前代理模式，决定主选择组（对齐旧项目 getProxies）
     QString m_selectedNode;

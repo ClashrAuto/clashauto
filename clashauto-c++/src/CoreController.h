@@ -23,9 +23,10 @@ public:
     void setTunEnabled(bool enabled);
     // 立即硬杀核心并还原系统代理（提权重启时用，避免旧核心占用 9090 与新实例冲突）
     void killCoreNow();
-    // 杀掉系统里残留/孤儿的同名核心进程（崩溃、强杀、更新内核重启会遗留）。
-    // startCore 会自动调用；更新内核替换二进制前也需调用，否则孤儿核心占着 exe 文件句柄导致替换失败。
-    void killOrphanCores();
+    // 修改 REST API 端口（设置页「应用」时）：更新配置并让下次 full.yaml 用新端口写 external-controller。
+    // 端口变更需重启核心才能重新 bind（热重载改不了），调用方负责随后 stop/startCore。
+    void setUiPort(int port);
+    int uiPort() const { return m_config.uiPort; }
 
 public slots:
     void startCore();
