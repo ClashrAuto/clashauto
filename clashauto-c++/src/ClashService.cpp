@@ -233,10 +233,16 @@ void ClashService::pollNodes()
             }
 
             const QJsonObject proxy = proxies.value(name).toObject();
-            const QJsonArray history = proxy.value("history").toArray();
+            const QString now = proxy.value("now").toString();
+            QJsonArray history = proxy.value("history").toArray();
+            // 组（url-test/select 等自动分类国家组）自身通常没有 history：
+            // 延迟/速度取其当前选中成员(now)的，否则国家组会显示「无速度」
+            if (history.isEmpty() && !now.isEmpty()) {
+                history = proxies.value(now).toObject().value("history").toArray();
+            }
             NodeInfo node;
             node.name = name;
-            node.now = proxy.value("now").toString();
+            node.now = now;
             node.delay = history.isEmpty() ? 0 : history.last().toObject().value("delay").toInt();
             node.speed = history.isEmpty() ? 0 : history.last().toObject().value("speed").toInteger();
             node.active = node.name == selected;

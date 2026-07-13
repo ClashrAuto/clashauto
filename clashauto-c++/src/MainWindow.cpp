@@ -31,7 +31,9 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QFontMetrics>
 #include <QMouseEvent>
+#include <QResizeEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -129,6 +131,40 @@ protected:
 private:
     QColor m_dot;
     QColor m_axis;
+};
+
+// 自适应宽度的名称标签：随列宽伸缩，超出可用宽度时右侧用「…」省略；
+// 完整名称放进 tooltip 便于悬停查看（节点名很长时——如订阅名是整条 URL）。
+class ElidingLabel : public QLabel
+{
+public:
+    explicit ElidingLabel(QWidget *parent = nullptr) : QLabel(parent) {}
+    void setFullText(const QString &text)
+    {
+        if (m_full == text) {
+            return;
+        }
+        m_full = text;
+        setToolTip(text);
+        applyElide();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QLabel::resizeEvent(event);
+        applyElide();
+    }
+
+private:
+    void applyElide()
+    {
+        const QString shown = fontMetrics().elidedText(m_full, Qt::ElideRight, width());
+        if (shown != text()) {
+            QLabel::setText(shown);
+        }
+    }
+    QString m_full;
 };
 
 // 底部开关（增强/网页/核心）的「呼吸圆点」——自绘并开启抗锯齿，
@@ -1934,9 +1970,15 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     layout->setContentsMargins(2, 0, 0, 0); // + 3px 透明左条 = 名称左内边距 5（对齐旧项目 padding-left:5）
     layout->setSpacing(8);
 
-    auto *name = new QLabel(node.active ? QString("[%1] %2").arg(node.name, node.now.isEmpty() ? node.name : node.now) : node.name, row);
+    // 组（now 非空，如自动分类国家组）附带显示当前使用的节点：「组名 → 使用中的节点」
+    QString display = node.name;
+    if (!node.now.isEmpty() && node.now != node.name) {
+        display = QString::fromUtf8("%1 → %2").arg(node.name, node.now);
+    }
+    auto *name = new ElidingLabel(row);
     name->setObjectName("nodeName");
     name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred); // 自适应：名称随列宽伸缩，不撑宽整行
+    name->setFullText(display); // 超出列宽用「…」省略，完整名进 tooltip
     layout->addWidget(name, 1);
 
     // 速度/延迟：内容大小的药丸，右对齐在 120px 列内（对应旧项目 span width:120px + 内层 padding 徽标）
