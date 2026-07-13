@@ -362,11 +362,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     // 使用系统原生标题栏（不再无边框）；标题栏配色由 applyTitleBarColor() 通过 DWM 设置
     resize(MainWidth, MainHeight);
     setMinimumSize(MainWidth, MainHeight);
-#if defined(Q_OS_WIN)
-    // 让侧栏/页脚的半透明处透出 Win11 亚克力毛玻璃：客户区需支持逐像素透明。
-    // 内容区(#rightPane)仍绘制不透明底色，正文照常清晰可读。
-    setAttribute(Qt::WA_TranslucentBackground);
-#endif
     // 恢复上次窗口位置/大小（对应旧项目 config.bounds）
     const QByteArray savedGeometry = QSettings().value("window/geometry").toByteArray();
     if (!savedGeometry.isEmpty()) {
@@ -3100,7 +3095,6 @@ void MainWindow::showEvent(QShowEvent *event)
 {
     QMainWindow::showEvent(event);
     applyTitleBarColor(); // 窗口显示后给系统标题栏着色（需窗口已实体化）
-    applyAcrylic();       // 同上：窗口实体化后启用亚克力毛玻璃背景
 }
 
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
@@ -3862,15 +3856,7 @@ void MainWindow::applyTheme(const QString &theme)
     const bool light = theme.compare("light", Qt::CaseInsensitive) == 0
                        || theme.compare("white", Qt::CaseInsensitive) == 0;
     m_theme = light ? "white" : "black";
-    QString qss = light ? lightStyle() : appStyle();
-#if defined(Q_OS_WIN)
-    // Win11 亚克力：根透明让毛玻璃透出，侧栏/页脚半透明（与侧栏同底色），内容区(#rightPane)保持不透明可读。
-    // 追加在基础样式之后，覆盖基础里的 #root/#sidebar/#footer 底色。
-    qss += light
-        ? QStringLiteral(" #root{background:transparent;} #sidebar{background:rgba(238,238,238,0.55);} #footer{background:rgba(238,238,238,0.55);}")
-        : QStringLiteral(" #root{background:transparent;} #sidebar{background:rgba(34,34,34,0.55);} #footer{background:rgba(34,34,34,0.55);}");
-#endif
-    setStyleSheet(qss);
+    setStyleSheet(light ? lightStyle() : appStyle());
     // 呼吸圆点是自绘的，随主题切换刷新其颜色（关/浅色白、关/深色灰、开=蓝）
     for (QWidget *dot : {m_tunDot, m_proxyDot, m_coreDot}) {
         if (dot)
@@ -3892,26 +3878,12 @@ void MainWindow::applyTitleBarColor()
     // 深色标题（#222）需要浅色的最小化/关闭按钮图标 -> 开启沉浸式深色模式
     const BOOL dark = light ? FALSE : TRUE;
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
-    // 标题栏背景色，与自绘标题栏一致：浅色 #eee / 深色 #222（COLORREF = 0x00BBGGRR）
+    // 标题栏背景色，与内容框同色：浅色 #eee / 深色 #222（COLORREF = 0x00BBGGRR）
     const COLORREF caption = light ? RGB(0xEE, 0xEE, 0xEE) : RGB(0x22, 0x22, 0x22);
     DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     // 标题文字颜色
     const COLORREF text = light ? RGB(0x33, 0x33, 0x33) : RGB(0xEE, 0xEE, 0xEE);
     DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
-#endif
-}
-
-void MainWindow::applyAcrylic()
-{
-#if defined(Q_OS_WIN)
-    // Win11 22H2+（build 22621+）：DWMWA_SYSTEMBACKDROP_TYPE = 亚克力(Acrylic)，
-    // 客户区透明处（#root/侧栏/页脚半透明）显示系统毛玻璃背景。旧系统不支持则本调用无效果，
-    // 半透明侧栏/页脚会直接透出桌面而非模糊——不影响正文（#rightPane 不透明）。
-    constexpr DWORD DWMWA_SYSTEMBACKDROP_TYPE = 38;
-    constexpr int DWMSBT_TRANSIENTWINDOW = 3; // 亚克力
-    const HWND hwnd = reinterpret_cast<HWND>(winId());
-    int backdrop = DWMSBT_TRANSIENTWINDOW;
-    DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
 #endif
 }
 

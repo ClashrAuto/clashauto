@@ -36,13 +36,13 @@ void TrayController::setStatus(bool tun, bool proxy, bool core)
 
 void TrayController::refreshIcon()
 {
-    // 与侧栏 logo 同一套配色（见 appStyle #logo[state]）：增强(TUN)开=红、核心在跑=黄、否则原色。
-    // TUN 必然核心在跑，故红优先于黄。
+    // 托盘状态色（比侧栏 logo 更柔和、不刺眼）：增强(TUN)开=暗红、核心在跑=米色、否则原色。
+    // TUN 必然核心在跑，故暗红优先于米色。
     QColor tint;
     if (m_tun) {
-        tint = QColor(0xFF, 0x00, 0x00); // 红（对齐 #logo[state="tun"]）
+        tint = QColor(0xB0, 0x3A, 0x3A); // 暗红（增强/TUN）
     } else if (m_core) {
-        tint = QColor(0xFF, 0xFF, 0x00); // 黄（对齐 #logo[state="proxy"]）
+        tint = QColor(0xD6, 0xC6, 0x8E); // 米色（核心在跑）
     }
 
     const QIcon base(":/assets/icon.ico");
