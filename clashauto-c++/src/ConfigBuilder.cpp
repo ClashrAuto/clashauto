@@ -353,7 +353,8 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
         if (type != "select") {
             groupBlock += "    url: 'http://www.gstatic.com/generate_204'\n";
             groupBlock += "    interval: 300\n";
-            groupBlock += "    lazy: false\n"; // 启动即后台测延迟，否则 lazy(默认true)不用不测→列表无延迟
+            // 不写 lazy（默认 true，对齐旧项目 clash.js）：lazy:false 会在启动时同步健康检查，
+            // 节点不可达时会卡住核心启动、REST API 迟迟不监听。延迟改由应用启动后异步测速填充。
         }
         groupBlock += "    proxies:\n";
         for (const QString &node : matched) {
@@ -529,7 +530,7 @@ QString ConfigBuilder::appendSubscriptionGroups(QString yaml, const QVector<Subs
         groups += "    type: url-test\n";
         groups += "    url: 'http://www.gstatic.com/generate_204'\n";
         groups += "    interval: 300\n";
-        groups += "    lazy: false\n"; // 启动即后台测延迟（lazy 默认 true 时不用不测→节点无延迟）
+        // 不写 lazy（默认 true，对齐旧项目）：避免启动时同步健康检查卡住核心，延迟改由应用异步测速填充。
         groups += "    proxies:\n";
         for (const SubscriptionNode &node : subscription.nodes) {
             const QRegularExpression nameRe("(?m)^  - name:\\s*(.+)$");
@@ -557,7 +558,7 @@ QString ConfigBuilder::appendSubscriptionGroups(QString yaml, const QVector<Subs
         groups += "    type: url-test\n";
         groups += "    url: 'http://www.gstatic.com/generate_204'\n";
         groups += "    interval: 300\n";
-        groups += "    lazy: false\n"; // 启动即后台测延迟（lazy 默认 true 时不用不测→节点无延迟）
+        // 不写 lazy（默认 true，对齐旧项目）：避免启动时同步健康检查卡住核心，延迟改由应用异步测速填充。
         groups += "    proxies:\n";
         for (const QString &nodeName : it.value()) {
             groups += QString("      - %1\n").arg(yamlQuote(nodeName));

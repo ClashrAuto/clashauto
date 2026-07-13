@@ -65,7 +65,9 @@ private:
     QTimer m_nodesTimer;
     QString m_host = "127.0.0.1";
     int m_port = 9090;
-    QString m_selectedGroup; // 空 = 未定；首轮 pollNodes 选主选择组（🚀 节点选择）为默认视图
+    QString m_selectedGroup; // 空 = 未定；首轮 pollNodes 选主组（按模式：Rule→🚀 节点选择, Global→GLOBAL）
+    QString m_mode = "Rule";  // 当前代理模式，决定主选择组（对齐旧项目 getProxies）
     QString m_selectedNode;
     bool m_clearOnSwitch = true;
+    bool m_autoTested = false; // 核心起来后自动测一次延迟（异步，非阻塞）；核心掉线后重置以便重测
 };

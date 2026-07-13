@@ -27,7 +27,7 @@ void ClashService::start()
     pollNodes();
     m_trafficTimer.start(1000);
     m_connectionsTimer.start(1000);
-    m_nodesTimer.start(2000); // 节点列表更实时（原 5s）；配合切换/禁用后的即时刷新
+    m_nodesTimer.start(1000); // 1s 实时拉取节点列表状态（对齐旧项目 getProxies 每秒轮询）
 }
 
 void ClashService::setMode(const QString &mode)
@@ -44,12 +44,15 @@ void ClashService::setMode(const QString &mode)
         apiMode = "Direct";
     }
 
+    m_mode = apiMode;        // 记录模式，pollNodes 据此选主组
+    m_selectedGroup.clear(); // 模式变了，默认视图重选主组
     sendJsonRequest(QUrl(QString("http://%1:%2/configs").arg(m_host).arg(m_port)),
                     "PATCH",
                     QJsonObject{{"mode", apiMode}},
                     [this, mode, apiMode](bool ok, const QString &message) {
                         if (ok) {
                             emit logUpdated(QString("Mode changed: %1").arg(mode));
+                            pollNodes();
                         } else {
                             emit logUpdated(QString("Mode change failed (%1): %2").arg(apiMode, message));
                         }
@@ -239,19 +242,24 @@ void ClashService::pollNodes()
         }
 
         if (group.value("all").toArray().isEmpty()) {
-            // 默认选「主选择组」（🚀 节点选择）：Rule 模式下只有在此组里「应用」才真正切换路由，
-            // 选 GLOBAL 只在 Global 模式生效——否则点应用没反应。
-            for (auto it = proxies.begin(); it != proxies.end(); ++it) {
-                const QJsonObject candidate = it.value().toObject();
-                if (candidate.value("type").toString() != QLatin1String("Selector")
-                    || candidate.value("all").toArray().isEmpty() || it.key() == QLatin1String("GLOBAL")) {
-                    continue;
-                }
-                if (it.key().contains(QString::fromUtf8("节点")) || it.key().contains(QString::fromUtf8("选择"))
-                    || it.key().contains(QString::fromUtf8("代理")) || it.key().contains(QLatin1String("Proxy"), Qt::CaseInsensitive)) {
-                    groupName = it.key();
-                    group = candidate;
-                    break;
+            // 主组按模式选（对齐旧项目 getProxies）：Global 用 GLOBAL；否则（Rule）用主选择组
+            // 🚀 节点选择——只有在正确的主组里「应用」才真正切换路由。
+            if (m_mode.compare(QLatin1String("Global"), Qt::CaseInsensitive) == 0) {
+                groupName = QStringLiteral("GLOBAL");
+                group = proxies.value(groupName).toObject();
+            } else {
+                for (auto it = proxies.begin(); it != proxies.end(); ++it) {
+                    const QJsonObject candidate = it.value().toObject();
+                    if (candidate.value("type").toString() != QLatin1String("Selector")
+                        || candidate.value("all").toArray().isEmpty() || it.key() == QLatin1String("GLOBAL")) {
+                        continue;
+                    }
+                    if (it.key().contains(QString::fromUtf8("节点")) || it.key().contains(QString::fromUtf8("选择"))
+                        || it.key().contains(QString::fromUtf8("代理")) || it.key().contains(QLatin1String("Proxy"), Qt::CaseInsensitive)) {
+                        groupName = it.key();
+                        group = candidate;
+                        break;
+                    }
                 }
             }
         }
@@ -333,6 +341,13 @@ void ClashService::pollNodes()
         });
 
         emit nodesUpdated(nodes, selected);
+
+        // 核心刚起来、首次拿到节点：自动异步测一次延迟（对齐旧项目「进列表即可见延迟」的体验）。
+        // 配置已不再用 lazy:false（会卡启动），改由这里用 REST /delay 异步补测，不阻塞任何东西。
+        if (!nodes.isEmpty() && !m_autoTested) {
+            m_autoTested = true;
+            testDelays();
+        }
     });
 }
 
@@ -350,6 +365,7 @@ void ClashService::sendGet(const QUrl &url, std::function<void(const QJsonDocume
                 emit trafficUpdated(0, 0);
                 emit connectionsUpdated(0, 0);
                 emit nodesUpdated({}, QString());
+                m_autoTested = false; // 核心掉线：下次起来重新自动测一次延迟
             }
             return;
         }
