@@ -8,6 +8,7 @@
 
 class QJsonDocument;
 class QJsonObject;
+class QNetworkReply;
 
 struct NodeInfo {
     QString name;
@@ -53,7 +54,11 @@ signals:
     void statusUpdated(bool tun, bool proxy, bool core);
 
 private:
-    void pollTraffic();
+    // /traffic 是「流式」接口（mihomo 每秒推一条，连接常开、永不 finished）——绝不能像普通接口
+    // 那样每秒 GET 一次，否则每次泄漏一个连接，几秒内耗尽 QNetworkAccessManager 的 6 连接/主机池，
+    // 之后所有请求（含 selectNode 的 PUT）永久排队 → 列表不刷新、点应用无反应。改为常开单流读取。
+    void startTrafficStream();
+    void ensureTrafficStream(); // 流断了（核心重启/端口变更）就重连
     void pollConnections();
     void pollNodes();
     void sendGet(const QUrl &url, std::function<void(const QJsonDocument &)> onJson);
@@ -61,7 +66,8 @@ private:
     void sendDelete(const QUrl &url, std::function<void(bool, QString)> onDone);
 
     QNetworkAccessManager m_network;
-    QTimer m_trafficTimer;
+    QNetworkReply *m_trafficReply = nullptr; // 常开的 /traffic 流；nullptr 表示未连/已断
+    QTimer m_trafficTimer;                    // 看门狗：定期确保 /traffic 流还活着，断了就重连
     QTimer m_connectionsTimer;
     QTimer m_nodesTimer;
     QString m_host = "127.0.0.1";
