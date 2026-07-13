@@ -3024,6 +3024,9 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
             if (wasRunning) {
                 m_core->stopCore();
             }
+            if (m_core) {
+                m_core->killOrphanCores(); // 杀掉可能占着 exe 句柄的残留核心，否则替换文件失败
+            }
             QDir().mkpath(QFileInfo(target).absolutePath());
             bool replaced = false;
             for (int attempt = 0; attempt < 8 && !replaced; ++attempt) {
