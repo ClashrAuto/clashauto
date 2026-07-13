@@ -24,6 +24,7 @@ signals:
 
 private:
     void rebuildMenu();
+    void refreshIcon(); // 按状态给托盘图标着色：增强(TUN)开=红，核心在跑=黄，否则原色
     QString speedText(qint64 value) const;
 
     MainWindow *m_window = nullptr;

@@ -1,0 +1,4 @@
+// Windows 可执行文件图标：Explorer/桌面快捷方式显示的就是这里的图标。
+// 路径由 CMake 用 configure_file 填成绝对路径（正斜杠，rc.exe/windres 均可解析），
+// 避免依赖 RC 编译器的工作目录而找不到图标。数字 1 = 最小资源 ID，会被资源管理器选作 exe 图标。
+1 ICON "@APP_ICON_ABS@"

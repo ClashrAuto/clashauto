@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFont>
 #include <QFontDatabase>
+#include <QIcon>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QTextStream>
@@ -42,6 +43,7 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName("Clash Auto");
     QApplication::setOrganizationName("ClashAuto");
+    QApplication::setWindowIcon(QIcon(":/assets/icon.ico")); // 窗口/任务栏图标（exe 图标另见 assets/app.rc）
     // 载入旧项目 iconfont（family "iconfont"），供 logo / 流量卡 / 页脚等图标复用
     QFontDatabase::addApplicationFont(":/assets/iconfont.ttf");
 

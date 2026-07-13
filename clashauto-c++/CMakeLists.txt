@@ -40,6 +40,18 @@ add_executable(clashauto-cpp
     resources.qrc
 )
 
+# Windows：把 assets/icon.ico 作为 exe 图标嵌入（否则桌面/资源管理器里图标是空的）。
+# 用 configure_file 把图标绝对路径填进 .rc，避免 RC 编译器工作目录不同而找不到图标；
+# MSVC(rc.exe) 与 MinGW(windres) 都接受正斜杠绝对路径。
+if(WIN32)
+    set(APP_ICON_ABS "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/app.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
+        @ONLY)
+    target_sources(clashauto-cpp PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+endif()
+
 target_link_libraries(clashauto-cpp PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
