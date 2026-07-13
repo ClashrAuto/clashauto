@@ -56,6 +56,7 @@ private:
     QFrame *createNodeRow(const NodeInfo &node);
     void showSubscriptionNodes(int subscriptionIndex);
     void showUpdateDialog();
+    void checkForUpdate(bool silent); // 拉取最新 release 与本地版本比较；silent=启动自动检查
     void showConnectionsDialog();
     void appendLog(const QString &message);
     void appendTimeline(QVBoxLayout *layout, QScrollArea *scroll, const QString &message);
@@ -110,6 +111,7 @@ private:
     QScrollArea *m_clashScroll = nullptr;
     QString m_logFilePath;
     QLabel *m_usersLabel = nullptr;
+    QLabel *m_versionLabel = nullptr; // 关于页版本行；发现新版本时高亮提示
     QWidget *m_tunDot = nullptr; // BreathingDot（自绘呼吸圆点）
     QWidget *m_proxyDot = nullptr;
     QWidget *m_coreDot = nullptr;

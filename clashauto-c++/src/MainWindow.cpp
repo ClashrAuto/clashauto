@@ -527,6 +527,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     if (m_core && !m_core->isCoreInstalled()) {
         QTimer::singleShot(600, this, [this] { promptDownloadCore(); });
     }
+
+    // 启动后延迟自动检查更新（对齐旧项目）：有新版本则托盘提示 + 版本号变红 + 弹更新窗，
+    // 已勾选「不再提示该版本」则跳过弹窗。
+    QTimer::singleShot(3000, this, [this] { checkForUpdate(true); });
 }
 
 QWidget *MainWindow::buildTitleBar()
@@ -1856,7 +1860,8 @@ QWidget *MainWindow::buildAboutPage()
     verLabel->setTextFormat(Qt::RichText);
     verLabel->setText(QString("Clash Auto: <a href='update' style='color:green;font-weight:bold;text-decoration:none;'>%1</a>").arg(version));
     verLabel->setToolTip(QString::fromUtf8("点击检查更新"));
-    connect(verLabel, &QLabel::linkActivated, this, [this](const QString &) { showUpdateDialog(); });
+    connect(verLabel, &QLabel::linkActivated, this, [this](const QString &) { checkForUpdate(false); });
+    m_versionLabel = verLabel; // 供发现新版本时改红提示
     layout->addWidget(verLabel);
     addTitle("Clash:");
     addLink(QString::fromUtf8("用户讨论和bug提交:"), "https://t.me/clashr_auto");
@@ -2340,7 +2345,7 @@ void MainWindow::showUpdateDialog()
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(QString::fromUtf8("Clash Auto 更新"));
     dialog->setStyleSheet(styleSheet());
-    dialog->resize(600, 660);
+    dialog->resize(600, 560); // 对齐旧项目 update 窗 600x540
     auto *root = new QVBoxLayout(dialog);
     root->setContentsMargins(10, 10, 10, 10);
     root->setSpacing(8);
@@ -2371,7 +2376,7 @@ void MainWindow::showUpdateDialog()
         auto *body = new QTextEdit(page);
         body->setReadOnly(true);
         body->setMinimumHeight(200);
-        auto *h2 = new QLabel(QString::fromUtf8("下载资源（双击下载到「下载」目录）"), page);
+        auto *h2 = new QLabel(QString::fromUtf8("下载资源"), page);
         h2->setObjectName("subCardMeta");
         auto *assets = new QListWidget(page);
         assets->setMinimumHeight(130);
@@ -2399,80 +2404,106 @@ void MainWindow::showUpdateDialog()
     auto *closeBtn = new QPushButton(QString::fromUtf8("关闭"), dialog);
     closeBtn->setObjectName("nodeButton");
     closeBtn->setFixedSize(80, 30);
-    auto *openPage = new QPushButton(QString::fromUtf8("打开下载页"), dialog);
-    openPage->setObjectName("primaryButton");
-    openPage->setFixedSize(110, 30);
+    auto *updateBtn = new QPushButton(QString::fromUtf8("更新"), dialog);
+    updateBtn->setObjectName("primaryButton");
+    updateBtn->setFixedSize(90, 30);
+    updateBtn->setEnabled(false); // 未选资源时禁用（对齐旧项目 address===''）
     bottom->addWidget(closeBtn);
-    bottom->addWidget(openPage);
+    bottom->addWidget(updateBtn);
     root->addLayout(bottom);
 
     connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::reject);
-    connect(openPage, &QPushButton::clicked, dialog, [] {
-        QDesktopServices::openUrl(QUrl("https://github.com/ClashrAuto/Clashr-Auto-Desktop/releases"));
-    });
-    // 拉取 GitHub releases（失败时优雅降级，仅显示提示）
     auto *nam = new QNetworkAccessManager(dialog);
 
-    // 双击资源即在应用内下载到「下载」目录，带进度条；完成后打开所在文件夹
-    auto downloadAsset = [this, dialog, nam, progress](QListWidgetItem *item) {
+    // 选中资源即启用「更新」（作用于当前 tab 的当前选中项）
+    auto currentAssets = [tabs, rel, beta]() -> QListWidget * {
+        return tabs->currentIndex() == 0 ? rel.assets : beta.assets;
+    };
+    auto refreshUpdateBtn = [updateBtn, currentAssets] {
+        QListWidget *lw = currentAssets();
+        updateBtn->setEnabled(lw && lw->currentItem() != nullptr);
+    };
+    connect(rel.assets, &QListWidget::itemSelectionChanged, dialog, refreshUpdateBtn);
+    connect(beta.assets, &QListWidget::itemSelectionChanged, dialog, refreshUpdateBtn);
+    connect(tabs, &QTabWidget::currentChanged, dialog, [refreshUpdateBtn](int) { refreshUpdateBtn(); });
+
+    // 「更新」：下载所选资源到临时目录 → 完成后启动安装包并退出应用（对齐旧项目 openExternal + quit）
+    connect(updateBtn, &QPushButton::clicked, dialog, [this, dialog, nam, progress, updateBtn, currentAssets] {
+        QListWidget *lw = currentAssets();
+        QListWidgetItem *item = lw ? lw->currentItem() : nullptr;
+        if (!item) {
+            return;
+        }
         const QString url = item->data(Qt::UserRole).toString();
         const QString name = item->text();
         if (url.isEmpty()) {
             return;
         }
-        QString dir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
         if (dir.isEmpty()) {
-            dir = QDir::homePath();
+            dir = QDir::tempPath();
         }
         const QString savePath = QDir(dir).filePath(name);
-
-        const QUrl assetUrl(url);
-        QNetworkRequest req(assetUrl);
-        req.setRawHeader("User-Agent", "clashauto-cpp");
-        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-        QNetworkReply *reply = nam->get(req);
-
+        QNetworkRequest dreq{QUrl(url)};
+        dreq.setRawHeader("User-Agent", "clashauto-cpp");
+        dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply *reply = nam->get(dreq);
+        updateBtn->setEnabled(false);
         progress->setValue(0);
         progress->show();
         appendLog(QString::fromUtf8("开始下载: %1").arg(name));
-
         connect(reply, &QNetworkReply::downloadProgress, dialog, [progress](qint64 received, qint64 total) {
             if (total > 0) {
                 progress->setValue(static_cast<int>(received * 100 / total));
             }
         });
-        connect(reply, &QNetworkReply::finished, dialog, [this, reply, progress, savePath, name] {
+        connect(reply, &QNetworkReply::finished, dialog, [this, dialog, reply, progress, updateBtn, savePath, name] {
             const bool ok = reply->error() == QNetworkReply::NoError;
             const QByteArray data = reply->readAll();
             const QString err = reply->errorString();
             reply->deleteLater();
             if (!ok) {
                 progress->hide();
+                updateBtn->setEnabled(true);
                 appendLog(QString::fromUtf8("下载失败: %1 (%2)").arg(name, err));
+                QMessageBox::warning(dialog, QString::fromUtf8("更新"), QString::fromUtf8("下载失败：%1").arg(err));
                 return;
             }
             QFile out(savePath);
             if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
                 progress->hide();
+                updateBtn->setEnabled(true);
                 appendLog(QString::fromUtf8("保存失败: %1").arg(savePath));
                 return;
             }
             out.write(data);
             out.close();
             progress->setValue(100);
-            appendLog(QString::fromUtf8("下载完成: %1").arg(savePath));
-            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(savePath).absolutePath()));
+            appendLog(QString::fromUtf8("下载完成，启动安装并退出: %1").arg(savePath));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(savePath)); // 启动安装包 / 打开文件
+            qApp->quit();                                             // 退出应用让安装继续（对齐旧项目）
         });
-    };
-    connect(rel.assets, &QListWidget::itemActivated, dialog, downloadAsset);
-    connect(beta.assets, &QListWidget::itemActivated, dialog, downloadAsset);
-    QNetworkRequest req(QUrl("https://api.github.com/repos/ClashrAuto/Clashr-Auto-Desktop/releases"));
+    });
+    // 资源过滤（对齐旧项目 formatAssets）：仅当前平台+架构；本项目命名 windows/linux/darwin + x64/arm64
+    const QString plat =
+#if defined(Q_OS_WIN)
+        QStringLiteral("windows");
+#elif defined(Q_OS_MACOS)
+        QStringLiteral("darwin");
+#else
+        QStringLiteral("linux");
+#endif
+    const QString arch = QSysInfo::currentCpuArchitecture().contains(QStringLiteral("arm"))
+                             ? QStringLiteral("arm64")
+                             : QStringLiteral("x64");
+
+    QNetworkRequest req(QUrl("https://api.github.com/repos/ClashrAuto/clashauto/releases"));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "clashauto-cpp");
     rel.body->setPlainText(QString::fromUtf8("正在获取..."));
     beta.body->setPlainText(QString::fromUtf8("正在获取..."));
     QNetworkReply *reply = nam->get(req);
-    connect(reply, &QNetworkReply::finished, dialog, [reply, rel, beta] {
+    connect(reply, &QNetworkReply::finished, dialog, [reply, rel, beta, plat, arch] {
         const bool ok = reply->error() == QNetworkReply::NoError;
         const QByteArray body = reply->readAll();
         reply->deleteLater();
@@ -2482,14 +2513,25 @@ void MainWindow::showUpdateDialog()
             return;
         }
         const QJsonArray arr = QJsonDocument::fromJson(body).array();
-        auto fill = [](const QJsonObject &r, const Refs &refs) {
-            refs.ver->setText("VERSION: " + r.value("tag_name").toString());
+        auto fill = [plat, arch](const QJsonObject &r, const Refs &refs) {
+            // VERSION 去字母（v0.1.81 → 0.1.81），对齐旧项目
+            const QString tag = r.value("tag_name").toString();
+            refs.ver->setText(QString::fromUtf8("VERSION: ")
+                              + QString(tag).remove(QRegularExpression(QStringLiteral("[A-Za-z]"))));
             refs.body->setPlainText(r.value("body").toString());
             refs.assets->clear();
             const QJsonArray assets = r.value("assets").toArray();
             for (const QJsonValue &av : assets) {
                 const QJsonObject a = av.toObject();
-                auto *item = new QListWidgetItem(a.value("name").toString());
+                const QString name = a.value("name").toString();
+                if (!name.contains(plat, Qt::CaseInsensitive) || !name.contains(arch, Qt::CaseInsensitive)) {
+                    continue; // 非当前平台/架构
+                }
+                if (name.endsWith(QStringLiteral(".yml"), Qt::CaseInsensitive)
+                    || name.endsWith(QStringLiteral(".yaml"), Qt::CaseInsensitive)) {
+                    continue;
+                }
+                auto *item = new QListWidgetItem(name);
                 item->setData(Qt::UserRole, a.value("browser_download_url").toString());
                 refs.assets->addItem(item);
             }
@@ -2517,7 +2559,98 @@ void MainWindow::showUpdateDialog()
         }
     });
 
+    // 「不再提示」：勾选并关闭后，记住跳过当前正式版版本号，启动自动检查不再为该版本弹窗
+    connect(dialog, &QDialog::finished, dialog, [noTip, rel] {
+        if (!noTip->isChecked()) {
+            return;
+        }
+        const QString t = rel.ver->text();
+        const QString tag = t.startsWith(QStringLiteral("VERSION: ")) ? t.mid(9).trimmed() : QString();
+        if (!tag.isEmpty() && tag != QStringLiteral("-")) {
+            QSettings().setValue(QStringLiteral("update/skipTag"), tag);
+        }
+    });
+
     dialog->show();
+}
+
+namespace {
+// 比较版本号（忽略前缀字母，如 v0.1.81 → 0.1.81），remote 更新则返回 true
+bool versionNewer(const QString &remote, const QString &local)
+{
+    auto parse = [](QString s) {
+        s.remove(QRegularExpression(QStringLiteral("[^0-9.]")));
+        QVector<int> v;
+        for (const QString &p : s.split('.', Qt::SkipEmptyParts)) {
+            v << p.toInt();
+        }
+        return v;
+    };
+    const QVector<int> a = parse(remote);
+    const QVector<int> b = parse(local);
+    for (int i = 0; i < qMax(a.size(), b.size()); ++i) {
+        const int x = i < a.size() ? a.at(i) : 0;
+        const int y = i < b.size() ? b.at(i) : 0;
+        if (x != y) {
+            return x > y;
+        }
+    }
+    return false;
+}
+} // namespace
+
+void MainWindow::checkForUpdate(bool silent)
+{
+    auto *nam = new QNetworkAccessManager(this);
+    QNetworkRequest req(QUrl("https://api.github.com/repos/ClashrAuto/clashauto/releases/latest"));
+    req.setRawHeader("Accept", "application/vnd.github+json");
+    req.setRawHeader("User-Agent", "clashauto-cpp");
+    if (!silent) {
+        appendLog(QString::fromUtf8("正在检查更新..."));
+    }
+    QNetworkReply *reply = nam->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, nam, silent] {
+        reply->deleteLater();
+        nam->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            if (!silent) {
+                appendLog(QString::fromUtf8("检查更新失败: %1").arg(reply->errorString()));
+                QMessageBox::warning(this, QString::fromUtf8("检查更新"),
+                                     QString::fromUtf8("检查失败：%1").arg(reply->errorString()));
+            }
+            return;
+        }
+        const QJsonObject r = QJsonDocument::fromJson(reply->readAll()).object();
+        const QString tag = r.value(QStringLiteral("tag_name")).toString();
+        const QString local = QString::fromUtf8(APP_VERSION);
+        if (tag.isEmpty()) {
+            if (!silent) {
+                appendLog(QString::fromUtf8("检查更新失败: 未取到版本号"));
+            }
+            return;
+        }
+        if (versionNewer(tag, local)) {
+            appendLog(QString::fromUtf8("发现新版本 %1（当前 %2）").arg(tag, local));
+            if (m_versionLabel) {
+                m_versionLabel->setText(QString("Clash Auto: <a href='update' style='color:red;font-weight:bold;text-decoration:none;'>%1 → %2 有新版本</a>").arg(local, tag));
+                m_versionLabel->setToolTip(QString::fromUtf8("发现新版本 %1，点击查看/下载").arg(tag));
+            }
+            if (m_tray) {
+                m_tray->notify(QString::fromUtf8("发现新版本"), QString::fromUtf8("%1 可更新（当前 %2）").arg(tag, local));
+            }
+            // 启动自动检查尊重「不再提示该版本」；手动检查（点击版本号）总是弹窗。
+            // skipTag 存的是去字母版本号（与更新窗 VERSION 显示一致），比较前同样去字母。
+            const QString skipKey = QString(tag).remove(QRegularExpression(QStringLiteral("[A-Za-z]")));
+            if (silent && QSettings().value(QStringLiteral("update/skipTag")).toString() == skipKey) {
+                return;
+            }
+            showUpdateDialog();
+        } else if (!silent) {
+            appendLog(QString::fromUtf8("已是最新版本 %1").arg(local));
+            QMessageBox::information(this, QString::fromUtf8("检查更新"),
+                                    QString::fromUtf8("已是最新版本 %1").arg(local));
+        }
+    });
 }
 
 void MainWindow::appendLog(const QString &message)

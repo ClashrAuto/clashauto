@@ -5,6 +5,7 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSet>
 #include <QUrl>
 
 #include <algorithm>
@@ -194,6 +195,23 @@ void ClashService::pollNodes()
         QVector<NodeInfo> nodes;
         const QJsonObject proxies = doc.object().value("proxies").toObject();
 
+        // 沿 now 链递归找到真正承载延迟的节点：组自身通常无 history，其 now 可能仍是组
+        // （如 节点选择→自动选择→某节点），需一路跟到有 history 的叶子，否则这些组不显示延迟。
+        auto resolveHistory = [&proxies](const QString &start) -> QJsonArray {
+            QString cur = start;
+            QSet<QString> seen;
+            for (int i = 0; i < 16 && !cur.isEmpty() && !seen.contains(cur); ++i) {
+                seen.insert(cur);
+                const QJsonObject o = proxies.value(cur).toObject();
+                const QJsonArray h = o.value("history").toArray();
+                if (!h.isEmpty()) {
+                    return h;
+                }
+                cur = o.value("now").toString();
+            }
+            return {};
+        };
+
         QString groupName = m_selectedGroup;
         QJsonObject group = proxies.value(groupName).toObject();
         QStringList groups;
@@ -234,12 +252,9 @@ void ClashService::pollNodes()
 
             const QJsonObject proxy = proxies.value(name).toObject();
             const QString now = proxy.value("now").toString();
-            QJsonArray history = proxy.value("history").toArray();
-            // 组（url-test/select 等自动分类国家组）自身通常没有 history：
-            // 延迟/速度取其当前选中成员(now)的，否则国家组会显示「无速度」
-            if (history.isEmpty() && !now.isEmpty()) {
-                history = proxies.value(now).toObject().value("history").toArray();
-            }
+            // 组（url-test/select 等）自身通常没有 history：递归沿 now 链取实际叶子的延迟/速度，
+            // 否则国家组、以及 now 指向其它组的选择组（节点选择/漏网之鱼等）都会「无延迟」。
+            const QJsonArray history = resolveHistory(name);
             NodeInfo node;
             node.name = name;
             node.now = now;
