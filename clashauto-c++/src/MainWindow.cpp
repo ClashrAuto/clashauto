@@ -3611,14 +3611,14 @@ void MainWindow::mouseReleaseEvent(QMouseEvent *)
 QString MainWindow::appStyle() const
 {
     return R"(
-        #root { background:#242425; }
+        #root { background:#222; }
         #titleBar { background:#222; border-top-left-radius:10px; border-top-right-radius:10px; }
         #windowTitle { color:#ccc; font-size:12px; padding-left:0; }
         #titleButton, #closeButton { color:#ccc; background:#222; border:0; border-radius:0; }
         #titleButton:hover { background:#333; }
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
-        #rightPane { background:#242425; }
+        #rightPane { background:#222; }
         #sidebar { background:#222; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
@@ -3628,7 +3628,7 @@ QString MainWindow::appStyle() const
         #menuButton:hover { background:rgb(62,62,62); padding-left:36px; }
         #menuButton:checked { background:#000; color:#ccc; border-left:3px solid #4898f8; }
         #version { color:#666; font-size:12px; }
-        #metricCard { background:#222; border:0; border-radius:4px; min-height:70px; }
+        #metricCard { background:#2a2a2a; border:0; border-radius:4px; min-height:70px; }
         #metricIcon { font-size:30px; color:#aaa; font-family:'iconfont'; }
         #metricTitle { color:#bfbfbf; font-size:12px; }
         #metricValue { color:#bfbfbf; font-size:18px; }
@@ -3638,8 +3638,14 @@ QString MainWindow::appStyle() const
         #metricCard[kind="download"] QLabel { color:rgb(72,165,167); }
         #sectionTitle { color:#eee; font-size:18px; font-weight:400; }
         QScrollArea { background:transparent; border:0; }
-        QScrollBar:vertical { background:#242425; width:10px; margin:0; }
-        QScrollBar::handle:vertical { background:#555; border-radius:5px; min-height:24px; }
+        QScrollBar:vertical { background:transparent; width:8px; margin:0; }
+        QScrollBar::handle:vertical { background:#555; border-radius:4px; min-height:24px; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; width:0; background:transparent; border:0; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
+        QScrollBar:horizontal { background:transparent; height:8px; margin:0; }
+        QScrollBar::handle:horizontal { background:#555; border-radius:4px; min-width:24px; }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { height:0; width:0; background:transparent; border:0; }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }
         QLineEdit, QComboBox, QTextEdit, QSpinBox { color:#fff; background:#444; border:1px solid #333; border-radius:3px; min-height:28px; padding:0 8px; }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border:1px solid #4898f8; }
         QComboBox { padding-right:24px; }
@@ -3653,12 +3659,12 @@ QString MainWindow::appStyle() const
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
-        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#242425; }
-        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#242425; }
-        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#242425; }
+        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#222; }
+        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#222; }
+        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#222; }
         #nodeRow, #plainCard { background:#252525; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #83bdff; }
-        #nodeName { color:#ccc; font-size:12px; }
+        #nodeName { color:#ccc; font-size:12px; padding-left:5px; }
         #delayBadge { color:#222; border-radius:5px; padding:3px 5px; font-size:12px; }
         #nodeButton { color:#ccc; background:transparent; border:0; border-left:1px solid #000; border-radius:0; font-size:12px; }
         #nodeButton:hover { background:#333; }
@@ -3709,14 +3715,14 @@ QString MainWindow::appStyle() const
 QString MainWindow::lightStyle() const
 {
     return R"(
-        #root { background:#ffffff; }
+        #root { background:#eee; }
         #titleBar { background:#eee; border-top-left-radius:10px; border-top-right-radius:10px; }
         #windowTitle { color:#333; font-size:12px; }
         #titleButton, #closeButton { color:#333; background:#eee; border:0; border-radius:0; }
         #titleButton:hover { background:#fff; }
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
-        #rightPane { background:#ffffff; }
+        #rightPane { background:#eee; }
         #sidebar { background:#eee; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
@@ -3726,7 +3732,7 @@ QString MainWindow::lightStyle() const
         #menuButton:hover { background:rgb(210,210,210); padding-left:36px; }
         #menuButton:checked { background:#fff; color:#333; border-left:3px solid #4898f8; }
         #version { color:#666; font-size:12px; }
-        #metricCard { background:#eee; border:0; border-radius:4px; min-height:70px; }
+        #metricCard { background:#fff; border:0; border-radius:4px; min-height:70px; }
         #metricIcon { font-size:30px; color:#888; font-family:'iconfont'; }
         #metricTitle { color:#3d3d3d; font-size:12px; }
         #metricValue { color:#3d3d3d; font-size:18px; }
@@ -3736,8 +3742,14 @@ QString MainWindow::lightStyle() const
         #metricCard[kind="download"] QLabel { color:rgb(72,165,167); }
         #sectionTitle { color:#111; font-size:18px; font-weight:400; }
         QScrollArea { background:transparent; border:0; }
-        QScrollBar:vertical { background:#fff; width:10px; margin:0; }
-        QScrollBar::handle:vertical { background:#ccc; border-radius:5px; min-height:24px; }
+        QScrollBar:vertical { background:transparent; width:8px; margin:0; }
+        QScrollBar::handle:vertical { background:#ccc; border-radius:4px; min-height:24px; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; width:0; background:transparent; border:0; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
+        QScrollBar:horizontal { background:transparent; height:8px; margin:0; }
+        QScrollBar::handle:horizontal { background:#ccc; border-radius:4px; min-width:24px; }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { height:0; width:0; background:transparent; border:0; }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }
         QLineEdit, QComboBox, QTextEdit, QSpinBox { color:#333; background:#eaeaea; border:1px solid #ccc; border-radius:3px; min-height:28px; padding:0 8px; }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border:1px solid #4898f8; }
         QComboBox { padding-right:24px; }
@@ -3751,12 +3763,12 @@ QString MainWindow::lightStyle() const
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
-        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#ffffff; }
-        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#ffffff; }
-        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#ffffff; }
-        #nodeRow, #plainCard { background:#eee; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
+        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#eee; }
+        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#eee; }
+        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#eee; }
+        #nodeRow, #plainCard { background:#fff; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #1f6fd2; }
-        #nodeName { color:#333; font-size:12px; }
+        #nodeName { color:#333; font-size:12px; padding-left:5px; }
         #delayBadge { color:#333; border-radius:5px; padding:3px 5px; font-size:12px; }
         #nodeButton { color:#333; background:transparent; border:0; border-left:1px solid #fff; border-radius:0; font-size:12px; }
         #nodeButton:hover { background:#c1c1c1; }
