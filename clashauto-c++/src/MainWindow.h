@@ -67,6 +67,8 @@ private:
     void reloadSubscriptions();
     void populateNodeList();
     void updateNodeBadges(); // 仅延迟/速度变化时原地更新药丸，避免整表重建导致的闪烁/清空
+    void beginNodeSwitch(const QString &target); // 点应用/禁用后进入加载态（目标转圈、其余禁用）
+    void endNodeSwitch();                         // 切换确认或超时后解除加载态
     QString speedText(qint64 value) const;
     QColor delayColor(int delay) const;
     QString appStyle() const;
@@ -140,6 +142,14 @@ private:
     QScrollArea *m_nodeScroll = nullptr;              // 节点列表滚动区（刷新时保留滚动位置）
     QHash<QString, QPointer<QLabel>> m_delayBadges;   // 节点名→延迟药丸，供原地更新（不清空重建）
     QString m_selectedNode;
+    // 切换加载态（对齐旧项目 disableLoading）：点应用/禁用后，目标按钮转圈、其余按钮禁用，
+    // 直到轮询确认「当前节点==目标」或超时才解除（防重入、给用户明确反馈）
+    bool m_nodeSwitching = false;
+    QString m_nodeSwitchTarget;                       // 被点击的节点名（该按钮转圈）
+    QString m_nodeSwitchFrom;                          // 点击前的活动节点；当前活动 != 它即视为切换完成
+    QPointer<QPushButton> m_spinnerButton;            // 正在转圈的目标按钮
+    QTimer *m_spinnerTimer = nullptr;                 // 转圈动画计时器
+    int m_spinnerFrame = 0;
     bool m_dragging = false;
     bool m_closeToTray = true;
     bool m_trayHintShown = false;

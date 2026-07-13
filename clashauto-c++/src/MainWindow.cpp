@@ -331,6 +331,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     registerUrlScheme();
     m_service.setEndpoint(config.host, config.uiPort); // 让轮询/切换走配置里的 API 端口（默认 9191）
     m_service.setClearConnectionsOnSwitch(config.clearConnections);
+    // 切换加载态的转圈动画：只更新那个目标按钮的文字，不整表重建
+    m_spinnerTimer = new QTimer(this);
+    connect(m_spinnerTimer, &QTimer::timeout, this, [this] {
+        static const char *frames[] = {"◐", "◓", "◑", "◒"}; // ◐◓◑◒
+        m_spinnerFrame = (m_spinnerFrame + 1) % 4;
+        if (m_spinnerButton) {
+            m_spinnerButton->setText(QString::fromUtf8(frames[m_spinnerFrame]));
+        }
+    });
     m_closeToTray = config.closeToTray;
     m_nodeSwitchNote = config.nodeSwitchNote;
     m_autoTheme = config.autoTheme;
@@ -473,6 +482,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         }
         m_nodeInitialized = true;
         m_selectedNode = selected;
+        // 加载态确认：当前活动节点已不同于点击前 → 切换/禁用完成，解除转圈+禁用（对齐旧项目 find() 轮询）
+        if (m_nodeSwitching && !m_nodeSwitchFrom.isEmpty() && selected != m_nodeSwitchFrom) {
+            endNodeSwitch(); // 内部会 populateNodeList，渲染新的活动节点与可点按钮
+            return;
+        }
         if (structural) {
             populateNodeList();
         } else if (anyChange) {
@@ -2047,11 +2061,24 @@ QFrame *MainWindow::createNodeRow(const NodeInfo &node)
     auto *apply = new QPushButton(node.active ? QString::fromUtf8("禁用") : QString::fromUtf8("应用"), row);
     apply->setObjectName("nodeButton");
     apply->setFixedSize(82, 38);
+    if (m_nodeSwitching) {
+        apply->setEnabled(false); // 切换中：所有按钮禁用（对齐旧项目 disableLoading）
+        if (!m_nodeSwitchTarget.isEmpty() && node.name == m_nodeSwitchTarget) {
+            static const char *frames[] = {"◐", "◓", "◑", "◒"};
+            apply->setText(QString::fromUtf8(frames[m_spinnerFrame % 4])); // 目标按钮转圈
+            m_spinnerButton = apply;
+        }
+    }
     connect(apply, &QPushButton::clicked, this, [this, node] {
+        if (m_nodeSwitching) {
+            return; // 防重入：切换进行中忽略点击
+        }
         if (node.active) {
+            beginNodeSwitch(node.name); // 禁用：转圈落在该(活动)节点的按钮上
             disableNodeByName(node.now.isEmpty() ? node.name : node.now);
         } else {
-            m_service.selectNode(node.name); // 切换到该节点或分组
+            beginNodeSwitch(node.name); // 应用：转圈落在目标按钮上
+            m_service.selectNode(node.name);
         }
     });
     layout->addWidget(apply);
@@ -3227,6 +3254,42 @@ void MainWindow::populateNodeList()
                                  .arg(shown)
                                  .arg(m_currentNodes.size()));
     }
+}
+
+void MainWindow::beginNodeSwitch(const QString &target)
+{
+    if (m_nodeSwitching) {
+        return;
+    }
+    m_nodeSwitching = true;
+    m_nodeSwitchTarget = target;      // 该节点的按钮转圈
+    m_nodeSwitchFrom = m_selectedNode; // 记录切换前的活动节点，用于确认「已切换」
+    m_spinnerFrame = 0;
+    if (m_spinnerTimer) {
+        m_spinnerTimer->start(120);
+    }
+    populateNodeList(); // 立即重画：目标按钮转圈、其余全部禁用（对齐旧项目 disableLoading）
+    // 兜底：6s 内未确认（PUT 失败/网络异常）自动解除，避免按钮永久卡在加载态
+    QTimer::singleShot(6000, this, [this, target] {
+        if (m_nodeSwitching && m_nodeSwitchTarget == target) {
+            endNodeSwitch();
+        }
+    });
+}
+
+void MainWindow::endNodeSwitch()
+{
+    if (!m_nodeSwitching) {
+        return;
+    }
+    m_nodeSwitching = false;
+    m_nodeSwitchTarget.clear();
+    m_nodeSwitchFrom.clear();
+    m_spinnerButton = nullptr;
+    if (m_spinnerTimer) {
+        m_spinnerTimer->stop();
+    }
+    populateNodeList(); // 恢复：活动节点置顶、所有按钮可点
 }
 
 void MainWindow::updateNodeBadges()
