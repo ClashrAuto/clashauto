@@ -362,6 +362,11 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     // 使用系统原生标题栏（不再无边框）；标题栏配色由 applyTitleBarColor() 通过 DWM 设置
     resize(MainWidth, MainHeight);
     setMinimumSize(MainWidth, MainHeight);
+#if defined(Q_OS_WIN)
+    // 让侧栏/页脚的半透明处透出 Win11 亚克力毛玻璃：客户区需支持逐像素透明。
+    // 内容区(#rightPane)仍绘制不透明底色，正文照常清晰可读。
+    setAttribute(Qt::WA_TranslucentBackground);
+#endif
     // 恢复上次窗口位置/大小（对应旧项目 config.bounds）
     const QByteArray savedGeometry = QSettings().value("window/geometry").toByteArray();
     if (!savedGeometry.isEmpty()) {
@@ -565,8 +570,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_service.start();
 
 #if defined(Q_OS_WIN)
+    const bool tunElevated = QCoreApplication::arguments().contains(QStringLiteral("--tun-elevated"));
     // 由「增强」提权重启而来：等旧实例硬杀核心、释放 9090/系统代理并退出后，带 TUN 冷启动核心。
-    if (QCoreApplication::arguments().contains(QStringLiteral("--tun-elevated"))) {
+    if (tunElevated) {
         QTimer::singleShot(1000, this, [this] {
             if (m_core && !m_core->isRunning()) {
                 m_core->setTunEnabled(true);
@@ -575,12 +581,27 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             }
         });
     }
+#else
+    const bool tunElevated = false;
 #endif
 
-    // 不再预装内核：首启若未检测到内核，延迟弹窗引导去「设置 → 系统」下载
-    // （提权重启场景下内核必已就位，isCoreInstalled 会跳过）
-    if (m_core && !m_core->isCoreInstalled()) {
-        QTimer::singleShot(600, this, [this] { promptDownloadCore(); });
+    // 启动即处理内核：有内核就自动拉起核心；首次没内核则直接跳「设置 → 系统」引导下载。
+    // （提权开 TUN 的冷启动交给上面的 --tun-elevated 分支，避免这里先无 TUN 起核心把它顶掉。）
+    if (m_core && !tunElevated) {
+        QTimer::singleShot(600, this, [this] {
+            if (!m_core) {
+                return;
+            }
+            if (m_core->isCoreInstalled()) {
+                if (!m_core->isRunning()) {
+                    m_core->startCore(); // 有内核：启动时自动开启核心
+                }
+            } else {
+                // 首次没内核：不弹是否前往的对话框，直接跳到设置页下载区并定位「更新内核」
+                appendLog(QString::fromUtf8("未检测到 mihomo 内核，请在「设置 → 系统」下载"));
+                goToCoreDownload();
+            }
+        });
     }
 
     // 更新检查时机：①启动后 3 秒自动检查一次（失败会自动重试）；②之后每 6 小时再查一次，
@@ -2704,7 +2725,25 @@ void MainWindow::showUpdateDialog()
         QNetworkRequest dreq{QUrl(url)};
         dreq.setRawHeader("User-Agent", "clashauto-cpp");
         dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        // 关掉 HTTP/2：Qt 的 HTTP/2 下大文件（尤其经代理隧道到 GitHub CDN）常「下一点就卡死」，
+        // 进度条冻住、永不 finished。强制 HTTP/1.1 更稳。
+        dreq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+        dreq.setTransferTimeout(30000); // 30s 无数据即判失败，避免永久卡在进度条不动（而不是无声挂起）
+#endif
         QNetworkReply *reply = nam->get(dreq);
+        // 边下边写到磁盘：不把整包（~40MB）缓存在内存，也及时清空 reply 缓冲，避免堆积卡顿。
+        // out 挂在 reply 名下，取消/关窗时随 reply 一起销毁（QFile 析构会关闭文件）。
+        auto *out = new QFile(savePath);
+        out->setParent(reply);
+        if (!out->open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            reply->abort();
+            reply->deleteLater();
+            updateBtn->setEnabled(true);
+            appendLog(QString::fromUtf8("保存失败（无法写入临时文件）: %1").arg(savePath));
+            QMessageBox::warning(dialog, QString::fromUtf8("更新"), QString::fromUtf8("无法写入临时文件：%1").arg(savePath));
+            return;
+        }
         updateBtn->setEnabled(false);
         progress->setValue(0);
         progress->show();
@@ -2714,27 +2753,24 @@ void MainWindow::showUpdateDialog()
                 progress->setValue(static_cast<int>(received * 100 / total));
             }
         });
-        connect(reply, &QNetworkReply::finished, dialog, [this, dialog, reply, progress, updateBtn, savePath, name] {
+        connect(reply, &QNetworkReply::readyRead, dialog, [reply, out] {
+            out->write(reply->readAll()); // 收到即写，避免 reply 内部缓冲无限堆积
+        });
+        connect(reply, &QNetworkReply::finished, dialog, [this, dialog, reply, progress, updateBtn, out, savePath, name] {
+            out->write(reply->readAll()); // 收尾残余
+            out->close();
             const bool ok = reply->error() == QNetworkReply::NoError;
-            const QByteArray data = reply->readAll();
             const QString err = reply->errorString();
-            reply->deleteLater();
+            reply->deleteLater(); // 连带删除 out
             if (!ok) {
+                QFile::remove(savePath); // 删掉不完整文件，避免半包被当成安装包运行
                 progress->hide();
                 updateBtn->setEnabled(true);
                 appendLog(QString::fromUtf8("下载失败: %1 (%2)").arg(name, err));
-                QMessageBox::warning(dialog, QString::fromUtf8("更新"), QString::fromUtf8("下载失败：%1").arg(err));
+                QMessageBox::warning(dialog, QString::fromUtf8("更新"),
+                                     QString::fromUtf8("下载失败：%1\n\n若在墙内，请确保「核心已启动」以走代理下载后重试。").arg(err));
                 return;
             }
-            QFile out(savePath);
-            if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                progress->hide();
-                updateBtn->setEnabled(true);
-                appendLog(QString::fromUtf8("保存失败: %1").arg(savePath));
-                return;
-            }
-            out.write(data);
-            out.close();
             progress->setValue(100);
             appendLog(QString::fromUtf8("下载完成，启动安装并退出: %1").arg(savePath));
             QDesktopServices::openUrl(QUrl::fromLocalFile(savePath)); // 启动安装包 / 打开文件
@@ -3064,6 +3100,7 @@ void MainWindow::showEvent(QShowEvent *event)
 {
     QMainWindow::showEvent(event);
     applyTitleBarColor(); // 窗口显示后给系统标题栏着色（需窗口已实体化）
+    applyAcrylic();       // 同上：窗口实体化后启用亚克力毛玻璃背景
 }
 
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
@@ -3234,6 +3271,10 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
         QNetworkRequest dreq{QUrl(mirror + url)};
         dreq.setRawHeader("User-Agent", "clashauto-cpp");
         dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        dreq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false); // 同更新包：关 HTTP/2，避免大文件卡死
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+        dreq.setTransferTimeout(30000); // 30s 无数据即失败，不永久卡「下载中」
+#endif
         QNetworkReply *dl = nam->get(dreq);
         connect(dl, &QNetworkReply::downloadProgress, btn, [btn](qint64 r, qint64 t) {
             if (t > 0) {
@@ -3669,7 +3710,7 @@ QString MainWindow::appStyle() const
         #nodeButton { color:#ccc; background:transparent; border:0; border-left:1px solid #000; border-radius:0; font-size:12px; }
         #nodeButton:hover { background:#333; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
-        #footer { background:#303032; }
+        #footer { background:#222; }
         #usersBadge { color:#fff; background:#000; border-radius:3px; padding:3px 5px; font-size:12px; }
         #footerArrow { color:#666; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#ccc; font-size:12px; }
@@ -3773,7 +3814,7 @@ QString MainWindow::lightStyle() const
         #nodeButton { color:#333; background:transparent; border:0; border-left:1px solid #fff; border-radius:0; font-size:12px; }
         #nodeButton:hover { background:#c1c1c1; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
-        #footer { background:#fafafa; }
+        #footer { background:#eee; }
         #usersBadge { color:#333; background:#fff; border-radius:3px; padding:3px 5px; font-size:12px; }
         #footerArrow { color:#e8e8e8; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#333; font-size:12px; }
@@ -3821,7 +3862,15 @@ void MainWindow::applyTheme(const QString &theme)
     const bool light = theme.compare("light", Qt::CaseInsensitive) == 0
                        || theme.compare("white", Qt::CaseInsensitive) == 0;
     m_theme = light ? "white" : "black";
-    setStyleSheet(light ? lightStyle() : appStyle());
+    QString qss = light ? lightStyle() : appStyle();
+#if defined(Q_OS_WIN)
+    // Win11 亚克力：根透明让毛玻璃透出，侧栏/页脚半透明（与侧栏同底色），内容区(#rightPane)保持不透明可读。
+    // 追加在基础样式之后，覆盖基础里的 #root/#sidebar/#footer 底色。
+    qss += light
+        ? QStringLiteral(" #root{background:transparent;} #sidebar{background:rgba(238,238,238,0.55);} #footer{background:rgba(238,238,238,0.55);}")
+        : QStringLiteral(" #root{background:transparent;} #sidebar{background:rgba(34,34,34,0.55);} #footer{background:rgba(34,34,34,0.55);}");
+#endif
+    setStyleSheet(qss);
     // 呼吸圆点是自绘的，随主题切换刷新其颜色（关/浅色白、关/深色灰、开=蓝）
     for (QWidget *dot : {m_tunDot, m_proxyDot, m_coreDot}) {
         if (dot)
@@ -3849,6 +3898,20 @@ void MainWindow::applyTitleBarColor()
     // 标题文字颜色
     const COLORREF text = light ? RGB(0x33, 0x33, 0x33) : RGB(0xEE, 0xEE, 0xEE);
     DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
+#endif
+}
+
+void MainWindow::applyAcrylic()
+{
+#if defined(Q_OS_WIN)
+    // Win11 22H2+（build 22621+）：DWMWA_SYSTEMBACKDROP_TYPE = 亚克力(Acrylic)，
+    // 客户区透明处（#root/侧栏/页脚半透明）显示系统毛玻璃背景。旧系统不支持则本调用无效果，
+    // 半透明侧栏/页脚会直接透出桌面而非模糊——不影响正文（#rightPane 不透明）。
+    constexpr DWORD DWMWA_SYSTEMBACKDROP_TYPE = 38;
+    constexpr int DWMSBT_TRANSIENTWINDOW = 3; // 亚克力
+    const HWND hwnd = reinterpret_cast<HWND>(winId());
+    int backdrop = DWMSBT_TRANSIENTWINDOW;
+    DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
 #endif
 }
 

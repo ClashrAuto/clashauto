@@ -80,6 +80,7 @@ private:
     QString lightStyle() const;
     void applyTheme(const QString &theme);
     void applyTitleBarColor(); // 通过 DWM 给系统原生标题栏着色
+    void applyAcrylic();       // Win11 亚克力毛玻璃背景（侧栏/页脚半透明处透出）
     QFrame *createSubscriptionCard(const SubscriptionSummary &subscription, int index);
     QWidget *buildRuleTableTab(const QString &section);
     void reloadRuleTable(const QString &section);
