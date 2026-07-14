@@ -3024,6 +3024,22 @@ void MainWindow::appendTimeline(QVBoxLayout *layout, QScrollArea *scroll, const 
 
     // el-timeline :reverse=true —— 最新在顶部
     layout->insertWidget(0, entry);
+
+    // 只保留最近 100 条日志：末位是 addStretch() 的伸缩项（始终在 count-1），
+    // 其余条目从新到旧排在它前面，最旧的一条即紧邻伸缩项的 count-2。
+    // 条目数 = count-1，超出则从末尾（最旧）逐条移除并释放，避免长时间运行内存无限增长。
+    constexpr int kMaxLogEntries = 100;
+    while (layout->count() - 1 > kMaxLogEntries) {
+        QLayoutItem *old = layout->takeAt(layout->count() - 2);
+        if (!old) {
+            break;
+        }
+        if (QWidget *w = old->widget()) {
+            w->deleteLater();
+        }
+        delete old;
+    }
+
     if (scroll) {
         QScrollBar *bar = scroll->verticalScrollBar();
         QTimer::singleShot(0, scroll, [bar] {
