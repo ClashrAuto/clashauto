@@ -349,6 +349,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     m_closeToTray = config.closeToTray;
     m_nodeSwitchNote = config.nodeSwitchNote;
     m_nodeOnlyAvailable = config.nodeOnlyAvailable;
+    m_mirror = config.mirror;
     m_autoTheme = config.autoTheme;
 
     // 退出时停止核心并还原系统代理（关闭到托盘或从托盘退出都会走到这里）
@@ -1181,6 +1182,9 @@ QWidget *MainWindow::buildSettingsPage()
     // 从 GitHub 拉取最新 mihomo（amd64 取 compatible 版）替换内核——虚拟机/老 CPU 上必需
     auto *cnAccel = new QCheckBox(QString::fromUtf8("国内加速"));
     cnAccel->setToolTip(QString::fromUtf8("勾选后经国内镜像加速下载 GitHub 内核（网络不佳/被墙时使用）"));
+    cnAccel->setChecked(config.mirror);        // 与更新弹窗「国内代理下载」共用 config.mirror
+    m_cnAccelCheck = cnAccel;
+    connect(cnAccel, &QCheckBox::toggled, this, &MainWindow::setMirrorEnabled); // 勾选即持久化，无需点「应用」
     auto *coreBtn = new QPushButton(QString::fromUtf8("更新内核"));
     coreBtn->setObjectName("nodeButton");
     coreBtn->setFixedSize(110, 30);
@@ -1256,6 +1260,7 @@ QWidget *MainWindow::buildSettingsPage()
         out << "mini: " << (closeToTray->isChecked() ? "true" : "false") << "\n";
         out << "sys: " << (autoStart->isChecked() ? "true" : "false") << "\n";
         out << "note: " << (nodeNote->isChecked() ? "true" : "false") << "\n";
+        out << "mirror: " << (cnAccel->isChecked() ? "true" : "false") << "\n"; // 国内镜像下载偏好
         out << "autoUpdate: " << autoUpdateSpin->value() << "\n";
         out << "theme: " << (light ? "light" : "black") << "\n";
         out << "autoTheme: " << (autoTheme->isChecked() ? "true" : "false") << "\n";
@@ -2618,6 +2623,44 @@ void MainWindow::showConnectionsDialog()
     dialog->show();
 }
 
+void MainWindow::setMirrorEnabled(bool on)
+{
+    // 「国内加速」(设置页) 与「国内代理下载」(更新弹窗) 共用偏好：任一处切换都即时落盘到 config.mirror，
+    // 并回同步设置页勾选框（设置页只构建一次，否则更新弹窗改了后、设置页「应用」会用旧值把它冲掉）。
+    if (m_mirror == on) {
+        return;
+    }
+    m_mirror = on;
+    if (m_cnAccelCheck) {
+        const QSignalBlocker blocker(m_cnAccelCheck); // 避免回同步再触发 toggled → 递归
+        m_cnAccelCheck->setChecked(on);
+    }
+
+    // 轻量持久化：只改 config.yaml 的 mirror 键，保留其余内容（不整体重写，避免依赖设置页控件）
+    const QString path = QDir(m_userDir).filePath("config.yaml");
+    QString yaml;
+    QFile in(path);
+    if (in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        yaml = QString::fromUtf8(in.readAll());
+        in.close();
+    }
+    const QString line = QStringLiteral("mirror: %1").arg(on ? "true" : "false");
+    const QRegularExpression re(QStringLiteral("(?m)^mirror:.*$"));
+    if (re.match(yaml).hasMatch()) {
+        yaml.replace(re, line);
+    } else {
+        if (!yaml.isEmpty() && !yaml.endsWith('\n')) {
+            yaml += '\n';
+        }
+        yaml += line + '\n';
+    }
+    QFile out(path);
+    if (out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        out.write(yaml.toUtf8());
+        out.close();
+    }
+}
+
 void MainWindow::showUpdateDialog()
 {
     auto *dialog = new QDialog(this);
@@ -2680,6 +2723,13 @@ void MainWindow::showUpdateDialog()
     auto *noTip = new QCheckBox(QString::fromUtf8("不再提示"), dialog);
     bottom->addWidget(noTip);
     bottom->addStretch();
+    // 国内代理下载：与「更新内核」的「国内加速」同机制——给 GitHub 下载链接加国内镜像前缀
+    // （ghfast.top），墙内/网络不佳时下载更新包更稳。查询 release 列表仍走 applyDownloadProxy。
+    auto *mirrorCheck = new QCheckBox(QString::fromUtf8("国内代理下载"), dialog);
+    mirrorCheck->setToolTip(QString::fromUtf8("勾选后经国内镜像（ghfast.top）加速下载更新包，网络不佳/被墙时使用"));
+    mirrorCheck->setChecked(m_mirror); // 与设置页「国内加速」共用偏好
+    connect(mirrorCheck, &QCheckBox::toggled, this, &MainWindow::setMirrorEnabled); // 勾选即持久化
+    bottom->addWidget(mirrorCheck);
     auto *closeBtn = new QPushButton(QString::fromUtf8("关闭"), dialog);
     closeBtn->setObjectName("nodeButton");
     closeBtn->setFixedSize(80, 30);
@@ -2708,7 +2758,7 @@ void MainWindow::showUpdateDialog()
     connect(tabs, &QTabWidget::currentChanged, dialog, [refreshUpdateBtn](int) { refreshUpdateBtn(); });
 
     // 「更新」：下载所选资源到临时目录 → 完成后启动安装包并退出应用（对齐旧项目 openExternal + quit）
-    connect(updateBtn, &QPushButton::clicked, dialog, [this, dialog, nam, progress, updateBtn, currentAssets] {
+    connect(updateBtn, &QPushButton::clicked, dialog, [this, dialog, nam, progress, updateBtn, currentAssets, mirrorCheck] {
         QListWidget *lw = currentAssets();
         QListWidgetItem *item = lw ? lw->currentItem() : nullptr;
         if (!item) {
@@ -2719,12 +2769,15 @@ void MainWindow::showUpdateDialog()
         if (url.isEmpty()) {
             return;
         }
+        // 国内代理下载：给下载链接加国内镜像前缀（与 updateMihomoCore 的 useMirror 一致）
+        const bool useMirror = mirrorCheck && mirrorCheck->isChecked();
+        const QString downloadUrl = useMirror ? QStringLiteral("https://ghfast.top/") + url : url;
         QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
         if (dir.isEmpty()) {
             dir = QDir::tempPath();
         }
         const QString savePath = QDir(dir).filePath(name);
-        QNetworkRequest dreq{QUrl(url)};
+        QNetworkRequest dreq{QUrl(downloadUrl)};
         dreq.setRawHeader("User-Agent", "clashauto-cpp");
         dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         // 关掉 HTTP/2：Qt 的 HTTP/2 下大文件（尤其经代理隧道到 GitHub CDN）常「下一点就卡死」，
@@ -2749,7 +2802,7 @@ void MainWindow::showUpdateDialog()
         updateBtn->setEnabled(false);
         progress->setValue(0);
         progress->show();
-        appendLog(QString::fromUtf8("开始下载: %1").arg(name));
+        appendLog(QString::fromUtf8("开始下载: %1%2").arg(name, useMirror ? QString::fromUtf8("（国内代理）") : QString()));
         connect(reply, &QNetworkReply::downloadProgress, dialog, [progress](qint64 received, qint64 total) {
             if (total > 0) {
                 progress->setValue(static_cast<int>(received * 100 / total));

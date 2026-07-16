@@ -25,6 +25,7 @@ struct AppConfig {
     QString noAllowRule;
     QString theme = "black";
     bool autoTheme = false;
+    bool mirror = false;               // 「国内加速 / 国内代理下载」共用：下载走国内镜像(ghfast.top)
     QString language = "zh-CN";
 
     QString clashExecutable() const;

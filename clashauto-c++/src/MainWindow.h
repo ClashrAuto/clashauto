@@ -17,6 +17,7 @@
 
 class QTextEdit;
 class QComboBox;
+class QCheckBox;
 class QLineEdit;
 class QScrollArea;
 class QTabWidget;
@@ -60,6 +61,7 @@ private:
     void disableNodeByName(const QString &liveName); // 把状态列表的实时节点名映射回订阅节点并 use:false + 重建
     void showSubscriptionNodes(int subscriptionIndex);
     void showUpdateDialog();
+    void setMirrorEnabled(bool on); // 「国内加速 / 国内代理下载」共用偏好：持久化到 config.mirror 并同步两处勾选框
     void checkForUpdate(bool silent, int retriesLeft = 2); // 拉取最新 release 与本地版本比较；silent=启动自动检查；失败时静默重试
     // 让下载（检查更新/更新包/内核/mmdb 等 GitHub 资源）在核心运行时经混合端口走代理——
     // 墙内直连 GitHub 常不通，走代理更可靠。核心没跑则保持直连。
@@ -137,6 +139,8 @@ private:
     QTabWidget *m_settingsTabs = nullptr;      // 设置页 tab（过滤/区域/规则/系统）
     QScrollArea *m_sysScroll = nullptr;        // 系统 tab 的滚动区（用于滚到「更新内核」）
     QPushButton *m_coreUpdateBtn = nullptr;    // 「更新内核」按钮（无内核时高亮引导）
+    QCheckBox *m_cnAccelCheck = nullptr;       // 设置页「国内加速」勾选框（供 setMirrorEnabled 同步，避免与更新弹窗不同步）
+    bool m_mirror = false;                     // 下载走国内镜像（对应 config.mirror）
     bool m_coreMissingPrompted = false;        // 避免重复弹「未检测到内核」窗
     QLineEdit *m_ruleFilter = nullptr;   // 规则搜索过滤
     QLabel *m_ruleCountLabel = nullptr;  // 规则条数/显示上限提示
