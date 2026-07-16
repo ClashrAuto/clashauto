@@ -72,6 +72,8 @@ private:
     void populateNodeList();
     void updateNodeBadges(); // 仅延迟/速度变化时原地更新药丸，避免整表重建导致的闪烁/清空
     void syncNodeRows();     // 集合不变时：原地更新药丸/名称/按钮态并按新次序重排现有行（不销毁 → 不闪现）
+    bool nodeListTested() const;                           // 当前列表是否已测出结果（有任一 delay>0）
+    bool nodeHidden(const NodeInfo &node, bool tested) const; // 「仅可用节点」是否应隐藏该节点
     void beginNodeSwitch(const QString &target); // 点应用/禁用后进入加载态（目标转圈、其余禁用）
     void endNodeSwitch();                         // 切换确认或超时后解除加载态
     QString speedText(qint64 value) const;

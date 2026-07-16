@@ -3457,6 +3457,26 @@ void MainWindow::reloadSubscriptions()
     grid->setRowStretch(cell / columns + 1, 1);
 }
 
+bool MainWindow::nodeListTested() const
+{
+    // 「已测过」判定：列表里只要有一个节点测出了延迟(>0)，就说明这一轮刷新/测速已出结果。
+    // testDelays 对整组并发测、全部完成后才 pollNodes 一次性上报，所以不会出现「部分已测部分未测」
+    // 的中间态——据此把 delay==0 可靠地判为「测过但超时/不可用」，而非「还没测」。
+    for (const NodeInfo &n : m_currentNodes) {
+        if (n.delay > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool MainWindow::nodeHidden(const NodeInfo &node, bool tested) const
+{
+    // 「仅可用节点」：仅在本轮已测出结果(tested)后，隐藏 delay<=0（超时/不可用）的节点；一次都没测出
+    // 时（刚启动/刚切组）全部显示，避免列表空一片。当前活动节点永不隐藏，防止「正在用的节点消失」。
+    return m_nodeOnlyAvailable && tested && node.delay <= 0 && !node.active;
+}
+
 void MainWindow::populateNodeList()
 {
     if (!m_nodeList) {
@@ -3478,13 +3498,14 @@ void MainWindow::populateNodeList()
     }
 
     const QString filter = m_nodeSearch ? m_nodeSearch->text().trimmed() : QString();
+    const bool tested = nodeListTested();
     int shown = 0;
     for (const NodeInfo &node : std::as_const(m_currentNodes)) {
         if (!filter.isEmpty() && !node.name.contains(filter, Qt::CaseInsensitive)) {
             continue;
         }
-        if (m_nodeOnlyAvailable && node.delay <= 0) {
-            continue; // 「仅可用节点」：隐藏未测/超时（delay<=0）的节点
+        if (nodeHidden(node, tested)) {
+            continue; // 「仅可用节点」：已测出结果后隐藏超时/不可用（delay<=0）的节点
         }
         layout->addWidget(createNodeRow(node));
         ++shown;
@@ -3582,10 +3603,11 @@ void MainWindow::syncNodeRows()
     }
 
     const QString filter = m_nodeSearch ? m_nodeSearch->text().trimmed() : QString();
+    const bool tested = nodeListTested();
     QVector<const NodeInfo *> desired; // 目标可见次序（已由 ClashService 按速度/延迟排好）
     for (const NodeInfo &n : std::as_const(m_currentNodes)) {
-        if (m_nodeOnlyAvailable && n.delay <= 0) {
-            continue; // 「仅可用节点」：与 populateNodeList 保持同一过滤，节点跨越可用边界时会触发整表重建
+        if (nodeHidden(n, tested)) {
+            continue; // 「仅可用节点」：与 populateNodeList 同一过滤，节点跨越可用边界时会触发整表重建
         }
         if (filter.isEmpty() || n.name.contains(filter, Qt::CaseInsensitive)) {
             desired.push_back(&n);
