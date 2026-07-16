@@ -348,6 +348,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     });
     m_closeToTray = config.closeToTray;
     m_nodeSwitchNote = config.nodeSwitchNote;
+    m_nodeOnlyAvailable = config.nodeOnlyAvailable;
     m_autoTheme = config.autoTheme;
 
     // 退出时停止核心并还原系统代理（关闭到托盘或从托盘退出都会走到这里）
@@ -1267,6 +1268,12 @@ QWidget *MainWindow::buildSettingsPage()
         appendLog(QString("Settings saved: %1").arg(path));
         m_closeToTray = closeToTray->isChecked();
         m_nodeSwitchNote = nodeNote->isChecked();
+        if (m_nodeOnlyAvailable != nodeOnly->isChecked()) {
+            m_nodeOnlyAvailable = nodeOnly->isChecked();
+            if (!m_nodeSwitching) {
+                populateNodeList(); // 「仅可用节点」改变了可见集合，整表重建即时生效
+            }
+        }
         m_autoTheme = autoTheme->isChecked();
         m_service.setClearConnectionsOnSwitch(clearConnections->isChecked());
         applyAutoStart(autoStart->isChecked());
@@ -3476,6 +3483,9 @@ void MainWindow::populateNodeList()
         if (!filter.isEmpty() && !node.name.contains(filter, Qt::CaseInsensitive)) {
             continue;
         }
+        if (m_nodeOnlyAvailable && node.delay <= 0) {
+            continue; // 「仅可用节点」：隐藏未测/超时（delay<=0）的节点
+        }
         layout->addWidget(createNodeRow(node));
         ++shown;
     }
@@ -3574,6 +3584,9 @@ void MainWindow::syncNodeRows()
     const QString filter = m_nodeSearch ? m_nodeSearch->text().trimmed() : QString();
     QVector<const NodeInfo *> desired; // 目标可见次序（已由 ClashService 按速度/延迟排好）
     for (const NodeInfo &n : std::as_const(m_currentNodes)) {
+        if (m_nodeOnlyAvailable && n.delay <= 0) {
+            continue; // 「仅可用节点」：与 populateNodeList 保持同一过滤，节点跨越可用边界时会触发整表重建
+        }
         if (filter.isEmpty() || n.name.contains(filter, Qt::CaseInsensitive)) {
             desired.push_back(&n);
         }

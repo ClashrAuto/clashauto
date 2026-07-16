@@ -168,6 +168,7 @@ private:
     bool m_closeToTray = true;
     bool m_trayHintShown = false;
     bool m_nodeSwitchNote = true;
+    bool m_nodeOnlyAvailable = true;                   // 「仅可用节点」：开启时状态页隐藏 delay<=0（未测/超时）的节点
     bool m_nodeInitialized = false;
     bool m_autoTheme = false;
     int m_autoUpdateMinutes = 0;
