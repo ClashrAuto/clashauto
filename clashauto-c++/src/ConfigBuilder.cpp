@@ -603,21 +603,42 @@ QString ConfigBuilder::setNestedScalar(QString yaml, const QString &section, con
 
 QString ConfigBuilder::ensureProxyServerNameserver(QString yaml) const
 {
-    // 开启增强(TUN, auto-route) 后，核心解析「代理服务器域名」若走 dns.fallback 的境外 DoH
-    // （1.0.0.1、iij…），这些 DoH 的出站连接会被核心自己的 TUN 路由捕获 → 命中规则再丢回代理 →
-    // 而拨代理又要先解析代理服务器域名 → 死循环，日志报 "dns resolve failed: couldn't find ip"，
-    // 表现为「所有节点无延迟、境外全打不开」（增强前用系统代理时 DoH 走物理网卡直连，故正常）。
-    // 加 proxy-server-nameserver：核心用境内明文 DNS 直连（绕过隧道与规则）专门解析代理服务器域名，
-    // 打破环路。境内明文 DNS 恒可直连（日志里国内直连流量本就正常），TUN 关时也无副作用。
-    if (yaml.contains(QRegularExpression("(?m)^  proxy-server-nameserver:"))) {
-        return yaml; // 已有（自定义配置里带了）就不再注入
+    // 开启增强(TUN, auto-route) 后，核心要先解析「代理服务器域名」才能拨代理，两条路都有坑：
+    // - 走境内明文/DoH：代理服务器域名常被污染 → 拿到假 IP → 连不上（换境内 DNS 仍不稳）。
+    // - 直接走 dns.fallback 的境外 DoH：这条 DoH 出站连接会被核心自己的 TUN 路由捕获 → 命中规则丢回
+    //   代理 → 拨代理又得先解析代理服务器域名 → 死循环，日志报 "dns resolve failed: couldn't find ip"，
+    //   表现为「所有节点无延迟、境外全打不开」。
+    // 解法：proxy-server-nameserver 用「IP 字面量」的境外 DoH（本身就是 IP，无需再解析 DoH 域名，且抗
+    // 污染），再在 rules 顶部加 IP-CIDR ...,DIRECT,no-resolve —— 到这些 DoH 的连接直连物理网卡、跳过隧道
+    // 与规则，打破环路。列 Cloudflare/Google/Quad9 多家做冗余：核心并发查询取最快应答，个别家被墙也不影响
+    // （被墙的超时、可达的照常应答）。TUN 关时这些直连规则也无副作用（本就直连）。
+    if (!yaml.contains(QRegularExpression("(?m)^  proxy-server-nameserver:"))) {
+        const QRegularExpressionMatch dnsHead = QRegularExpression("(?m)^dns:\\n").match(yaml);
+        if (dnsHead.hasMatch()) { // 没有 dns 块（理论上不会）就跳过，避免破坏结构
+            const QString block =
+                "  proxy-server-nameserver:\n"
+                "    - https://1.1.1.1/dns-query\n"
+                "    - https://1.0.0.1/dns-query\n"
+                "    - https://8.8.8.8/dns-query\n"
+                "    - https://8.8.4.4/dns-query\n"
+                "    - https://9.9.9.9/dns-query\n";
+            yaml.insert(dnsHead.capturedEnd(0), block);
+        }
     }
-    const QRegularExpressionMatch dnsHead = QRegularExpression("(?m)^dns:\\n").match(yaml);
-    if (!dnsHead.hasMatch()) {
-        return yaml; // 没有 dns 块（理论上不会）：不动，避免破坏结构
+
+    // 让到境外 DoH 的连接直连、跳过隧道/规则（否则被 TUN 捕获成环）。前插到 rules 顶部。
+    if (!yaml.contains("IP-CIDR,1.1.1.1/32,DIRECT")) {
+        const QRegularExpressionMatch rulesHead = QRegularExpression("(?m)^rules:\\n").match(yaml);
+        if (rulesHead.hasMatch()) {
+            const QString directRules =
+                "  - \"IP-CIDR,1.1.1.1/32,DIRECT,no-resolve\"\n"
+                "  - \"IP-CIDR,1.0.0.1/32,DIRECT,no-resolve\"\n"
+                "  - \"IP-CIDR,8.8.8.8/32,DIRECT,no-resolve\"\n"
+                "  - \"IP-CIDR,8.8.4.4/32,DIRECT,no-resolve\"\n"
+                "  - \"IP-CIDR,9.9.9.9/32,DIRECT,no-resolve\"\n";
+            yaml.insert(rulesHead.capturedEnd(0), directRules);
+        }
     }
-    const QString block = "  proxy-server-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n";
-    yaml.insert(dnsHead.capturedEnd(0), block);
     return yaml;
 }
 
