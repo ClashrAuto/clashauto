@@ -1029,6 +1029,18 @@ QWidget *MainWindow::buildSettingsPage()
     blockRule->setCurrentText(config.noAllowRule.isEmpty() ? QStringLiteral("CN|^CN|CN_") : config.noAllowRule);
     auto *nodeOnly = new QCheckBox();
     nodeOnly->setChecked(config.nodeOnlyAvailable);
+    // 即时生效并落盘：勾选/取消立刻重建状态列表并写盘，不必再点「应用」。
+    // 修复「关掉了却还在过滤（不显示全部）」——此前过滤只在点「应用」时才更新 m_nodeOnlyAvailable。
+    connect(nodeOnly, &QCheckBox::toggled, this, [this](bool on) {
+        if (m_nodeOnlyAvailable == on) {
+            return;
+        }
+        m_nodeOnlyAvailable = on;
+        if (!m_nodeSwitching) {
+            populateNodeList();
+        }
+        persistConfigBool(QStringLiteral("node"), on);
+    });
     auto *webProxy = new QCheckBox();
     webProxy->setChecked(config.webProxy);
     auto *tun = new QCheckBox();
@@ -2623,20 +2635,9 @@ void MainWindow::showConnectionsDialog()
     dialog->show();
 }
 
-void MainWindow::setMirrorEnabled(bool on)
+void MainWindow::persistConfigBool(const QString &key, bool value)
 {
-    // 「国内加速」(设置页) 与「国内代理下载」(更新弹窗) 共用偏好：任一处切换都即时落盘到 config.mirror，
-    // 并回同步设置页勾选框（设置页只构建一次，否则更新弹窗改了后、设置页「应用」会用旧值把它冲掉）。
-    if (m_mirror == on) {
-        return;
-    }
-    m_mirror = on;
-    if (m_cnAccelCheck) {
-        const QSignalBlocker blocker(m_cnAccelCheck); // 避免回同步再触发 toggled → 递归
-        m_cnAccelCheck->setChecked(on);
-    }
-
-    // 轻量持久化：只改 config.yaml 的 mirror 键，保留其余内容（不整体重写，避免依赖设置页控件）
+    // 轻量持久化：只改 config.yaml 的单个键、保留其余内容（不整体重写，供各处 toggled 即时落盘用）
     const QString path = QDir(m_userDir).filePath("config.yaml");
     QString yaml;
     QFile in(path);
@@ -2644,8 +2645,8 @@ void MainWindow::setMirrorEnabled(bool on)
         yaml = QString::fromUtf8(in.readAll());
         in.close();
     }
-    const QString line = QStringLiteral("mirror: %1").arg(on ? "true" : "false");
-    const QRegularExpression re(QStringLiteral("(?m)^mirror:.*$"));
+    const QString line = QStringLiteral("%1: %2").arg(key, value ? "true" : "false");
+    const QRegularExpression re(QStringLiteral("(?m)^%1:.*$").arg(QRegularExpression::escape(key)));
     if (re.match(yaml).hasMatch()) {
         yaml.replace(re, line);
     } else {
@@ -2659,6 +2660,21 @@ void MainWindow::setMirrorEnabled(bool on)
         out.write(yaml.toUtf8());
         out.close();
     }
+}
+
+void MainWindow::setMirrorEnabled(bool on)
+{
+    // 「国内加速」(设置页) 与「国内代理下载」(更新弹窗) 共用偏好：任一处切换都即时落盘到 config.mirror，
+    // 并回同步设置页勾选框（设置页只构建一次，否则更新弹窗改了后、设置页「应用」会用旧值把它冲掉）。
+    if (m_mirror == on) {
+        return;
+    }
+    m_mirror = on;
+    if (m_cnAccelCheck) {
+        const QSignalBlocker blocker(m_cnAccelCheck); // 避免回同步再触发 toggled → 递归
+        m_cnAccelCheck->setChecked(on);
+    }
+    persistConfigBool(QStringLiteral("mirror"), on);
 }
 
 void MainWindow::showUpdateDialog()

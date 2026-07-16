@@ -62,6 +62,7 @@ private:
     void showSubscriptionNodes(int subscriptionIndex);
     void showUpdateDialog();
     void setMirrorEnabled(bool on); // 「国内加速 / 国内代理下载」共用偏好：持久化到 config.mirror 并同步两处勾选框
+    void persistConfigBool(const QString &key, bool value); // 只改 config.yaml 的单个布尔键、保留其余内容
     void checkForUpdate(bool silent, int retriesLeft = 2); // 拉取最新 release 与本地版本比较；silent=启动自动检查；失败时静默重试
     // 让下载（检查更新/更新包/内核/mmdb 等 GitHub 资源）在核心运行时经混合端口走代理——
     // 墙内直连 GitHub 常不通，走代理更可靠。核心没跑则保持直连。
