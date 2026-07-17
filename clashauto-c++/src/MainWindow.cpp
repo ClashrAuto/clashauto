@@ -565,7 +565,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     // 未检测到内核（不再预装）→ 弹窗引导用户去设置下载
     connect(m_core, &CoreController::coreMissing, this, [this](const QString &) { promptDownloadCore(); });
     connect(m_tray, &TrayController::toggleCoreRequested, m_core, &CoreController::toggleCore);
-    connect(m_tray, &TrayController::toggleProxyRequested, m_core, &CoreController::toggleProxy);
+    connect(m_tray, &TrayController::toggleProxyRequested, this, &MainWindow::onToggleProxyRequested);
     connect(m_tray, &TrayController::toggleTunRequested, this, &MainWindow::onToggleTunRequested);
     connect(m_subscriptions, &SubscriptionStore::subscriptionUpdated, this, [this](int, bool ok, const QString &message) {
         appendLog(message);
@@ -601,6 +601,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
                 return;
             }
             if (m_core->isCoreInstalled()) {
+#if defined(Q_OS_WIN)
+                // 恢复上次退出前的增强(TUN)状态（config 的 use:，每次切换即落盘；一键更新
+                // 自动重启后也走这里）。非管理员进程建不了 TUN 网卡 → 先按需提权重启。
+                if (m_core->isTunEnabled() && !isProcessElevated()) {
+                    appendLog(QString::fromUtf8("正在恢复上次的增强(TUN)模式，需要管理员权限..."));
+                    if (relaunchElevatedForTun()) {
+                        return; // 提权实例接管，本实例即将退出
+                    }
+                    // 取消授权/提权失败：本次不带 TUN 启动（use: 已由 relaunch 回滚为 false，
+                    // 避免以后每次启动都弹 UAC）
+                    m_core->setTunEnabled(false);
+                }
+#endif
                 if (!m_core->isRunning()) {
                     m_core->startCore(); // 有内核：启动时自动开启核心
                 }
@@ -1054,6 +1067,7 @@ QWidget *MainWindow::buildSettingsPage()
     });
     auto *webProxy = new QCheckBox();
     webProxy->setChecked(config.webProxy);
+    m_webProxyCheck = webProxy; // 底部「网页」开关切换时同步勾选，保证「应用」写盘值 == 实际状态
     auto *tun = new QCheckBox();
     tun->setChecked(config.tun);
     auto *clearConnections = new QCheckBox();
@@ -1276,7 +1290,9 @@ QWidget *MainWindow::buildSettingsPage()
         out << "ui: " << uiPort->text().trimmed() << "\n";
         out << "port: " << mixedPort->text().trimmed() << "\n";
         out << "web: " << (webProxy->isChecked() ? "true" : "false") << "\n";
-        out << "use: " << (tun->isChecked() ? "true" : "false") << "\n";
+        // use:(增强/TUN) 由底部开关独占管理、每次切换即落盘——这里写「当前实际状态」而非
+        // 建页时的旧快照，否则「应用」会把切换后的增强状态悄悄改回去
+        out << "use: " << (m_core && m_core->isTunEnabled() ? "true" : "false") << "\n";
         out << "node: " << (nodeOnly->isChecked() ? "true" : "false") << "\n";
         out << "clearConnections: " << (clearConnections->isChecked() ? "true" : "false") << "\n";
         out << "increment: " << (increment->isChecked() ? "true" : "false") << "\n";
@@ -1294,6 +1310,10 @@ QWidget *MainWindow::buildSettingsPage()
         out << "  allowUse: " << (allowUse->isChecked() ? "true" : "false") << "\n";
         out << "  noallowUse: " << (blockUse->isChecked() ? "true" : "false") << "\n";
         appendLog(QString("Settings saved: %1").arg(path));
+        // 「系统代理」应用即生效，并与底部「网页」开关同一状态源（写盘值 == 实际状态）
+        if (m_core && webProxy->isChecked() != m_core->isProxyEnabled()) {
+            m_core->toggleProxy();
+        }
         m_closeToTray = closeToTray->isChecked();
         m_nodeSwitchNote = nodeNote->isChecked();
         if (m_nodeOnlyAvailable != nodeOnly->isChecked()) {
@@ -2164,7 +2184,7 @@ QWidget *MainWindow::buildFooter()
 
     // 增强(TUN) 走 onToggleTunRequested：需要管理员权限，非提权时先弹 UAC 提权重启
     addSwitch("增强", &m_tunDot, [this] { onToggleTunRequested(); });
-    addSwitch("网页", &m_proxyDot, [this] { if (m_core) m_core->toggleProxy(); });
+    addSwitch("网页", &m_proxyDot, [this] { onToggleProxyRequested(); });
     addSwitch("核心", &m_coreDot, [this] { if (m_core) m_core->toggleCore(); });
 
     auto *mode = new QComboBox(footer);
@@ -2762,10 +2782,11 @@ void MainWindow::showUpdateDialog()
     auto *closeBtn = new QPushButton(QString::fromUtf8("关闭"), dialog);
     closeBtn->setObjectName("nodeButton");
     closeBtn->setFixedSize(80, 30);
-    auto *updateBtn = new QPushButton(QString::fromUtf8("更新"), dialog);
+    auto *updateBtn = new QPushButton(QString::fromUtf8("一键更新"), dialog);
     updateBtn->setObjectName("primaryButton");
-    updateBtn->setFixedSize(90, 30);
+    updateBtn->setFixedSize(100, 30);
     updateBtn->setEnabled(false); // 未选资源时禁用（对齐旧项目 address===''）
+    updateBtn->setToolTip(QString::fromUtf8("下载后自动静默安装并重启，恢复更新前的增强/网页开关状态"));
     bottom->addWidget(closeBtn);
     bottom->addWidget(updateBtn);
     root->addLayout(bottom);
@@ -2786,7 +2807,8 @@ void MainWindow::showUpdateDialog()
     connect(beta.assets, &QListWidget::itemSelectionChanged, dialog, refreshUpdateBtn);
     connect(tabs, &QTabWidget::currentChanged, dialog, [refreshUpdateBtn](int) { refreshUpdateBtn(); });
 
-    // 「更新」：下载所选资源到临时目录 → 完成后启动安装包并退出应用（对齐旧项目 openExternal + quit）
+    // 「一键更新」：下载所选资源到临时目录 → Windows 安装包走静默安装 + 自动重启
+    // （launchSilentUpdateAndRestart）；其余资源退回旧行为：打开文件并退出应用。
     connect(updateBtn, &QPushButton::clicked, dialog, [this, dialog, nam, progress, updateBtn, currentAssets, mirrorCheck] {
         QListWidget *lw = currentAssets();
         QListWidgetItem *item = lw ? lw->currentItem() : nullptr;
@@ -2856,6 +2878,15 @@ void MainWindow::showUpdateDialog()
                 return;
             }
             progress->setValue(100);
+#if defined(Q_OS_WIN)
+            // 一键更新：NSIS 安装包支持 /S 静默安装——等本进程退出后原地升级并自动重启。
+            // 增强/网页开关每次切换已落盘（config 的 use:/web:），重启后按其自动恢复。
+            if (name.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive)) {
+                appendLog(QString::fromUtf8("下载完成，正在静默安装并自动重启: %1").arg(savePath));
+                launchSilentUpdateAndRestart(savePath);
+                return;
+            }
+#endif
             appendLog(QString::fromUtf8("下载完成，启动安装并退出: %1").arg(savePath));
             QDesktopServices::openUrl(QUrl::fromLocalFile(savePath)); // 启动安装包 / 打开文件
             qApp->quit();                                             // 退出应用让安装继续（对齐旧项目）
@@ -2911,6 +2942,18 @@ void MainWindow::showUpdateDialog()
                 auto *item = new QListWidgetItem(name);
                 item->setData(Qt::UserRole, a.value("browser_download_url").toString());
                 refs.assets->addItem(item);
+            }
+            // 一键更新：自动选中推荐资源（优先 setup 安装包，支持静默安装+自动重启），
+            // 弹窗一开「一键更新」即可点，无需先手选资源
+            if (refs.assets->count() > 0) {
+                int pick = 0;
+                for (int i = 0; i < refs.assets->count(); ++i) {
+                    if (refs.assets->item(i)->text().contains(QStringLiteral("setup"), Qt::CaseInsensitive)) {
+                        pick = i;
+                        break;
+                    }
+                }
+                refs.assets->setCurrentRow(pick);
             }
         };
         bool haveRel = false;
@@ -4104,6 +4147,22 @@ void MainWindow::onToggleTunRequested()
     }
 #endif
     m_core->toggleTun();
+    // 切换即落盘：重启/一键更新后按 use: 恢复增强状态
+    persistConfigBool(QStringLiteral("use"), m_core->isTunEnabled());
+}
+
+void MainWindow::onToggleProxyRequested()
+{
+    // 网页(系统代理)开关统一入口（底部开关 + 托盘共用）：切换后立即把状态写入 config 的
+    // web:，重启/一键更新后按其恢复；并同步设置页「系统代理」勾选，避免「应用」用旧值写回。
+    if (!m_core) {
+        return;
+    }
+    m_core->toggleProxy();
+    persistConfigBool(QStringLiteral("web"), m_core->isProxyEnabled());
+    if (m_webProxyCheck) {
+        m_webProxyCheck->setChecked(m_core->isProxyEnabled());
+    }
 }
 
 #if defined(Q_OS_WIN)
@@ -4120,7 +4179,7 @@ bool MainWindow::isProcessElevated()
     return ok && elevation.TokenIsElevated != 0;
 }
 
-void MainWindow::relaunchElevatedForTun()
+bool MainWindow::relaunchElevatedForTun()
 {
     const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
     const std::wstring exeW = exe.toStdWString();
@@ -4135,6 +4194,8 @@ void MainWindow::relaunchElevatedForTun()
     sei.lpParameters = paramsW.c_str();
     sei.nShow = SW_SHOWNORMAL;
 
+    // 先落盘 use:true：提权实例启动即读 config，保证它按「增强开启」恢复；取消授权时下面回滚
+    persistConfigBool(QStringLiteral("use"), true);
     if (ShellExecuteExW(&sei)) {
         if (sei.hProcess) {
             CloseHandle(sei.hProcess);
@@ -4142,17 +4203,76 @@ void MainWindow::relaunchElevatedForTun()
         // 提权实例已启动：立即硬杀本(非提权)核心并还原系统代理，把 9090/代理让给新实例，再退出。
         m_core->killCoreNow();
         qApp->quit();
-    } else {
-        const DWORD err = GetLastError();
-        if (err == ERROR_CANCELLED) {
-            appendLog(QString::fromUtf8("增强(TUN) 需要管理员权限：已取消授权，未开启"));
-            if (m_tray) {
-                m_tray->notify(QString::fromUtf8("增强模式"),
-                               QString::fromUtf8("需要管理员权限，已取消授权，未开启"));
-            }
-        } else {
-            appendLog(QString::fromUtf8("增强(TUN) 提权失败（错误码 %1）").arg(err));
+        return true;
+    }
+    persistConfigBool(QStringLiteral("use"), false); // 未提权成功：回滚，避免下次启动误弹 UAC「恢复」
+    const DWORD err = GetLastError();
+    if (err == ERROR_CANCELLED) {
+        appendLog(QString::fromUtf8("增强(TUN) 需要管理员权限：已取消授权，未开启"));
+        if (m_tray) {
+            m_tray->notify(QString::fromUtf8("增强模式"),
+                           QString::fromUtf8("需要管理员权限，已取消授权，未开启"));
         }
+    } else {
+        appendLog(QString::fromUtf8("增强(TUN) 提权失败（错误码 %1）").arg(err));
+    }
+    return false;
+}
+
+void MainWindow::launchSilentUpdateAndRestart(const QString &installerPath)
+{
+    // 一键更新收尾：交给隐藏的 PowerShell 守护进程——等本进程退出（释放 exe 占用）→
+    // NSIS 静默安装（/S，/D= 装回当前安装目录，安装版/便携版都原地升级）→ 重新拉起新版。
+    // 增强/网页开关状态已随每次切换写入 config（use:/web:），新实例启动时自动恢复。
+    QDir exeDir(QCoreApplication::applicationDirPath());
+    QString installRoot;
+    if (exeDir.dirName() == QStringLiteral("clashauto-c++")) {
+        QDir root = exeDir;
+        root.cdUp();
+        installRoot = root.absolutePath(); // 标准布局（<root>/clashauto-c++/exe）：原地升级
+    } else {
+        // 非常规布局（如开发目录）：装到安装包默认位置
+        installRoot = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath(QStringLiteral("ClashAuto"));
+    }
+    const QString newExe = QDir(installRoot).filePath(QStringLiteral("clashauto-c++/clashauto-cpp.exe"));
+    const auto psq = [](const QString &s) { // PowerShell 单引号串：内嵌单引号翻倍即可，无其他转义
+        QString r = QDir::toNativeSeparators(s);
+        r.replace(QLatin1Char('\''), QStringLiteral("''"));
+        return r;
+    };
+    // 用 ProcessStartInfo.Arguments 原样传参：NSIS 要求 /D= 是最后一个参数且路径不能带引号，
+    // Start-Process 的 -ArgumentList 会给含空格参数自动加引号，故不能用。
+    const QString script = QStringLiteral(
+        "Wait-Process -Id %1 -Timeout 60 -ErrorAction SilentlyContinue\n"
+        "$psi = New-Object System.Diagnostics.ProcessStartInfo\n"
+        "$psi.FileName = '%2'\n"
+        "$psi.Arguments = '/S /D=%3'\n"
+        "$psi.UseShellExecute = $false\n"
+        "[System.Diagnostics.Process]::Start($psi).WaitForExit()\n"
+        "Start-Process -FilePath '%4'\n")
+        .arg(QString::number(QCoreApplication::applicationPid()),
+             psq(installerPath), psq(installRoot), psq(newExe));
+    // -EncodedCommand（UTF-16LE Base64）：中文/空格路径无需再转义，也不落临时脚本文件
+    const QByteArray utf16(reinterpret_cast<const char *>(script.utf16()),
+                           static_cast<qsizetype>(script.size()) * 2);
+    const QString params = QStringLiteral("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ")
+        + QString::fromLatin1(utf16.toBase64());
+    const std::wstring fileW = L"powershell.exe";
+    const std::wstring paramsW2 = params.toStdWString();
+
+    SHELLEXECUTEINFOW sei2{};
+    sei2.cbSize = sizeof(sei2);
+    sei2.fMask = SEE_MASK_NOASYNC;
+    sei2.lpFile = fileW.c_str();
+    sei2.lpParameters = paramsW2.c_str();
+    sei2.nShow = SW_HIDE; // 全程隐藏 PowerShell 窗口
+    if (ShellExecuteExW(&sei2)) {
+        qApp->quit(); // aboutToQuit 停核心并还原系统代理，守护进程随后接手安装+重启
+    } else {
+        // 守护进程起不来：退回旧行为——打开安装包由用户手动安装
+        appendLog(QString::fromUtf8("自动安装启动失败（错误码 %1），已打开安装包请手动安装").arg(GetLastError()));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(installerPath));
+        qApp->quit();
     }
 }
 #endif

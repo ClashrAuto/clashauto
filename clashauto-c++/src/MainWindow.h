@@ -103,9 +103,11 @@ private:
     void promptDownloadCore();  // 未检测到内核时弹窗提示，确认后跳转设置下载
     void goToCoreDownload();    // 跳到「设置 → 系统」并滚动/高亮「更新内核」按钮
     void onToggleTunRequested(); // 增强/TUN 开关入口：开启且非管理员时先提权（对齐旧项目按需提权）
+    void onToggleProxyRequested(); // 网页(系统代理)开关入口：切换并把状态落盘（重启/更新后恢复）
 #if defined(Q_OS_WIN)
     static bool isProcessElevated();     // 当前进程是否已提权（管理员）
-    void relaunchElevatedForTun();       // 以管理员身份重启自身并带 --tun-elevated
+    bool relaunchElevatedForTun();       // 以管理员身份重启自身并带 --tun-elevated；true=已重启（本实例将退出）
+    void launchSilentUpdateAndRestart(const QString &installerPath); // 一键更新收尾：静默安装并自动重启
 #endif
 
     ClashService m_service;
@@ -141,6 +143,7 @@ private:
     QScrollArea *m_sysScroll = nullptr;        // 系统 tab 的滚动区（用于滚到「更新内核」）
     QPushButton *m_coreUpdateBtn = nullptr;    // 「更新内核」按钮（无内核时高亮引导）
     QCheckBox *m_cnAccelCheck = nullptr;       // 设置页「国内加速」勾选框（供 setMirrorEnabled 同步，避免与更新弹窗不同步）
+    QCheckBox *m_webProxyCheck = nullptr;      // 设置页「系统代理」勾选框（底部「网页」开关切换时同步，避免「应用」用旧值写回）
     bool m_mirror = false;                     // 下载走国内镜像（对应 config.mirror）
     bool m_coreMissingPrompted = false;        // 避免重复弹「未检测到内核」窗
     QLineEdit *m_ruleFilter = nullptr;   // 规则搜索过滤
