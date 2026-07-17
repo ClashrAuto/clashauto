@@ -31,6 +31,31 @@ int runHidden(const QString &program, const QStringList &args, int timeoutMs = 3
     }
     return p.exitCode();
 }
+
+#if defined(Q_OS_MACOS)
+// mac 没有 sysproxy 二进制：系统代理用自带的 networksetup 设置。
+// 这里列出所有「已启用」的网络服务（Wi-Fi、Ethernet 等），逐个设/清代理。
+QStringList macNetworkServices()
+{
+    QProcess p;
+    p.start("networksetup", {"-listallnetworkservices"});
+    if (!p.waitForFinished(10000)) {
+        p.kill();
+        return {};
+    }
+    QStringList services;
+    const QStringList lines = QString::fromUtf8(p.readAllStandardOutput()).split('\n');
+    for (const QString &raw : lines) {
+        const QString line = raw.trimmed();
+        // 首行是提示文字（An asterisk (*)...）；带 * 前缀的是已停用的服务，跳过
+        if (line.isEmpty() || line.startsWith(QLatin1Char('*')) || line.contains(QLatin1String("asterisk"))) {
+            continue;
+        }
+        services << line;
+    }
+    return services;
+}
+#endif
 }
 
 CoreController::CoreController(AppConfig config, QObject *parent)
@@ -235,6 +260,26 @@ void CoreController::rebuildConfig()
 
 void CoreController::startProxy()
 {
+#if defined(Q_OS_MACOS)
+    // mac 用系统自带 networksetup（运行用户需属 admin 组，个人 Mac 默认如此）：
+    // 混合端口同时服务 HTTP/HTTPS/SOCKS，三种代理都指向它
+    const QStringList services = macNetworkServices();
+    if (services.isEmpty()) {
+        emit logUpdated(QString::fromUtf8("设置系统代理失败：networksetup 未列出可用网络服务"));
+        return;
+    }
+    const QString port = QString::number(m_config.mixedPort);
+    for (const QString &svc : services) {
+        runHidden("networksetup", {"-setwebproxy", svc, m_config.host, port}, 10000);
+        runHidden("networksetup", {"-setsecurewebproxy", svc, m_config.host, port}, 10000);
+        runHidden("networksetup", {"-setsocksfirewallproxy", svc, m_config.host, port}, 10000);
+        runHidden("networksetup", {"-setproxybypassdomains", svc,
+                                   "localhost", "127.0.0.1", "10.0.0.0/8", "172.16.0.0/12",
+                                   "192.168.0.0/16", "*.local"}, 10000);
+    }
+    m_sysproxyActive = true;
+    emit logUpdated("Start sysproxy ok!");
+#else
     if (!ensureSysproxy()) {
         return;
     }
@@ -243,6 +288,7 @@ void CoreController::startProxy()
     runHidden(sysproxy, {"global", QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort), "localhost;127.*;10.*;172.16.*;192.168.*;<local>"});
     m_sysproxyActive = true;
     emit logUpdated("Start sysproxy ok!");
+#endif
 }
 
 void CoreController::stopProxy()
@@ -252,12 +298,22 @@ void CoreController::stopProxy()
     if (!m_sysproxyActive) {
         return;
     }
+#if defined(Q_OS_MACOS)
+    for (const QString &svc : macNetworkServices()) {
+        runHidden("networksetup", {"-setwebproxystate", svc, "off"}, 10000);
+        runHidden("networksetup", {"-setsecurewebproxystate", svc, "off"}, 10000);
+        runHidden("networksetup", {"-setsocksfirewallproxystate", svc, "off"}, 10000);
+    }
+    m_sysproxyActive = false;
+    emit logUpdated("Stop sysproxy ok!");
+#else
     const QString sysproxy = m_config.sysproxyExecutable();
     if (QFileInfo::exists(sysproxy)) {
         runHidden(sysproxy, {"set", "1"}, 5000); // 还原本质是写注册表，5s 足够；30s 超时会把退出卡死
         m_sysproxyActive = false;
         emit logUpdated("Stop sysproxy ok!");
     }
+#endif
 }
 
 bool CoreController::ensureSysproxy()
