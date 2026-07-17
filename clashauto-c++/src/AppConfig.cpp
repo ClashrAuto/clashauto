@@ -28,17 +28,6 @@ QString AppConfig::clashConfig() const
     return QDir(sourceRoot).filePath("config/full.yaml");
 }
 
-QString AppConfig::sysproxyExecutable() const
-{
-#if defined(Q_OS_WIN)
-    return QDir(sourceRoot).filePath("command/sysproxy/sysproxy-windows-amd64.exe");
-#elif defined(Q_OS_MACOS)
-    return QDir(sourceRoot).filePath("command/sysproxy/sysproxy-darwin-amd64");
-#else
-    return QDir(sourceRoot).filePath("command/sysproxy/sysproxy-linux-amd64");
-#endif
-}
-
 AppConfig AppConfigLoader::load()
 {
     AppConfig config;

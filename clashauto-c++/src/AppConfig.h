@@ -30,7 +30,6 @@ struct AppConfig {
 
     QString clashExecutable() const;
     QString clashConfig() const;
-    QString sysproxyExecutable() const;
 };
 
 class AppConfigLoader

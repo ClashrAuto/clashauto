@@ -86,6 +86,10 @@ jobs:
               if ($name.StartsWith("command/clash/")) {
                 continue
               }
+              # 系统代理已改用 WinINET 原生 API：不再打包 sysproxy 二进制
+              if ($name.StartsWith("command/sysproxy/")) {
+                continue
+              }
 
               $target = Join-Path "Clashr-Auto" $name
               if ($name.EndsWith("/")) {
@@ -566,6 +570,9 @@ jobs:
                       continue
                   # 不再预装内核：跳过 command/clash/ 下的核心二进制（用户在设置里按需下载）
                   if name.startswith("command/clash/"):
+                      continue
+                  # 系统代理已改用 gsettings：不再打包 sysproxy 二进制
+                  if name.startswith("command/sysproxy/"):
                       continue
                   target = target_root / name
                   if entry.is_dir():

@@ -11,6 +11,17 @@
 #include <QRegularExpression>
 #include <QSysInfo>
 
+#if defined(Q_OS_WIN)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <wininet.h> // InternetSetOption：原生设置系统(WinINET)代理，不再依赖捆绑的 sysproxy.exe
+#endif
+
 namespace {
 #if defined(Q_OS_WIN)
 constexpr unsigned kCreateNoWindow = 0x08000000; // CREATE_NO_WINDOW
@@ -31,6 +42,33 @@ int runHidden(const QString &program, const QStringList &args, int timeoutMs = 3
     }
     return p.exitCode();
 }
+
+#if defined(Q_OS_WIN)
+// Windows 原生系统代理：WinINET 每连接选项（即 IE/系统代理），与此前捆绑的 sysproxy.exe
+// 所做的完全等价，但免掉外部二进制与子进程。设置后广播 SETTINGS_CHANGED/REFRESH 即时生效。
+bool setWinSystemProxy(bool enable, const QString &server, const QString &bypass)
+{
+    std::wstring serverW = server.toStdWString();
+    std::wstring bypassW = bypass.toStdWString();
+    INTERNET_PER_CONN_OPTIONW options[3]{};
+    options[0].dwOption = INTERNET_PER_CONN_FLAGS;
+    options[0].Value.dwValue = enable ? (PROXY_TYPE_PROXY | PROXY_TYPE_DIRECT) : PROXY_TYPE_DIRECT;
+    options[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER;
+    options[1].Value.pszValue = serverW.data();
+    options[2].dwOption = INTERNET_PER_CONN_PROXY_BYPASS;
+    options[2].Value.pszValue = bypassW.data();
+
+    INTERNET_PER_CONN_OPTION_LISTW list{};
+    list.dwSize = sizeof(list);
+    list.pszConnection = nullptr; // 默认（LAN）连接
+    list.dwOptionCount = enable ? 3 : 1; // 关闭时只写 FLAGS=DIRECT
+    list.pOptions = options;
+    const BOOL ok = InternetSetOptionW(nullptr, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, sizeof(list));
+    InternetSetOptionW(nullptr, INTERNET_OPTION_SETTINGS_CHANGED, nullptr, 0);
+    InternetSetOptionW(nullptr, INTERNET_OPTION_REFRESH, nullptr, 0);
+    return ok == TRUE;
+}
+#endif
 
 #if defined(Q_OS_MACOS)
 // mac 没有 sysproxy 二进制：系统代理用自带的 networksetup 设置。
@@ -279,13 +317,29 @@ void CoreController::startProxy()
     }
     m_sysproxyActive = true;
     emit logUpdated("Start sysproxy ok!");
-#else
-    if (!ensureSysproxy()) {
+#elif defined(Q_OS_WIN)
+    // 进程内直调 WinINET，无子进程、无外部二进制
+    const QString server = QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort);
+    if (!setWinSystemProxy(true, server, QStringLiteral("localhost;127.*;10.*;172.16.*;192.168.*;<local>"))) {
+        emit logUpdated(QString::fromUtf8("设置系统代理失败（WinINET InternetSetOption）"));
         return;
     }
-
-    const QString sysproxy = m_config.sysproxyExecutable();
-    runHidden(sysproxy, {"global", QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort), "localhost;127.*;10.*;172.16.*;192.168.*;<local>"});
+    m_sysproxyActive = true;
+    emit logUpdated("Start sysproxy ok!");
+#else
+    // Linux：gsettings（GNOME/Cinnamon 系桌面）。混合端口同时服务 HTTP/HTTPS/SOCKS。
+    // 非 GNOME 桌面（如 KDE）gsettings 不存在或 schema 缺失时报错并放弃，不再依赖捆绑二进制。
+    if (runHidden("gsettings", {"set", "org.gnome.system.proxy", "mode", "manual"}, 10000) != 0) {
+        emit logUpdated(QString::fromUtf8("设置系统代理失败：gsettings 不可用（非 GNOME 系桌面？）"));
+        return;
+    }
+    const QString port = QString::number(m_config.mixedPort);
+    for (const char *schema : {"org.gnome.system.proxy.http", "org.gnome.system.proxy.https", "org.gnome.system.proxy.socks"}) {
+        runHidden("gsettings", {"set", QString::fromLatin1(schema), "host", m_config.host}, 10000);
+        runHidden("gsettings", {"set", QString::fromLatin1(schema), "port", port}, 10000);
+    }
+    runHidden("gsettings", {"set", "org.gnome.system.proxy", "ignore-hosts",
+                            "['localhost', '127.0.0.0/8', '::1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']"}, 10000);
     m_sysproxyActive = true;
     emit logUpdated("Start sysproxy ok!");
 #endif
@@ -306,53 +360,15 @@ void CoreController::stopProxy()
     }
     m_sysproxyActive = false;
     emit logUpdated("Stop sysproxy ok!");
+#elif defined(Q_OS_WIN)
+    setWinSystemProxy(false, QString(), QString()); // FLAGS=DIRECT 即还原直连
+    m_sysproxyActive = false;
+    emit logUpdated("Stop sysproxy ok!");
 #else
-    const QString sysproxy = m_config.sysproxyExecutable();
-    if (QFileInfo::exists(sysproxy)) {
-        runHidden(sysproxy, {"set", "1"}, 5000); // 还原本质是写注册表，5s 足够；30s 超时会把退出卡死
-        m_sysproxyActive = false;
-        emit logUpdated("Stop sysproxy ok!");
-    }
+    runHidden("gsettings", {"set", "org.gnome.system.proxy", "mode", "none"}, 10000);
+    m_sysproxyActive = false;
+    emit logUpdated("Stop sysproxy ok!");
 #endif
-}
-
-bool CoreController::ensureSysproxy()
-{
-    const QString sysproxy = m_config.sysproxyExecutable();
-    if (QFileInfo::exists(sysproxy)) {
-        return true;
-    }
-
-    const QString archive = QDir(m_config.sourceRoot).filePath("command/sysproxy/sysproxy.zip");
-    const QString outputDir = QDir(m_config.sourceRoot).filePath("command/sysproxy");
-    if (!QFileInfo::exists(archive)) {
-        emit logUpdated(QString("sysproxy 不存在，且找不到压缩包: %1").arg(archive));
-        return false;
-    }
-
-#if defined(Q_OS_WIN)
-    QString escapedArchive = archive;
-    QString escapedOutputDir = outputDir;
-    escapedArchive.replace("'", "''");
-    escapedOutputDir.replace("'", "''");
-    const int code = runHidden("powershell", {
-        "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
-        "-Command",
-        QString("Expand-Archive -LiteralPath '%1' -DestinationPath '%2' -Force")
-            .arg(escapedArchive, escapedOutputDir)
-    });
-#else
-    const int code = runHidden("unzip", {"-o", archive, "-d", outputDir});
-#endif
-
-    if (code != 0 || !QFileInfo::exists(sysproxy)) {
-        emit logUpdated(QString("解压 sysproxy 失败: %1").arg(archive));
-        return false;
-    }
-
-    emit logUpdated(QString("sysproxy 已解压: %1").arg(sysproxy));
-    return true;
 }
 
 void CoreController::reloadConfig()

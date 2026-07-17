@@ -58,6 +58,7 @@ target_link_libraries(clashauto-cpp PRIVATE
     $<$<PLATFORM_ID:Windows>:dwmapi>
     $<$<PLATFORM_ID:Windows>:shell32>   # ShellExecuteEx（runas 提权重启）
     $<$<PLATFORM_ID:Windows>:advapi32>  # OpenProcessToken/GetTokenInformation（提权判定）
+    $<$<PLATFORM_ID:Windows>:wininet>   # InternetSetOption（原生设置系统代理，替代捆绑 sysproxy.exe）
 )
 
 target_compile_options(clashauto-cpp PRIVATE

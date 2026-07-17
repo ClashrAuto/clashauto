@@ -44,7 +44,6 @@ signals:
 private:
     void startProxy();
     void stopProxy();
-    bool ensureSysproxy();
     void reloadConfig();
     void emitStatus();
 
@@ -55,5 +54,5 @@ private:
     QString m_fullConfigPath;
     bool m_proxyEnabled = false;
     bool m_tunEnabled = false;
-    bool m_sysproxyActive = false; // 本会话是否真的应用过系统代理：stopProxy 据此跳过无谓的 sysproxy 进程
+    bool m_sysproxyActive = false; // 本会话是否真的应用过系统代理：stopProxy 据此跳过无谓的还原动作
 };
