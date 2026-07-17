@@ -33,7 +33,6 @@
 #include <QMessageBox>
 #include <QFontMetrics>
 #include <QMouseEvent>
-#include <QResizeEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkProxy>
 #include <QNetworkReply>
@@ -102,6 +101,10 @@ constexpr int FooterHeight = 38;
 constexpr int Radius = 5;
 constexpr int MainWidth = 900;
 constexpr int MainHeight = 510;
+// 最小尺寸留出缩小余量：旧项目 minWidth 锁死 900，窄屏（小笔记本/虚拟机）上窗口怎么拖都缩不小。
+// 640 高于各页面布局最小宽度（约束最紧的是设置「过滤」tab：140 标签 + 300 正则下拉 ≈ 610）。
+constexpr int MainMinWidth = 640;
+constexpr int MainMinHeight = 430;
 
 // UI 尺寸对齐旧项目实测值（见 docs/legacy-ui-spec.md）
 constexpr int MenuSpacing = 5;    // 菜单项 margin-bottom
@@ -137,6 +140,8 @@ private:
 
 // 自适应宽度的名称标签：随列宽伸缩，超出可用宽度时右侧用「…」省略；
 // 完整名称放进 tooltip 便于悬停查看（节点名很长时——如订阅名是整条 URL）。
+// 省略在 paintEvent 里现算，绝不 setText：QLabel::setText 会 updateGeometry 使整个节点列表的
+// 布局缓存失效并全表重算 sizeHint，窗口每拖一步所有长名行都触发一次——正是缩放卡顿的主因。
 class ElidingLabel : public QLabel
 {
 public:
@@ -148,24 +153,22 @@ public:
         }
         m_full = text;
         setToolTip(text);
-        applyElide();
+        update();
     }
 
 protected:
-    void resizeEvent(QResizeEvent *event) override
+    void paintEvent(QPaintEvent *) override
     {
-        QLabel::resizeEvent(event);
-        applyElide();
+        QPainter p(this);
+        const QRect r = rect().adjusted(PadLeft, 0, 0, 0);
+        p.setPen(palette().color(foregroundRole())); // QSS #nodeName 的 color 经 polish 落在调色板上
+        p.drawText(r, Qt::AlignLeft | Qt::AlignVCenter,
+                   fontMetrics().elidedText(m_full, Qt::ElideRight, r.width()));
     }
 
 private:
-    void applyElide()
-    {
-        const QString shown = fontMetrics().elidedText(m_full, Qt::ElideRight, width());
-        if (shown != text()) {
-            QLabel::setText(shown);
-        }
-    }
+    // 自绘不再走 QLabel 的样式表文本渲染，QSS #nodeName 的 padding-left:5 在此手动对齐
+    static constexpr int PadLeft = 5;
     QString m_full;
 };
 
@@ -363,7 +366,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     setWindowIcon(QIcon(":/assets/icon.ico"));
     // 使用系统原生标题栏（不再无边框）；标题栏配色由 applyTitleBarColor() 通过 DWM 设置
     resize(MainWidth, MainHeight);
-    setMinimumSize(MainWidth, MainHeight);
+    setMinimumSize(MainMinWidth, MainMinHeight); // 默认仍开 900x510，但允许拖小
     // 恢复上次窗口位置/大小（对应旧项目 config.bounds）
     const QByteArray savedGeometry = QSettings().value("window/geometry").toByteArray();
     if (!savedGeometry.isEmpty()) {
@@ -494,6 +497,14 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
             // 切换进行中（尚未确认）：只原地刷药丸，不重排/不动按钮，避免扰乱转圈与禁用态
             if (anyChange) {
                 updateNodeBadges();
+            }
+            return;
+        }
+        if (m_inSizeMove) {
+            // 窗口正被拖动/缩放（模态 sizing 循环里定时器/网络照常派发）：重排/重建都会全表
+            // 重布局，会明显掉帧——先挂起，WM_EXITSIZEMOVE 时一次性补齐
+            if (setChanged || anyChange) {
+                m_nodeResyncPending = true;
             }
             return;
         }
@@ -2132,6 +2143,8 @@ QWidget *MainWindow::buildFooter()
     footerArrow->setObjectName("footerArrow");
     m_logLabel = new QLabel("Ready", footer);
     m_logLabel->setObjectName("footerLog");
+    // 不参与最小宽度计算：长日志只在可用空间内截断，不把右侧开关挤出窗口、也不阻止窗口缩小
+    m_logLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     layout->addWidget(m_usersLabel);
     layout->addWidget(footerArrow);
     layout->addWidget(m_logLabel, 1);
@@ -3192,6 +3205,28 @@ void MainWindow::showEvent(QShowEvent *event)
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
 {
     // 系统标题栏/边框由系统负责缩放与移动，这里不再拦截 WM_NCHITTEST
+#if defined(Q_OS_WIN)
+    // 交互式拖动/缩放期间暂停高频重绘源：两张流量图 20FPS 的全量抗锯齿重绘和轮询触发的
+    // 节点列表刷新会叠在每步 resize 的布局+重绘上（无 GPU 的虚拟机上尤其卡）。结束后一次性补齐。
+    if (eventType == "windows_generic_MSG") {
+        const MSG *msg = static_cast<const MSG *>(message);
+        if (msg && (msg->message == WM_ENTERSIZEMOVE || msg->message == WM_EXITSIZEMOVE)) {
+            m_inSizeMove = (msg->message == WM_ENTERSIZEMOVE);
+            if (m_upChart) {
+                m_upChart->setPaused(m_inSizeMove);
+            }
+            if (m_downChart) {
+                m_downChart->setPaused(m_inSizeMove);
+            }
+            if (!m_inSizeMove && m_nodeResyncPending) {
+                m_nodeResyncPending = false;
+                if (!m_nodeSwitching) {
+                    syncNodeRows(); // 拖动期间集合变了会在内部自动退回 populateNodeList
+                } // 切换加载态中不动列表（会误恢复按钮态）；endNodeSwitch 完成时统一刷新
+            }
+        }
+    }
+#endif
     return QMainWindow::nativeEvent(eventType, message, result);
 }
 
@@ -3594,9 +3629,12 @@ void MainWindow::populateNodeList()
     }
 
     if (m_nodeTitle) {
-        m_nodeTitle->setText(QString::fromUtf8("节点 <span style='font-size:9px'>(%1/%2)</span>")
-                                 .arg(shown)
-                                 .arg(m_currentNodes.size()));
+        const QString title = QString::fromUtf8("节点 <span style='font-size:9px'>(%1/%2)</span>")
+                                  .arg(shown)
+                                  .arg(m_currentNodes.size());
+        if (m_nodeTitle->text() != title) {
+            m_nodeTitle->setText(title); // 计数没变不 setText，避免每秒一次头部重布局
+        }
     }
 }
 
@@ -3653,9 +3691,17 @@ void MainWindow::updateNodeBadges()
         if (!badge) {
             continue; // 该节点被搜索过滤掉、或行已销毁（QPointer 置空）
         }
-        badge->setText(QString("%1/%2").arg(speedText(node.speed),
-                                            node.delay == 0 ? QStringLiteral("-") : QString::number(node.delay)));
-        badge->setStyleSheet(QString("background:%1;").arg(delayColor(node.delay).name(QColor::HexArgb)));
+        // 先比较再赋值：QLabel::setText 不做等值短路（会 updateGeometry 引发整表重布局），
+        // setStyleSheet 相同字符串也会重新 polish——数据没变时这两处每秒白做一次全表布局
+        const QString text = QString("%1/%2").arg(speedText(node.speed),
+                                                  node.delay == 0 ? QStringLiteral("-") : QString::number(node.delay));
+        if (badge->text() != text) {
+            badge->setText(text);
+        }
+        const QString style = QString("background:%1;").arg(delayColor(node.delay).name(QColor::HexArgb));
+        if (badge->styleSheet() != style) {
+            badge->setStyleSheet(style);
+        }
     }
 }
 
@@ -3703,9 +3749,16 @@ void MainWindow::syncNodeRows()
             continue;
         }
         if (QLabel *badge = m_delayBadges.value(node.name).data()) {
-            badge->setText(QString("%1/%2").arg(speedText(node.speed),
-                                                node.delay == 0 ? QStringLiteral("-") : QString::number(node.delay)));
-            badge->setStyleSheet(QString("background:%1;").arg(delayColor(node.delay).name(QColor::HexArgb)));
+            // 同 updateNodeBadges：先比较再赋值，数据没变不触发重布局/重新 polish
+            const QString text = QString("%1/%2").arg(speedText(node.speed),
+                                                      node.delay == 0 ? QStringLiteral("-") : QString::number(node.delay));
+            if (badge->text() != text) {
+                badge->setText(text);
+            }
+            const QString style = QString("background:%1;").arg(delayColor(node.delay).name(QColor::HexArgb));
+            if (badge->styleSheet() != style) {
+                badge->setStyleSheet(style);
+            }
         }
         if (auto *nameLbl = static_cast<ElidingLabel *>(m_nodeNameLabels.value(node.name).data())) {
             QString display = node.name; // 组行：now 变了要更新「组名 → 使用节点」
@@ -3715,8 +3768,13 @@ void MainWindow::syncNodeRows()
             nameLbl->setFullText(display);
         }
         if (QPushButton *btn = m_nodeButtons.value(node.name).data()) {
-            btn->setText(node.active ? QString::fromUtf8("禁用") : QString::fromUtf8("应用"));
-            btn->setEnabled(true); // 非切换态：确保可点（切换态不会走到这里）
+            const QString label = node.active ? QString::fromUtf8("禁用") : QString::fromUtf8("应用");
+            if (btn->text() != label) {
+                btn->setText(label);
+            }
+            if (!btn->isEnabled()) {
+                btn->setEnabled(true); // 非切换态：确保可点（切换态不会走到这里）
+            }
         }
         if (row->property("active").toBool() != node.active) {
             row->setProperty("active", node.active); // 活动态变了，重刷样式（#nodeRow[active]）
@@ -3731,9 +3789,12 @@ void MainWindow::syncNodeRows()
     m_nodeList->setUpdatesEnabled(true);
 
     if (m_nodeTitle) {
-        m_nodeTitle->setText(QString::fromUtf8("节点 <span style='font-size:9px'>(%1/%2)</span>")
-                                 .arg(desired.size())
-                                 .arg(m_currentNodes.size()));
+        const QString title = QString::fromUtf8("节点 <span style='font-size:9px'>(%1/%2)</span>")
+                                  .arg(desired.size())
+                                  .arg(m_currentNodes.size());
+        if (m_nodeTitle->text() != title) {
+            m_nodeTitle->setText(title); // 同 populateNodeList：计数没变不 setText
+        }
     }
 }
 

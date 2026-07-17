@@ -39,6 +39,25 @@ void TrafficChart::addSample(qint64 value)
     m_pending.enqueue(static_cast<double>(qMax<qint64>(0, value)));
 }
 
+void TrafficChart::setPaused(bool paused)
+{
+    // 窗口拖动/缩放期间（WM_ENTERSIZEMOVE~EXITSIZEMOVE）暂停 50ms 滚动重绘：
+    // 两张图 20FPS 的全量抗锯齿重绘会叠在每步 resize 的重绘上放大卡顿（无 GPU 的虚拟机尤甚）。
+    // 数据仍照常入队/推进（replay 的 1s 定时器不停），恢复时无缝续画。
+    if (m_paused == paused) {
+        return;
+    }
+    m_paused = paused;
+    if (paused) {
+        m_scrollTimer->stop();
+    } else {
+        m_scrollTimer->start(50);
+        if (isVisible()) {
+            update();
+        }
+    }
+}
+
 void TrafficChart::tick()
 {
     // offset -= width/(maxPointer-2)/(loop/speed)，loop/speed = 1000/50 = 20
@@ -57,7 +76,7 @@ void TrafficChart::replay()
         m_pointers.pop_front();
     }
     m_offset = 0.0;
-    if (isVisible()) {
+    if (isVisible() && !m_paused) {
         update();
     }
 }

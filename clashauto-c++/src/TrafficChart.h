@@ -17,6 +17,7 @@ public:
     explicit TrafficChart(QString title, QColor lineColor, QWidget *parent = nullptr);
 
     void addSample(qint64 value);
+    void setPaused(bool paused); // 窗口拖动/缩放期间暂停滚动重绘（数据照常入队，恢复时续画）
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -31,6 +32,7 @@ private:
     QVector<double> m_pointers;   // 可见数据点
     QQueue<double> m_pending;     // 待入队样本
     double m_offset = 0.0;
+    bool m_paused = false;        // 交互式拖动/缩放中：不重绘（见 setPaused）
     int m_maxPointer = 42;        // length + 2
     QTimer *m_scrollTimer = nullptr;
     QTimer *m_stepTimer = nullptr;

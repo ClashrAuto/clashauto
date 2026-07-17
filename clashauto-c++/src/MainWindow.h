@@ -172,6 +172,8 @@ private:
     QTimer *m_spinnerTimer = nullptr;                 // 转圈动画计时器
     int m_spinnerFrame = 0;
     bool m_dragging = false;
+    bool m_inSizeMove = false;        // Windows 交互式拖动/缩放进行中（WM_ENTERSIZEMOVE~EXITSIZEMOVE）
+    bool m_nodeResyncPending = false; // 拖动/缩放期间挂起的节点列表刷新，结束后补一次
     bool m_closeToTray = true;
     bool m_trayHintShown = false;
     bool m_nodeSwitchNote = true;
