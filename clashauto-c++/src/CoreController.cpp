@@ -152,10 +152,18 @@ void CoreController::stopCore()
 {
     stopProxy();
     if (isRunning()) {
-        m_core.terminate();
+#if defined(Q_OS_WIN)
+        // mihomo 是无窗口控制台程序，terminate() 的 WM_CLOSE 对它无效（同 killCoreNow）——
+        // 之前每次停核心/退出程序都必然白等满 2.5s 超时才 kill，这就是「退出要很久」的主因。
+        // 直接硬杀：提权重启流程用 killCoreNow 硬杀多年无副作用（wintun 网卡随进程消失）。
+        m_core.kill();
+        m_core.waitForFinished(1500);
+#else
+        m_core.terminate(); // POSIX 下是 SIGTERM，mihomo 能优雅退出，留短暂宽限
         if (!m_core.waitForFinished(2500)) {
             m_core.kill();
         }
+#endif
     }
     emitStatus();
 }
@@ -233,14 +241,21 @@ void CoreController::startProxy()
 
     const QString sysproxy = m_config.sysproxyExecutable();
     runHidden(sysproxy, {"global", QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort), "localhost;127.*;10.*;172.16.*;192.168.*;<local>"});
+    m_sysproxyActive = true;
     emit logUpdated("Start sysproxy ok!");
 }
 
 void CoreController::stopProxy()
 {
+    // 本会话没开过系统代理就直接跳过：退出时 stopCore 与核心 finished 信号会各调一次
+    // stopProxy，之前每次都同步起 sysproxy 子进程（VM 里进程创建很慢），拖慢退出。
+    if (!m_sysproxyActive) {
+        return;
+    }
     const QString sysproxy = m_config.sysproxyExecutable();
     if (QFileInfo::exists(sysproxy)) {
-        runHidden(sysproxy, {"set", "1"});
+        runHidden(sysproxy, {"set", "1"}, 5000); // 还原本质是写注册表，5s 足够；30s 超时会把退出卡死
+        m_sysproxyActive = false;
         emit logUpdated("Stop sysproxy ok!");
     }
 }
