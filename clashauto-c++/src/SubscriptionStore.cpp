@@ -316,15 +316,58 @@ bool SubscriptionStore::setNodeEnabled(int subscriptionIndex, int nodeIndex, boo
 
 bool SubscriptionStore::setAllNodesEnabled(int subscriptionIndex, bool enabled)
 {
-    // 复用逐个 setNodeEnabled（每次读写整份 YAML）；节点数不大，简单可靠
-    const int count = nodes(subscriptionIndex).size();
+    // 单次读写：定位目标订阅的 list 区间（复用 replaceSubscriptionList 的遍历方式），
+    // 把区间内所有节点级 `      use:`（6 空格缩进）行整行替换为目标值，一次写回。
+    if (subscriptionIndex < 0) {
+        return false;
+    }
+    ensureFile();
+    QStringList lines = readText().split('\n');
+    int current = -1;
+    int listLine = -1;
+    int listEnd = -1;
+
+    for (int i = 0; i < lines.size(); ++i) {
+        QString line = lines[i];
+        if (!line.isEmpty() && line.front() == QChar::ByteOrderMark) {
+            line.remove(0, 1);
+            lines[i] = line;
+        }
+        if (line.startsWith("- ")) {
+            if (current == subscriptionIndex && listLine >= 0) {
+                listEnd = i; // 下一个订阅项即目标 list 区间的下界
+                break;
+            }
+            current++;
+            continue;
+        }
+        if (current == subscriptionIndex && line.startsWith("  ") && !line.startsWith("    ")
+            && line.trimmed().startsWith("list:")) {
+            listLine = i;
+        }
+    }
+
+    if (listLine < 0) {
+        return false; // 找不到订阅或其 list 键：安全返回
+    }
+    if (listEnd < 0) {
+        listEnd = lines.size(); // 目标订阅是最后一项，区间延伸到文件尾
+    }
+
+    // 节点级 use 键固定 6 空格缩进（parseProxyList 输出如此）；订阅级 `  use:` 为 2 空格，
+    // 不会命中，故只影响本订阅的节点，不动别的订阅。
+    const QString useLine = QString("      use: %1").arg(enabled ? "true" : "false");
     bool any = false;
-    for (int i = 0; i < count; ++i) {
-        if (setNodeEnabled(subscriptionIndex, i, enabled)) {
+    for (int i = listLine + 1; i < listEnd; ++i) {
+        if (lines[i].startsWith("      use:")) {
+            lines[i] = useLine;
             any = true;
         }
     }
-    return any;
+    if (!any) {
+        return false; // 空 list 或无节点：无需写盘
+    }
+    return writeText(lines.join('\n'));
 }
 
 bool SubscriptionStore::addSubscription(const QString &name, const QString &url, const QString &type)
@@ -911,6 +954,10 @@ bool SubscriptionStore::writeText(const QString &text) const
     if (!text.endsWith('\n')) {
         file.write("\n");
     }
+    file.close();
+    // 收紧为仅属主可读写（0600），防止 POSIX 上其他用户读走节点明文凭据。
+    // Windows 上 NTFS ACL 不受 POSIX 位影响，此调用无害。
+    QFile::setPermissions(path(), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     return true;
 }
 

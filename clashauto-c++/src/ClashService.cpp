@@ -49,6 +49,18 @@ void ClashService::setMixedPort(int port)
     }
 }
 
+void ClashService::setSecret(const QString &secret)
+{
+    m_secret = secret;
+}
+
+void ClashService::applyAuth(QNetworkRequest &req) const
+{
+    if (!m_secret.isEmpty()) {
+        req.setRawHeader("Authorization", QByteArray("Bearer ") + m_secret.toUtf8());
+    }
+}
+
 void ClashService::start()
 {
     emit statusUpdated(false, false, false);
@@ -57,7 +69,7 @@ void ClashService::start()
     pollConnections();
     pollNodes();
     m_trafficTimer.start(2000);      // 看门狗：流断了就重连（核心重启/端口变更）
-    m_connectionsTimer.start(1000);
+    m_connectionsTimer.start(2000);  // /connections 全量拉取开销大、只用到数量与 downloadTotal，2s 足够
     m_nodesTimer.start(1000); // 1s 实时拉取节点列表状态（对齐旧项目 getProxies 每秒轮询）
 }
 
@@ -198,6 +210,7 @@ void ClashService::testNodeDelays(const QStringList &names, bool thenSpeed)
         const QUrl url(QString("http://%1:%2/proxies/%3/delay?timeout=5000&url=%4")
                            .arg(m_host).arg(m_port).arg(encoded, target));
         QNetworkRequest request(url);
+        applyAuth(request); // /proxies/<name>/delay 也是核心 REST 接口，需带 secret
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
         request.setTransferTimeout(9000); // 略大于核心侧 5s，避免任何一条延迟请求挂死占用连接槽
 #endif
@@ -381,7 +394,9 @@ void ClashService::startTrafficStream()
         return; // 已有活跃流，勿重复开（否则又会泄漏连接）
     }
     const QUrl url(QString("http://%1:%2/traffic").arg(m_host).arg(m_port));
-    m_trafficReply = m_network.get(QNetworkRequest(url));
+    QNetworkRequest request(url);
+    applyAuth(request);
+    m_trafficReply = m_network.get(request);
     // mihomo 每秒推一行 JSON：{"up":..,"down":..,"upTotal":..,"downTotal":..}\n —— 按行读、逐条发
     connect(m_trafficReply, &QNetworkReply::readyRead, this, [this] {
         while (m_trafficReply && m_trafficReply->canReadLine()) {
@@ -412,14 +427,22 @@ void ClashService::ensureTrafficStream()
 
 void ClashService::pollConnections()
 {
+    if (m_connectionsInFlight) {
+        return; // 上一拍 /connections 还没回来：跳过这一拍，避免慢响应下请求自我堆积耗尽连接池
+    }
+    m_connectionsInFlight = true;
     sendGet(QUrl(QString("http://%1:%2/connections").arg(m_host).arg(m_port)), [this](const QJsonDocument &doc) {
         const QJsonObject obj = doc.object();
         emit connectionsUpdated(obj.value("connections").toArray().size(), obj.value("downloadTotal").toInteger());
-    });
+    }, [this] { m_connectionsInFlight = false; }); // finished：成功/失败/超时都在此清在途标志
 }
 
 void ClashService::pollNodes()
 {
+    if (m_nodesInFlight) {
+        return; // 上一拍 /proxies 还没回来：跳过这一拍，避免请求自我堆积
+    }
+    m_nodesInFlight = true;
     sendGet(QUrl(QString("http://%1:%2/proxies").arg(m_host).arg(m_port)), [this](const QJsonDocument &doc) {
         QVector<NodeInfo> nodes;
         const QJsonObject proxies = doc.object().value("proxies").toObject();
@@ -583,17 +606,18 @@ void ClashService::pollNodes()
             m_autoTested = true;
             testDelays();
         }
-    });
+    }, [this] { m_nodesInFlight = false; }); // finished：所有退出路径（成功/错误/超时）清在途标志
 }
 
-void ClashService::sendGet(const QUrl &url, std::function<void(const QJsonDocument &)> onJson)
+void ClashService::sendGet(const QUrl &url, std::function<void(const QJsonDocument &)> onJson, std::function<void()> onFinished)
 {
     QNetworkRequest request(url);
+    applyAuth(request);
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setTransferTimeout(8000); // 兜底：任何请求最多挂 8s，杜绝卡死接口耗尽 6 连接/主机池
 #endif
     QNetworkReply *reply = m_network.get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, onJson = std::move(onJson)] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, onJson = std::move(onJson), onFinished = std::move(onFinished)] {
         const QByteArray body = reply->readAll();
         const QNetworkReply::NetworkError err = reply->error();
         reply->deleteLater();
@@ -617,6 +641,9 @@ void ClashService::sendGet(const QUrl &url, std::function<void(const QJsonDocume
                     emit speedTestRunning(false);
                 }
             }
+            if (onFinished) {
+                onFinished(); // 出错路径也要放行在途标志，否则轮询会永久卡死
+            }
             return;
         }
 
@@ -625,6 +652,9 @@ void ClashService::sendGet(const QUrl &url, std::function<void(const QJsonDocume
         if (error.error == QJsonParseError::NoError) {
             onJson(doc);
         }
+        if (onFinished) {
+            onFinished(); // 成功/解析失败均放行在途标志
+        }
     });
 }
 
@@ -632,6 +662,7 @@ void ClashService::sendJsonRequest(const QUrl &url, const QByteArray &method, co
 {
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    applyAuth(request);
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setTransferTimeout(8000); // 兜底：selectNode 的 PUT 等最多挂 8s，不会永久占用连接
 #endif
@@ -648,6 +679,7 @@ void ClashService::sendJsonRequest(const QUrl &url, const QByteArray &method, co
 void ClashService::sendDelete(const QUrl &url, std::function<void(bool, QString)> onDone)
 {
     QNetworkRequest request(url);
+    applyAuth(request);
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     request.setTransferTimeout(8000);
 #endif

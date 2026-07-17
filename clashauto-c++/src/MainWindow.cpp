@@ -7,6 +7,7 @@
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
@@ -341,6 +342,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     registerUrlScheme();
     m_service.setEndpoint(config.host, config.uiPort); // 让轮询/切换走配置里的 API 端口（默认 9191）
     m_service.setMixedPort(config.mixedPort);          // 下载测速经此混合端口走代理
+    m_service.setSecret(config.secret);                // 核心开启鉴权时，轮询/切换请求带上 secret
     m_proxyHost = config.host;                         // 下载走代理用的主机/端口（applyDownloadProxy）
     m_proxyMixedPort = config.mixedPort;
     m_service.setClearConnectionsOnSwitch(config.clearConnections);
@@ -571,6 +573,15 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(m_tray, &TrayController::toggleCoreRequested, m_core, &CoreController::toggleCore);
     connect(m_tray, &TrayController::toggleProxyRequested, this, &MainWindow::onToggleProxyRequested);
     connect(m_tray, &TrayController::toggleTunRequested, this, &MainWindow::onToggleTunRequested);
+    // 「更新所有订阅」会连续触发多次 subscriptionUpdated；把 rebuildConfig（生成 full.yaml + 热重载核心）
+    // 经 500ms single-shot 去抖合并——500ms 内的多次变更只重建/热重载一次。
+    m_subRebuildTimer = new QTimer(this);
+    m_subRebuildTimer->setSingleShot(true);
+    connect(m_subRebuildTimer, &QTimer::timeout, this, [this] {
+        if (m_core) {
+            m_core->rebuildConfig();
+        }
+    });
     connect(m_subscriptions, &SubscriptionStore::subscriptionUpdated, this,
             [this](int, bool ok, const QString &message, bool changed) {
         appendLog(message);
@@ -578,7 +589,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         // 内容没变就不重建 full.yaml、不热重载核心：自动更新每隔几分钟跑一次，
         // 订阅通常无变化，之前每次都无谓地重载核心（日志里 67 次/18 小时）
         if (ok && changed) {
-            m_core->rebuildConfig();
+            m_subRebuildTimer->start(500); // 去抖合并批量更新的多次重建
         }
     });
 
@@ -825,7 +836,11 @@ QWidget *MainWindow::buildStatusPage()
             m_nodeSearch->clear();
         }
     });
-    connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { populateNodeList(); });
+    // 搜索去抖：每个按键都整表重建（~2000 个 widget）会明显卡顿；改为 250ms 后才真正过滤重建。
+    m_nodeSearchTimer = new QTimer(this);
+    m_nodeSearchTimer->setSingleShot(true);
+    connect(m_nodeSearchTimer, &QTimer::timeout, this, [this] { populateNodeList(); });
+    connect(m_nodeSearch, &QLineEdit::textChanged, this, [this] { m_nodeSearchTimer->start(250); });
     connect(speedTest, &QPushButton::clicked, this, [this] {
         if (m_speedTesting) {
             return; // 测速进行中：忽略重复点击
@@ -2351,6 +2366,7 @@ void MainWindow::disableNodeByName(const QString &liveName)
 void MainWindow::showSubscriptionNodes(int subscriptionIndex)
 {
     auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose); // 反复勾选会「关旧框开新框」，不自动销毁会累积泄漏
     dialog->setWindowTitle("Subscription nodes");
     dialog->resize(620, 420);
     auto *dialogLayout = new QVBoxLayout(dialog);
@@ -2495,6 +2511,19 @@ void MainWindow::showConnectionsDialog()
     // 累积的连接列表（保留离线项，模拟旧项目按 id 合并 + 离线标记 + 下载增量排序）
     auto acc = std::make_shared<QList<QJsonObject>>();
     auto reloadFn = std::make_shared<std::function<void()>>();
+    // P4：每张卡片的可更新控件句柄（按连接 id 索引）+ 上次可见连接的 id 集合。
+    // 可见集合不变时只原地更新这些控件的数值，不 delete/重建整表（避免每秒重建 + 闪烁）。
+    struct CardRefs {
+        QPointer<QFrame> card;
+        QPointer<QLabel> dot;
+        QPointer<QLabel> title;
+        QPointer<QLabel> chain;
+        QPointer<QLabel> down;
+        QPointer<QLabel> up;
+        QPointer<QPushButton> del;
+    };
+    auto cards = std::make_shared<QHash<QString, CardRefs>>();
+    auto prevIds = std::make_shared<QSet<QString>>();
 
     // 速度/流量格式（旧项目 connections 无空格：1.50KB）
     auto spd = [](qint64 value) -> QString {
@@ -2505,7 +2534,8 @@ void MainWindow::showConnectionsDialog()
         return QString::number(n, 'f', 2) + units[i];
     };
     // 小徽标：iconfont 图标 + 文本，固定配色（与旧项目一致，不随主题变化）
-    auto makeBadge = [](QChar glyph, const QString &text, const QString &bg, const QString &fg) -> QWidget * {
+    auto makeBadge = [](QChar glyph, const QString &text, const QString &bg, const QString &fg,
+                        QLabel **outText = nullptr) -> QWidget * {
         auto *badge = new QFrame();
         badge->setStyleSheet(QString("QFrame{background:%1;border-radius:5px;}").arg(bg));
         auto *h = new QHBoxLayout(badge);
@@ -2517,10 +2547,13 @@ void MainWindow::showConnectionsDialog()
         t->setStyleSheet(QString("color:%1;font-size:12px;background:transparent;").arg(fg));
         h->addWidget(ico);
         h->addWidget(t);
+        if (outText) {
+            *outText = t; // 供集合不变时原地更新药丸文本（下载/上传/代理链）
+        }
         return badge;
     };
     // 单张连接卡片
-    auto makeCard = [this, dialog, light, spd, makeBadge](const QJsonObject &c) -> QFrame * {
+    auto makeCard = [this, dialog, light, spd, makeBadge, cards](const QJsonObject &c) -> QFrame * {
         const QJsonObject meta = c.value("metadata").toObject();
         const bool offline = c.value("offline").toBool();
         QString host = meta.value("host").toString();
@@ -2559,9 +2592,10 @@ void MainWindow::showConnectionsDialog()
         h->addWidget(title, 1);
 
         // 代理链（深底白字）/ 下载（绿底 #333）/ 上传（红底 #333）——配色对齐旧项目
-        h->addWidget(makeBadge(QChar(0xE6BC), chain0, "rgba(0,0,0,0.35)", "#fff"));
-        h->addWidget(makeBadge(QChar(0xE6CD), dl ? spd(dl) : QStringLiteral("-"), "rgba(0,255,0,0.5)", "#333"));
-        h->addWidget(makeBadge(QChar(0xE6CC), ul ? spd(ul) : QStringLiteral("-"), "rgba(255,0,0,0.5)", "#333"));
+        QLabel *chainText = nullptr, *dlText = nullptr, *ulText = nullptr;
+        h->addWidget(makeBadge(QChar(0xE6BC), chain0, "rgba(0,0,0,0.35)", "#fff", &chainText));
+        h->addWidget(makeBadge(QChar(0xE6CD), dl ? spd(dl) : QStringLiteral("-"), "rgba(0,255,0,0.5)", "#333", &dlText));
+        h->addWidget(makeBadge(QChar(0xE6CC), ul ? spd(ul) : QStringLiteral("-"), "rgba(255,0,0,0.5)", "#333", &ulText));
 
         auto *del = new QPushButton(QString::fromUtf8("✕"), card);
         del->setFixedSize(30, 30);
@@ -2578,22 +2612,81 @@ void MainWindow::showConnectionsDialog()
             }
         });
         h->addWidget(del);
+        // 登记控件句柄，供集合不变时原地更新（del 的 clicked 捕获的是稳定的 id，无需重连）
+        CardRefs refs;
+        refs.card = card;
+        refs.dot = dot;
+        refs.title = title;
+        refs.chain = chainText;
+        refs.down = dlText;
+        refs.up = ulText;
+        refs.del = del;
+        cards->insert(id, refs);
         return card;
     };
 
-    // 根据切换/搜索状态重建卡片列表，并更新按钮上的计数
-    auto buildList = [guard, acc, listBody, listLayout, onlineBtn, offlineBtn, search, makeCard]() {
-        if (!guard) {
+    // 集合不变时的原地更新：不销毁卡片，只刷新在线圆点/标题/代理链/上下行/删除按钮态。
+    // 样式字符串需与 makeCard 保持一致。
+    auto updateCard = [light, spd](const CardRefs &refs, const QJsonObject &c) {
+        if (!refs.card) {
             return;
         }
-        listBody->setUpdatesEnabled(false);
-        while (QLayoutItem *item = listLayout->takeAt(0)) {
-            delete item->widget();
-            delete item;
+        const QJsonObject meta = c.value("metadata").toObject();
+        const bool offline = c.value("offline").toBool();
+        QString host = meta.value("host").toString();
+        if (host.isEmpty()) {
+            host = meta.value("destinationIP").toString();
+        }
+        QString type = meta.value("type").toString();
+        if (type.isEmpty()) {
+            type = meta.value("network").toString();
+        }
+        QStringList chains;
+        for (const QJsonValue &ch : c.value("chains").toArray()) {
+            chains << ch.toString();
+        }
+        const QString chain0 = chains.isEmpty() ? QStringLiteral("-") : chains.first();
+        const qint64 dl = c.value("download").toInteger();
+        const qint64 ul = c.value("upload").toInteger();
+        if (refs.dot) {
+            refs.dot->setStyleSheet(offline ? "color:#999;font-size:10px;background:transparent;"
+                                            : "color:#67c23a;font-size:10px;background:transparent;");
+        }
+        if (refs.title) {
+            refs.title->setText(QString("[%1] %2").arg(type, host));
+            refs.title->setStyleSheet(offline
+                ? "color:#999;font-size:14px;background:transparent;"
+                : (light ? "color:#333;font-size:14px;background:transparent;"
+                         : "color:#eee;font-size:14px;background:transparent;"));
+        }
+        if (refs.chain) {
+            refs.chain->setText(chain0);
+        }
+        if (refs.down) {
+            refs.down->setText(dl ? spd(dl) : QStringLiteral("-"));
+        }
+        if (refs.up) {
+            refs.up->setText(ul ? spd(ul) : QStringLiteral("-"));
+        }
+        if (refs.del) {
+            refs.del->setEnabled(!offline);
+        }
+    };
+
+    // 刷新卡片列表 + 计数。可见连接的 id 集合与上次相同时，只原地更新已有卡片的数值（不重排、不重建），
+    // 避免每秒 delete+重建上千个 widget 的卡顿与闪烁；集合变化时才整表重建并重建句柄表。
+    auto buildList = [guard, acc, listBody, listLayout, onlineBtn, offlineBtn, search,
+                      makeCard, updateCard, cards, prevIds]() {
+        if (!guard) {
+            return;
         }
         const bool showOnline = onlineBtn->isChecked();
         const bool showOffline = offlineBtn->isChecked();
         const QString f = search->text().trimmed();
+
+        // 第一遍：算出可见连接（保持 acc 的排序次序）、其 id 集合与计数——不做任何 widget 操作
+        QList<QJsonObject> visible;
+        QSet<QString> visibleIds;
         int onlineCount = 0, offlineCount = 0;
         for (const QJsonObject &c : std::as_const(*acc)) {
             const bool off = c.value("offline").toBool();
@@ -2608,30 +2701,55 @@ void MainWindow::showConnectionsDialog()
             if (!f.isEmpty() && !host.contains(f, Qt::CaseInsensitive)) {
                 continue;
             }
+            visible.append(c);
+            visibleIds.insert(c.value("id").toString());
+        }
+        onlineBtn->setText(QString::fromUtf8("Online (%1)").arg(onlineCount));
+        offlineBtn->setText(QString::fromUtf8("Offline (%1)").arg(offlineCount));
+
+        // 集合不变：只原地更新已有卡片的数值（按 id 查表，与显示次序无关）
+        if (visibleIds == *prevIds && !cards->isEmpty()) {
+            for (const QJsonObject &c : std::as_const(visible)) {
+                const auto it = cards->constFind(c.value("id").toString());
+                if (it != cards->constEnd()) {
+                    updateCard(*it, c);
+                }
+            }
+            return;
+        }
+
+        // 集合变化：整表重建（并重建 id→控件 句柄表）
+        listBody->setUpdatesEnabled(false);
+        while (QLayoutItem *item = listLayout->takeAt(0)) {
+            delete item->widget();
+            delete item;
+        }
+        cards->clear();
+        for (const QJsonObject &c : std::as_const(visible)) {
             listLayout->addWidget(makeCard(c));
         }
         listLayout->addStretch();
         listBody->setUpdatesEnabled(true);
-        onlineBtn->setText(QString::fromUtf8("Online (%1)").arg(onlineCount));
-        offlineBtn->setText(QString::fromUtf8("Offline (%1)").arg(offlineCount));
+        *prevIds = visibleIds;
     };
 
-    // 拉取连接：按 id 合并进 acc（新增/更新在线，缺失标记离线），按下载增量降序
+    // 拉取连接：按 id 合并进 acc（新增/更新在线，缺失标记离线），按下载增量降序。
+    // 用 QHash<id,下标> 替代线性查找（O(在线×累积) → O(在线+累积)）；acc 设上限防离线连接无界堆积。
     *reloadFn = [this, guard, acc, buildList]() {
         m_service.fetchConnections([guard, acc, buildList](QJsonArray conns) {
             if (!guard) {
                 return;
             }
-            for (QJsonObject &o : *acc) {
-                o.insert("offline", true);
+            QHash<QString, int> indexById; // id → acc 下标，本轮内一次性建立
+            indexById.reserve(acc->size());
+            for (int i = 0; i < acc->size(); ++i) {
+                (*acc)[i].insert("offline", true); // 先全标记离线，命中的再翻回在线
+                indexById.insert(acc->at(i).value("id").toString(), i);
             }
             for (const QJsonValue &cv : conns) {
                 QJsonObject c = cv.toObject();
                 const QString id = c.value("id").toString();
-                int idx = -1;
-                for (int i = 0; i < acc->size(); ++i) {
-                    if (acc->at(i).value("id").toString() == id) { idx = i; break; }
-                }
+                const int idx = indexById.value(id, -1);
                 if (idx >= 0) {
                     const double prevDl = acc->at(idx).value("download").toDouble();
                     c.insert("sort", c.value("download").toDouble() - prevDl);
@@ -2640,12 +2758,17 @@ void MainWindow::showConnectionsDialog()
                 } else {
                     c.insert("sort", 0);
                     c.insert("offline", false);
+                    indexById.insert(id, acc->size());
                     acc->append(c);
                 }
             }
             std::sort(acc->begin(), acc->end(), [](const QJsonObject &a, const QJsonObject &b) {
                 return a.value("sort").toDouble() > b.value("sort").toDouble();
             });
+            // 上限：挂 BT 等场景离线连接会无界堆积；按活跃度排序后截去尾部（最不活跃/离线的最旧项）
+            while (acc->size() > 500) {
+                acc->removeLast();
+            }
             buildList();
         });
     };
@@ -2827,6 +2950,9 @@ void MainWindow::showUpdateDialog()
         if (url.isEmpty()) {
             return;
         }
+        // 官方 <资源名>.sha256 边车的直连 url（fill 时按名登记；老版本无边车则为空）。
+        // 下载后据此校验安装包完整性——边车必须官方直连，绝不加镜像前缀，否则失去信任锚。
+        const QString sidecarUrl = item->data(Qt::UserRole + 1).toString();
         // 国内代理下载：给下载链接加国内镜像前缀（与 updateMihomoCore 的 useMirror 一致）
         const bool useMirror = mirrorCheck && mirrorCheck->isChecked();
         const QString downloadUrl = useMirror ? QStringLiteral("https://ghfast.top/") + url : url;
@@ -2869,7 +2995,7 @@ void MainWindow::showUpdateDialog()
         connect(reply, &QNetworkReply::readyRead, dialog, [reply, out] {
             out->write(reply->readAll()); // 收到即写，避免 reply 内部缓冲无限堆积
         });
-        connect(reply, &QNetworkReply::finished, dialog, [this, dialog, reply, progress, updateBtn, out, savePath, name] {
+        connect(reply, &QNetworkReply::finished, dialog, [this, dialog, reply, nam, progress, updateBtn, out, savePath, name, sidecarUrl, useMirror] {
             out->write(reply->readAll()); // 收尾残余
             out->close();
             const bool ok = reply->error() == QNetworkReply::NoError;
@@ -2885,18 +3011,77 @@ void MainWindow::showUpdateDialog()
                 return;
             }
             progress->setValue(100);
+
+            // 校验通过后的真正执行动作（静默安装并重启 / 打开安装包并退出）。
+            auto doExecute = [this, savePath, name] {
 #if defined(Q_OS_WIN)
-            // 一键更新：NSIS 安装包支持 /S 静默安装——等本进程退出后原地升级并自动重启。
-            // 增强/网页开关每次切换已落盘（config 的 use:/web:），重启后按其自动恢复。
-            if (name.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive)) {
-                appendLog(QString::fromUtf8("下载完成，正在静默安装并自动重启: %1").arg(savePath));
-                launchSilentUpdateAndRestart(savePath);
+                // 一键更新：NSIS 安装包支持 /S 静默安装——等本进程退出后原地升级并自动重启。
+                // 增强/网页开关每次切换已落盘（config 的 use:/web:），重启后按其自动恢复。
+                if (name.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive)) {
+                    appendLog(QString::fromUtf8("下载完成，正在静默安装并自动重启: %1").arg(savePath));
+                    launchSilentUpdateAndRestart(savePath);
+                    return;
+                }
+#endif
+                appendLog(QString::fromUtf8("下载完成，启动安装并退出: %1").arg(savePath));
+                QDesktopServices::openUrl(QUrl::fromLocalFile(savePath)); // 启动安装包 / 打开文件
+                qApp->quit();                                             // 退出应用让安装继续（对齐旧项目）
+            };
+
+            // 边车缺失 / 取不到校验文件时的处置：镜像下载不可信 → 拒绝并清理；直连老版本可能
+            // 本就没有边车 → 向后兼容，跳过校验照常执行。
+            auto onSidecarUnavailable = [this, dialog, progress, updateBtn, savePath, useMirror, doExecute] {
+                if (useMirror) {
+                    QFile::remove(savePath); // 经镜像下载又无校验锚，直接销毁
+                    progress->hide();
+                    updateBtn->setEnabled(true);
+                    appendLog(QString::fromUtf8("更新已取消: 经镜像下载但未取到校验文件（.sha256），无法校验完整性"));
+                    QMessageBox::warning(dialog, QString::fromUtf8("更新"),
+                                         QString::fromUtf8("无法校验完整性（未取到校验文件），经镜像下载已取消，请关闭「国内代理下载」后重试。"));
+                    return;
+                }
+                appendLog(QString::fromUtf8("未取到校验文件，跳过完整性校验（直连）"));
+                doExecute();
+            };
+
+            if (sidecarUrl.isEmpty()) {
+                onSidecarUnavailable();
                 return;
             }
+
+            // 完整性校验：直连（复用已 applyDownloadProxy 的 nam，绝不加 ghfast.top 镜像前缀）
+            // 下载官方 <资源名>.sha256 边车，比对刚下好的安装包摘要。
+            appendLog(QString::fromUtf8("正在校验安装包完整性..."));
+            QNetworkRequest sreq{QUrl(sidecarUrl)};
+            sreq.setRawHeader("User-Agent", "clashauto-cpp");
+            sreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+            sreq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+            sreq.setTransferTimeout(30000);
 #endif
-            appendLog(QString::fromUtf8("下载完成，启动安装并退出: %1").arg(savePath));
-            QDesktopServices::openUrl(QUrl::fromLocalFile(savePath)); // 启动安装包 / 打开文件
-            qApp->quit();                                             // 退出应用让安装继续（对齐旧项目）
+            QNetworkReply *sreply = nam->get(sreq);
+            connect(sreply, &QNetworkReply::finished, dialog,
+                    [this, dialog, sreply, progress, updateBtn, savePath, doExecute, onSidecarUnavailable] {
+                const bool sok = sreply->error() == QNetworkReply::NoError;
+                const QByteArray sdata = sreply->readAll();
+                sreply->deleteLater();
+                if (!sok || sdata.trimmed().isEmpty()) {
+                    appendLog(QString::fromUtf8("校验文件下载失败"));
+                    onSidecarUnavailable(); // 取不到边车按镜像/直连策略处置
+                    return;
+                }
+                if (verifySha256(savePath, QString::fromUtf8(sdata))) {
+                    appendLog(QString::fromUtf8("安装包完整性校验通过"));
+                    doExecute();
+                } else {
+                    QFile::remove(savePath); // 删除可疑安装包，绝不执行
+                    progress->hide();
+                    updateBtn->setEnabled(true);
+                    appendLog(QString::fromUtf8("安装包校验失败，可能被篡改，已取消"));
+                    QMessageBox::warning(dialog, QString::fromUtf8("更新"),
+                                         QString::fromUtf8("安装包校验失败，可能被篡改，已取消。"));
+                }
+            });
         });
     });
     // 资源过滤（对齐旧项目 formatAssets）：仅当前平台+架构；本项目命名 windows/linux/darwin + x64/arm64
@@ -2936,6 +3121,13 @@ void MainWindow::showUpdateDialog()
             refs.body->setPlainText(r.value("body").toString());
             refs.assets->clear();
             const QJsonArray assets = r.value("assets").toArray();
+            // 先全量登记 assetName → browser_download_url（含 .sha256 边车），供下载后按
+            // <资源名>.sha256 查边车做完整性校验。本 release 内建表，避免 rel/beta 同名资源串味。
+            QHash<QString, QString> urlByName;
+            for (const QJsonValue &av : assets) {
+                const QJsonObject a = av.toObject();
+                urlByName.insert(a.value("name").toString(), a.value("browser_download_url").toString());
+            }
             for (const QJsonValue &av : assets) {
                 const QJsonObject a = av.toObject();
                 const QString name = a.value("name").toString();
@@ -2948,8 +3140,13 @@ void MainWindow::showUpdateDialog()
                     || name.endsWith(QStringLiteral(".yaml"), Qt::CaseInsensitive)) {
                     continue;
                 }
+                if (name.endsWith(QStringLiteral(".sha256"), Qt::CaseInsensitive)) {
+                    continue; // 校验边车，不作为可下载资源展示（仅供下方按名查表校验）
+                }
                 auto *item = new QListWidgetItem(name);
                 item->setData(Qt::UserRole, a.value("browser_download_url").toString());
+                // 边车（<资源名>.sha256）的官方直连 url，供下载后校验；缺失则为空（老版本无边车）
+                item->setData(Qt::UserRole + 1, urlByName.value(name + QStringLiteral(".sha256")));
                 refs.assets->addItem(item);
             }
             // 一键更新：自动选中推荐资源（优先 setup 安装包，支持静默安装+自动重启），
@@ -3027,6 +3224,28 @@ bool versionNewer(const QString &remote, const QString &local)
     return false;
 }
 } // namespace
+
+bool MainWindow::verifySha256(const QString &filePath, const QString &expectedHexLower) const
+{
+    // 边车内容通常仅为十六进制摘要（可能带换行）；也兼容 "<hex>  <文件名>" 形式：取首个空白前的段。
+    QString expected = expectedHexLower.trimmed();
+    const qsizetype ws = expected.indexOf(QRegularExpression(QStringLiteral("\\s")));
+    if (ws > 0) {
+        expected = expected.left(ws);
+    }
+    if (expected.isEmpty()) {
+        return false;
+    }
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    QCryptographicHash h(QCryptographicHash::Sha256);
+    if (!h.addData(&f)) { // 流式读取：数十 MB 安装包/内核不整体读入内存
+        return false;
+    }
+    return QString::fromLatin1(h.result().toHex()).compare(expected, Qt::CaseInsensitive) == 0;
+}
 
 void MainWindow::applyDownloadProxy(QNetworkAccessManager *nam) const
 {
@@ -3321,14 +3540,21 @@ void MainWindow::applyAutoUpdate(int minutes)
 void MainWindow::registerUrlScheme()
 {
 #if defined(Q_OS_WIN)
-    // 注册 clash-auto:// 协议到 HKCU（无需管理员）；每次启动幂等刷新指向当前 exe
+    // 提权(--tun-elevated)实例不注册：非提权主实例已注册过，提权上下文无需重复，
+    // 且避免在管理员权限下做多余的注册表写入（缩小提权面）。
+    if (QCoreApplication::arguments().contains(QStringLiteral("--tun-elevated"))) {
+        return;
+    }
+    // 注册 clash-auto:// 协议到 HKCU（无需管理员）；每次启动幂等刷新指向当前 exe。
+    // 用 QSettings 进程内直接写注册表，替代 spawn 三次 reg.exe——reg.exe 启动在 VM 上
+    // 阻塞明显，且提权实例里以管理员跑同目录可能被劫持的 reg.exe 是提权面（与 applyAutoStart 同风格）。
     const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
-    const QString base = "HKCU\\Software\\Classes\\clash-auto";
-    const QString cmdVal = QLatin1Char('"') + exe + QLatin1String("\" \"%1\"");
-    runHidden("reg", {"add", base, "/ve", "/d", "URL:Clash Auto Protocol", "/f"});
-    // 空数据用 /t REG_SZ 不带 /d，避免 QProcess 传空串参数的 Windows 怪癖
-    runHidden("reg", {"add", base, "/v", "URL Protocol", "/t", "REG_SZ", "/f"});
-    runHidden("reg", {"add", base + "\\shell\\open\\command", "/ve", "/d", cmdVal, "/f"});
+    QSettings root("HKEY_CURRENT_USER\\Software\\Classes\\clash-auto", QSettings::NativeFormat);
+    root.setValue(".", "URL:Clash Auto Protocol"); // 默认值(@)
+    root.setValue("URL Protocol", "");
+    QSettings cmd("HKEY_CURRENT_USER\\Software\\Classes\\clash-auto\\shell\\open\\command",
+                  QSettings::NativeFormat);
+    cmd.setValue(".", QLatin1Char('"') + exe + QLatin1String("\" \"%1\"")); // "<exe>" "%1"
 #endif
 }
 
@@ -3451,6 +3677,17 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
             return;
         }
 
+        // 第三方 mihomo（MetaCubeX）若为该资产提供同名 .sha256 边车，则下载后直连校验（不加镜像）；
+        // 上游不受我们控制，无边车不阻断内核更新（best effort）。
+        QString coreSidecarUrl;
+        const QString coreSidecarName = assetName + QStringLiteral(".sha256");
+        for (const QJsonValue &av : assets) {
+            if (av.toObject().value("name").toString() == coreSidecarName) {
+                coreSidecarUrl = av.toObject().value("browser_download_url").toString();
+                break;
+            }
+        }
+
         appendLog(QString::fromUtf8("下载 mihomo %1 ...%2").arg(tag, mirror.isEmpty() ? QString() : QString::fromUtf8("（国内加速）")));
         btn->setText(QString::fromUtf8("下载中..."));
         QNetworkRequest dreq{QUrl(mirror + url)};
@@ -3466,13 +3703,13 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
                 btn->setText(QString::fromUtf8("下载中 %1%").arg(int(r * 100 / t)));
             }
         });
-        connect(dl, &QNetworkReply::finished, this, [this, dl, nam, btn, cfg, tag, assetName, restore] {
+        connect(dl, &QNetworkReply::finished, this, [this, dl, nam, btn, cfg, tag, assetName, coreSidecarUrl, restore] {
             const bool ok2 = dl->error() == QNetworkReply::NoError;
             const QByteArray data = dl->readAll();
             const QString err2 = dl->errorString();
             dl->deleteLater();
-            nam->deleteLater();
             if (!ok2 || data.isEmpty()) {
+                nam->deleteLater();
                 restore();
                 appendLog(QString::fromUtf8("内核下载失败: %1").arg(err2));
                 return;
@@ -3482,6 +3719,7 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
             const QString archivePath = QDir(tmpDir).filePath(assetName);
             QFile f(archivePath);
             if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                nam->deleteLater();
                 restore();
                 appendLog(QString::fromUtf8("内核更新失败: 无法写入临时文件"));
                 return;
@@ -3489,48 +3727,91 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
             f.write(data);
             f.close();
 
-            btn->setText(QString::fromUtf8("安装中..."));
-            const QString extracted = extractCoreBinary(archivePath, tmpDir);
-            if (extracted.isEmpty()) {
+            // 校验通过（或上游无边车）后：解压 → 停核心 → 替换二进制 → 恢复运行。
+            auto doReplace = [this, cfg, tag, restore, tmpDir, archivePath, btn] {
+                btn->setText(QString::fromUtf8("安装中..."));
+                const QString extracted = extractCoreBinary(archivePath, tmpDir);
+                if (extracted.isEmpty()) {
+                    QDir(tmpDir).removeRecursively();
+                    restore();
+                    appendLog(QString::fromUtf8("内核更新失败: 解压失败（缺少 tar/gzip 或压缩包异常）"));
+                    return;
+                }
+
+                // 停核心 → 替换二进制（保留原文件名）→ 恢复运行
+                const QString target = cfg.clashExecutable();
+                const bool wasRunning = m_core && m_core->isRunning();
+                if (wasRunning) {
+                    m_core->stopCore();
+                }
+                QDir().mkpath(QFileInfo(target).absolutePath());
+                bool replaced = false;
+                for (int attempt = 0; attempt < 8 && !replaced; ++attempt) {
+                    QFile::remove(target);
+                    if (QFile::copy(extracted, target)) {
+                        replaced = true;
+                    } else {
+                        QThread::msleep(150); // Windows 下核心退出后句柄释放可能有短暂延迟
+                    }
+                }
+#if !defined(Q_OS_WIN)
+                if (replaced) {
+                    QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
+                                                      | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                                      | QFileDevice::ReadOther | QFileDevice::ExeOther);
+                }
+#endif
                 QDir(tmpDir).removeRecursively();
+                if (wasRunning) {
+                    m_core->startCore();
+                }
                 restore();
-                appendLog(QString::fromUtf8("内核更新失败: 解压失败（缺少 tar/gzip 或压缩包异常）"));
+                if (replaced) {
+                    appendLog(QString::fromUtf8("内核已更新到 mihomo %1%2").arg(tag, wasRunning ? QString::fromUtf8("，已重启核心") : QString()));
+                } else {
+                    appendLog(QString::fromUtf8("内核更新失败: 无法替换文件（可能被占用）"));
+                }
+            };
+
+            // 上游未提供边车：跳过校验，照常替换（不因第三方缺失而阻断内核更新）。
+            if (coreSidecarUrl.isEmpty()) {
+                nam->deleteLater();
+                appendLog(QString::fromUtf8("上游未提供校验文件，跳过完整性校验"));
+                doReplace();
                 return;
             }
 
-            // 停核心 → 替换二进制（保留原文件名）→ 恢复运行
-            const QString target = cfg.clashExecutable();
-            const bool wasRunning = m_core && m_core->isRunning();
-            if (wasRunning) {
-                m_core->stopCore();
-            }
-            QDir().mkpath(QFileInfo(target).absolutePath());
-            bool replaced = false;
-            for (int attempt = 0; attempt < 8 && !replaced; ++attempt) {
-                QFile::remove(target);
-                if (QFile::copy(extracted, target)) {
-                    replaced = true;
-                } else {
-                    QThread::msleep(150); // Windows 下核心退出后句柄释放可能有短暂延迟
-                }
-            }
-#if !defined(Q_OS_WIN)
-            if (replaced) {
-                QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
-                                                  | QFileDevice::ReadGroup | QFileDevice::ExeGroup
-                                                  | QFileDevice::ReadOther | QFileDevice::ExeOther);
-            }
+            // 直连（复用已 applyDownloadProxy 的 nam，绝不加镜像前缀）下载 .sha256 边车并校验。
+            btn->setText(QString::fromUtf8("校验中..."));
+            QNetworkRequest sreq{QUrl(coreSidecarUrl)};
+            sreq.setRawHeader("User-Agent", "clashauto-cpp");
+            sreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+            sreq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+            sreq.setTransferTimeout(30000);
 #endif
-            QDir(tmpDir).removeRecursively();
-            if (wasRunning) {
-                m_core->startCore();
-            }
-            restore();
-            if (replaced) {
-                appendLog(QString::fromUtf8("内核已更新到 mihomo %1%2").arg(tag, wasRunning ? QString::fromUtf8("，已重启核心") : QString()));
-            } else {
-                appendLog(QString::fromUtf8("内核更新失败: 无法替换文件（可能被占用）"));
-            }
+            QNetworkReply *sreply = nam->get(sreq);
+            connect(sreply, &QNetworkReply::finished, this,
+                    [this, sreply, nam, restore, tmpDir, archivePath, doReplace] {
+                const bool sok = sreply->error() == QNetworkReply::NoError;
+                const QByteArray sdata = sreply->readAll();
+                sreply->deleteLater();
+                nam->deleteLater();
+                if (!sok || sdata.trimmed().isEmpty()) {
+                    // 边车取不到：上游波动，不阻断——跳过校验继续替换。
+                    appendLog(QString::fromUtf8("校验文件下载失败，跳过完整性校验"));
+                    doReplace();
+                    return;
+                }
+                if (verifySha256(archivePath, QString::fromUtf8(sdata))) {
+                    appendLog(QString::fromUtf8("内核完整性校验通过"));
+                    doReplace();
+                } else {
+                    QDir(tmpDir).removeRecursively(); // 删可疑压缩包，绝不替换
+                    restore();
+                    appendLog(QString::fromUtf8("内核更新失败: 校验不通过，可能被篡改，已取消"));
+                }
+            });
         });
     });
 }
@@ -3548,10 +3829,27 @@ void MainWindow::handleProtocolUrl(const QString &raw)
         appendLog(QString::fromUtf8("协议链接缺少 url 参数: %1").arg(raw));
         return;
     }
+    // 安全校验：协议可被任意网页/程序触发，只接受 http/https 订阅链接，
+    // 堵住 url=C:\...\敏感文件 或 file:// 之类的本地文件读取。
+    const QString subScheme = QUrl(subUrl).scheme().toLower();
+    if (subScheme != QLatin1String("http") && subScheme != QLatin1String("https")) {
+        appendLog(QString::fromUtf8("拒绝导入非 http(s) 订阅链接: %1").arg(subUrl));
+        return;
+    }
     const QString name = q.queryItemValue("name", QUrl::FullyDecoded).trimmed();
     QString type = q.queryItemValue("type", QUrl::FullyDecoded).trimmed();
     if (type.isEmpty()) {
         type = "sub";
+    }
+    // 导入前弹确认框（避免外部链接静默添加订阅）；http 明文额外提示可被篡改。
+    QString confirmText = QString::fromUtf8("是否导入来自链接的订阅：\n%1").arg(subUrl);
+    if (subScheme == QLatin1String("http")) {
+        confirmText += QString::fromUtf8("\n\n注意：该订阅使用明文 http，可能被网络篡改。");
+    }
+    if (QMessageBox::question(this, QString::fromUtf8("导入订阅"), confirmText,
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes) {
+        appendLog(QString::fromUtf8("用户取消导入订阅: %1").arg(subUrl));
+        return;
     }
     if (m_subscriptions->addSubscription(name, subUrl, type)) {
         const int index = m_subscriptions->load().size() - 1;

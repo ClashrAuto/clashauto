@@ -68,6 +68,9 @@ private:
     // 让下载（检查更新/更新包/内核/mmdb 等 GitHub 资源）在核心运行时经混合端口走代理——
     // 墙内直连 GitHub 常不通，走代理更可靠。核心没跑则保持直连。
     void applyDownloadProxy(QNetworkAccessManager *nam) const;
+    // 用官方 <文件>.sha256 边车校验已下载文件完整性：流式算 SHA-256，与边车内的十六进制摘要
+    // 去空白后不区分大小写比较。防镜像/中间人投递被篡改的安装包或内核。
+    bool verifySha256(const QString &filePath, const QString &expectedHexLower) const;
     void showConnectionsDialog();
     void appendLog(const QString &message);
     void appendTimeline(QVBoxLayout *layout, QScrollArea *scroll, const QString &message);
@@ -188,5 +191,7 @@ private:
     int m_autoUpdateMinutes = 0;
     int m_runMinutes = 0;
     QTimer *m_autoUpdateTimer = nullptr;
+    QTimer *m_nodeSearchTimer = nullptr;  // 状态页搜索框去抖（250ms）：避免每个按键都整表重建
+    QTimer *m_subRebuildTimer = nullptr;  // 订阅更新后 rebuildConfig 去抖（500ms）：合并批量更新的多次热重载
     QPoint m_dragStart;
 };

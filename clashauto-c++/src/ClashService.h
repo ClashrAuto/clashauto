@@ -4,12 +4,14 @@
 #include <QJsonArray>
 #include <QNetworkAccessManager>
 #include <QObject>
+#include <QString>
 #include <QTimer>
 #include <functional>
 
 class QJsonDocument;
 class QJsonObject;
 class QNetworkReply;
+class QNetworkRequest;
 
 struct NodeInfo {
     QString name;
@@ -36,6 +38,7 @@ public:
     void start();
     void setEndpoint(const QString &host, int port); // REST API 地址（对齐 config.uiPort，默认 9191）
     void setMixedPort(int port); // 混合代理端口（对齐 config.mixedPort，默认 7890）——下载测速经此端口走代理
+    void setSecret(const QString &secret); // external-controller 的 secret；非空时所有发往核心的请求带 Authorization: Bearer
     void setMode(const QString &mode);
     void setSelectedGroup(const QString &group);
     void setClearConnectionsOnSwitch(bool enabled);
@@ -64,7 +67,8 @@ private:
     void ensureTrafficStream(); // 流断了（核心重启/端口变更）就重连
     void pollConnections();
     void pollNodes();
-    void sendGet(const QUrl &url, std::function<void(const QJsonDocument &)> onJson);
+    void applyAuth(QNetworkRequest &req) const; // secret 非空时给发往核心的请求加 Authorization: Bearer 头（统一入口，避免遗漏）
+    void sendGet(const QUrl &url, std::function<void(const QJsonDocument &)> onJson, std::function<void()> onFinished = {});
     void sendJsonRequest(const QUrl &url, const QByteArray &method, const QJsonObject &payload, std::function<void(bool, QString)> onDone);
     void sendDelete(const QUrl &url, std::function<void(bool, QString)> onDone);
 
@@ -86,9 +90,12 @@ private:
     QTimer m_trafficTimer;                    // 看门狗：定期确保 /traffic 流还活着，断了就重连
     QTimer m_connectionsTimer;
     QTimer m_nodesTimer;
+    bool m_connectionsInFlight = false; // /connections 轮询在途：上一拍未回则跳过，防止慢响应下请求自我堆积
+    bool m_nodesInFlight = false;        // /proxies 轮询在途：同上
     QString m_host = "127.0.0.1";
     int m_port = 9191; // 默认对齐 AppConfig::uiPort / default.yaml；实际由 setEndpoint 按配置设定
     int m_mixedPort = 7890; // 默认对齐 AppConfig::mixedPort；由 setMixedPort 按配置设定
+    QString m_secret;       // external-controller secret；空 = 不加鉴权头（兼容未设 secret 的老核心）
     QString m_selectedGroup; // 空 = 未定；首轮 pollNodes 选主组（按模式：Rule→🚀 节点选择, Global→GLOBAL）
     QString m_mode = "Rule";  // 当前代理模式，决定主选择组（对齐旧项目 getProxies）
     QString m_selectedNode;

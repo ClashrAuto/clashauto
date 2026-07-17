@@ -8,6 +8,7 @@ struct AppConfig {
     QString sourceRoot;
     QString userDir;
     QString host = "127.0.0.1";
+    QString secret; // external-controller 访问密钥：为空时首次加载随机生成并落盘到用户 config.yaml
     int uiPort = 9191; // REST API 端口（对齐 default.yaml external-controller）；用 9191 避开原版 9090
     int mixedPort = 7890;
     int autoUpdateMinutes = 0;

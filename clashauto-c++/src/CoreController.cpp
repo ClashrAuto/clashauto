@@ -377,10 +377,26 @@ void CoreController::reloadConfig()
         return;
     }
 
+    // 安全加固：热重载前用核心自身的测试模式（mihomo -t）校验待加载配置。校验不过就不 PUT，
+    // 保留当前正在运行的好配置，避免坏配置覆盖导致核心失效。核心 exe 缺失时跳过校验直接按原逻辑走
+    // （别因缺核心反而不重载）。这是同步的短进程调用，reloadConfig 在 UI 线程被调用且频率低（设置/规则变更），可接受。
+    const QString exe = m_config.clashExecutable();
+    if (QFileInfo::exists(exe)) {
+        const int rc = runHidden(exe, {"-t", "-d", m_config.userDir, "-f", m_fullConfigPath});
+        if (rc != 0) {
+            emit logUpdated(QString::fromUtf8("配置校验未通过，已跳过热重载（保留当前运行配置）"));
+            return;
+        }
+    }
+
     QJsonObject payload;
     payload.insert("path", m_fullConfigPath);
     QNetworkRequest request(QUrl(QString("http://%1:%2/configs").arg(m_config.host).arg(m_config.uiPort)));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    // external-controller 设了 secret 后，本 PUT 也必须带 Bearer，否则热重载 401（与 ClashService 同）
+    if (!m_config.secret.isEmpty()) {
+        request.setRawHeader("Authorization", QByteArray("Bearer ") + m_config.secret.toUtf8());
+    }
     QNetworkReply *reply = m_network.put(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
         const QByteArray body = reply->readAll();

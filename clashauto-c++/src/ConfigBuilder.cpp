@@ -34,6 +34,12 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = mergePlugin(yaml, plugin);
     yaml = setScalar(yaml, "mixed-port", QString::number(m_config.mixedPort));
     yaml = setScalar(yaml, "external-controller", QString("'%1:%2'").arg(m_config.host).arg(m_config.uiPort));
+    // 安全加固：给 REST API 设访问密钥（secret 键 default.yaml 通常没有，setScalar 缺失时会追加/前置）
+    if (!m_config.secret.isEmpty()) {
+        yaml = setScalar(yaml, "secret", QString("'%1'").arg(m_config.secret));
+    }
+    // 安全加固：默认关闭 allow-lan，混合端口只监听本机，避免暴露成开放代理
+    yaml = setScalar(yaml, "allow-lan", "false");
     yaml = setNestedScalar(yaml, "tun", "enable", tunEnabled ? "true" : "false");
     yaml = ensureProxyServerNameserver(yaml);
     yaml = normalizeEmptyProxies(yaml);

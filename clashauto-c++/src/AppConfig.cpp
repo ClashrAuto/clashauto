@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QStandardPaths>
 #include <QSysInfo>
@@ -81,6 +82,29 @@ AppConfig AppConfigLoader::load()
     config.autoTheme = boolFromYaml(yaml, "autoTheme", config.autoTheme);
     config.mirror = boolFromYaml(yaml, "mirror", config.mirror);
     config.language = valueFromYaml(yaml, "language", config.language);
+    config.secret = valueFromYaml(yaml, "secret", QString());
+
+    // 安全加固：external-controller 未设访问密钥时，首次加载随机生成 32 位十六进制 secret 并落盘，
+    // 之后固定复用。仅写入「用户可写」的 userConfig（bundled 只读，不改）。
+    if (config.secret.isEmpty()) {
+        QString generated;
+        generated.reserve(32);
+        for (int i = 0; i < 16; ++i) {
+            generated += QStringLiteral("%1").arg(QRandomGenerator::global()->bounded(256), 2, 16, QLatin1Char('0'));
+        }
+        config.secret = generated;
+        if (QFile::exists(userConfig)) {
+            file.close(); // 释放读句柄，避免与下面的追加写在 Windows 上争用
+            QFile out(userConfig);
+            if (out.open(QIODevice::Append)) {
+                const QString line = (yaml.isEmpty() || yaml.endsWith('\n'))
+                    ? QStringLiteral("secret: %1\n").arg(config.secret)
+                    : QStringLiteral("\nsecret: %1\n").arg(config.secret);
+                out.write(line.toUtf8());
+                out.close();
+            }
+        }
+    }
     return config;
 }
 

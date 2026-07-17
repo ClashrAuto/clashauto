@@ -288,6 +288,16 @@ jobs:
           $nsi | Set-Content -Path installer.nsi -Encoding UTF8
           makensis installer.nsi
 
+      - name: Generate SHA256 sidecars
+        shell: pwsh
+        run: |
+          # 为每个发布物生成 <文件>.sha256（仅十六进制摘要）。应用更新时直连 GitHub
+          # 取该边车校验安装包完整性——即使经 ghfast.top 镜像下载正文，摘要仍来自官方源，
+          # 镜像无法在不被发现的情况下投递木马。边车随 dist/ClashAuto-* 一并上传。
+          Get-ChildItem dist -Filter 'ClashAuto-*' -File | Where-Object { $_.Extension -ne '.sha256' } | ForEach-Object {
+            (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() | Out-File -FilePath "$($_.FullName).sha256" -Encoding ascii -NoNewline
+          }
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -481,6 +491,17 @@ jobs:
           EOF
           hdiutil create -volname "Clash Auto" -srcfolder dist/dmgroot -ov -format UDZO \
             "dist/ClashAuto-${APP_VERSION}-macos-universal.dmg"
+
+      - name: Generate SHA256 sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 每个发布物生成 <文件>.sha256（仅摘要），供应用更新时直连 GitHub 校验完整性
+          for f in dist/ClashAuto-*; do
+            case "$f" in *.sha256) continue;; esac
+            [ -f "$f" ] || continue
+            shasum -a 256 "$f" | awk '{print $1}' > "$f.sha256"
+          done
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
@@ -685,6 +706,17 @@ jobs:
           EOF
 
           fakeroot dpkg-deb --build "$pkg_root" "dist/ClashAuto-${APP_VERSION}-linux-${{ matrix.arch }}.deb"
+
+      - name: Generate SHA256 sidecars
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 每个发布物生成 <文件>.sha256（仅摘要），供应用更新时直连 GitHub 校验完整性
+          for f in dist/ClashAuto-*; do
+            case "$f" in *.sha256) continue;; esac
+            [ -f "$f" ] || continue
+            sha256sum "$f" | awk '{print $1}' > "$f.sha256"
+          done
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

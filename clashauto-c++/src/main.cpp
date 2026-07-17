@@ -171,6 +171,8 @@ int main(int argc, char *argv[])
     // 本进程为主实例：监听命名管道，接收后续实例转发的链接
     QLocalServer::removeServer(serverName);
     QLocalServer server;
+    // 仅同一用户可连接该命名管道：防止本地其他用户/低权限进程投递「导入订阅」等指令
+    server.setSocketOptions(QLocalServer::UserAccessOption);
     server.listen(serverName);
     // 提权重启时旧(非提权)实例可能还没退出、仍占用命名管道 → listen 失败；短暂重试直到它释放，
     // 保证提权实例也能建起单实例服务器（否则后续链接转发/防重复启动会失效）。
