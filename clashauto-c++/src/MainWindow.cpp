@@ -331,6 +331,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         QFile::remove(m_logFilePath + ".old");
         QFile::rename(m_logFilePath, m_logFilePath + ".old");
     }
+    // 常开句柄 + 每条 flush：之前每条日志都 open/append/close 一次文件，
+    // mihomo 的连接日志逐条转发进来，在 QEMU 虚拟机上文件打开开销明显
+    m_logFile.setFileName(m_logFilePath);
+    m_logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
     m_core = new CoreController(config, this);
     m_tray = new TrayController(this, this);
     m_subscriptions = new SubscriptionStore(config, this);
@@ -567,10 +571,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     connect(m_tray, &TrayController::toggleCoreRequested, m_core, &CoreController::toggleCore);
     connect(m_tray, &TrayController::toggleProxyRequested, this, &MainWindow::onToggleProxyRequested);
     connect(m_tray, &TrayController::toggleTunRequested, this, &MainWindow::onToggleTunRequested);
-    connect(m_subscriptions, &SubscriptionStore::subscriptionUpdated, this, [this](int, bool ok, const QString &message) {
+    connect(m_subscriptions, &SubscriptionStore::subscriptionUpdated, this,
+            [this](int, bool ok, const QString &message, bool changed) {
         appendLog(message);
         reloadSubscriptions();
-        if (ok) {
+        // 内容没变就不重建 full.yaml、不热重载核心：自动更新每隔几分钟跑一次，
+        // 订阅通常无变化，之前每次都无谓地重载核心（日志里 67 次/18 小时）
+        if (ok && changed) {
             m_core->rebuildConfig();
         }
     });
@@ -2897,7 +2904,7 @@ void MainWindow::showUpdateDialog()
 #if defined(Q_OS_WIN)
         QStringLiteral("windows");
 #elif defined(Q_OS_MACOS)
-        QStringLiteral("darwin");
+        QStringLiteral("macos"); // 本项目 mac 资产命名 macos-universal（通用二进制 DMG）
 #else
         QStringLiteral("linux");
 #endif
@@ -2932,8 +2939,10 @@ void MainWindow::showUpdateDialog()
             for (const QJsonValue &av : assets) {
                 const QJsonObject a = av.toObject();
                 const QString name = a.value("name").toString();
-                if (!name.contains(plat, Qt::CaseInsensitive) || !name.contains(arch, Qt::CaseInsensitive)) {
-                    continue; // 非当前平台/架构
+                if (!name.contains(plat, Qt::CaseInsensitive)
+                    || !(name.contains(arch, Qt::CaseInsensitive)
+                         || name.contains(QStringLiteral("universal"), Qt::CaseInsensitive))) {
+                    continue; // 非当前平台/架构（universal=mac 通用二进制，任意架构可用）
                 }
                 if (name.endsWith(QStringLiteral(".yml"), Qt::CaseInsensitive)
                     || name.endsWith(QStringLiteral(".yaml"), Qt::CaseInsensitive)) {
@@ -3111,12 +3120,10 @@ void MainWindow::appendLog(const QString &message)
         m_logLabel->setText(message);
     }
     appendTimeline(m_logTimeline, m_logScroll, message);
-    if (!m_logFilePath.isEmpty()) {
-        QFile file(m_logFilePath);
-        if (file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-            file.write(line.toUtf8());
-            file.write("\n");
-        }
+    if (m_logFile.isOpen()) {
+        m_logFile.write(line.toUtf8());
+        m_logFile.write("\n");
+        m_logFile.flush(); // 逐条落盘：崩溃/被杀时日志不缺尾，也方便外部 tail
     }
 }
 

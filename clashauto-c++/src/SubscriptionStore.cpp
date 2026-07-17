@@ -526,7 +526,12 @@ void SubscriptionStore::updateSubscriptionFromText(int index, const QString &yam
         emit subscriptionUpdated(index, false, "No proxies found in subscription");
         return;
     }
-    const bool ok = replaceSubscriptionList(index, nodeList);
+    bool changed = true;
+    const bool ok = replaceSubscriptionList(index, nodeList, &changed);
+    if (ok && !changed) {
+        emit subscriptionUpdated(index, true, QString::fromUtf8("订阅无变化（%1 个节点），跳过重载").arg(count), false);
+        return;
+    }
     emit subscriptionUpdated(index, ok, ok ? QString("Updated %1 nodes").arg(count) : "Failed to write subscribe.yaml");
 }
 
@@ -809,10 +814,14 @@ bool SubscriptionStore::nodeAllowed(const QString &name) const
     return true;
 }
 
-bool SubscriptionStore::replaceSubscriptionList(int index, const QString &nodeListYaml)
+bool SubscriptionStore::replaceSubscriptionList(int index, const QString &nodeListYaml, bool *changed)
 {
+    if (changed) {
+        *changed = true;
+    }
     ensureFile();
-    QStringList lines = readText().split('\n');
+    const QString oldText = readText();
+    QStringList lines = oldText.split('\n');
     int current = -1;
     int listLine = -1;
     int listEnd = -1;
@@ -855,7 +864,16 @@ bool SubscriptionStore::replaceSubscriptionList(int index, const QString &nodeLi
     for (int i = replacement.size() - 1; i >= 0; --i) {
         lines.insert(listLine, replacement[i]);
     }
-    return writeText(lines.join('\n'));
+    const QString newText = lines.join('\n');
+    if (newText == oldText) {
+        // 订阅内容毫无变化（节点及其启用状态逐字节一致）：不写盘，并告知调用方
+        // 可跳过 full.yaml 重建与核心热重载——自动更新周期短时这是常态
+        if (changed) {
+            *changed = false;
+        }
+        return true;
+    }
+    return writeText(newText);
 }
 
 void SubscriptionStore::ensureFile() const

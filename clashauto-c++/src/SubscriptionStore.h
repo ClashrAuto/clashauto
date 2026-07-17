@@ -47,14 +47,16 @@ public:
     QString path() const;
 
 signals:
-    void subscriptionUpdated(int index, bool ok, QString message);
+    // changed=false 表示更新成功但内容与上次完全一致（含节点启用状态）——
+    // 调用方可据此跳过 full.yaml 重建与核心热重载（自动更新周期短时避免无谓重载）
+    void subscriptionUpdated(int index, bool ok, QString message, bool changed = true);
 
 private:
     void ensureFile() const;
     QString readText() const;
     bool writeText(const QString &text) const;
     SubscriptionSummary summaryAt(int index);
-    bool replaceSubscriptionList(int index, const QString &nodeListYaml);
+    bool replaceSubscriptionList(int index, const QString &nodeListYaml, bool *changed = nullptr);
     QMap<QString, bool> existingNodeUseByEndpoint(int index) const;
     QMap<QString, QString> existingNodeYamlByEndpoint(int index) const;
     QString parseProxyList(const QString &yaml, const QMap<QString, bool> &previousUse, const QMap<QString, QString> &previousYaml, int *count) const;
