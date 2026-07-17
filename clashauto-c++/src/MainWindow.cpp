@@ -3210,6 +3210,20 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
     // 节点列表刷新会叠在每步 resize 的布局+重绘上（无 GPU 的虚拟机上尤其卡）。结束后一次性补齐。
     if (eventType == "windows_generic_MSG") {
         const MSG *msg = static_cast<const MSG *>(message);
+        if (msg && msg->message == WM_ERASEBKGND) {
+            // 系统擦底默认用窗口类的 COLOR_WINDOW 白刷：拖大窗口/首帧/最大化还原时，
+            // 新暴露的客户区在应用重绘跟上前是一片纯白（深色主题下即「白色背景板」）。
+            // 改用主题底色擦除（与 applyTitleBarColor 的标题栏同色），白板消失。
+            const bool light = (m_theme == "white");
+            const COLORREF fill = light ? RGB(0xEE, 0xEE, 0xEE) : RGB(0x22, 0x22, 0x22);
+            RECT rc;
+            GetClientRect(msg->hwnd, &rc);
+            HBRUSH brush = CreateSolidBrush(fill);
+            FillRect(reinterpret_cast<HDC>(msg->wParam), &rc, brush);
+            DeleteObject(brush);
+            *result = 1; // 告知系统已擦除，不再走默认白刷
+            return true;
+        }
         if (msg && (msg->message == WM_ENTERSIZEMOVE || msg->message == WM_EXITSIZEMOVE)) {
             m_inSizeMove = (msg->message == WM_ENTERSIZEMOVE);
             if (m_upChart) {
@@ -3827,6 +3841,7 @@ void MainWindow::mouseReleaseEvent(QMouseEvent *)
 QString MainWindow::appStyle() const
 {
     return R"(
+        QMainWindow { background:#222; }
         #root { background:#222; }
         #titleBar { background:#222; border-top-left-radius:10px; border-top-right-radius:10px; }
         #windowTitle { color:#ccc; font-size:12px; padding-left:0; }
@@ -3931,6 +3946,7 @@ QString MainWindow::appStyle() const
 QString MainWindow::lightStyle() const
 {
     return R"(
+        QMainWindow { background:#eee; }
         #root { background:#eee; }
         #titleBar { background:#eee; border-top-left-radius:10px; border-top-right-radius:10px; }
         #windowTitle { color:#333; font-size:12px; }
