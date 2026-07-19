@@ -3612,13 +3612,23 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
     if (eventType == "windows_generic_MSG") {
         const MSG *msg = static_cast<const MSG *>(message);
         if (msg && msg->message == WM_ERASEBKGND) {
+            RECT rc;
+            GetClientRect(msg->hwnd, &rc);
+            // 纯拖动位置（在移动/缩放循环里且客户区尺寸没变）时「认领擦底但什么都不刷」：
+            // backing store 完整覆盖客户区，紧随其后的 flush 会原样贴回内容；若先刷一层底色，
+            // 软件合成（无 GPU 虚拟机）可能恰在「刷底」与「贴回」之间合成一帧——整窗内容
+            // 闪现为纯色，即拖动位置时的「闪透/闪现」。拖出屏幕边缘再拖回时，系统对重新
+            // 露出的条带逐步 WM_PAINT+擦底，每步都闪一次，此处跳过后由 flush 直接贴内容。
+            if (m_inSizeMove
+                && QSize(rc.right - rc.left, rc.bottom - rc.top) == m_sizeMoveEntrySize) {
+                *result = 1;
+                return true;
+            }
             // 系统擦底默认用窗口类的 COLOR_WINDOW 白刷：拖大窗口/首帧/最大化还原时，
             // 新暴露的客户区在应用重绘跟上前是一片纯白（深色主题下即「白色背景板」）。
             // 改用主题底色擦除（与 applyTitleBarColor 的标题栏同色），白板消失。
             const bool light = (m_theme == "white");
             const COLORREF fill = light ? RGB(0xEE, 0xEE, 0xEE) : RGB(0x22, 0x22, 0x22);
-            RECT rc;
-            GetClientRect(msg->hwnd, &rc);
             HBRUSH brush = CreateSolidBrush(fill);
             FillRect(reinterpret_cast<HDC>(msg->wParam), &rc, brush);
             DeleteObject(brush);
@@ -3627,6 +3637,11 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
         }
         if (msg && (msg->message == WM_ENTERSIZEMOVE || msg->message == WM_EXITSIZEMOVE)) {
             m_inSizeMove = (msg->message == WM_ENTERSIZEMOVE);
+            if (m_inSizeMove) {
+                RECT rc;
+                GetClientRect(msg->hwnd, &rc);
+                m_sizeMoveEntrySize = QSize(rc.right - rc.left, rc.bottom - rc.top); // 「纯移动」判定基准
+            }
             if (!m_inSizeMove && m_nodeResyncPending) {
                 m_nodeResyncPending = false;
                 if (!m_nodeSwitching) {

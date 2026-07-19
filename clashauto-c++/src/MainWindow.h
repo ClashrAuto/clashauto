@@ -183,6 +183,7 @@ private:
     int m_spinnerFrame = 0;
     bool m_dragging = false;
     bool m_inSizeMove = false;        // Windows 交互式拖动/缩放进行中（WM_ENTERSIZEMOVE~EXITSIZEMOVE）
+    QSize m_sizeMoveEntrySize;        // 进入拖动/缩放时的客户区尺寸：尺寸没变=纯移动，擦底可整个跳过
     bool m_nodeResyncPending = false; // 拖动/缩放期间挂起的节点列表刷新，结束后补一次
     bool m_closeToTray = true;
     bool m_trayHintShown = false;
