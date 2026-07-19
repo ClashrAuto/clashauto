@@ -67,6 +67,8 @@ private:
     void checkForUpdate(bool silent, int retriesLeft = 2); // 拉取最新 release 与本地版本比较；silent=启动自动检查；失败时静默重试
     // 让下载（检查更新/更新包/内核/mmdb 等 GitHub 资源）在核心运行时经混合端口走代理——
     // 墙内直连 GitHub 常不通，走代理更可靠。核心没跑则保持直连。
+    // 注意：勾选「国内加速/国内代理下载」时，更新包/内核的下载改为直连 ghfast.top 镜像
+    // （不经此代理）；API 查询与 .sha256 边车校验仍走本函数配置的通道。
     void applyDownloadProxy(QNetworkAccessManager *nam) const;
     // 用官方 <文件>.sha256 边车校验已下载文件完整性：流式算 SHA-256，与边车内的十六进制摘要
     // 去空白后不区分大小写比较。防镜像/中间人投递被篡改的安装包或内核。

@@ -69,6 +69,7 @@
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVBoxLayout>
+#include <QWindow>
 
 #include <functional>
 #include <utility>
@@ -2840,6 +2841,31 @@ void MainWindow::setMirrorEnabled(bool on)
     persistConfigBool(QStringLiteral("mirror"), on);
 }
 
+namespace {
+// 比较版本号（忽略前缀字母，如 v0.1.81 → 0.1.81），remote 更新则返回 true
+bool versionNewer(const QString &remote, const QString &local)
+{
+    auto parse = [](QString s) {
+        s.remove(QRegularExpression(QStringLiteral("[^0-9.]")));
+        QVector<int> v;
+        for (const QString &p : s.split('.', Qt::SkipEmptyParts)) {
+            v << p.toInt();
+        }
+        return v;
+    };
+    const QVector<int> a = parse(remote);
+    const QVector<int> b = parse(local);
+    for (int i = 0; i < qMax(a.size(), b.size()); ++i) {
+        const int x = i < a.size() ? a.at(i) : 0;
+        const int y = i < b.size() ? b.at(i) : 0;
+        if (x != y) {
+            return x > y;
+        }
+    }
+    return false;
+}
+} // namespace
+
 void MainWindow::showUpdateDialog()
 {
     auto *dialog = new QDialog(this);
@@ -2892,6 +2918,34 @@ void MainWindow::showUpdateDialog()
     const Refs rel = makeTab(QString::fromUtf8("正式版"));
     const Refs beta = makeTab(QString::fromUtf8("测试版"));
 
+    // 「内核」tab：显示本地 mihomo 版本与最新版本、更新说明，并可在此直接更新内核
+    //（下载与「国内代理下载」共用同一开关；更新按钮复用 updateMihomoCore 全流程）
+    auto *corePage = new QWidget();
+    auto *coreLayout = new QVBoxLayout(corePage);
+    coreLayout->setContentsMargins(10, 10, 10, 10);
+    coreLayout->setSpacing(4);
+    auto *coreVer = new QLabel(QString::fromUtf8("内核版本: 检测中..."), corePage);
+    coreVer->setObjectName("sectionTitle");
+    coreVer->setWordWrap(true);
+    auto *coreNoteHead = new QLabel(QString::fromUtf8("更新说明"), corePage);
+    coreNoteHead->setObjectName("subCardMeta");
+    auto *coreBody = new QTextEdit(corePage);
+    coreBody->setReadOnly(true);
+    coreBody->setMinimumHeight(200);
+    coreBody->setPlainText(QString::fromUtf8("正在获取..."));
+    auto *coreUpdateBtn = new QPushButton(QString::fromUtf8("更新内核"), corePage);
+    coreUpdateBtn->setObjectName("primaryButton");
+    coreUpdateBtn->setFixedSize(110, 30);
+    coreUpdateBtn->setToolTip(QString::fromUtf8("从 GitHub 获取最新 mihomo 内核并替换（amd64 使用兼容版）"));
+    auto *coreBtnRow = new QHBoxLayout();
+    coreBtnRow->addStretch();
+    coreBtnRow->addWidget(coreUpdateBtn);
+    coreLayout->addWidget(coreVer);
+    coreLayout->addWidget(coreNoteHead);
+    coreLayout->addWidget(coreBody, 1);
+    coreLayout->addLayout(coreBtnRow);
+    tabs->addTab(corePage, QString::fromUtf8("内核"));
+
     auto *progress = new QProgressBar(dialog);
     progress->setFixedHeight(26);
     progress->setValue(0);
@@ -2903,12 +2957,18 @@ void MainWindow::showUpdateDialog()
     bottom->addWidget(noTip);
     bottom->addStretch();
     // 国内代理下载：与「更新内核」的「国内加速」同机制——给 GitHub 下载链接加国内镜像前缀
-    // （ghfast.top），墙内/网络不佳时下载更新包更稳。查询 release 列表仍走 applyDownloadProxy。
+    // （ghfast.top）并「直连」下载（镜像国内可直达，不套核心节点代理——否则绕道节点出国再
+    // 回国内镜像，又慢又费流量）。查询 release 列表仍走 applyDownloadProxy（api.github.com
+    // 镜像代理不了，墙内需经节点）。
     auto *mirrorCheck = new QCheckBox(QString::fromUtf8("国内代理下载"), dialog);
-    mirrorCheck->setToolTip(QString::fromUtf8("勾选后经国内镜像（ghfast.top）加速下载更新包，网络不佳/被墙时使用"));
+    mirrorCheck->setToolTip(QString::fromUtf8("勾选后直连国内镜像（ghfast.top）加速下载更新包/内核，不经代理节点"));
     mirrorCheck->setChecked(m_mirror); // 与设置页「国内加速」共用偏好
     connect(mirrorCheck, &QCheckBox::toggled, this, &MainWindow::setMirrorEnabled); // 勾选即持久化
     bottom->addWidget(mirrorCheck);
+    // 「内核」tab 的更新按钮：与设置页「更新内核」同一流程，镜像偏好取本弹窗勾选框
+    connect(coreUpdateBtn, &QPushButton::clicked, dialog, [this, coreUpdateBtn, mirrorCheck] {
+        updateMihomoCore(coreUpdateBtn, mirrorCheck->isChecked());
+    });
     auto *closeBtn = new QPushButton(QString::fromUtf8("关闭"), dialog);
     closeBtn->setObjectName("nodeButton");
     closeBtn->setFixedSize(80, 30);
@@ -2923,11 +2983,17 @@ void MainWindow::showUpdateDialog()
 
     connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::reject);
     auto *nam = new QNetworkAccessManager(dialog);
-    applyDownloadProxy(nam); // 核心在跑则经代理拉取 release 列表并下载更新包
+    applyDownloadProxy(nam); // 核心在跑则经代理查 release 列表/内核版本（未勾镜像时下载也走它）
 
     // 选中资源即启用「更新」（作用于当前 tab 的当前选中项）
     auto currentAssets = [tabs, rel, beta]() -> QListWidget * {
-        return tabs->currentIndex() == 0 ? rel.assets : beta.assets;
+        if (tabs->currentIndex() == 0) {
+            return rel.assets;
+        }
+        if (tabs->currentIndex() == 1) {
+            return beta.assets;
+        }
+        return nullptr; // 「内核」tab 用页内的「更新内核」按钮，底部「一键更新」置灰
     };
     auto refreshUpdateBtn = [updateBtn, currentAssets] {
         QListWidget *lw = currentAssets();
@@ -2953,9 +3019,15 @@ void MainWindow::showUpdateDialog()
         // 官方 <资源名>.sha256 边车的直连 url（fill 时按名登记；老版本无边车则为空）。
         // 下载后据此校验安装包完整性——边车必须官方直连，绝不加镜像前缀，否则失去信任锚。
         const QString sidecarUrl = item->data(Qt::UserRole + 1).toString();
-        // 国内代理下载：给下载链接加国内镜像前缀（与 updateMihomoCore 的 useMirror 一致）
+        // 国内代理下载：给下载链接加国内镜像前缀，并用「直连」的 QNAM 下载——镜像在国内
+        // 可直达，绝不套核心节点代理（与「更新内核」一致）。未勾选则沿用 nam（核心在跑经节点）。
         const bool useMirror = mirrorCheck && mirrorCheck->isChecked();
         const QString downloadUrl = useMirror ? QStringLiteral("https://ghfast.top/") + url : url;
+        QNetworkAccessManager *dlNam = nam;
+        if (useMirror) {
+            dlNam = new QNetworkAccessManager(dialog);
+            dlNam->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
+        }
         QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
         if (dir.isEmpty()) {
             dir = QDir::tempPath();
@@ -2970,7 +3042,7 @@ void MainWindow::showUpdateDialog()
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
         dreq.setTransferTimeout(30000); // 30s 无数据即判失败，避免永久卡在进度条不动（而不是无声挂起）
 #endif
-        QNetworkReply *reply = nam->get(dreq);
+        QNetworkReply *reply = dlNam->get(dreq);
         // 边下边写到磁盘：不把整包（~40MB）缓存在内存，也及时清空 reply 缓冲，避免堆积卡顿。
         // out 挂在 reply 名下，取消/关窗时随 reply 一起销毁（QFile 析构会关闭文件）。
         auto *out = new QFile(savePath);
@@ -3007,7 +3079,7 @@ void MainWindow::showUpdateDialog()
                 updateBtn->setEnabled(true);
                 appendLog(QString::fromUtf8("下载失败: %1 (%2)").arg(name, err));
                 QMessageBox::warning(dialog, QString::fromUtf8("更新"),
-                                     QString::fromUtf8("下载失败：%1\n\n若在墙内，请确保「核心已启动」以走代理下载后重试。").arg(err));
+                                     QString::fromUtf8("下载失败：%1\n\n若在墙内，可勾选「国内代理下载」走国内镜像，或启动核心以经代理下载后重试。").arg(err));
                 return;
             }
             progress->setValue(100);
@@ -3185,6 +3257,73 @@ void MainWindow::showUpdateDialog()
         }
     });
 
+    // 「内核」tab：本地版本用 `mihomo -v` 探测（无内核则「未安装」），最新版本走 GitHub API
+    QString localCoreVer;
+    bool coreInstalled = false;
+    {
+        const QString exe = AppConfigLoader::load().clashExecutable();
+        if (QFile::exists(exe)) {
+            coreInstalled = true;
+            QProcess p;
+#if defined(Q_OS_WIN)
+            p.setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *a) {
+                a->flags |= 0x08000000u; // CREATE_NO_WINDOW：GUI 下静默执行，不闪控制台
+            });
+#endif
+            p.start(exe, {QStringLiteral("-v")});
+            // -v 即刻返回；3s 兜底防止损坏的二进制卡住 UI 线程
+            if (p.waitForFinished(3000)) {
+                // 输出形如 "Mihomo Meta v1.19.12 windows amd64 with go1.24 ..."，取 v 开头版本号
+                const QRegularExpressionMatch m = QRegularExpression(QStringLiteral("\\bv\\d+[0-9A-Za-z.\\-]*"))
+                                                      .match(QString::fromUtf8(p.readAllStandardOutput()));
+                if (m.hasMatch()) {
+                    localCoreVer = m.captured(0);
+                }
+            } else {
+                p.kill();
+            }
+        }
+    }
+    // 有内核但 -v 解析不出版本（损坏/超时）显示「未知」，与「未安装」区分开
+    const QString localShown = !coreInstalled ? QString::fromUtf8("未安装")
+                               : localCoreVer.isEmpty() ? QString::fromUtf8("未知")
+                                                        : localCoreVer;
+    coreVer->setText(QString::fromUtf8("内核版本: %1（正在查询最新版...）").arg(localShown));
+    QNetworkRequest coreReq(QUrl(QStringLiteral("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")));
+    coreReq.setRawHeader("Accept", "application/vnd.github+json");
+    coreReq.setRawHeader("User-Agent", "clashauto-cpp");
+    coreReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    coreReq.setTransferTimeout(10000);
+#endif
+    QNetworkReply *coreReply = nam->get(coreReq);
+    connect(coreReply, &QNetworkReply::finished, dialog, [coreReply, coreVer, coreBody, localCoreVer, localShown] {
+        const bool ok = coreReply->error() == QNetworkReply::NoError;
+        const QByteArray body = coreReply->readAll();
+        const QString err = coreReply->errorString();
+        coreReply->deleteLater();
+        if (!ok) {
+            coreVer->setText(QString::fromUtf8("内核版本: %1（查询最新版失败）").arg(localShown));
+            coreBody->setPlainText(QString::fromUtf8("获取失败: ") + err);
+            return;
+        }
+        const QJsonObject r = QJsonDocument::fromJson(body).object();
+        const QString tag = r.value(QStringLiteral("tag_name")).toString();
+        if (tag.isEmpty()) {
+            // 多半是被限流/返回错误对象——把 message 展示出来便于排查
+            const QString apiMsg = r.value(QStringLiteral("message")).toString();
+            coreVer->setText(QString::fromUtf8("内核版本: %1（查询最新版失败）").arg(localShown));
+            coreBody->setPlainText(QString::fromUtf8("获取失败: 未取到版本号%1")
+                                       .arg(apiMsg.isEmpty() ? QString() : QString::fromUtf8("（%1）").arg(apiMsg)));
+            return;
+        }
+        const bool newer = localCoreVer.isEmpty() || versionNewer(tag, localCoreVer);
+        coreVer->setText(QString::fromUtf8("内核版本: %1 → 最新 %2 %3")
+                             .arg(localShown, tag,
+                                  newer ? QString::fromUtf8("（可更新）") : QString::fromUtf8("（已是最新）")));
+        coreBody->setPlainText(r.value(QStringLiteral("body")).toString());
+    });
+
     // 「不再提示」：勾选并关闭后，记住跳过当前正式版版本号，启动自动检查不再为该版本弹窗
     connect(dialog, &QDialog::finished, dialog, [noTip, rel] {
         if (!noTip->isChecked()) {
@@ -3199,31 +3338,6 @@ void MainWindow::showUpdateDialog()
 
     dialog->show();
 }
-
-namespace {
-// 比较版本号（忽略前缀字母，如 v0.1.81 → 0.1.81），remote 更新则返回 true
-bool versionNewer(const QString &remote, const QString &local)
-{
-    auto parse = [](QString s) {
-        s.remove(QRegularExpression(QStringLiteral("[^0-9.]")));
-        QVector<int> v;
-        for (const QString &p : s.split('.', Qt::SkipEmptyParts)) {
-            v << p.toInt();
-        }
-        return v;
-    };
-    const QVector<int> a = parse(remote);
-    const QVector<int> b = parse(local);
-    for (int i = 0; i < qMax(a.size(), b.size()); ++i) {
-        const int x = i < a.size() ? a.at(i) : 0;
-        const int y = i < b.size() ? b.at(i) : 0;
-        if (x != y) {
-            return x > y;
-        }
-    }
-    return false;
-}
-} // namespace
 
 bool MainWindow::verifySha256(const QString &filePath, const QString &expectedHexLower) const
 {
@@ -3588,17 +3702,23 @@ QString MainWindow::extractCoreBinary(const QString &archivePath, const QString 
 #endif
 }
 
-void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
+void MainWindow::updateMihomoCore(QPushButton *btnIn, bool useMirror)
 {
+    // 按钮可能来自更新弹窗（WA_DeleteOnClose，下载中途关窗即销毁），异步回调里
+    // 一律经 QPointer 判空访问，避免悬垂指针；流程本身继续在后台完成。
+    const QPointer<QPushButton> btn(btnIn);
     btn->setEnabled(false);
     btn->setText(QString::fromUtf8("检查中..."));
     const AppConfig cfg = AppConfigLoader::load();
     // 国内加速：ghproxy 系镜像只代理下载（github.com 发布资源），不代理 api.github.com（返回 403），
-    // 故仅给下载链接加镜像前缀；查询版本仍直连 api.github.com（国内通常可达）。
+    // 故仅给下载链接加镜像前缀；且镜像国内可直达，下载用「直连」QNAM，不套核心节点代理
+    // （与更新弹窗「国内代理下载」一致）。查询版本仍走 nam（核心在跑经节点）。
     const QString mirror = useMirror ? QStringLiteral("https://ghfast.top/") : QString();
     auto restore = [btn] {
-        btn->setEnabled(true);
-        btn->setText(QString::fromUtf8("更新内核"));
+        if (btn) {
+            btn->setEnabled(true);
+            btn->setText(QString::fromUtf8("更新内核"));
+        }
     };
 
     auto *nam = new QNetworkAccessManager(this);
@@ -3689,7 +3809,9 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
         }
 
         appendLog(QString::fromUtf8("下载 mihomo %1 ...%2").arg(tag, mirror.isEmpty() ? QString() : QString::fromUtf8("（国内加速）")));
-        btn->setText(QString::fromUtf8("下载中..."));
+        if (btn) {
+            btn->setText(QString::fromUtf8("下载中..."));
+        }
         QNetworkRequest dreq{QUrl(mirror + url)};
         dreq.setRawHeader("User-Agent", "clashauto-cpp");
         dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -3697,12 +3819,20 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
         dreq.setTransferTimeout(30000); // 30s 无数据即失败，不永久卡「下载中」
 #endif
-        QNetworkReply *dl = nam->get(dreq);
-        connect(dl, &QNetworkReply::downloadProgress, btn, [btn](qint64 r, qint64 t) {
-            if (t > 0) {
-                btn->setText(QString::fromUtf8("下载中 %1%").arg(int(r * 100 / t)));
-            }
-        });
+        // 国内加速时直连镜像下载（不套节点代理）；挂在 nam 名下，随 nam deleteLater 一并销毁
+        QNetworkAccessManager *dlNam = nam;
+        if (!mirror.isEmpty()) {
+            dlNam = new QNetworkAccessManager(nam);
+            dlNam->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
+        }
+        QNetworkReply *dl = dlNam->get(dreq);
+        if (btn) {
+            connect(dl, &QNetworkReply::downloadProgress, btn.data(), [btn](qint64 r, qint64 t) {
+                if (btn && t > 0) {
+                    btn->setText(QString::fromUtf8("下载中 %1%").arg(int(r * 100 / t)));
+                }
+            });
+        }
         connect(dl, &QNetworkReply::finished, this, [this, dl, nam, btn, cfg, tag, assetName, coreSidecarUrl, restore] {
             const bool ok2 = dl->error() == QNetworkReply::NoError;
             const QByteArray data = dl->readAll();
@@ -3729,7 +3859,9 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
 
             // 校验通过（或上游无边车）后：解压 → 停核心 → 替换二进制 → 恢复运行。
             auto doReplace = [this, cfg, tag, restore, tmpDir, archivePath, btn] {
-                btn->setText(QString::fromUtf8("安装中..."));
+                if (btn) {
+                    btn->setText(QString::fromUtf8("安装中..."));
+                }
                 const QString extracted = extractCoreBinary(archivePath, tmpDir);
                 if (extracted.isEmpty()) {
                     QDir(tmpDir).removeRecursively();
@@ -3782,7 +3914,9 @@ void MainWindow::updateMihomoCore(QPushButton *btn, bool useMirror)
             }
 
             // 直连（复用已 applyDownloadProxy 的 nam，绝不加镜像前缀）下载 .sha256 边车并校验。
-            btn->setText(QString::fromUtf8("校验中..."));
+            if (btn) {
+                btn->setText(QString::fromUtf8("校验中..."));
+            }
             QNetworkRequest sreq{QUrl(coreSidecarUrl)};
             sreq.setRawHeader("User-Agent", "clashauto-cpp");
             sreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -4162,10 +4296,16 @@ void MainWindow::syncNodeRows()
 
 void MainWindow::mousePressEvent(QMouseEvent *event)
 {
-    // 系统标题栏之外，允许按住侧栏空白处拖拽移动窗口
-    // （菜单按钮自行消费点击，不会触发拖拽；用 pos() 与 move() 配对，避免带框窗口跳变）
-    if (event->button() == Qt::LeftButton && event->pos().x() < SidebarWidth) {
-        m_dragging = true;
+    // 系统标题栏之外，允许按住侧栏空白处拖拽移动窗口（菜单按钮自行消费点击，不会触发拖拽）
+    if (event->button() == Qt::LeftButton && event->pos().x() < SidebarWidth && !isMaximized()) {
+        // 交给系统的模态移动循环（与拖系统标题栏同路径）：DWM 整体平移已合成的窗口表面，
+        // 拖动全程客户区不重绘。此前逐 mouseMove 调 move()，每步 SetWindowPos 都触发
+        // 擦底+重绘，内容闪出底色（拖动闪透）；窗口在指针下位移还会抖动 hover 态加剧闪烁。
+        if (windowHandle() && windowHandle()->startSystemMove()) {
+            event->accept();
+            return; // 系统接管后不再派发后续 move/release，无需手动拖拽状态
+        }
+        m_dragging = true; // startSystemMove 不可用的平台退回手动拖拽
         m_dragStart = event->globalPosition().toPoint() - pos();
         event->accept();
         return;
