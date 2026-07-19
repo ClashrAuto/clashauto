@@ -4310,6 +4310,13 @@ void MainWindow::mousePressEvent(QMouseEvent *event)
 {
     // 系统标题栏之外，允许按住侧栏空白处拖拽移动窗口（菜单按钮自行消费点击，不会触发拖拽）
     if (event->button() == Qt::LeftButton && event->pos().x() < SidebarWidth && !isMaximized()) {
+        // 版本号链接例外：QLabel 只开 LinksAccessibleByMouse 时 press 会被 ignore 上抛到这里，
+        // 一旦进了系统移动模态循环，release 就被它吃掉，linkActivated 永远不触发（点了没反应）。
+        // 放行给默认处理：release 仍会派发回标签，完成「点击检查更新」。
+        if (m_sidebarVersionLabel && childAt(event->pos()) == m_sidebarVersionLabel) {
+            QMainWindow::mousePressEvent(event);
+            return;
+        }
         // 交给系统的模态移动循环（与拖系统标题栏同路径）：DWM 整体平移已合成的窗口表面，
         // 拖动全程客户区不重绘。此前逐 mouseMove 调 move()，每步 SetWindowPos 都触发
         // 擦底+重绘，内容闪出底色（拖动闪透）；窗口在指针下位移还会抖动 hover 态加剧闪烁。
