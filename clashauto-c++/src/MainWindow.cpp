@@ -3172,6 +3172,12 @@ void MainWindow::showUpdateDialog()
     QNetworkRequest req(QUrl("https://api.github.com/repos/ClashrAuto/clashauto/releases"));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "clashauto-cpp");
+    // 与 checkForUpdate 同配：跟随 301（组织/仓库改名）；加超时，避免网络不通时
+    // 「更新说明」永远停在「正在获取...」。
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    req.setTransferTimeout(15000);
+#endif
     rel.body->setPlainText(QString::fromUtf8("正在获取..."));
     beta.body->setPlainText(QString::fromUtf8("正在获取..."));
     QNetworkReply *reply = nam->get(req);
@@ -3180,8 +3186,12 @@ void MainWindow::showUpdateDialog()
         const QByteArray body = reply->readAll();
         reply->deleteLater();
         if (!ok) {
-            rel.body->setPlainText(QString::fromUtf8("获取失败: ") + reply->errorString());
-            beta.body->setPlainText(QString());
+            // 403 限流等情况 API 会带 message，比 Qt 的 errorString 更能说明问题
+            const QString apiMsg = QJsonDocument::fromJson(body).object().value(QStringLiteral("message")).toString();
+            const QString failText = QString::fromUtf8("获取失败: ")
+                                     + (apiMsg.isEmpty() ? reply->errorString() : apiMsg);
+            rel.body->setPlainText(failText);
+            beta.body->setPlainText(failText);
             return;
         }
         const QJsonArray arr = QJsonDocument::fromJson(body).array();
@@ -3190,7 +3200,11 @@ void MainWindow::showUpdateDialog()
             const QString tag = r.value("tag_name").toString();
             refs.ver->setText(QString::fromUtf8("VERSION: ")
                               + QString(tag).remove(QRegularExpression(QStringLiteral("[A-Za-z]"))));
-            refs.body->setPlainText(r.value("body").toString());
+            // 老版本 CI 没写 release notes（body 为空），给出明确占位而不是一片空白
+            const QString notes = r.value("body").toString();
+            refs.body->setPlainText(notes.trimmed().isEmpty()
+                                        ? QString::fromUtf8("（此版本未附更新说明）")
+                                        : notes);
             refs.assets->clear();
             const QJsonArray assets = r.value("assets").toArray();
             // 先全量登记 assetName → browser_download_url（含 .sha256 边车），供下载后按
@@ -3321,7 +3335,10 @@ void MainWindow::showUpdateDialog()
         coreVer->setText(QString::fromUtf8("内核版本: %1 → 最新 %2 %3")
                              .arg(localShown, tag,
                                   newer ? QString::fromUtf8("（可更新）") : QString::fromUtf8("（已是最新）")));
-        coreBody->setPlainText(r.value(QStringLiteral("body")).toString());
+        const QString notes = r.value(QStringLiteral("body")).toString();
+        coreBody->setPlainText(notes.trimmed().isEmpty()
+                                   ? QString::fromUtf8("（此版本未附更新说明）")
+                                   : notes);
     });
 
     // 「不再提示」：勾选并关闭后，记住跳过当前正式版版本号，启动自动检查不再为该版本弹窗
@@ -3589,8 +3606,9 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
 {
     // 系统标题栏/边框由系统负责缩放与移动，这里不再拦截 WM_NCHITTEST
 #if defined(Q_OS_WIN)
-    // 交互式拖动/缩放期间暂停高频重绘源：两张流量图 20FPS 的全量抗锯齿重绘和轮询触发的
-    // 节点列表刷新会叠在每步 resize 的布局+重绘上（无 GPU 的虚拟机上尤其卡）。结束后一次性补齐。
+    // 交互式拖动/缩放期间只挂起「节点列表刷新」（整表布局+重建，叠在每步 resize 上才是真卡），
+    // 结束后一次性补齐。流量图已改静态层缓存+共用定时器，逐帧只画一条折线，
+    // 拖动/缩放期间照常滚动，不再暂停。
     if (eventType == "windows_generic_MSG") {
         const MSG *msg = static_cast<const MSG *>(message);
         if (msg && msg->message == WM_ERASEBKGND) {
@@ -3609,12 +3627,6 @@ bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr
         }
         if (msg && (msg->message == WM_ENTERSIZEMOVE || msg->message == WM_EXITSIZEMOVE)) {
             m_inSizeMove = (msg->message == WM_ENTERSIZEMOVE);
-            if (m_upChart) {
-                m_upChart->setPaused(m_inSizeMove);
-            }
-            if (m_downChart) {
-                m_downChart->setPaused(m_inSizeMove);
-            }
             if (!m_inSizeMove && m_nodeResyncPending) {
                 m_nodeResyncPending = false;
                 if (!m_nodeSwitching) {

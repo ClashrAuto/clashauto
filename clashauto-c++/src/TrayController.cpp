@@ -4,7 +4,6 @@
 #include <QAction>
 #include <QApplication>
 #include <QColor>
-#include <QMenu>
 #include <QPainter>
 #include <QPixmap>
 
@@ -20,18 +19,52 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
             m_window->activateWindow();
         }
     });
-    rebuildMenu();
+    buildMenu();
     m_tray.show();
+}
+
+void TrayController::buildMenu()
+{
+    // 菜单只建这一次，之后 setStatus/setTraffic 只改各行 QAction 的文本。
+    // 此前流量每秒 rebuildMenu()：new QMenu 换给 setContextMenu（它不接管旧菜单
+    // 所有权），旧菜单+全部 QAction 每秒泄漏一份；用户正开着菜单时还会被整个换掉。
+    m_menu.addAction("控制面板", this, [this] {
+        if (m_window) {
+            m_window->showNormal();
+            m_window->raise();
+            m_window->activateWindow();
+        }
+    });
+    m_menu.addSeparator();
+    m_upAction = m_menu.addAction(QString("UP: %1").arg(speedText(0)));
+    m_upAction->setEnabled(false);
+    m_downAction = m_menu.addAction(QString("DOWN: %1").arg(speedText(0)));
+    m_downAction->setEnabled(false);
+    m_menu.addSeparator();
+    m_coreAction = m_menu.addAction("启动核心", this, &TrayController::toggleCoreRequested);
+    m_proxyAction = m_menu.addAction("打开网页代理", this, &TrayController::toggleProxyRequested);
+    m_tunAction = m_menu.addAction("打开增强模式", this, &TrayController::toggleTunRequested);
+    m_menu.addSeparator();
+    m_menu.addAction("退出程序", qApp, &QApplication::quit);
+    m_tray.setContextMenu(&m_menu);
 }
 
 void TrayController::setStatus(bool tun, bool proxy, bool core)
 {
+    // emitStatus 会在启动/停止/重载等多个节点重复发同一状态；没变就不碰托盘
+    // （setIcon/setToolTip 是到 shell 的往返，重复调用会让图标肉眼可见地闪）。
+    if (m_statusKnown && tun == m_tun && proxy == m_proxy && core == m_core) {
+        return;
+    }
+    m_statusKnown = true;
     m_tun = tun;
     m_proxy = proxy;
     m_core = core;
     m_tray.setToolTip(QString("Clash Auto - %1").arg(core ? "运行中" : "已停止"));
     refreshIcon(); // 状态变了刷新图标颜色（增强=红、核心在跑=黄）
-    rebuildMenu();
+    m_coreAction->setText(core ? "停止核心" : "启动核心");
+    m_proxyAction->setText(proxy ? "关闭网页代理" : "打开网页代理");
+    m_tunAction->setText(tun ? "关闭增强模式" : "打开增强模式");
 }
 
 void TrayController::refreshIcon()
@@ -65,9 +98,13 @@ void TrayController::refreshIcon()
 
 void TrayController::setTraffic(qint64 up, qint64 down)
 {
+    if (up == m_up && down == m_down) {
+        return; // 空闲时常年 0/0，一秒一改毫无必要
+    }
     m_up = up;
     m_down = down;
-    rebuildMenu();
+    m_upAction->setText(QString("UP: %1").arg(speedText(up)));
+    m_downAction->setText(QString("DOWN: %1").arg(speedText(down)));
 }
 
 void TrayController::notify(const QString &title, const QString &message)
@@ -75,28 +112,6 @@ void TrayController::notify(const QString &title, const QString &message)
     if (QSystemTrayIcon::supportsMessages()) {
         m_tray.showMessage(title, message, QSystemTrayIcon::Information, 3000);
     }
-}
-
-void TrayController::rebuildMenu()
-{
-    auto *menu = new QMenu();
-    menu->addAction("控制面板", this, [this] {
-        if (m_window) {
-            m_window->showNormal();
-            m_window->raise();
-            m_window->activateWindow();
-        }
-    });
-    menu->addSeparator();
-    menu->addAction(QString("UP: %1").arg(speedText(m_up)))->setEnabled(false);
-    menu->addAction(QString("DOWN: %1").arg(speedText(m_down)))->setEnabled(false);
-    menu->addSeparator();
-    menu->addAction(m_core ? "停止核心" : "启动核心", this, &TrayController::toggleCoreRequested);
-    menu->addAction(m_proxy ? "关闭网页代理" : "打开网页代理", this, &TrayController::toggleProxyRequested);
-    menu->addAction(m_tun ? "关闭增强模式" : "打开增强模式", this, &TrayController::toggleTunRequested);
-    menu->addSeparator();
-    menu->addAction("退出程序", qApp, &QApplication::quit);
-    m_tray.setContextMenu(menu);
 }
 
 QString TrayController::speedText(qint64 value) const

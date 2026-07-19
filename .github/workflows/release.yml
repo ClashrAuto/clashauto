@@ -313,6 +313,10 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示 body）；
+          # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
+          body: ${{ github.event.head_commit.message }}
+          generate_release_notes: true
           make_latest: true
           overwrite_files: true
           files: |
@@ -517,6 +521,10 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示 body）；
+          # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
+          body: ${{ github.event.head_commit.message }}
+          generate_release_notes: true
           make_latest: true
           overwrite_files: true
           files: |
@@ -734,6 +742,10 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示 body）；
+          # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
+          body: ${{ github.event.head_commit.message }}
+          generate_release_notes: true
           make_latest: true
           overwrite_files: true
           files: |
