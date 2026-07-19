@@ -320,11 +320,11 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
-          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示）。经上一步
-          # 写盘的文件传入：`body:` 里直接内插多行提交说明，部分换行会变成字面 \n。
-          # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示），经上一步写盘的
+          # 文件传入。不能用 generate_release_notes：创建 release 时 GitHub 会把「提供的
+          # body + 自动说明」合并，body 里的部分换行被转义成字面 \n；后续 job 的 body_path
+          # 更新又会覆盖掉自动说明——它只留下污染的中间态，纯负作用，故移除。
           body_path: release-notes.md
-          generate_release_notes: true
           make_latest: true
           overwrite_files: true
           files: |
@@ -536,11 +536,11 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
-          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示）。经上一步
-          # 写盘的文件传入：`body:` 里直接内插多行提交说明，部分换行会变成字面 \n。
-          # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示），经上一步写盘的
+          # 文件传入。不能用 generate_release_notes：创建 release 时 GitHub 会把「提供的
+          # body + 自动说明」合并，body 里的部分换行被转义成字面 \n；后续 job 的 body_path
+          # 更新又会覆盖掉自动说明——它只留下污染的中间态，纯负作用，故移除。
           body_path: release-notes.md
-          generate_release_notes: true
           make_latest: true
           overwrite_files: true
           files: |
@@ -765,11 +765,11 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
-          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示）。经上一步
-          # 写盘的文件传入：`body:` 里直接内插多行提交说明，部分换行会变成字面 \n。
-          # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示），经上一步写盘的
+          # 文件传入。不能用 generate_release_notes：创建 release 时 GitHub 会把「提供的
+          # body + 自动说明」合并，body 里的部分换行被转义成字面 \n；后续 job 的 body_path
+          # 更新又会覆盖掉自动说明——它只留下污染的中间态，纯负作用，故移除。
           body_path: release-notes.md
-          generate_release_notes: true
           make_latest: true
           overwrite_files: true
           files: |
