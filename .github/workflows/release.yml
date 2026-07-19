@@ -306,6 +306,13 @@ jobs:
             dist/ClashAuto-*-windows-${{ matrix.arch }}-portable.zip
             dist/ClashAuto-*-windows-${{ matrix.arch }}-setup.exe
 
+      - name: Write release notes
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        shell: bash
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: printf '%s\n' "$COMMIT_MSG" > release-notes.md
+
       - name: Upload to GitHub Release
         if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
         uses: softprops/action-gh-release@v2
@@ -313,9 +320,10 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
-          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示 body）；
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示）。经上一步
+          # 写盘的文件传入：`body:` 里直接内插多行提交说明，部分换行会变成字面 \n。
           # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
-          body: ${{ github.event.head_commit.message }}
+          body_path: release-notes.md
           generate_release_notes: true
           make_latest: true
           overwrite_files: true
@@ -514,6 +522,13 @@ jobs:
           path: |
             dist/ClashAuto-*-macos-universal.dmg
 
+      - name: Write release notes
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        shell: bash
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: printf '%s\n' "$COMMIT_MSG" > release-notes.md
+
       - name: Upload to GitHub Release
         if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
         uses: softprops/action-gh-release@v2
@@ -521,9 +536,10 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
-          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示 body）；
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示）。经上一步
+          # 写盘的文件传入：`body:` 里直接内插多行提交说明，部分换行会变成字面 \n。
           # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
-          body: ${{ github.event.head_commit.message }}
+          body_path: release-notes.md
           generate_release_notes: true
           make_latest: true
           overwrite_files: true
@@ -735,6 +751,13 @@ jobs:
             dist/ClashAuto-*-linux-${{ matrix.arch }}-portable.zip
             dist/ClashAuto-*-linux-${{ matrix.arch }}.deb
 
+      - name: Write release notes
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        shell: bash
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: printf '%s\n' "$COMMIT_MSG" > release-notes.md
+
       - name: Upload to GitHub Release
         if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
         uses: softprops/action-gh-release@v2
@@ -742,9 +765,10 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: Clash Auto ${{ env.APP_VERSION }}
           target_commitish: ${{ github.sha }}
-          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示 body）；
+          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示）。经上一步
+          # 写盘的文件传入：`body:` 里直接内插多行提交说明，部分换行会变成字面 \n。
           # generate_release_notes 再附上 GitHub 自动生成的变更对比链接。
-          body: ${{ github.event.head_commit.message }}
+          body_path: release-notes.md
           generate_release_notes: true
           make_latest: true
           overwrite_files: true
