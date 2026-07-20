@@ -5,7 +5,7 @@
 #import "../helper/HelperProtocol.h"
 
 // daemon 的 launchd plist 文件名（位于 .app/Contents/Library/LaunchDaemons/ 下）
-static NSString *const kPlistName = @"com.clashrauto.clashauto.helper.plist";
+static NSString *const kPlistName = @"com.yuehongsun.auto.helper.plist";
 
 namespace MacHelper {
 
@@ -100,8 +100,14 @@ QString pingVersion(QString *err)
 bool isReady()
 {
     if (status() != RegStatus::Enabled) return false;
-    QString err;
-    return !pingVersion(&err).isEmpty();
+    // 刚注册/批准的 daemon 由 launchd 按需拉起：首个 XPC 连接会触发 spawn，可能比单次 ping 的
+    // 5s 超时更慢。只 ping 一次就判 false，会让「已安装、Enabled」的 helper 被误判不可用，于是
+    // 代理/核心静默退回非 root。这里重试几次给冷启动留出时间，任一次拿到版本即视为就绪。
+    for (int i = 0; i < 3; ++i) {
+        QString err;
+        if (!pingVersion(&err).isEmpty()) return true;
+    }
+    return false;
 }
 
 // 通用：建连接、在其上调用一个「reply(BOOL ok, NSString *err)」的远程方法，同步等结果。

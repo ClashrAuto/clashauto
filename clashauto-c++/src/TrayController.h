@@ -26,8 +26,9 @@ signals:
 
 private:
     void buildMenu();   // 只在构造时建一次；之后 setStatus/setTraffic 仅改对应行的文本
-    void refreshIcon(); // 按状态给托盘图标着色：增强(TUN)开=红，核心在跑=黄，否则原色
-    QString speedText(qint64 value) const;
+    void refreshIcon(); // 按状态给托盘图标着色 + macOS 上把上/下行速率画在图标右侧
+    QString speedText(qint64 value) const;        // 菜单里的长文本："2.00 MB"
+    QString speedTextCompact(qint64 value) const; // 图标旁的紧凑文本："2.0 MB/s"
 
     MainWindow *m_window = nullptr;
     QSystemTrayIcon m_tray;

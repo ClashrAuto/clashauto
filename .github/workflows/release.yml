@@ -509,9 +509,9 @@ jobs:
           # 重新嵌入特权 helper 与其 launchd plist（macdeployqt 可能动过 Contents/MacOS）。
           # helper 独立可执行由 CMake 构建在 $BUILD_DIR 根下（OUTPUT_NAME），universal。
           mkdir -p "$APP/Contents/Library/LaunchDaemons"
-          cp "$BUILD_DIR/com.clashrauto.clashauto.helper" "$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
-          cp "clashauto-c++/helper/com.clashrauto.clashauto.helper.plist" "$APP/Contents/Library/LaunchDaemons/"
-          lipo -archs "$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
+          cp "$BUILD_DIR/com.yuehongsun.auto.helper" "$APP/Contents/MacOS/com.yuehongsun.auto.helper"
+          cp "clashauto-c++/helper/com.yuehongsun.auto.helper.plist" "$APP/Contents/Library/LaunchDaemons/"
+          lipo -archs "$APP/Contents/MacOS/com.yuehongsun.auto.helper"
 
           # 运行时资源进 bundle：Contents/Clashr-Auto。AppConfigLoader 从 exe 目录
           # (Contents/MacOS) 向上探测 ../Clashr-Auto 第一跳即命中，拖进 /Applications 也不丢
@@ -523,20 +523,26 @@ jobs:
           done
           test -f "$APP/Contents/Clashr-Auto/config/config.yaml"
 
-          # Inside-out 签名（公证必需硬化运行时 + 安全时间戳）：先单独签特权 helper，再 --deep 签
-          # 整个 app（--deep 覆盖 frameworks 与 helper，identity/options 一致，幂等）。
-          # macdeployqt 之后再签：install_name_tool 的改写会破坏更早的签名。
-          HELPER="$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
+          # 签名（公证必需硬化运行时 + 安全时间戳）。macdeployqt 之后再签：install_name_tool 改写会破坏更早签名。
+          # 关键：helper 必须用显式 -i 指定 identifier = com.yuehongsun.auto.helper（= launchd Label）。
+          # 否则 codesign 把可执行名末尾的「.helper」当扩展名剥掉，identifier 变成 com.yuehongsun.auto，
+          # 与注册 Label 不一致 → SMAppService daemon 启动即被 Launch Constraint Violation SIGKILL，核心无法 root。
+          # 用 --deep 一把签全（含 frameworks）会把 helper identifier 又剥回去，故末尾再单独 -i 重签 helper + 浅签 app 重新封存。
+          HELPER="$APP/Contents/MacOS/com.yuehongsun.auto.helper"
+          HELPER_ID="com.yuehongsun.auto.helper"
           if [ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != "-" ]; then
-            codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$HELPER"
             codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+            codesign --force --options runtime --timestamp -i "$HELPER_ID" --sign "$SIGN_IDENTITY" "$HELPER"
+            codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
             echo "signed with: $SIGN_IDENTITY"
           else
-            codesign --force --sign - "$HELPER"
-            codesign --force --deep --sign - "$APP"   # ad-hoc 兜底（无 cert secret）
+            codesign --force --deep --sign - "$APP"                       # ad-hoc 兜底（无 cert secret）
+            codesign --force -i "$HELPER_ID" --sign - "$HELPER"
+            codesign --force --sign - "$APP"
           fi
           codesign --verify --deep --strict --verbose=2 "$APP" && echo "codesign verify OK"
           codesign --verify --strict --verbose=2 "$HELPER" && echo "helper codesign verify OK"
+          echo "helper identity:"; codesign -dvv "$HELPER" 2>&1 | grep -Ei 'Identifier|TeamIdentifier'
 
       - name: Create DMG
         shell: bash
