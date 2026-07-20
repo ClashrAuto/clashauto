@@ -261,6 +261,7 @@ jobs:
           OutFile "dist\ClashAuto-$%APP_VERSION%-windows-$%APP_ARCH%-setup.exe"
           InstallDir "$LOCALAPPDATA\ClashAuto"
           RequestExecutionLevel user
+          AutoCloseWindow true
 
           Page directory
           Page instfiles
@@ -274,6 +275,11 @@ jobs:
             CreateShortcut "$SMPROGRAMS\Clash Auto\Clash Auto.lnk" "$INSTDIR\clashauto-c++\clashauto-cpp.exe"
             CreateShortcut "$DESKTOP\Clash Auto.lnk" "$INSTDIR\clashauto-c++\clashauto-cpp.exe"
             WriteUninstaller "$INSTDIR\Uninstall.exe"
+            ; 交互安装装完自动打开程序（0.1.110 之前的一键更新走「打开安装包」老路径，
+            ; 装完不会回到应用——由安装器补上）；静默(/S)不启，launchSilentUpdateAndRestart
+            ; 的守护进程负责重启，避免双开
+            IfSilent +2
+            Exec '"$INSTDIR\clashauto-c++\clashauto-cpp.exe"'
           SectionEnd
 
           Section "Uninstall"
