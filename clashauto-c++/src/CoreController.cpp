@@ -343,23 +343,25 @@ void CoreController::startCore()
 #endif
 
 #if defined(Q_OS_MACOS)
-    // helper 就绪：以 root 起核心（这样 TUN/增强模式才能建 utun、改路由）。否则回退普通 QProcess，
-    // 此时 TUN 无法生效（mihomo 非 root 建不了 utun）——由 MainWindow 在开启增强时先确保 helper。
-    if (MacHelper::isReady()) {
+    // helper 已注册启用：以 root 起核心（这样 TUN/增强模式才能建 utun、改路由）。
+    // 判定用 status()==Enabled——与 MainWindow 开启增强、状态栏显示的判定一致；不要再靠 isReady()
+    // 里那次额外的 getVersion ping 做门槛：冷启动的 daemon 首个 XPC 偶发慢/超时，会让「helper 明明
+    // 装了、增强也开了、核心却仍非 root」。这里直接尝试经 helper（真正的 startCore XPC，15s 超时，
+    // 也会顺带把 daemon 拉起）；真失败才回退普通 QProcess，且把原因讲清楚（回退后 TUN 不生效）。
+    if (MacHelper::status() == MacHelper::RegStatus::Enabled) {
         QString herr;
-        if (!MacHelper::startCore(exe, cfg, m_config.userDir, &herr)) {
-            emit logUpdated(QString::fromUtf8("经特权 helper 启动核心失败：%1").arg(herr));
+        if (MacHelper::startCore(exe, cfg, m_config.userDir, &herr)) {
+            m_helperCoreRunning = true;
+            startCoreLogTail();
+            emit logUpdated(QString::fromUtf8("核心已由特权 helper 以 root 启动（支持 TUN）"));
+            if (m_proxyEnabled) {
+                startProxy();
+            }
             emitStatus();
             return;
         }
-        m_helperCoreRunning = true;
-        startCoreLogTail();
-        emit logUpdated(QString::fromUtf8("核心已由特权 helper 以 root 启动（支持 TUN）"));
-        if (m_proxyEnabled) {
-            startProxy();
-        }
-        emitStatus();
-        return;
+        // 经 helper 起失败：不再静默退回——讲清楚原因，再以非 root QProcess 兜底（TUN 将不可用）。
+        emit logUpdated(QString::fromUtf8("经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效").arg(herr));
     }
 #endif
 

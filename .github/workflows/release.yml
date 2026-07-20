@@ -509,9 +509,9 @@ jobs:
           # 重新嵌入特权 helper 与其 launchd plist（macdeployqt 可能动过 Contents/MacOS）。
           # helper 独立可执行由 CMake 构建在 $BUILD_DIR 根下（OUTPUT_NAME），universal。
           mkdir -p "$APP/Contents/Library/LaunchDaemons"
-          cp "$BUILD_DIR/com.clashrauto.clashauto.helper" "$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
-          cp "clashauto-c++/helper/com.clashrauto.clashauto.helper.plist" "$APP/Contents/Library/LaunchDaemons/"
-          lipo -archs "$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
+          cp "$BUILD_DIR/com.yuehongsun.auto.helper" "$APP/Contents/MacOS/com.yuehongsun.auto.helper"
+          cp "clashauto-c++/helper/com.yuehongsun.auto.helper.plist" "$APP/Contents/Library/LaunchDaemons/"
+          lipo -archs "$APP/Contents/MacOS/com.yuehongsun.auto.helper"
 
           # 运行时资源进 bundle：Contents/Clashr-Auto。AppConfigLoader 从 exe 目录
           # (Contents/MacOS) 向上探测 ../Clashr-Auto 第一跳即命中，拖进 /Applications 也不丢
@@ -526,7 +526,7 @@ jobs:
           # Inside-out 签名（公证必需硬化运行时 + 安全时间戳）：先单独签特权 helper，再 --deep 签
           # 整个 app（--deep 覆盖 frameworks 与 helper，identity/options 一致，幂等）。
           # macdeployqt 之后再签：install_name_tool 的改写会破坏更早的签名。
-          HELPER="$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
+          HELPER="$APP/Contents/MacOS/com.yuehongsun.auto.helper"
           if [ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != "-" ]; then
             codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$HELPER"
             codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"

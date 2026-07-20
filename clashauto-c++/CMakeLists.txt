@@ -81,7 +81,7 @@ if(APPLE)
         OUTPUT_NAME "Clash Auto"
         MACOSX_BUNDLE ON
         MACOSX_BUNDLE_BUNDLE_NAME "Clash Auto"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.clashrauto.clashauto"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.yuehongsun.auto"
         MACOSX_BUNDLE_BUNDLE_VERSION "${APP_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${APP_VERSION}")
     # CI 在配置前用 assets/icon.ico 生成 icon.icns；存在则作为应用图标打进 Resources
@@ -115,7 +115,7 @@ if(APPLE)
     # 特权 helper（以 root 运行的 launchd daemon）：独立可执行，只依赖 Foundation（NSXPC）。
     # 继承全局 CMAKE_OSX_ARCHITECTURES / DEPLOYMENT_TARGET，故 CI 里同样是 universal。
     add_executable(clashauto-helper helper/helper_main.mm)
-    set_target_properties(clashauto-helper PROPERTIES OUTPUT_NAME "com.clashrauto.clashauto.helper")
+    set_target_properties(clashauto-helper PROPERTIES OUTPUT_NAME "com.yuehongsun.auto.helper")
     # 复用应用生成的 Version.h（#define APP_VERSION）作为 helper 版本，避免 compile-def 的跨生成器引号坑
     target_include_directories(clashauto-helper PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/helper"
@@ -133,10 +133,10 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-cpp>/Library/LaunchDaemons"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:clashauto-helper>"
-            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-cpp>/MacOS/com.clashrauto.clashauto.helper"
+            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-cpp>/MacOS/com.yuehongsun.auto.helper"
         COMMAND ${CMAKE_COMMAND} -E copy
-            "${CMAKE_CURRENT_SOURCE_DIR}/helper/com.clashrauto.clashauto.helper.plist"
-            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-cpp>/Library/LaunchDaemons/com.clashrauto.clashauto.helper.plist"
+            "${CMAKE_CURRENT_SOURCE_DIR}/helper/com.yuehongsun.auto.helper.plist"
+            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-cpp>/Library/LaunchDaemons/com.yuehongsun.auto.helper.plist"
         VERBATIM)
 endif()
 

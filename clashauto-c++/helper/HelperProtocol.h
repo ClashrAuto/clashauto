@@ -5,12 +5,12 @@
 #import <Foundation/Foundation.h>
 
 // launchd 广告的 mach service 名（= helper 的 bundle id / Label）。两侧必须一致。
-#define CA_HELPER_MACH_SERVICE "com.clashrauto.clashauto.helper"
+#define CA_HELPER_MACH_SERVICE "com.yuehongsun.auto.helper"
 
 // 允许连接本 helper 的客户端代码签名要求：必须是本应用、Apple 背书、且叶证书属于我们的 Team。
 // helper 用 -[NSXPCConnection setCodeSigningRequirement:]（macOS 13+）据此拒绝任意进程驱动 root。
 #define CA_CLIENT_CODE_REQUIREMENT \
-    "identifier \"com.clashrauto.clashauto\" and anchor apple generic and " \
+    "identifier \"com.yuehongsun.auto\" and anchor apple generic and " \
     "certificate leaf[subject.OU] = \"6AXTRT5TV4\""
 
 @protocol CAHelperProtocol <NSObject>
