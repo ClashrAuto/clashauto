@@ -89,9 +89,9 @@ static void redrawTray()
         NSForegroundColorAttributeName : textColor,
     };
 
-    // 定宽文字区：按最宽模板值算宽度，右对齐 → 不随数字长短抖动。图标离文字 3 个字符。
-    const CGFloat charW = ceil([@"0" sizeWithAttributes:attrs].width);
-    const CGFloat gap = 3.0 * charW;
+    // 定宽文字区：按最宽模板值算宽度，右对齐 → 不随数字长短抖动。
+    // 图标紧挨文字（仅留 2pt 间距，之前 3 个字符太宽）。
+    const CGFloat gap = 2.0;
     const CGFloat textW = ceil([@"888.8 MB/s" sizeWithAttributes:attrs].width);
     NSString *text = [NSString stringWithFormat:@"%@\n%@", g_upText, g_downText];
     NSAttributedString *att = [[NSAttributedString alloc] initWithString:text attributes:attrs];
