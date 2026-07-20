@@ -8,19 +8,26 @@
 #include <QPixmap>
 
 #if defined(Q_OS_MACOS)
-#include "MacSpeedItem.h" // 独立的原生菜单栏项显示两行上/下速率（真文字，不画进图标）
+#include "MacSpeedItem.h" // 原生托盘（图标+两行速率合成一项 + 原生菜单），取代 Qt 托盘项
+// C 回调 → 转到 TrayController 成员（ctx 即 this）。
+static void macCbOpen(void *c) { static_cast<TrayController *>(c)->macOpenWindow(); }
+static void macCbCore(void *c) { static_cast<TrayController *>(c)->macToggleCore(); }
+static void macCbProxy(void *c) { static_cast<TrayController *>(c)->macToggleProxy(); }
+static void macCbTun(void *c) { static_cast<TrayController *>(c)->macToggleTun(); }
+static void macCbQuit(void *c) { static_cast<TrayController *>(c)->macQuit(); }
 #endif
 
 TrayController::TrayController(MainWindow *window, QObject *parent)
     : QObject(parent), m_window(window)
 {
+#if defined(Q_OS_MACOS)
+    // macOS 不用 Qt 托盘：改用原生一项（图标在左、两行速率在右、定宽不抖动 + 原生菜单）。
+    MacTrayHandlers h{this, &macCbOpen, &macCbCore, &macCbProxy, &macCbTun, &macCbQuit};
+    macTrayInstall(h);
+    macTraySetStatus(false, false, false);
+#else
     refreshIcon(); // 初始（核心未起）用原色图标
     m_tray.setToolTip("Clash Auto");
-#if defined(Q_OS_MACOS)
-    // 速率项在 Qt 图标 show() 之前创建：实测这样 Qt 托盘图标才会正常显示（放到 show() 之后
-    // 反而会让 Qt 的图标项消失）。位置固定不了两项左右序，见下方 setStatus 里的补充。
-    macSpeedItemInstall();
-#endif
     connect(&m_tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger && m_window) {
             m_window->showNormal();
@@ -30,7 +37,23 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
     });
     buildMenu();
     m_tray.show();
+#endif
 }
+
+#if defined(Q_OS_MACOS)
+void TrayController::macOpenWindow()
+{
+    if (m_window) {
+        m_window->showNormal();
+        m_window->raise();
+        m_window->activateWindow();
+    }
+}
+void TrayController::macToggleCore() { emit toggleCoreRequested(); }
+void TrayController::macToggleProxy() { emit toggleProxyRequested(); }
+void TrayController::macToggleTun() { emit toggleTunRequested(); }
+void TrayController::macQuit() { qApp->quit(); }
+#endif
 
 void TrayController::buildMenu()
 {
@@ -69,13 +92,14 @@ void TrayController::setStatus(bool tun, bool proxy, bool core)
     m_tun = tun;
     m_proxy = proxy;
     m_core = core;
+#if defined(Q_OS_MACOS)
+    macTraySetStatus(tun, proxy, core); // 原生托盘：更新菜单项文字 + 核心在跑才显示速率
+#else
     m_tray.setToolTip(QString("Clash Auto - %1").arg(core ? "运行中" : "已停止"));
     refreshIcon(); // 状态变了刷新图标颜色（增强=红、核心在跑=黄）
     m_coreAction->setText(core ? "停止核心" : "启动核心");
     m_proxyAction->setText(proxy ? "关闭网页代理" : "打开网页代理");
     m_tunAction->setText(tun ? "关闭增强模式" : "打开增强模式");
-#if defined(Q_OS_MACOS)
-    macSpeedItemSetVisible(core); // 核心在跑才显示速率项，停了就收起
 #endif
 }
 
@@ -115,20 +139,24 @@ void TrayController::setTraffic(qint64 up, qint64 down)
     }
     m_up = up;
     m_down = down;
+#if defined(Q_OS_MACOS)
+    // 原生托盘：两行速率（上=上传、下=下载，无 ↑↓ 标识），图标固定不抖。
+    macTraySetSpeed(speedTextCompact(up), speedTextCompact(down));
+#else
     m_upAction->setText(QString("UP: %1").arg(speedText(up)));
     m_downAction->setText(QString("DOWN: %1").arg(speedText(down)));
-#if defined(Q_OS_MACOS)
-    // macOS：更新独立菜单栏项的两行真文字（上=上传、下=下载），不动图标本身。
-    macSpeedItemSetSpeed(QStringLiteral("↑ ") + speedTextCompact(up),
-                         QStringLiteral("↓ ") + speedTextCompact(down));
 #endif
 }
 
 void TrayController::notify(const QString &title, const QString &message)
 {
+#if defined(Q_OS_MACOS)
+    macTrayNotify(title, message); // 原生气泡（不再走 Qt 托盘，因 macOS 已改原生托盘）
+#else
     if (QSystemTrayIcon::supportsMessages()) {
         m_tray.showMessage(title, message, QSystemTrayIcon::Information, 3000);
     }
+#endif
 }
 
 QString TrayController::speedText(qint64 value) const

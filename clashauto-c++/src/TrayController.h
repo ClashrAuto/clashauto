@@ -24,6 +24,16 @@ signals:
     void toggleProxyRequested();
     void toggleTunRequested();
 
+#if defined(Q_OS_MACOS)
+public:
+    // 原生托盘菜单/点击的回调入口（由 MacSpeedItem 的 C 回调转到这里，再发成 Qt 信号）。
+    void macOpenWindow();
+    void macToggleCore();
+    void macToggleProxy();
+    void macToggleTun();
+    void macQuit();
+#endif
+
 private:
     void buildMenu();   // 只在构造时建一次；之后 setStatus/setTraffic 仅改对应行的文本
     void refreshIcon(); // 按状态给托盘图标着色 + macOS 上把上/下行速率画在图标右侧
