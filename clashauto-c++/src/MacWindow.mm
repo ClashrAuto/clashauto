@@ -6,7 +6,8 @@
 void configureMacTitleBar(WId winId, const QColor &bg)
 {
     // winId() 在 macOS 上是 NSView*；由它取到承载它的 NSWindow。
-    NSView *view = reinterpret_cast<NSView *>(static_cast<quintptr>(winId));
+    // ARC 下禁止整数直接转 Obj-C 指针，先转 void* 再 __bridge（不转移所有权）。
+    NSView *view = (__bridge NSView *)reinterpret_cast<void *>(static_cast<quintptr>(winId));
     NSWindow *window = view.window;
     if (!window) {
         return; // 窗口尚未实体化（未 show）时无 NSWindow，稍后 show 后会再次调用
