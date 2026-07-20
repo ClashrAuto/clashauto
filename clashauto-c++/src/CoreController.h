@@ -7,17 +7,21 @@
 #include <QObject>
 #include <QProcess>
 
+class QTimer;
+
 class CoreController final : public QObject
 {
     Q_OBJECT
 
 public:
     explicit CoreController(AppConfig config, QObject *parent = nullptr);
+    ~CoreController() override;
 
     bool isRunning() const;
     bool isProxyEnabled() const;
     bool isTunEnabled() const;
     bool isCoreInstalled() const; // 内核二进制是否已就位（不再预装内核，需用户从设置下载）
+    bool isHelperCore() const;    // macOS：当前核心是否由特权 helper（root）启动（决定 TUN 是否可用）
 
     // 设置 TUN 标志但不重载（用于核心尚未启动时预置状态，例如提权重启后带 TUN 冷启动）
     void setTunEnabled(bool enabled);
@@ -47,6 +51,16 @@ private:
     void reloadConfig();
     void emitStatus();
 
+#if defined(Q_OS_MACOS)
+    // 懒创建并预授权一个 system.services.systemconfiguration.network 权限的 AuthorizationRef，
+    // 整个进程生命周期复用：设/清系统代理经 SCPreferences 提交时最多首次弹一次密码。
+    // （仅作 helper 不可用时的 fallback；helper 就绪时设代理走 root helper，全程免密。）
+    bool ensureMacAuthorization();
+    void startCoreLogTail(); // helper 起核心后 tail userDir/logs/core.log，转成 logUpdated
+    void stopCoreLogTail();
+    void pollCoreLog();
+#endif
+
     AppConfig m_config;
     ConfigBuilder m_configBuilder;
     QNetworkAccessManager m_network;
@@ -55,4 +69,11 @@ private:
     bool m_proxyEnabled = false;
     bool m_tunEnabled = false;
     bool m_sysproxyActive = false; // 本会话是否真的应用过系统代理：stopProxy 据此跳过无谓的还原动作
+#if defined(Q_OS_MACOS)
+    void *m_macAuthRef = nullptr;      // 实为 AuthorizationRef；用 void* 避免在头文件引入 Security 头
+    bool m_helperCoreRunning = false;  // 核心是否由特权 helper（root）启动（TUN 依赖此）
+    QTimer *m_coreLogTimer = nullptr;  // tail core.log 的定时器（helper 拥有核心时的日志来源）
+    QString m_coreLogPath;
+    qint64 m_coreLogPos = 0;
+#endif
 };

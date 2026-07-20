@@ -1,4 +1,7 @@
 ﻿#include "MainWindow.h"
+#if defined(Q_OS_MACOS)
+#include "MacHelperClient.h" // 开启增强(TUN)时确保特权 helper 已就绪并以 root 起核心
+#endif
 
 #include <QAbstractItemView>
 #include <QApplication>
@@ -4624,8 +4627,44 @@ void MainWindow::onToggleTunRequested()
         relaunchElevatedForTun();
         return;
     }
-#endif
     m_core->toggleTun();
+#elif defined(Q_OS_MACOS)
+    // macOS：TUN 需要以 root 运行 mihomo（建 utun/改路由）→ 交给特权 helper。开启前先确保 helper
+    // 已注册并启用；未批准则引导去「系统设置 → 登录项」，本次不开启。
+    if (turningOn) {
+        MacHelper::RegStatus st = MacHelper::status();
+        if (st != MacHelper::RegStatus::Enabled) {
+            QString err;
+            st = MacHelper::registerDaemon(&err);
+            if (st == MacHelper::RegStatus::RequiresApproval) {
+                MacHelper::openLoginItemsSettings();
+                appendLog(QString::fromUtf8("增强模式需在「系统设置 → 登录项」允许 Clash Auto 的后台项，允许后再开启"));
+                if (m_tray) {
+                    m_tray->notify(QString::fromUtf8("增强模式"),
+                                   QString::fromUtf8("请在系统设置里允许后台项后重试"));
+                }
+                return; // 待批准，本次不开启
+            }
+            if (st != MacHelper::RegStatus::Enabled) {
+                appendLog(QString::fromUtf8("增强模式：特权 helper 不可用：%1").arg(err));
+                return;
+            }
+        }
+        // helper 已就绪。若核心正以普通(非 root)方式在跑，切到 helper 后端才能建 utun：先停旧核心，
+        // toggleTun 写好 TUN 配置后，startCore 会以 helper(root) 起。
+        if (m_core->isRunning() && !m_core->isHelperCore()) {
+            m_core->stopCore();
+        }
+        m_core->toggleTun();
+        if (!m_core->isRunning()) {
+            m_core->startCore();
+        }
+    } else {
+        m_core->toggleTun(); // 关 TUN：helper-core 在跑则热重载去掉 utun
+    }
+#else
+    m_core->toggleTun();
+#endif
     // 切换即落盘：重启/一键更新后按 use: 恢复增强状态
     persistConfigBool(QStringLiteral("use"), m_core->isTunEnabled());
 }

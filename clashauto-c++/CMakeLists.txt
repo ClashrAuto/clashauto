@@ -8,6 +8,11 @@ if(NOT APP_VERSION)
     set(APP_VERSION "${PROJECT_VERSION}")
 endif()
 
+# macOS 需要 Objective-C++（.mm）来调 SMAppService / NSXPCConnection（特权 helper）
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -86,6 +91,53 @@ if(APPLE)
         target_sources(clashauto-cpp PRIVATE "${APP_ICNS}")
         set_source_files_properties("${APP_ICNS}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
     endif()
+
+    # 系统代理改经 SystemConfiguration + Security（AuthorizationRef 授权），需链接这两个框架；
+    # CoreFoundation 提供 CFDictionary/CFString 等类型（Qt 已间接带上，这里显式声明保稳）。
+    find_library(SECURITY_FRAMEWORK Security REQUIRED)
+    find_library(SYSTEMCONFIGURATION_FRAMEWORK SystemConfiguration REQUIRED)
+    find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    find_library(SERVICEMANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)
+
+    # 应用侧特权 helper 客户端（SMAppService 注册 + XPC）。ARC 省心管理 Obj-C 对象生命周期，
+    # 避免 __block/NSXPCConnection 在 MRR 下的悬垂。
+    target_sources(clashauto-cpp PRIVATE src/MacHelperClient.mm src/MacHelperClient.h)
+    set_source_files_properties(src/MacHelperClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+
+    target_link_libraries(clashauto-cpp PRIVATE
+        ${SECURITY_FRAMEWORK}
+        ${SYSTEMCONFIGURATION_FRAMEWORK}
+        ${COREFOUNDATION_FRAMEWORK}
+        ${FOUNDATION_FRAMEWORK}
+        ${SERVICEMANAGEMENT_FRAMEWORK})
+
+    # 特权 helper（以 root 运行的 launchd daemon）：独立可执行，只依赖 Foundation（NSXPC）。
+    # 继承全局 CMAKE_OSX_ARCHITECTURES / DEPLOYMENT_TARGET，故 CI 里同样是 universal。
+    add_executable(clashauto-helper helper/helper_main.mm)
+    set_target_properties(clashauto-helper PROPERTIES OUTPUT_NAME "com.clashrauto.clashauto.helper")
+    # 复用应用生成的 Version.h（#define APP_VERSION）作为 helper 版本，避免 compile-def 的跨生成器引号坑
+    target_include_directories(clashauto-helper PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/helper"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    set_source_files_properties(helper/helper_main.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(clashauto-helper PRIVATE
+        ${FOUNDATION_FRAMEWORK}
+        ${SYSTEMCONFIGURATION_FRAMEWORK}
+        ${COREFOUNDATION_FRAMEWORK})
+
+    # 把 helper 可执行 + launchd plist 嵌进 app bundle（SMAppService 要求的布局）。
+    # 本地构建即嵌入；CI 在 macdeployqt 之后会再覆盖一次并做 inside-out 签名（见 release.yml）。
+    add_dependencies(clashauto-cpp clashauto-helper)
+    add_custom_command(TARGET clashauto-cpp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-cpp>/Library/LaunchDaemons"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:clashauto-helper>"
+            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-cpp>/MacOS/com.clashrauto.clashauto.helper"
+        COMMAND ${CMAKE_COMMAND} -E copy
+            "${CMAKE_CURRENT_SOURCE_DIR}/helper/com.clashrauto.clashauto.helper.plist"
+            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-cpp>/Library/LaunchDaemons/com.clashrauto.clashauto.helper.plist"
+        VERBATIM)
 endif()
 
 # Generate Version.h with the resolved APP_VERSION (bulletproof quoting across generators)

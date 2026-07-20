@@ -454,7 +454,7 @@ jobs:
             -DAPP_VERSION="$APP_VERSION" \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" \
             -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=12.0
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
 
       - name: Build
         shell: bash
@@ -469,12 +469,49 @@ jobs:
           lipo -archs "$bin" | grep -q x86_64
           lipo -archs "$bin" | grep -q arm64
 
+      # 导入 Developer ID 证书到临时 keychain（仅当设置了 secret；否则回退 ad-hoc，fork 仍能编）。
+      # 复用 schat.build/qt-desktop.yml 的做法，凭据同名 secret（Team 6AXTRT5TV4）。
+      - name: Import Developer ID signing cert
+        id: signcert
+        shell: bash
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PW: ${{ secrets.MACOS_CERT_PW }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_P12:-}" ]; then
+            echo "MACOS_CERT_P12 未设置 — 回退 ad-hoc 签名"; echo "identity=-" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          KC="$RUNNER_TEMP/sign.keychain-db"; KPW="$(openssl rand -base64 18)"
+          security create-keychain -p "$KPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KPW" "$KC"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "${CERT_PW:-}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KPW" "$KC" >/dev/null
+          # 让临时 keychain 与默认 keychain 一起可搜，codesign 才能找到身份
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed 's/"//g')
+          IDENTITY=$(security find-identity -v -p codesigning "$KC" | grep -m1 "Developer ID Application" | sed -E 's/.*"(.*)".*/\1/')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          [ -n "$IDENTITY" ] || { echo "导入的证书里没有 Developer ID Application 身份"; exit 1; }
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+          echo "imported identity: $IDENTITY"
+
       - name: Stage app bundle
         shell: bash
+        env:
+          SIGN_IDENTITY: ${{ steps.signcert.outputs.identity }}
         run: |
           set -euo pipefail
           APP="$BUILD_DIR/Clash Auto.app"
           "$QT_ROOT/bin/macdeployqt" "$APP" -verbose=1
+
+          # 重新嵌入特权 helper 与其 launchd plist（macdeployqt 可能动过 Contents/MacOS）。
+          # helper 独立可执行由 CMake 构建在 $BUILD_DIR 根下（OUTPUT_NAME），universal。
+          mkdir -p "$APP/Contents/Library/LaunchDaemons"
+          cp "$BUILD_DIR/com.clashrauto.clashauto.helper" "$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
+          cp "clashauto-c++/helper/com.clashrauto.clashauto.helper.plist" "$APP/Contents/Library/LaunchDaemons/"
+          lipo -archs "$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
 
           # 运行时资源进 bundle：Contents/Clashr-Auto。AppConfigLoader 从 exe 目录
           # (Contents/MacOS) 向上探测 ../Clashr-Auto 第一跳即命中，拖进 /Applications 也不丢
@@ -486,18 +523,35 @@ jobs:
           done
           test -f "$APP/Contents/Clashr-Auto/config/config.yaml"
 
-          # ad-hoc 签名：Apple Silicon 拒绝运行完全无签名的 arm64 二进制；
-          # macdeployqt 改过 frameworks、资源也已放入，最后整体重签一次
-          codesign --force --deep --sign - "$APP"
+          # Inside-out 签名（公证必需硬化运行时 + 安全时间戳）：先单独签特权 helper，再 --deep 签
+          # 整个 app（--deep 覆盖 frameworks 与 helper，identity/options 一致，幂等）。
+          # macdeployqt 之后再签：install_name_tool 的改写会破坏更早的签名。
+          HELPER="$APP/Contents/MacOS/com.clashrauto.clashauto.helper"
+          if [ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != "-" ]; then
+            codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$HELPER"
+            codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
+            echo "signed with: $SIGN_IDENTITY"
+          else
+            codesign --force --sign - "$HELPER"
+            codesign --force --deep --sign - "$APP"   # ad-hoc 兜底（无 cert secret）
+          fi
+          codesign --verify --deep --strict --verbose=2 "$APP" && echo "codesign verify OK"
+          codesign --verify --strict --verbose=2 "$HELPER" && echo "helper codesign verify OK"
 
       - name: Create DMG
         shell: bash
+        env:
+          SIGN_IDENTITY: ${{ steps.signcert.outputs.identity }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
         run: |
           set -euo pipefail
           mkdir -p dist/dmgroot
           ditto "$BUILD_DIR/Clash Auto.app" "dist/dmgroot/Clash Auto.app"
           ln -s /Applications dist/dmgroot/Applications
-          # 无开发者证书（ad-hoc 签名）：给用户一份首次打开的引导，缓解 Gatekeeper 拦截
+          # ad-hoc（无证书）时才附「首次打开」引导；已公证的包无需，跳过
+          if [ -z "${SIGN_IDENTITY:-}" ] || [ "$SIGN_IDENTITY" = "-" ]; then
           cat > "dist/dmgroot/打开说明.txt" <<'EOF'
           Clash Auto（macOS 通用版：Intel + Apple Silicon）
 
@@ -507,8 +561,22 @@ jobs:
           方法一：在「应用程序」中右键点击「Clash Auto」→ 打开 → 再点「打开」。
           方法二：终端执行 xattr -cr "/Applications/Clash Auto.app" 后正常双击。
           EOF
-          hdiutil create -volname "Clash Auto" -srcfolder dist/dmgroot -ov -format UDZO \
-            "dist/ClashAuto-${APP_VERSION}-macos-universal.dmg"
+          fi
+          DMG="dist/ClashAuto-${APP_VERSION}-macos-universal.dmg"
+          hdiutil create -volname "Clash Auto" -srcfolder dist/dmgroot -ov -format UDZO "$DMG"
+          # 公证 + staple：仅在真签名 + 有 notary 凭据时（Apple 拒绝 ad-hoc 提交）。
+          # 用 App Store Connect API Key(.p8)；失败则本步失败 → 不上传未公证的 dmg。
+          if [ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != "-" ] && [ -n "${NOTARY_KEY:-}" ]; then
+            echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/nkey.p8"
+            xcrun notarytool submit "$DMG" \
+              --key "$RUNNER_TEMP/nkey.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" \
+              --wait --timeout 45m
+            xcrun stapler staple "$DMG"
+            xcrun stapler validate "$DMG" && echo "notarized + stapled OK"
+            rm -f "$RUNNER_TEMP/nkey.p8"
+          else
+            echo "无 notary 凭据或 ad-hoc 签名 — 跳过公证"
+          fi
 
       - name: Generate SHA256 sidecars
         shell: bash

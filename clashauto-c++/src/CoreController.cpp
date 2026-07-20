@@ -10,6 +10,7 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSysInfo>
+#include <QTimer>
 
 #if defined(Q_OS_WIN)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -20,6 +21,14 @@
 #endif
 #include <windows.h>
 #include <wininet.h> // InternetSetOption：原生设置系统(WinINET)代理，不再依赖捆绑的 sysproxy.exe
+#endif
+
+#if defined(Q_OS_MACOS)
+// 系统代理改经 SystemConfiguration 框架（带 Authorization 授权）直接写入，替代逐服务多次
+// 起 networksetup 子进程：既省去每次 fork/exec，也把授权收敛成整会话最多弹一次密码。
+#include <Security/Authorization.h>
+#include <SystemConfiguration/SystemConfiguration.h>
+#include "MacHelperClient.h" // 特权 helper：就绪时代理/核心/TUN 都走它（root，免密），否则回退本文件内实现
 #endif
 
 namespace {
@@ -71,27 +80,110 @@ bool setWinSystemProxy(bool enable, const QString &server, const QString &bypass
 #endif
 
 #if defined(Q_OS_MACOS)
-// mac 没有 sysproxy 二进制：系统代理用自带的 networksetup 设置。
-// 这里列出所有「已启用」的网络服务（Wi-Fi、Ethernet 等），逐个设/清代理。
-QStringList macNetworkServices()
+// 往 CFMutableDictionary 写入一个整数值（键为 SC 框架导出的 CFStringRef 常量）
+void cfDictSetInt(CFMutableDictionaryRef d, CFStringRef key, int v)
 {
-    QProcess p;
-    p.start("networksetup", {"-listallnetworkservices"});
-    if (!p.waitForFinished(10000)) {
-        p.kill();
-        return {};
+    CFNumberRef n = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &v);
+    CFDictionarySetValue(d, key, n);
+    CFRelease(n);
+}
+
+// 往 CFMutableDictionary 写入一个字符串值
+void cfDictSetStr(CFMutableDictionaryRef d, CFStringRef key, const QString &v)
+{
+    CFStringRef s = v.toCFString(); // 调用方持有，需 CFRelease
+    CFDictionarySetValue(d, key, s);
+    CFRelease(s);
+}
+
+// 取某网络服务现有的 Proxies 字典并做可变拷贝（保留 FTP/PAC 等我们不管的键，避免误清用户配置）；
+// 不存在则新建空表。返回值归调用方所有，用完 CFRelease。
+CFMutableDictionaryRef macCopyProxiesDict(SCPreferencesRef prefs, CFStringRef serviceID)
+{
+    CFStringRef path = CFStringCreateWithFormat(kCFAllocatorDefault, nullptr,
+                                                CFSTR("/NetworkServices/%@/Proxies"), serviceID);
+    CFDictionaryRef existing = (CFDictionaryRef)SCPreferencesPathGetValue(prefs, path); // Get 规则，不释放
+    CFRelease(path);
+    if (existing && CFGetTypeID(existing) == CFDictionaryGetTypeID()) {
+        return CFDictionaryCreateMutableCopy(kCFAllocatorDefault, 0, existing);
     }
-    QStringList services;
-    const QStringList lines = QString::fromUtf8(p.readAllStandardOutput()).split('\n');
-    for (const QString &raw : lines) {
-        const QString line = raw.trimmed();
-        // 首行是提示文字（An asterisk (*)...）；带 * 前缀的是已停用的服务，跳过
-        if (line.isEmpty() || line.startsWith(QLatin1Char('*')) || line.contains(QLatin1String("asterisk"))) {
-            continue;
+    return CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
+                                     &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+}
+
+// 经带授权的 SCPreferences，在所有「已启用」网络服务上设置(enable)或清除(disable) HTTP/HTTPS/SOCKS
+// 代理。一次 Lock→逐服务改 Proxies 字典→Commit→Apply，取代旧的逐服务四次 networksetup 子进程。
+// disable 时只翻 *Enable 位、保留 host/port，方便下次秒开，也不动其它代理键。成功返回 true，
+// 失败原因写入 *err。
+bool macApplyProxies(AuthorizationRef auth, bool enable, const QString &host, int port,
+                     const QStringList &bypass, QString *err)
+{
+    SCPreferencesRef prefs = SCPreferencesCreateWithAuthorization(
+        kCFAllocatorDefault, CFSTR("ClashAuto"), nullptr, auth);
+    if (!prefs) {
+        if (err) *err = QStringLiteral("SCPreferencesCreateWithAuthorization 返回空");
+        return false;
+    }
+    if (!SCPreferencesLock(prefs, true)) {
+        if (err) *err = QStringLiteral("SCPreferencesLock 失败（无权限或配置被占用）");
+        CFRelease(prefs);
+        return false;
+    }
+
+    bool committed = false;
+    CFArrayRef services = SCNetworkServiceCopyAll(prefs);
+    if (services) {
+        CFMutableArrayRef exceptions = nullptr;
+        if (enable) {
+            exceptions = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
+            for (const QString &b : bypass) {
+                CFStringRef s = b.toCFString();
+                CFArrayAppendValue(exceptions, s);
+                CFRelease(s);
+            }
         }
-        services << line;
+        const CFIndex count = CFArrayGetCount(services);
+        for (CFIndex i = 0; i < count; ++i) {
+            SCNetworkServiceRef svc = (SCNetworkServiceRef)CFArrayGetValueAtIndex(services, i);
+            if (!SCNetworkServiceGetEnabled(svc)) continue; // 跳过已停用的服务（等价旧代码跳过 * 前缀）
+            CFStringRef sid = SCNetworkServiceGetServiceID(svc);
+            if (!sid) continue;
+
+            CFMutableDictionaryRef proxies = macCopyProxiesDict(prefs, sid);
+            if (enable) {
+                cfDictSetInt(proxies, kSCPropNetProxiesHTTPEnable, 1);
+                cfDictSetStr(proxies, kSCPropNetProxiesHTTPProxy, host);
+                cfDictSetInt(proxies, kSCPropNetProxiesHTTPPort, port);
+                cfDictSetInt(proxies, kSCPropNetProxiesHTTPSEnable, 1);
+                cfDictSetStr(proxies, kSCPropNetProxiesHTTPSProxy, host);
+                cfDictSetInt(proxies, kSCPropNetProxiesHTTPSPort, port);
+                cfDictSetInt(proxies, kSCPropNetProxiesSOCKSEnable, 1);
+                cfDictSetStr(proxies, kSCPropNetProxiesSOCKSProxy, host);
+                cfDictSetInt(proxies, kSCPropNetProxiesSOCKSPort, port);
+                if (exceptions) CFDictionarySetValue(proxies, kSCPropNetProxiesExceptionsList, exceptions);
+            } else {
+                cfDictSetInt(proxies, kSCPropNetProxiesHTTPEnable, 0);
+                cfDictSetInt(proxies, kSCPropNetProxiesHTTPSEnable, 0);
+                cfDictSetInt(proxies, kSCPropNetProxiesSOCKSEnable, 0);
+            }
+            CFStringRef path = CFStringCreateWithFormat(kCFAllocatorDefault, nullptr,
+                                                        CFSTR("/NetworkServices/%@/Proxies"), sid);
+            SCPreferencesPathSetValue(prefs, path, proxies);
+            CFRelease(path);
+            CFRelease(proxies);
+        }
+        if (exceptions) CFRelease(exceptions);
+        CFRelease(services);
+
+        committed = SCPreferencesCommitChanges(prefs) && SCPreferencesApplyChanges(prefs);
+        if (!committed && err) *err = QStringLiteral("SCPreferencesCommit/Apply 失败");
+    } else if (err) {
+        *err = QStringLiteral("SCNetworkServiceCopyAll 返回空");
     }
-    return services;
+
+    SCPreferencesUnlock(prefs);
+    CFRelease(prefs);
+    return committed;
 }
 #endif
 }
@@ -129,9 +221,65 @@ CoreController::CoreController(AppConfig config, QObject *parent)
     });
 }
 
+CoreController::~CoreController()
+{
+#if defined(Q_OS_MACOS)
+    if (m_macAuthRef) {
+        // 仅释放本进程的授权引用，不 DestroyRights（进程退出即失效，无需全局吊销）
+        AuthorizationFree(static_cast<AuthorizationRef>(m_macAuthRef), kAuthorizationFlagDefaults);
+        m_macAuthRef = nullptr;
+    }
+#endif
+}
+
+#if defined(Q_OS_MACOS)
+bool CoreController::ensureMacAuthorization()
+{
+    if (m_macAuthRef) {
+        return true; // 本会话已授权，复用
+    }
+    AuthorizationRef authRef = nullptr;
+    OSStatus st = AuthorizationCreate(nullptr, kAuthorizationEmptyEnvironment,
+                                      kAuthorizationFlagDefaults, &authRef);
+    if (st != errAuthorizationSuccess) {
+        emit logUpdated(QString::fromUtf8("创建授权会话失败（AuthorizationCreate=%1）").arg(st));
+        return false;
+    }
+    // 预授权修改网络配置的权限：弹一次密码框；成功后授权缓存在 authRef 上，
+    // 后续 SCPreferencesCommit 在权限有效期内不再弹（这正是替代 networksetup 的目的）。
+    AuthorizationItem item = { "system.services.systemconfiguration.network", 0, nullptr, 0 };
+    AuthorizationRights rights = { 1, &item };
+    AuthorizationFlags flags = kAuthorizationFlagDefaults
+                             | kAuthorizationFlagInteractionAllowed
+                             | kAuthorizationFlagPreAuthorize
+                             | kAuthorizationFlagExtendRights;
+    st = AuthorizationCopyRights(authRef, &rights, kAuthorizationEmptyEnvironment, flags, nullptr);
+    if (st != errAuthorizationSuccess) {
+        // 用户取消或权限不足：放弃，不再退回逐次弹窗的 networksetup
+        AuthorizationFree(authRef, kAuthorizationFlagDefaults);
+        emit logUpdated(QString::fromUtf8("未获得网络配置授权（用户取消或权限不足，AuthorizationCopyRights=%1）").arg(st));
+        return false;
+    }
+    m_macAuthRef = authRef;
+    return true;
+}
+#endif
+
 bool CoreController::isRunning() const
 {
+#if defined(Q_OS_MACOS)
+    if (m_helperCoreRunning) return true; // 核心由 helper 拥有时 m_core 处于 NotRunning
+#endif
     return m_core.state() != QProcess::NotRunning;
+}
+
+bool CoreController::isHelperCore() const
+{
+#if defined(Q_OS_MACOS)
+    return m_helperCoreRunning;
+#else
+    return false;
+#endif
 }
 
 bool CoreController::isProxyEnabled() const
@@ -194,6 +342,27 @@ void CoreController::startCore()
     }
 #endif
 
+#if defined(Q_OS_MACOS)
+    // helper 就绪：以 root 起核心（这样 TUN/增强模式才能建 utun、改路由）。否则回退普通 QProcess，
+    // 此时 TUN 无法生效（mihomo 非 root 建不了 utun）——由 MainWindow 在开启增强时先确保 helper。
+    if (MacHelper::isReady()) {
+        QString herr;
+        if (!MacHelper::startCore(exe, cfg, m_config.userDir, &herr)) {
+            emit logUpdated(QString::fromUtf8("经特权 helper 启动核心失败：%1").arg(herr));
+            emitStatus();
+            return;
+        }
+        m_helperCoreRunning = true;
+        startCoreLogTail();
+        emit logUpdated(QString::fromUtf8("核心已由特权 helper 以 root 启动（支持 TUN）"));
+        if (m_proxyEnabled) {
+            startProxy();
+        }
+        emitStatus();
+        return;
+    }
+#endif
+
     m_core.setProgram(exe);
     // 仅传 -d/-f：stock mihomo 无 -token 参数（原 Clashr 定制核心才有），传了会「flag provided
     // but not defined: -token」→ 打印用法并以退出码 2 结束，导致核心起不来。
@@ -214,6 +383,17 @@ void CoreController::startCore()
 void CoreController::stopCore()
 {
     stopProxy();
+#if defined(Q_OS_MACOS)
+    if (m_helperCoreRunning) {
+        QString herr;
+        MacHelper::stopCore(&herr);
+        m_helperCoreRunning = false;
+        stopCoreLogTail();
+        emit logUpdated(QString::fromUtf8("核心已停止（helper）"));
+        emitStatus();
+        return;
+    }
+#endif
     if (isRunning()) {
 #if defined(Q_OS_WIN)
         // mihomo 是无窗口控制台程序，terminate() 的 WM_CLOSE 对它无效（同 killCoreNow）——
@@ -253,6 +433,16 @@ void CoreController::killCoreNow()
     // 硬杀：mihomo 是无窗口控制台程序，terminate() 的 WM_CLOSE 对它无效，只能 kill()。
     // 提权重启时用它立刻释放 9090 与系统代理，避免与新（提权）实例的核心抢端口。
     stopProxy();
+#if defined(Q_OS_MACOS)
+    if (m_helperCoreRunning) {
+        QString herr;
+        MacHelper::stopCore(&herr);
+        m_helperCoreRunning = false;
+        stopCoreLogTail();
+        emitStatus();
+        return;
+    }
+#endif
     if (isRunning()) {
         m_core.kill();
         m_core.waitForFinished(1500);
@@ -299,21 +489,29 @@ void CoreController::rebuildConfig()
 void CoreController::startProxy()
 {
 #if defined(Q_OS_MACOS)
-    // mac 用系统自带 networksetup（运行用户需属 admin 组，个人 Mac 默认如此）：
-    // 混合端口同时服务 HTTP/HTTPS/SOCKS，三种代理都指向它
-    const QStringList services = macNetworkServices();
-    if (services.isEmpty()) {
-        emit logUpdated(QString::fromUtf8("设置系统代理失败：networksetup 未列出可用网络服务"));
+    const QStringList macBypass = {"localhost", "127.0.0.1", "10.0.0.0/8", "172.16.0.0/12",
+                                   "192.168.0.0/16", "*.local"};
+    // helper 就绪：以 root 设代理，全程免密（首选）。否则回退 Option B（进程内 SCPreferences + 一次性授权）。
+    if (MacHelper::isReady()) {
+        QString herr;
+        if (!MacHelper::setSystemProxy(true, m_config.host, m_config.mixedPort, macBypass, &herr)) {
+            emit logUpdated(QString::fromUtf8("设置系统代理失败（helper）：%1").arg(herr));
+            return;
+        }
+        m_sysproxyActive = true;
+        emit logUpdated("Start sysproxy ok!");
         return;
     }
-    const QString port = QString::number(m_config.mixedPort);
-    for (const QString &svc : services) {
-        runHidden("networksetup", {"-setwebproxy", svc, m_config.host, port}, 10000);
-        runHidden("networksetup", {"-setsecurewebproxy", svc, m_config.host, port}, 10000);
-        runHidden("networksetup", {"-setsocksfirewallproxy", svc, m_config.host, port}, 10000);
-        runHidden("networksetup", {"-setproxybypassdomains", svc,
-                                   "localhost", "127.0.0.1", "10.0.0.0/8", "172.16.0.0/12",
-                                   "192.168.0.0/16", "*.local"}, 10000);
+    // 经 SCPreferences（带一次性授权）设代理：混合端口同时服务 HTTP/HTTPS/SOCKS，三种都指向它
+    if (!ensureMacAuthorization()) {
+        emit logUpdated(QString::fromUtf8("设置系统代理失败：未获得授权"));
+        return;
+    }
+    QString err;
+    if (!macApplyProxies(static_cast<AuthorizationRef>(m_macAuthRef), true,
+                         m_config.host, m_config.mixedPort, macBypass, &err)) {
+        emit logUpdated(QString::fromUtf8("设置系统代理失败：%1").arg(err));
+        return;
     }
     m_sysproxyActive = true;
     emit logUpdated("Start sysproxy ok!");
@@ -353,10 +551,23 @@ void CoreController::stopProxy()
         return;
     }
 #if defined(Q_OS_MACOS)
-    for (const QString &svc : macNetworkServices()) {
-        runHidden("networksetup", {"-setwebproxystate", svc, "off"}, 10000);
-        runHidden("networksetup", {"-setsecurewebproxystate", svc, "off"}, 10000);
-        runHidden("networksetup", {"-setsocksfirewallproxystate", svc, "off"}, 10000);
+    // helper 就绪：以 root 清代理（免密）。否则回退 Option B（复用本会话已持有的授权）。
+    if (MacHelper::isReady()) {
+        QString herr;
+        if (!MacHelper::setSystemProxy(false, m_config.host, m_config.mixedPort, {}, &herr)) {
+            emit logUpdated(QString::fromUtf8("还原系统代理失败（helper）：%1").arg(herr));
+        }
+        m_sysproxyActive = false;
+        emit logUpdated("Stop sysproxy ok!");
+        return;
+    }
+    // 复用本会话已持有的授权（开代理时已弹过一次），关代理不再弹密码
+    if (m_macAuthRef) {
+        QString err;
+        if (!macApplyProxies(static_cast<AuthorizationRef>(m_macAuthRef), false,
+                             m_config.host, m_config.mixedPort, {}, &err)) {
+            emit logUpdated(QString::fromUtf8("还原系统代理失败：%1").arg(err));
+        }
     }
     m_sysproxyActive = false;
     emit logUpdated("Stop sysproxy ok!");
@@ -415,3 +626,54 @@ void CoreController::emitStatus()
     const bool running = isRunning();
     emit statusChanged(running && m_tunEnabled, running && m_proxyEnabled, running);
 }
+
+#if defined(Q_OS_MACOS)
+void CoreController::startCoreLogTail()
+{
+    // helper 每次 startCore 会重建 core.log（截断到 0），故从头 tail
+    m_coreLogPath = QDir(m_config.userDir).filePath("logs/core.log");
+    m_coreLogPos = 0;
+    if (!m_coreLogTimer) {
+        m_coreLogTimer = new QTimer(this);
+        m_coreLogTimer->setInterval(500);
+        connect(m_coreLogTimer, &QTimer::timeout, this, &CoreController::pollCoreLog);
+    }
+    m_coreLogTimer->start();
+}
+
+void CoreController::stopCoreLogTail()
+{
+    if (m_coreLogTimer) {
+        m_coreLogTimer->stop();
+    }
+    m_coreLogPath.clear();
+    m_coreLogPos = 0;
+}
+
+void CoreController::pollCoreLog()
+{
+    if (m_coreLogPath.isEmpty()) {
+        return;
+    }
+    QFile f(m_coreLogPath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        return; // core.log 还没被 helper 建出来
+    }
+    const qint64 size = f.size();
+    if (size < m_coreLogPos) {
+        m_coreLogPos = 0; // 文件被重建（新一轮启动）
+    }
+    if (size == m_coreLogPos) {
+        return;
+    }
+    f.seek(m_coreLogPos);
+    const QByteArray chunk = f.readAll();
+    m_coreLogPos = f.pos();
+    // mihomo 输出为 UTF-8；按行发（顺带修掉进程内路径「每段只发最后一行」的截断）
+    const QStringList lines =
+        QString::fromUtf8(chunk).split(QRegularExpression("[\\r\\n]+"), Qt::SkipEmptyParts);
+    for (const QString &line : lines) {
+        emit logUpdated(line);
+    }
+}
+#endif

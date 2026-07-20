@@ -2,6 +2,9 @@
 #include "AppConfig.h"
 #include "ConfigBuilder.h"
 #include "SubscriptionStore.h"
+#if defined(Q_OS_MACOS)
+#include "MacHelperClient.h" // 特权 helper 的注册/ping（--mac-helper-* 子命令，真机验证用）
+#endif
 
 #include <QApplication>
 #include <QCoreApplication>
@@ -54,6 +57,48 @@ int main(int argc, char *argv[])
         QTextStream(stdout) << path << Qt::endl;
         return 0;
     }
+
+#if defined(Q_OS_MACOS)
+    // 特权 helper 的 CLI 验证入口（真机上从已签名 bundle 内运行才有效）：
+    //   .../Clash Auto.app/Contents/MacOS/Clash Auto --mac-helper-register|status|ping|unregister
+    {
+        const QStringList args = app.arguments();
+        auto statusName = [](MacHelper::RegStatus s) -> QString {
+            switch (s) {
+                case MacHelper::RegStatus::Enabled:          return QStringLiteral("enabled");
+                case MacHelper::RegStatus::RequiresApproval: return QStringLiteral("requires-approval");
+                case MacHelper::RegStatus::NotRegistered:    return QStringLiteral("not-registered");
+                case MacHelper::RegStatus::NotFound:         return QStringLiteral("not-found");
+                default:                                     return QStringLiteral("unknown");
+            }
+        };
+        if (args.contains("--mac-helper-status")) {
+            QTextStream(stdout) << statusName(MacHelper::status()) << Qt::endl;
+            return 0;
+        }
+        if (args.contains("--mac-helper-register")) {
+            QString err;
+            const MacHelper::RegStatus s = MacHelper::registerDaemon(&err);
+            QTextStream(stdout) << "status=" << statusName(s);
+            if (!err.isEmpty()) QTextStream(stdout) << " error=" << err;
+            QTextStream(stdout) << Qt::endl;
+            return s == MacHelper::RegStatus::Enabled ? 0 : 1;
+        }
+        if (args.contains("--mac-helper-unregister")) {
+            QString err;
+            const bool ok = MacHelper::unregisterDaemon(&err);
+            QTextStream(stdout) << (ok ? QStringLiteral("unregistered") : (QStringLiteral("failed: ") + err)) << Qt::endl;
+            return ok ? 0 : 1;
+        }
+        if (args.contains("--mac-helper-ping")) {
+            QString err;
+            const QString v = MacHelper::pingVersion(&err);
+            if (!v.isEmpty()) { QTextStream(stdout) << "helper-version=" << v << Qt::endl; return 0; }
+            QTextStream(stdout) << "ping failed: " << err << Qt::endl;
+            return 1;
+        }
+    }
+#endif
 
     const int urlArg = app.arguments().indexOf("--print-effective-url");
     if (urlArg >= 0 && app.arguments().size() > urlArg + 1) {
