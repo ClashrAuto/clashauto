@@ -21,6 +21,8 @@ static ClashTrayTarget *g_target = nil;
 static NSMenuItem *g_upItem = nil, *g_downItem = nil;
 static NSMenuItem *g_coreItem = nil, *g_proxyItem = nil, *g_tunItem = nil;
 static bool g_core = false;
+static bool g_proxy = false; // 状态先缓存在这，安装可晚于 setStatus/setIcon（TrayController 推迟创建状态项）
+static bool g_tun = false;
 static NSString *g_upText = @"0 B/s";
 static NSString *g_downText = @"0 B/s";
 static NSImage *g_icon = nil; // 由 Qt 传入的托盘图标（:/assets/icon.ico 转 PNG）
@@ -117,6 +119,13 @@ void macTrayInstall(const MacTrayHandlers &handlers)
     g_target.handlers = handlers;
 
     g_item = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
+    // 关键修复：显式钉住可见性。NSStatusItem.visible 会按 autosaveName 持久化进本 app 的
+    // defaults（不设名时系统自动派发 "Item-0" 这类跨启动稳定的名字）。旧实现创建后立刻
+    // visible=NO（核心未起先藏着），这个 NO 已被系统记进 defaults；本实现若从不碰 visible，
+    // 创建瞬间就被恢复成「隐藏」→ 菜单栏里整项完全不出现（连兜底灰块都轮不到画）。
+    // 换固定 autosaveName 绕开陈旧的 "Item-0" 记录，再强制 YES 让系统把 YES 持久化回去。
+    g_item.autosaveName = @"ClashAutoTray";
+    g_item.visible = YES;
 
     NSMenu *menu = [[NSMenu alloc] init];
     menu.autoenablesItems = NO; // 自己控制启用态：UP/DOWN 行常灰，其余可点
@@ -124,16 +133,22 @@ void macTrayInstall(const MacTrayHandlers &handlers)
     NSMenuItem *panel = [menu addItemWithTitle:@"控制面板" action:@selector(openWindow:) keyEquivalent:@""];
     panel.target = g_target;
     [menu addItem:[NSMenuItem separatorItem]];
-    g_upItem = [menu addItemWithTitle:@"UP: 0 B/s" action:nil keyEquivalent:@""];
+    // 各行文字取当前缓存值：安装被推迟到事件循环起来之后，此前的 setSpeed/setStatus 只更新了缓存。
+    g_upItem = [menu addItemWithTitle:[NSString stringWithFormat:@"UP: %@", g_upText]
+                               action:nil keyEquivalent:@""];
     g_upItem.enabled = NO;
-    g_downItem = [menu addItemWithTitle:@"DOWN: 0 B/s" action:nil keyEquivalent:@""];
+    g_downItem = [menu addItemWithTitle:[NSString stringWithFormat:@"DOWN: %@", g_downText]
+                                 action:nil keyEquivalent:@""];
     g_downItem.enabled = NO;
     [menu addItem:[NSMenuItem separatorItem]];
-    g_coreItem = [menu addItemWithTitle:@"启动核心" action:@selector(toggleCore:) keyEquivalent:@""];
+    g_coreItem = [menu addItemWithTitle:(g_core ? @"停止核心" : @"启动核心")
+                                 action:@selector(toggleCore:) keyEquivalent:@""];
     g_coreItem.target = g_target;
-    g_proxyItem = [menu addItemWithTitle:@"打开网页代理" action:@selector(toggleProxy:) keyEquivalent:@""];
+    g_proxyItem = [menu addItemWithTitle:(g_proxy ? @"关闭网页代理" : @"打开网页代理")
+                                  action:@selector(toggleProxy:) keyEquivalent:@""];
     g_proxyItem.target = g_target;
-    g_tunItem = [menu addItemWithTitle:@"打开增强模式" action:@selector(toggleTun:) keyEquivalent:@""];
+    g_tunItem = [menu addItemWithTitle:(g_tun ? @"关闭增强模式" : @"打开增强模式")
+                                action:@selector(toggleTun:) keyEquivalent:@""];
     g_tunItem.target = g_target;
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *quit = [menu addItemWithTitle:@"退出程序" action:@selector(quit:) keyEquivalent:@""];
@@ -142,7 +157,7 @@ void macTrayInstall(const MacTrayHandlers &handlers)
     // 设了 menu：点击图标即弹菜单，「控制面板」为首项负责打开主界面。
     g_item.menu = menu;
 
-    redrawTray(); // 初始只画图标（核心未跑）
+    redrawTray(); // 按缓存状态渲染（核心未跑=只画图标；已跑=图标+速率）
 }
 
 void macTraySetIconPng(const void *pngData, long len)
@@ -161,6 +176,8 @@ void macTraySetIconPng(const void *pngData, long len)
 void macTraySetStatus(bool tun, bool proxy, bool core)
 {
     g_core = core;
+    g_proxy = proxy;
+    g_tun = tun;
     if (g_coreItem) g_coreItem.title = core ? @"停止核心" : @"启动核心";
     if (g_proxyItem) g_proxyItem.title = proxy ? @"关闭网页代理" : @"打开网页代理";
     if (g_tunItem) g_tunItem.title = tun ? @"关闭增强模式" : @"打开增强模式";

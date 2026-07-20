@@ -8,6 +8,7 @@
 #include <QIcon>
 #include <QPainter>
 #include <QPixmap>
+#include <QTimer>
 
 #if defined(Q_OS_MACOS)
 #include "MacSpeedItem.h" // 原生托盘（图标+两行速率合成一项 + 原生菜单），取代 Qt 托盘项
@@ -24,11 +25,14 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
 {
 #if defined(Q_OS_MACOS)
     // macOS 不用 Qt 托盘：改用原生一项（图标在左、两行速率在右、定宽不抖动 + 原生菜单）。
-    MacTrayHandlers h{this, &macCbOpen, &macCbCore, &macCbProxy, &macCbTun, &macCbQuit};
-    macTrayInstall(h);
-    // 把 Qt 的图标资源（和以前托盘同一张）转 PNG 传给原生层，避免依赖可能为空的
-    // applicationIconImage 导致整项透明「消失」。
+    // 先把图标/初始状态喂给原生层缓存（这些调用不要求状态项已存在），NSStatusItem 本体
+    // 推迟到事件循环第一拍再创建：本构造函数跑在 app.exec() 之前（Cocoa 尚未完成启动），
+    // 此时创建的状态项可能不会被真正排进菜单栏；旧版（分离的纯文字项）也是构造期创建、
+    // 但要等运行期 setVisible(YES) 才现身。singleShot(0) 复刻这一已知可用的时序，
+    // 配合原生层安装时显式 visible=YES（还破除旧版持久化进 defaults 的隐藏态）。
     {
+        // 把 Qt 的图标资源（和以前托盘同一张）转 PNG 传给原生层，避免依赖可能为空的
+        // applicationIconImage 导致整项透明「消失」。
         const QPixmap pm = QIcon(QStringLiteral(":/assets/icon.ico")).pixmap(64, 64);
         QByteArray png;
         QBuffer buf(&png);
@@ -40,6 +44,10 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
         }
     }
     macTraySetStatus(false, false, false);
+    QTimer::singleShot(0, this, [this] {
+        MacTrayHandlers h{this, &macCbOpen, &macCbCore, &macCbProxy, &macCbTun, &macCbQuit};
+        macTrayInstall(h); // 幂等；安装时按缓存的图标/状态/速率渲染
+    });
 #else
     refreshIcon(); // 初始（核心未起）用原色图标
     m_tray.setToolTip("Clash Auto");
