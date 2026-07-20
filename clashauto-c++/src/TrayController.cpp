@@ -4,7 +4,10 @@
 #include <QAction>
 #include <QApplication>
 #include <QColor>
+#include <QFont>
+#include <QFontMetrics>
 #include <QPainter>
+#include <QPalette>
 #include <QPixmap>
 
 TrayController::TrayController(MainWindow *window, QObject *parent)
@@ -79,21 +82,57 @@ void TrayController::refreshIcon()
     }
 
     const QIcon base(":/assets/icon.ico");
-    if (!tint.isValid()) {
-        m_tray.setIcon(base); // 空闲：原色应用图标
-        return;
+
+    // 按状态给图标着色（SourceIn 把非透明像素整体染成状态色，保留轮廓）。
+    QPixmap icon = base.pixmap(64, 64);
+    if (tint.isValid() && !icon.isNull()) {
+        QPainter p(&icon);
+        p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        p.fillRect(icon.rect(), tint);
+        p.end();
     }
-    // 用 SourceIn 把图标非透明像素整体染成状态色（保留图标轮廓，只换颜色）。
-    QPixmap pm = base.pixmap(64, 64);
-    if (pm.isNull()) {
+    if (icon.isNull()) {
         m_tray.setIcon(base);
         return;
     }
-    QPainter p(&pm);
-    p.setCompositionMode(QPainter::CompositionMode_SourceIn);
-    p.fillRect(pm.rect(), tint);
-    p.end();
-    m_tray.setIcon(QIcon(pm));
+
+#ifdef Q_OS_MACOS
+    // macOS 菜单栏空间足够，把上/下速率画在图标右侧两行（上=上传、下=下载）。
+    // 核心没跑时无流量，只显示图标。Windows/Linux 托盘槽只有 ~16px，加文字会被
+    // 缩成一团，故仅 macOS 走这条。
+    if (m_core) {
+        const int side = 44;        // 图标边长（逻辑像素，菜单栏会再缩放）
+        const int gap = 6;
+        const int pad = 4;
+        QFont font = QApplication::font();
+        font.setPixelSize(19);      // 两行文字塞进 side 高度内
+        font.setBold(true);
+        const QFontMetrics fm(font);
+        const QString upStr = "▲ " + speedTextCompact(m_up < 0 ? 0 : m_up);   // ▲ 上传
+        const QString downStr = "▼ " + speedTextCompact(m_down < 0 ? 0 : m_down); // ▼ 下载
+        const int textW = qMax(fm.horizontalAdvance(upStr), fm.horizontalAdvance(downStr));
+        const int totalW = side + gap + textW + pad;
+
+        const qreal dpr = 4.0; // 高分屏下先高清渲染，再交给菜单栏缩放
+        QPixmap canvas(qRound(totalW * dpr), qRound(side * dpr));
+        canvas.setDevicePixelRatio(dpr);
+        canvas.fill(Qt::transparent);
+        QPainter p(&canvas);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawPixmap(QRect(0, 0, side, side), icon);
+        p.setFont(font);
+        // 菜单栏文字颜色随系统深浅色：亮色栏用深字、暗色栏用浅字。
+        p.setPen(QApplication::palette().color(QPalette::WindowText));
+        const int lineH = side / 2;
+        p.drawText(QRect(side + gap, 0, textW, lineH), Qt::AlignLeft | Qt::AlignVCenter, upStr);
+        p.drawText(QRect(side + gap, lineH, textW, lineH), Qt::AlignLeft | Qt::AlignVCenter, downStr);
+        p.end();
+        m_tray.setIcon(QIcon(canvas));
+        return;
+    }
+#endif
+    m_tray.setIcon(QIcon(icon));
 }
 
 void TrayController::setTraffic(qint64 up, qint64 down)
@@ -105,6 +144,7 @@ void TrayController::setTraffic(qint64 up, qint64 down)
     m_down = down;
     m_upAction->setText(QString("UP: %1").arg(speedText(up)));
     m_downAction->setText(QString("DOWN: %1").arg(speedText(down)));
+    refreshIcon(); // macOS 上把新速率重画到图标右侧
 }
 
 void TrayController::notify(const QString &title, const QString &message)
@@ -124,4 +164,18 @@ QString TrayController::speedText(qint64 value) const
         ++unit;
     }
     return QString::number(number, 'f', 2) + " " + units[unit];
+}
+
+QString TrayController::speedTextCompact(qint64 value) const
+{
+    // 图标旁的紧凑速率："0 B/s"、"12.3 KB/s"、"1.2 MB/s"（B 不带小数，其余一位）。
+    double number = static_cast<double>(qMax<qint64>(0, value));
+    const QStringList units = {"B", "KB", "MB", "GB", "TB"};
+    int unit = 0;
+    while (number >= 1024.0 && unit + 1 < units.size()) {
+        number /= 1024.0;
+        ++unit;
+    }
+    const QString num = QString::number(number, 'f', unit == 0 ? 0 : 1);
+    return num + " " + units[unit] + "/s";
 }
