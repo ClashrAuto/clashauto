@@ -4,17 +4,21 @@
 #include <QAction>
 #include <QApplication>
 #include <QColor>
-#include <QFont>
-#include <QFontMetrics>
 #include <QPainter>
-#include <QPalette>
 #include <QPixmap>
+
+#if defined(Q_OS_MACOS)
+#include "MacSpeedItem.h" // 独立的原生菜单栏项显示两行上/下速率（真文字，不画进图标）
+#endif
 
 TrayController::TrayController(MainWindow *window, QObject *parent)
     : QObject(parent), m_window(window)
 {
     refreshIcon(); // 初始（核心未起）用原色图标
     m_tray.setToolTip("Clash Auto");
+#if defined(Q_OS_MACOS)
+    macSpeedItemInstall(); // 图标旁另开一项显示速率；核心未起时隐藏
+#endif
     connect(&m_tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger && m_window) {
             m_window->showNormal();
@@ -68,6 +72,9 @@ void TrayController::setStatus(bool tun, bool proxy, bool core)
     m_coreAction->setText(core ? "停止核心" : "启动核心");
     m_proxyAction->setText(proxy ? "关闭网页代理" : "打开网页代理");
     m_tunAction->setText(tun ? "关闭增强模式" : "打开增强模式");
+#if defined(Q_OS_MACOS)
+    macSpeedItemSetVisible(core); // 核心在跑才显示速率项，停了就收起
+#endif
 }
 
 void TrayController::refreshIcon()
@@ -82,57 +89,21 @@ void TrayController::refreshIcon()
     }
 
     const QIcon base(":/assets/icon.ico");
-
-    // 按状态给图标着色（SourceIn 把非透明像素整体染成状态色，保留轮廓）。
-    QPixmap icon = base.pixmap(64, 64);
-    if (tint.isValid() && !icon.isNull()) {
-        QPainter p(&icon);
-        p.setCompositionMode(QPainter::CompositionMode_SourceIn);
-        p.fillRect(icon.rect(), tint);
-        p.end();
+    if (!tint.isValid()) {
+        m_tray.setIcon(base); // 空闲：原色应用图标
+        return;
     }
-    if (icon.isNull()) {
+    // 用 SourceIn 把图标非透明像素整体染成状态色（保留图标轮廓，只换颜色）。
+    QPixmap pm = base.pixmap(64, 64);
+    if (pm.isNull()) {
         m_tray.setIcon(base);
         return;
     }
-
-#ifdef Q_OS_MACOS
-    // macOS 菜单栏空间足够，把上/下速率画在图标右侧两行（上=上传、下=下载）。
-    // 核心没跑时无流量，只显示图标。Windows/Linux 托盘槽只有 ~16px，加文字会被
-    // 缩成一团，故仅 macOS 走这条。
-    if (m_core) {
-        const int side = 44;        // 图标边长（逻辑像素，菜单栏会再缩放）
-        const int gap = 6;
-        const int pad = 4;
-        QFont font = QApplication::font();
-        font.setPixelSize(19);      // 两行文字塞进 side 高度内
-        font.setBold(true);
-        const QFontMetrics fm(font);
-        const QString upStr = "▲ " + speedTextCompact(m_up < 0 ? 0 : m_up);   // ▲ 上传
-        const QString downStr = "▼ " + speedTextCompact(m_down < 0 ? 0 : m_down); // ▼ 下载
-        const int textW = qMax(fm.horizontalAdvance(upStr), fm.horizontalAdvance(downStr));
-        const int totalW = side + gap + textW + pad;
-
-        const qreal dpr = 4.0; // 高分屏下先高清渲染，再交给菜单栏缩放
-        QPixmap canvas(qRound(totalW * dpr), qRound(side * dpr));
-        canvas.setDevicePixelRatio(dpr);
-        canvas.fill(Qt::transparent);
-        QPainter p(&canvas);
-        p.setRenderHint(QPainter::Antialiasing, true);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        p.drawPixmap(QRect(0, 0, side, side), icon);
-        p.setFont(font);
-        // 菜单栏文字颜色随系统深浅色：亮色栏用深字、暗色栏用浅字。
-        p.setPen(QApplication::palette().color(QPalette::WindowText));
-        const int lineH = side / 2;
-        p.drawText(QRect(side + gap, 0, textW, lineH), Qt::AlignLeft | Qt::AlignVCenter, upStr);
-        p.drawText(QRect(side + gap, lineH, textW, lineH), Qt::AlignLeft | Qt::AlignVCenter, downStr);
-        p.end();
-        m_tray.setIcon(QIcon(canvas));
-        return;
-    }
-#endif
-    m_tray.setIcon(QIcon(icon));
+    QPainter p(&pm);
+    p.setCompositionMode(QPainter::CompositionMode_SourceIn);
+    p.fillRect(pm.rect(), tint);
+    p.end();
+    m_tray.setIcon(QIcon(pm));
 }
 
 void TrayController::setTraffic(qint64 up, qint64 down)
@@ -144,7 +115,11 @@ void TrayController::setTraffic(qint64 up, qint64 down)
     m_down = down;
     m_upAction->setText(QString("UP: %1").arg(speedText(up)));
     m_downAction->setText(QString("DOWN: %1").arg(speedText(down)));
-    refreshIcon(); // macOS 上把新速率重画到图标右侧
+#if defined(Q_OS_MACOS)
+    // macOS：更新独立菜单栏项的两行真文字（上=上传、下=下载），不动图标本身。
+    macSpeedItemSetSpeed(QStringLiteral("↑ ") + speedTextCompact(up),
+                         QStringLiteral("↓ ") + speedTextCompact(down));
+#endif
 }
 
 void TrayController::notify(const QString &title, const QString &message)

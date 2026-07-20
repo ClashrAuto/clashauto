@@ -106,9 +106,11 @@ if(APPLE)
     # 避免 __block/NSXPCConnection 在 MRR 下的悬垂。
     target_sources(clashauto-cpp PRIVATE
         src/MacHelperClient.mm src/MacHelperClient.h
-        src/MacWindow.mm src/MacWindow.h)
+        src/MacWindow.mm src/MacWindow.h
+        src/MacSpeedItem.mm src/MacSpeedItem.h)
     set_source_files_properties(src/MacHelperClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     set_source_files_properties(src/MacWindow.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_source_files_properties(src/MacSpeedItem.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
     target_link_libraries(clashauto-cpp PRIVATE
         ${SECURITY_FRAMEWORK}
