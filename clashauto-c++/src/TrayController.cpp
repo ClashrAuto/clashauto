@@ -16,9 +16,6 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
 {
     refreshIcon(); // 初始（核心未起）用原色图标
     m_tray.setToolTip("Clash Auto");
-#if defined(Q_OS_MACOS)
-    macSpeedItemInstall(); // 图标旁另开一项显示速率；核心未起时隐藏
-#endif
     connect(&m_tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger && m_window) {
             m_window->showNormal();
@@ -28,6 +25,11 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
     });
     buildMenu();
     m_tray.show();
+#if defined(Q_OS_MACOS)
+    // 必须在 Qt 图标 show() 之后再建速率项：菜单栏按创建先后从左到右排，晚建的在右，
+    // 这样速率就落在图标右侧（而不是左侧）。核心未起时隐藏。
+    macSpeedItemInstall();
+#endif
 }
 
 void TrayController::buildMenu()
