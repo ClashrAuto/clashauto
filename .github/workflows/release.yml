@@ -602,29 +602,12 @@ jobs:
           path: |
             dist/ClashAuto-*-macos-universal.dmg
 
-      - name: Write release notes
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
-        shell: bash
-        env:
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
-        run: printf '%s\n' "$COMMIT_MSG" > release-notes.md
-
-      - name: Upload to GitHub Release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: Clash Auto ${{ env.APP_VERSION }}
-          target_commitish: ${{ github.sha }}
-          # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示），经上一步写盘的
-          # 文件传入。不能用 generate_release_notes：创建 release 时 GitHub 会把「提供的
-          # body + 自动说明」合并，body 里的部分换行被转义成字面 \n；后续 job 的 body_path
-          # 更新又会覆盖掉自动说明——它只留下污染的中间态，纯负作用，故移除。
-          body_path: release-notes.md
-          make_latest: true
-          overwrite_files: true
-          files: |
-            dist/ClashAuto-*
+      # 不再从本 CI 往 GitHub Release 上传 mac DMG：签名+公证的 mac 包由独立仓库
+      # integemjack/schat.build 的 "clashauto macOS (signed)" workflow 构建并 --clobber
+      # 到同一个 "Clash Auto <ver>" latest release。此前本 job 用 overwrite_files:true 传
+      # 同名 dmg，会把 schat.build 的签名包覆盖回未签名版本（mac 客户端 GET /releases/latest
+      # 就会下到未签名包）。故这里只保留上面的 workflow artifact（供该 run 内下载/排查），
+      # 不碰 Release。Windows/Linux 两个 job 仍会创建并维护该 release。
 
   linux:
     name: Linux ${{ matrix.arch }}
