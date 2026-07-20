@@ -19,6 +19,7 @@ struct MacTrayHandlers {
 };
 
 void macTrayInstall(const MacTrayHandlers &handlers);
+void macTraySetIconPng(const void *pngData, long len);        // 用 Qt 的图标 PNG 字节做托盘图标（保证有效）
 void macTraySetStatus(bool tun, bool proxy, bool core);       // 更新菜单项文字 + 核心在跑才显示速率
 void macTraySetSpeed(const QString &up, const QString &down); // 更新两行速率（图标右侧）+ 菜单 UP/DOWN 行
 void macTrayNotify(const QString &title, const QString &message);

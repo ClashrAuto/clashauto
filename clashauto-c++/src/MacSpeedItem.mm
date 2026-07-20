@@ -23,6 +23,17 @@ static NSMenuItem *g_coreItem = nil, *g_proxyItem = nil, *g_tunItem = nil;
 static bool g_core = false;
 static NSString *g_upText = @"0 B/s";
 static NSString *g_downText = @"0 B/s";
+static NSImage *g_icon = nil; // 由 Qt 传入的托盘图标（:/assets/icon.ico 转 PNG）
+
+// 取托盘图标：优先 Qt 传入的，其次 App 图标，都没有则返回 nil（redraw 会画灰块占位）。
+static NSImage *trayIcon()
+{
+    if (g_icon && g_icon.size.width > 0) {
+        return g_icon;
+    }
+    NSImage *appIcon = [NSApp applicationIconImage];
+    return (appIcon && appIcon.size.width > 0) ? appIcon : nil;
+}
 
 // 把「图标 + 两行速率」画进一张恰好等于菜单栏厚度的图。图标固定在最左、离文字 3 个字符，
 // 文字区定宽右对齐——数字长短变化只在定宽区内右对齐，不推动图标，故不抖动。
@@ -34,7 +45,18 @@ static void redrawTray()
     NSStatusBarButton *button = g_item.button;
     const CGFloat thickness = [[NSStatusBar systemStatusBar] thickness];
     const CGFloat iconSide = floor(thickness) - 3.0; // 图标略小于厚度，上下留边
-    NSImage *appIcon = [NSApp applicationIconImage];
+    NSImage *appIcon = trayIcon();
+
+    // 画图标（有效就画，否则画个灰块占位——保证这一项永远可见，绝不透明消失）。
+    void (^drawIcon)(void) = ^{
+        const NSRect ir = NSMakeRect(2.0, (thickness - iconSide) / 2.0, iconSide, iconSide);
+        if (appIcon) {
+            [appIcon drawInRect:ir];
+        } else {
+            [[NSColor systemGrayColor] set];
+            [[NSBezierPath bezierPathWithRoundedRect:ir xRadius:3.0 yRadius:3.0] fill];
+        }
+    };
 
     if (!g_core) {
         // 核心未跑：只画图标（不占速率区，宽度收窄）。
@@ -42,7 +64,7 @@ static void redrawTray()
         NSImage *img = [NSImage imageWithSize:NSMakeSize(w, thickness)
                                       flipped:NO
                                drawingHandler:^BOOL(NSRect /*r*/) {
-            [appIcon drawInRect:NSMakeRect(2.0, (thickness - iconSide) / 2.0, iconSide, iconSide)];
+            drawIcon();
             return YES;
         }];
         button.image = img;
@@ -76,7 +98,7 @@ static void redrawTray()
     NSImage *img = [NSImage imageWithSize:NSMakeSize(totalW, thickness)
                                   flipped:NO
                            drawingHandler:^BOOL(NSRect /*r*/) {
-        [appIcon drawInRect:NSMakeRect(2.0, (thickness - iconSide) / 2.0, iconSide, iconSide)];
+        drawIcon();
         const NSRect tr = NSMakeRect(iconSide + gap, (thickness - att.size.height) / 2.0, textW, att.size.height);
         [att drawInRect:tr];
         return YES;
@@ -121,6 +143,19 @@ void macTrayInstall(const MacTrayHandlers &handlers)
     g_item.menu = menu;
 
     redrawTray(); // 初始只画图标（核心未跑）
+}
+
+void macTraySetIconPng(const void *pngData, long len)
+{
+    if (!pngData || len <= 0) {
+        return;
+    }
+    NSData *d = [NSData dataWithBytes:pngData length:(NSUInteger)len];
+    NSImage *img = [[NSImage alloc] initWithData:d];
+    if (img && img.size.width > 0) {
+        g_icon = img;
+        redrawTray();
+    }
 }
 
 void macTraySetStatus(bool tun, bool proxy, bool core)

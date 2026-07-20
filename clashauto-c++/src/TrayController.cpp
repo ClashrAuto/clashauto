@@ -3,7 +3,9 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QBuffer>
 #include <QColor>
+#include <QIcon>
 #include <QPainter>
 #include <QPixmap>
 
@@ -24,6 +26,19 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
     // macOS 不用 Qt 托盘：改用原生一项（图标在左、两行速率在右、定宽不抖动 + 原生菜单）。
     MacTrayHandlers h{this, &macCbOpen, &macCbCore, &macCbProxy, &macCbTun, &macCbQuit};
     macTrayInstall(h);
+    // 把 Qt 的图标资源（和以前托盘同一张）转 PNG 传给原生层，避免依赖可能为空的
+    // applicationIconImage 导致整项透明「消失」。
+    {
+        const QPixmap pm = QIcon(QStringLiteral(":/assets/icon.ico")).pixmap(64, 64);
+        QByteArray png;
+        QBuffer buf(&png);
+        buf.open(QIODevice::WriteOnly);
+        pm.save(&buf, "PNG");
+        buf.close();
+        if (!png.isEmpty()) {
+            macTraySetIconPng(png.constData(), static_cast<long>(png.size()));
+        }
+    }
     macTraySetStatus(false, false, false);
 #else
     refreshIcon(); // 初始（核心未起）用原色图标
