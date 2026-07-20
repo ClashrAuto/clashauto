@@ -115,6 +115,12 @@ private:
     bool relaunchElevatedForTun();       // 以管理员身份重启自身并带 --tun-elevated；true=已重启（本实例将退出）
     void launchSilentUpdateAndRestart(const QString &installerPath); // 一键更新收尾：静默安装并自动重启
 #endif
+#if defined(Q_OS_MACOS)
+    void refreshMacHelperStatus();       // 刷新设置页「免密助手」状态文字
+    void installMacHelper();             // 注册特权 helper（未批准则引导系统设置并轮询）
+    void uninstallMacHelper();           // 注销特权 helper
+    void startMacHelperApprovalWatch();  // 引导批准后轮询，状态变为已启用时提示
+#endif
 
     ClashService m_service;
     QStackedWidget *m_pages = nullptr;
@@ -151,6 +157,11 @@ private:
     QPushButton *m_coreUpdateBtn = nullptr;    // 「更新内核」按钮（无内核时高亮引导）
     QCheckBox *m_cnAccelCheck = nullptr;       // 设置页「国内加速」勾选框（供 setMirrorEnabled 同步，避免与更新弹窗不同步）
     QCheckBox *m_webProxyCheck = nullptr;      // 设置页「系统代理」勾选框（底部「网页」开关切换时同步，避免「应用」用旧值写回）
+#if defined(Q_OS_MACOS)
+    QLabel *m_helperStatusLabel = nullptr;     // 设置页「免密助手」状态文字
+    QTimer *m_helperApprovalTimer = nullptr;   // 引导批准后轮询状态
+    int m_helperApprovalTicks = 0;
+#endif
     bool m_mirror = false;                     // 下载走国内镜像（对应 config.mirror）
     bool m_coreMissingPrompted = false;        // 避免重复弹「未检测到内核」窗
     QLineEdit *m_ruleFilter = nullptr;   // 规则搜索过滤

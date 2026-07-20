@@ -1262,6 +1262,30 @@ QWidget *MainWindow::buildSettingsPage()
     coreRowLayout->addWidget(coreBtn);
     coreRowLayout->addStretch();
     sysLayout->addWidget(row(QString::fromUtf8("mihomo 内核"), coreRow));
+#if defined(Q_OS_MACOS)
+    // 免密助手（特权 helper）：安装并在系统设置批准后，代理/增强模式全程免密（对标 Surge）
+    auto *helperStatus = new QLabel(sysBody);
+    m_helperStatusLabel = helperStatus;
+    auto *helperInstallBtn = new QPushButton(QString::fromUtf8("安装/启用"));
+    helperInstallBtn->setObjectName("nodeButton");
+    helperInstallBtn->setFixedSize(90, 30);
+    helperInstallBtn->setToolTip(QString::fromUtf8("注册以 root 运行的特权助手；首次需在系统设置→登录项批准一次"));
+    connect(helperInstallBtn, &QPushButton::clicked, this, &MainWindow::installMacHelper);
+    auto *helperRemoveBtn = new QPushButton(QString::fromUtf8("卸载"));
+    helperRemoveBtn->setObjectName("nodeButton");
+    helperRemoveBtn->setFixedSize(70, 30);
+    connect(helperRemoveBtn, &QPushButton::clicked, this, &MainWindow::uninstallMacHelper);
+    auto *helperRow = new QWidget();
+    auto *helperRowLayout = new QHBoxLayout(helperRow);
+    helperRowLayout->setContentsMargins(0, 0, 0, 0);
+    helperRowLayout->setSpacing(10);
+    helperRowLayout->addWidget(helperStatus);
+    helperRowLayout->addWidget(helperInstallBtn);
+    helperRowLayout->addWidget(helperRemoveBtn);
+    helperRowLayout->addStretch();
+    sysLayout->addWidget(row(QString::fromUtf8("免密助手"), helperRow));
+    refreshMacHelperStatus();
+#endif
     addDivider();
     addGroup(QString::fromUtf8("界面"));
     sysLayout->addWidget(row(QString::fromUtf8("主题"), theme));
@@ -4682,6 +4706,82 @@ void MainWindow::onToggleProxyRequested()
         m_webProxyCheck->setChecked(m_core->isProxyEnabled());
     }
 }
+
+#if defined(Q_OS_MACOS)
+void MainWindow::refreshMacHelperStatus()
+{
+    if (!m_helperStatusLabel) {
+        return;
+    }
+    QString text;
+    switch (MacHelper::status()) {
+        case MacHelper::RegStatus::Enabled:          text = QString::fromUtf8("已启用（代理/增强免密）"); break;
+        case MacHelper::RegStatus::RequiresApproval: text = QString::fromUtf8("待批准：请在系统设置→登录项允许"); break;
+        case MacHelper::RegStatus::NotRegistered:    text = QString::fromUtf8("未安装"); break;
+        case MacHelper::RegStatus::NotFound:         text = QString::fromUtf8("不可用（bundle 布局异常）"); break;
+        default:                                     text = QString::fromUtf8("未知"); break;
+    }
+    m_helperStatusLabel->setText(text);
+}
+
+void MainWindow::installMacHelper()
+{
+    QString err;
+    const MacHelper::RegStatus st = MacHelper::registerDaemon(&err);
+    refreshMacHelperStatus();
+    if (st == MacHelper::RegStatus::Enabled) {
+        appendLog(QString::fromUtf8("免密助手已启用"));
+        if (m_tray) {
+            m_tray->notify(QString::fromUtf8("免密助手"),
+                           QString::fromUtf8("已启用，代理/增强模式将不再要求密码"));
+        }
+    } else if (st == MacHelper::RegStatus::RequiresApproval) {
+        MacHelper::openLoginItemsSettings();
+        appendLog(QString::fromUtf8("免密助手需在「系统设置 → 登录项」允许 Clash Auto 的后台项，批准后自动生效"));
+        startMacHelperApprovalWatch();
+    } else {
+        appendLog(QString::fromUtf8("免密助手安装失败：%1").arg(err));
+    }
+}
+
+void MainWindow::uninstallMacHelper()
+{
+    QString err;
+    if (MacHelper::unregisterDaemon(&err)) {
+        appendLog(QString::fromUtf8("免密助手已卸载"));
+    } else {
+        appendLog(QString::fromUtf8("免密助手卸载失败：%1").arg(err));
+    }
+    if (m_helperApprovalTimer) {
+        m_helperApprovalTimer->stop();
+    }
+    refreshMacHelperStatus();
+}
+
+void MainWindow::startMacHelperApprovalWatch()
+{
+    // 引导用户去系统设置批准后，我们收不到回调——轮询状态，变为已启用即提示（最多盯 ~2 分钟）
+    if (!m_helperApprovalTimer) {
+        m_helperApprovalTimer = new QTimer(this);
+        m_helperApprovalTimer->setInterval(2000);
+        connect(m_helperApprovalTimer, &QTimer::timeout, this, [this] {
+            refreshMacHelperStatus();
+            if (MacHelper::status() == MacHelper::RegStatus::Enabled) {
+                m_helperApprovalTimer->stop();
+                appendLog(QString::fromUtf8("免密助手已获批准并启用"));
+                if (m_tray) {
+                    m_tray->notify(QString::fromUtf8("免密助手"),
+                                   QString::fromUtf8("已启用，现在可开启增强模式（免密）"));
+                }
+            } else if (++m_helperApprovalTicks >= 60) {
+                m_helperApprovalTimer->stop();
+            }
+        });
+    }
+    m_helperApprovalTicks = 0;
+    m_helperApprovalTimer->start();
+}
+#endif
 
 #if defined(Q_OS_WIN)
 bool MainWindow::isProcessElevated()
