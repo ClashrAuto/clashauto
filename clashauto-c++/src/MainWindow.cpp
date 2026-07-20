@@ -1,6 +1,7 @@
 ﻿#include "MainWindow.h"
 #if defined(Q_OS_MACOS)
 #include "MacHelperClient.h" // 开启增强(TUN)时确保特权 helper 已就绪并以 root 起核心
+#include "MacWindow.h"       // 系统标题栏透明 + 内容铺满整窗（标题栏与背景同色）
 #endif
 
 #include <QAbstractItemView>
@@ -4630,6 +4631,11 @@ void MainWindow::applyTitleBarColor()
     // 标题文字颜色
     const COLORREF text = light ? RGB(0x33, 0x33, 0x33) : RGB(0xEE, 0xEE, 0xEE);
     DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
+#elif defined(Q_OS_MACOS)
+    // 让系统标题栏透明、内容铺满整窗：标题栏区域透出内容底色（浅 #eee / 深 #222），
+    // 与背景同色；内容随之上移，页面顶部贴近窗口上边缘（仅剩右栏 10px 内边距）。
+    const bool light = (m_theme == "white");
+    configureMacTitleBar(winId(), light ? QColor(0xEE, 0xEE, 0xEE) : QColor(0x22, 0x22, 0x22));
 #endif
 }
 

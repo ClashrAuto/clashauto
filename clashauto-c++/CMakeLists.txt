@@ -99,18 +99,24 @@ if(APPLE)
     find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
     find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
     find_library(SERVICEMANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)
+    # AppKit：把系统标题栏做成透明 + 内容铺满整窗（标题栏与背景同色，内容上移贴顶）。
+    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
 
     # 应用侧特权 helper 客户端（SMAppService 注册 + XPC）。ARC 省心管理 Obj-C 对象生命周期，
     # 避免 __block/NSXPCConnection 在 MRR 下的悬垂。
-    target_sources(clashauto-cpp PRIVATE src/MacHelperClient.mm src/MacHelperClient.h)
+    target_sources(clashauto-cpp PRIVATE
+        src/MacHelperClient.mm src/MacHelperClient.h
+        src/MacWindow.mm src/MacWindow.h)
     set_source_files_properties(src/MacHelperClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_source_files_properties(src/MacWindow.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
     target_link_libraries(clashauto-cpp PRIVATE
         ${SECURITY_FRAMEWORK}
         ${SYSTEMCONFIGURATION_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
-        ${SERVICEMANAGEMENT_FRAMEWORK})
+        ${SERVICEMANAGEMENT_FRAMEWORK}
+        ${APPKIT_FRAMEWORK})
 
     # 特权 helper（以 root 运行的 launchd daemon）：独立可执行，只依赖 Foundation（NSXPC）。
     # 继承全局 CMAKE_OSX_ARCHITECTURES / DEPLOYMENT_TARGET，故 CI 里同样是 universal。
