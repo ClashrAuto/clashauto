@@ -79,9 +79,10 @@ int main(int argc, char *argv[])
         if (args.contains("--mac-helper-register")) {
             QString err;
             const MacHelper::RegStatus s = MacHelper::registerDaemon(&err);
-            QTextStream(stdout) << "status=" << statusName(s);
-            if (!err.isEmpty()) QTextStream(stdout) << " error=" << err;
-            QTextStream(stdout) << Qt::endl;
+            QTextStream out(stdout); // 具名 lvalue：临时 QTextStream 上直接 << Qt::endl 不合法
+            out << "status=" << statusName(s);
+            if (!err.isEmpty()) out << " error=" << err;
+            out << Qt::endl;
             return s == MacHelper::RegStatus::Enabled ? 0 : 1;
         }
         if (args.contains("--mac-helper-unregister")) {
