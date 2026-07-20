@@ -70,7 +70,7 @@ private:
     bool m_tunEnabled = false;
     bool m_sysproxyActive = false; // 本会话是否真的应用过系统代理：stopProxy 据此跳过无谓的还原动作
 #if defined(Q_OS_MACOS)
-    void *m_macAuthRef = nullptr;      // 实为 AuthorizationRef；用 void* 避免在头文件引入 Security 头
+    const void *m_macAuthRef = nullptr; // 实为 AuthorizationRef(=const AuthorizationOpaqueRef*)；const void* 避免引 Security 头且不丢 const
     bool m_helperCoreRunning = false;  // 核心是否由特权 helper（root）启动（TUN 依赖此）
     QTimer *m_coreLogTimer = nullptr;  // tail core.log 的定时器（helper 拥有核心时的日志来源）
     QString m_coreLogPath;
