@@ -3122,6 +3122,14 @@ void MainWindow::showUpdateDialog()
                     launchSilentUpdateAndRestart(savePath);
                     return;
                 }
+#elif defined(Q_OS_MACOS)
+                // 一键更新：挂载 DMG → ditto 覆盖当前 .app → 卸载 → 自动重启（新版签名+公证）。
+                // 增强/网页开关每次切换已落盘（config 的 use:/web:），重启后按其自动恢复。
+                if (name.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive)) {
+                    appendLog(QString::fromUtf8("下载完成，正在安装并自动重启: %1").arg(savePath));
+                    launchSilentUpdateAndRestartMac(savePath);
+                    return;
+                }
 #endif
                 appendLog(QString::fromUtf8("下载完成，启动安装并退出: %1").arg(savePath));
                 QDesktopServices::openUrl(QUrl::fromLocalFile(savePath)); // 启动安装包 / 打开文件
@@ -4896,6 +4904,83 @@ void MainWindow::launchSilentUpdateAndRestart(const QString &installerPath)
         // 守护进程起不来：退回旧行为——打开安装包由用户手动安装
         appendLog(QString::fromUtf8("自动安装启动失败（错误码 %1），已打开安装包请手动安装").arg(GetLastError()));
         QDesktopServices::openUrl(QUrl::fromLocalFile(installerPath));
+        qApp->quit();
+    }
+}
+#endif
+
+#if defined(Q_OS_MACOS)
+void MainWindow::launchSilentUpdateAndRestartMac(const QString &dmgPath)
+{
+    // 一键更新收尾：写一个分离运行的 shell 脚本——等本进程退出 → 挂载 DMG → ditto 覆盖当前
+    // .app 包 → 卸载 → 去隔离标记 → 重新拉起新版。增强/网页开关每次切换已落盘（config 的
+    // use:/web:），新实例启动时自动恢复。
+    // 当前 .app 路径：applicationDirPath = <bundle>.app/Contents/MacOS，上溯两级得包根。
+    QDir dir(QCoreApplication::applicationDirPath());
+    dir.cdUp(); // Contents
+    dir.cdUp(); // <bundle>.app
+    const QString appBundle = dir.absolutePath();
+    if (!appBundle.endsWith(QStringLiteral(".app"))) {
+        // 非打包运行（开发目录）：没有可替换的 .app，退回打开 DMG 手动安装
+        appendLog(QString::fromUtf8("非 .app 方式运行，改为打开安装包手动安装"));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(dmgPath));
+        qApp->quit();
+        return;
+    }
+
+    // shell 单引号转义：整体包成 '...'，内嵌单引号写成 '\'' 收尾再续。
+    const auto shq = [](const QString &s) {
+        QString r = s;
+        r.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+        return QLatin1Char('\'') + r + QLatin1Char('\'');
+    };
+
+    // do_replace 只做「挂载 DMG → ditto 覆盖 .app → 卸载」这一步。普通身份先试；失败（如
+    // /Applications 里的包归 root）就用 osascript 以管理员身份只重跑 do_replace（`$0 replace`）。
+    // 关键：等待旧进程退出、去隔离、open 重启这些都留在普通身份实例里做——绝不能让 open 跑在
+    // 管理员(root)身份下，否则新 app 会以 root 启动。
+    const QString script = QStringLiteral(
+        "#!/bin/sh\n"
+        "PID=%1\n"
+        "DMG=%2\n"
+        "APP=%3\n"
+        "do_replace() {\n"
+        "  MNT=$(mktemp -d /tmp/clashauto-upd.XXXXXX)\n"
+        "  hdiutil attach \"$DMG\" -nobrowse -noverify -mountpoint \"$MNT\" >/dev/null 2>&1 || return 2\n"
+        "  SRC=$(ls -d \"$MNT\"/*.app 2>/dev/null | head -n1)\n"
+        "  RC=1\n"
+        "  if [ -n \"$SRC\" ] && rm -rf \"$APP\" 2>/dev/null && ditto \"$SRC\" \"$APP\" 2>/dev/null; then RC=0; fi\n"
+        "  hdiutil detach \"$MNT\" >/dev/null 2>&1\n"
+        "  return $RC\n"
+        "}\n"
+        "if [ \"$1\" = replace ]; then do_replace; exit $?; fi\n"
+        "i=0; while kill -0 \"$PID\" 2>/dev/null; do sleep 0.5; i=$((i+1)); [ $i -ge 120 ] && break; done\n"
+        "if ! do_replace; then\n"
+        "  osascript -e \"do shell script \\\"/bin/sh '$0' replace\\\" with administrator privileges\" || { open \"$DMG\"; exit 1; }\n"
+        "fi\n"
+        "xattr -dr com.apple.quarantine \"$APP\" 2>/dev/null\n"
+        "open -n \"$APP\"\n"
+        "rm -f \"$0\"\n")
+        .arg(QString::number(QCoreApplication::applicationPid()), shq(dmgPath), shq(appBundle));
+
+    const QString scriptPath = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                   .filePath(QStringLiteral("clashauto-update.sh"));
+    QFile f(scriptPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        appendLog(QString::fromUtf8("无法写更新脚本，改为打开安装包手动安装"));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(dmgPath));
+        qApp->quit();
+        return;
+    }
+    f.write(script.toUtf8());
+    f.close();
+
+    // 分离启动：脱离本进程，本进程退出后脚本继续跑（等待→安装→重启）。
+    if (QProcess::startDetached(QStringLiteral("/bin/sh"), {scriptPath})) {
+        qApp->quit(); // aboutToQuit 停核心并还原系统代理，脚本随后接手安装+重启
+    } else {
+        appendLog(QString::fromUtf8("自动安装启动失败，已打开安装包请手动安装"));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(dmgPath));
         qApp->quit();
     }
 }

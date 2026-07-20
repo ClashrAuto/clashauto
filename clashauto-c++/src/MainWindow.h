@@ -116,6 +116,7 @@ private:
     void launchSilentUpdateAndRestart(const QString &installerPath); // 一键更新收尾：静默安装并自动重启
 #endif
 #if defined(Q_OS_MACOS)
+    void launchSilentUpdateAndRestartMac(const QString &dmgPath); // 一键更新收尾：挂载 DMG 覆盖 .app 并自动重启
     void refreshMacHelperStatus();       // 刷新设置页「免密助手」状态文字
     void installMacHelper();             // 注册特权 helper（未批准则引导系统设置并轮询）
     void uninstallMacHelper();           // 注销特权 helper
