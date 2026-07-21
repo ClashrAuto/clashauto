@@ -121,6 +121,13 @@ target_compile_options(clashauto-qml PRIVATE
 # GUI 子系统：Windows 上不弹控制台窗口
 set_target_properties(clashauto-qml PROPERTIES WIN32_EXECUTABLE ON)
 
+# 产物文件名统一为 clashauto（去掉历史上的 -qml/-cpp 后缀）：Windows→clashauto.exe，
+# Linux→clashauto。CMake 目标名仍叫 clashauto-qml（内部标识，不影响产物名）。
+# macOS 例外——见下方 if(APPLE)，输出「Clash Auto.app」bundle。
+if(NOT APPLE)
+    set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME clashauto)
+endif()
+
 # macOS：打成「Clash Auto.app」bundle；Clashr-Auto 运行时资源由 CI 放进 Contents/Clashr-Auto。
 if(APPLE)
     set_target_properties(clashauto-qml PROPERTIES

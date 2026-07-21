@@ -8,6 +8,7 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -125,12 +126,34 @@ int UpdateController::recommendedIndex(int tab) const
     if (assets.isEmpty()) {
         return -1;
     }
-    for (int i = 0; i < assets.size(); ++i) {
-        if (assets.at(i).name.contains(QStringLiteral("setup"), Qt::CaseInsensitive)) {
-            return i;
+    // 各平台优先推荐「可一键安装」的资源，且必须**确定性**选取——不能只 return 0，因为
+    // GitHub 资源顺序 = 上传顺序，Linux 上 0 号常是 .tar.gz，「一键更新」就变成下压缩包 →
+    // 弹归档管理器 → 退出，什么都没装（即 Linux「更新错乱」的根因）。按扩展名精确择优：
+    //   Windows → NSIS 安装器（名含 setup 的 .exe，支持 /S 静默安装 + 自动重启）
+    //   Linux   → .deb（openUrl 交系统包管理器安装）
+    //   macOS   → .dmg（launchSilentUpdateAndRestartMac 覆盖 .app + 自动重启）
+    auto firstMatch = [&assets](auto pred) -> int {
+        for (int i = 0; i < assets.size(); ++i) {
+            if (pred(assets.at(i).name)) {
+                return i;
+            }
         }
+        return -1;
+    };
+#if defined(Q_OS_WIN)
+    int idx = firstMatch([](const QString &n) {
+        return n.contains(QStringLiteral("setup"), Qt::CaseInsensitive)
+               && n.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive);
+    });
+    if (idx < 0) {
+        idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive); });
     }
-    return 0;
+#elif defined(Q_OS_MACOS)
+    int idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive); });
+#else
+    int idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".deb"), Qt::CaseInsensitive); });
+#endif
+    return idx >= 0 ? idx : 0;
 }
 
 void UpdateController::fetchReleases()
@@ -523,7 +546,11 @@ void UpdateController::launchSilentUpdateAndRestart(const QString &installerPath
     } else {
         installRoot = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath(QStringLiteral("ClashAuto"));
     }
-    const QString newExe = QDir(installRoot).filePath(QStringLiteral("clashauto-c++/clashauto-cpp.exe"));
+    // 重启新装的应用：产物统一名为 clashauto.exe（去掉历史 -qml/-cpp 后缀）。用当前进程的
+    // 可执行名动态取，避免再因二进制改名而重启到不存在的 exe（旧代码写死 clashauto-cpp.exe，
+    // QML 版产物却是 clashauto-qml.exe → 更新后无法自动重启，即 Windows「更新错乱」的根因）。
+    const QString exeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+    const QString newExe = QDir(installRoot).filePath(QStringLiteral("clashauto-c++/") + exeName);
     const auto psq = [](const QString &s) {
         QString r = QDir::toNativeSeparators(s);
         r.replace(QLatin1Char('\''), QStringLiteral("''"));

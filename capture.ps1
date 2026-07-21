@@ -24,7 +24,7 @@ public class Cap {
 "@
 Add-Type $sig
 $TOP=[IntPtr](-1); $NOTOP=[IntPtr](-2); $SWP=0x0003
-$h = (Get-Process clashauto-cpp -ErrorAction SilentlyContinue | Select-Object -First 1).MainWindowHandle
+$h = (Get-Process clashauto -ErrorAction SilentlyContinue | Select-Object -First 1).MainWindowHandle
 if(-not $h){ "NO WINDOW"; exit 1 }
 
 # robust foreground: attach to foreground thread's input queue
