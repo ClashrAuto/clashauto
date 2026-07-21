@@ -6,6 +6,9 @@
 #include "../SubscriptionStore.h"
 #include "Version.h"
 
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QVariantMap>
 #include <QWindow>
 
 #if defined(Q_OS_MACOS)
@@ -155,6 +158,47 @@ void QmlBridge::clearConnections()
 {
     if (m_clash)
         m_clash->clearConnections();
+}
+
+void QmlBridge::refreshConnections()
+{
+    if (!m_clash)
+        return;
+    // 异步拉取（复用 ClashService::fetchConnections）；映射成 QML 友好的 {type,host,chain,下载,上传,id,offline}。
+    m_clash->fetchConnections([this](QJsonArray arr) {
+        QVariantList list;
+        for (const QJsonValue &v : arr) {
+            const QJsonObject c = v.toObject();
+            const QJsonObject meta = c.value("metadata").toObject();
+            QString host = meta.value("host").toString();
+            if (host.isEmpty())
+                host = meta.value("destinationIP").toString();
+            QString type = meta.value("type").toString();
+            if (type.isEmpty())
+                type = meta.value("network").toString();
+            const QJsonArray chains = c.value("chains").toArray();
+            const QString chain0 = chains.isEmpty() ? QStringLiteral("-") : chains.first().toString();
+            QVariantMap m;
+            m["type"] = type;
+            m["host"] = host;
+            m["chain"] = chain0;
+            m["download"] = speedText(c.value("download").toInteger());
+            m["upload"] = speedText(c.value("upload").toInteger());
+            m["id"] = c.value("id").toString();
+            m["offline"] = c.value("offline").toBool();
+            list.append(m);
+        }
+        m_connections = list;
+        emit connectionsListChanged();
+    });
+}
+
+void QmlBridge::closeConnectionById(const QString &id)
+{
+    if (!m_clash)
+        return;
+    m_clash->closeConnection(id);
+    refreshConnections();
 }
 
 void QmlBridge::applyMacGlass(QWindow *window, bool dark)

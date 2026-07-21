@@ -79,6 +79,22 @@
                 },
                 {
                     "access": "public",
+                    "name": "refreshConnections",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "id",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "closeConnectionById",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
                     "arguments": [
                         {
                             "name": "window",
@@ -222,10 +238,24 @@
                     "user": false
                 },
                 {
-                    "constant": true,
+                    "constant": false,
                     "designable": true,
                     "final": false,
                     "index": 9,
+                    "name": "connections",
+                    "notify": "connectionsListChanged",
+                    "read": "connections",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QVariantList",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 10,
                     "name": "nodeModel",
                     "read": "nodeModel",
                     "required": false,
@@ -238,7 +268,7 @@
                     "constant": false,
                     "designable": true,
                     "final": false,
-                    "index": 10,
+                    "index": 11,
                     "name": "selectedNode",
                     "notify": "nodesChanged",
                     "read": "selectedNode",
@@ -252,7 +282,7 @@
                     "constant": false,
                     "designable": true,
                     "final": false,
-                    "index": 11,
+                    "index": 12,
                     "name": "groups",
                     "notify": "groupsChanged",
                     "read": "groups",
@@ -266,7 +296,7 @@
                     "constant": false,
                     "designable": true,
                     "final": false,
-                    "index": 12,
+                    "index": 13,
                     "name": "selectedGroup",
                     "notify": "groupsChanged",
                     "read": "selectedGroup",
@@ -280,7 +310,7 @@
                     "constant": false,
                     "designable": true,
                     "final": false,
-                    "index": 13,
+                    "index": 14,
                     "name": "speedTesting",
                     "notify": "speedTestingChanged",
                     "read": "speedTesting",
@@ -294,7 +324,7 @@
                     "constant": false,
                     "designable": true,
                     "final": false,
-                    "index": 14,
+                    "index": 15,
                     "name": "mode",
                     "notify": "modeChanged",
                     "read": "mode",
@@ -308,7 +338,7 @@
                     "constant": false,
                     "designable": true,
                     "final": false,
-                    "index": 15,
+                    "index": 16,
                     "name": "lastLog",
                     "notify": "logAppended",
                     "read": "lastLog",
@@ -322,7 +352,7 @@
                     "constant": true,
                     "designable": true,
                     "final": false,
-                    "index": 16,
+                    "index": 17,
                     "name": "version",
                     "read": "version",
                     "required": false,
@@ -335,7 +365,7 @@
                     "constant": true,
                     "designable": true,
                     "final": false,
-                    "index": 17,
+                    "index": 18,
                     "name": "initialDark",
                     "read": "initialDark",
                     "required": false,
@@ -360,6 +390,11 @@
                 {
                     "access": "public",
                     "name": "connectionsChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "connectionsListChanged",
                     "returnType": "void"
                 },
                 {

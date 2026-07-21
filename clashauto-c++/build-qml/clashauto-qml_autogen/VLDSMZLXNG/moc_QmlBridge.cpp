@@ -44,6 +44,7 @@ static constexpr auto qt_meta_stringdata_CLASSQmlBridgeENDCLASS = QtMocHelpers::
     "",
     "trafficChanged",
     "connectionsChanged",
+    "connectionsListChanged",
     "nodesChanged",
     "groupsChanged",
     "speedTestingChanged",
@@ -64,6 +65,9 @@ static constexpr auto qt_meta_stringdata_CLASSQmlBridgeENDCLASS = QtMocHelpers::
     "setNodeFilter",
     "filter",
     "clearConnections",
+    "refreshConnections",
+    "closeConnectionById",
+    "id",
     "applyMacGlass",
     "QWindow*",
     "window",
@@ -77,6 +81,7 @@ static constexpr auto qt_meta_stringdata_CLASSQmlBridgeENDCLASS = QtMocHelpers::
     "downBytes",
     "connectionsCount",
     "totalDownText",
+    "connections",
     "nodeModel",
     "NodeListModel*",
     "selectedNode",
@@ -90,55 +95,60 @@ static constexpr auto qt_meta_stringdata_CLASSQmlBridgeENDCLASS = QtMocHelpers::
 );
 #else  // !QT_MOC_HAS_STRING_DATA
 struct qt_meta_stringdata_CLASSQmlBridgeENDCLASS_t {
-    uint offsetsAndSizes[96];
+    uint offsetsAndSizes[106];
     char stringdata0[10];
     char stringdata1[14];
     char stringdata2[1];
     char stringdata3[15];
     char stringdata4[19];
-    char stringdata5[13];
-    char stringdata6[14];
-    char stringdata7[20];
-    char stringdata8[12];
+    char stringdata5[23];
+    char stringdata6[13];
+    char stringdata7[14];
+    char stringdata8[20];
     char stringdata9[12];
-    char stringdata10[5];
-    char stringdata11[11];
-    char stringdata12[12];
-    char stringdata13[10];
-    char stringdata14[8];
+    char stringdata10[12];
+    char stringdata11[5];
+    char stringdata12[11];
+    char stringdata13[12];
+    char stringdata14[10];
     char stringdata15[8];
-    char stringdata16[11];
-    char stringdata17[8];
-    char stringdata18[12];
-    char stringdata19[6];
-    char stringdata20[13];
+    char stringdata16[8];
+    char stringdata17[11];
+    char stringdata18[8];
+    char stringdata19[12];
+    char stringdata20[6];
     char stringdata21[13];
-    char stringdata22[14];
-    char stringdata23[7];
-    char stringdata24[17];
-    char stringdata25[14];
-    char stringdata26[9];
-    char stringdata27[7];
-    char stringdata28[5];
-    char stringdata29[12];
-    char stringdata30[13];
-    char stringdata31[11];
-    char stringdata32[7];
-    char stringdata33[9];
-    char stringdata34[8];
-    char stringdata35[10];
-    char stringdata36[17];
-    char stringdata37[14];
-    char stringdata38[10];
-    char stringdata39[15];
-    char stringdata40[13];
-    char stringdata41[7];
-    char stringdata42[14];
-    char stringdata43[13];
-    char stringdata44[5];
-    char stringdata45[8];
-    char stringdata46[8];
-    char stringdata47[12];
+    char stringdata22[13];
+    char stringdata23[14];
+    char stringdata24[7];
+    char stringdata25[17];
+    char stringdata26[19];
+    char stringdata27[20];
+    char stringdata28[3];
+    char stringdata29[14];
+    char stringdata30[9];
+    char stringdata31[7];
+    char stringdata32[5];
+    char stringdata33[12];
+    char stringdata34[13];
+    char stringdata35[11];
+    char stringdata36[7];
+    char stringdata37[9];
+    char stringdata38[8];
+    char stringdata39[10];
+    char stringdata40[17];
+    char stringdata41[14];
+    char stringdata42[12];
+    char stringdata43[10];
+    char stringdata44[15];
+    char stringdata45[13];
+    char stringdata46[7];
+    char stringdata47[14];
+    char stringdata48[13];
+    char stringdata49[5];
+    char stringdata50[8];
+    char stringdata51[8];
+    char stringdata52[12];
 };
 #define QT_MOC_LITERAL(ofs, len) \
     uint(sizeof(qt_meta_stringdata_CLASSQmlBridgeENDCLASS_t::offsetsAndSizes) + ofs), len 
@@ -149,55 +159,61 @@ Q_CONSTINIT static const qt_meta_stringdata_CLASSQmlBridgeENDCLASS_t qt_meta_str
         QT_MOC_LITERAL(24, 0),  // ""
         QT_MOC_LITERAL(25, 14),  // "trafficChanged"
         QT_MOC_LITERAL(40, 18),  // "connectionsChanged"
-        QT_MOC_LITERAL(59, 12),  // "nodesChanged"
-        QT_MOC_LITERAL(72, 13),  // "groupsChanged"
-        QT_MOC_LITERAL(86, 19),  // "speedTestingChanged"
-        QT_MOC_LITERAL(106, 11),  // "modeChanged"
-        QT_MOC_LITERAL(118, 11),  // "logAppended"
-        QT_MOC_LITERAL(130, 4),  // "line"
-        QT_MOC_LITERAL(135, 10),  // "toggleCore"
-        QT_MOC_LITERAL(146, 11),  // "toggleProxy"
-        QT_MOC_LITERAL(158, 9),  // "toggleTun"
-        QT_MOC_LITERAL(168, 7),  // "setMode"
-        QT_MOC_LITERAL(176, 7),  // "display"
-        QT_MOC_LITERAL(184, 10),  // "selectNode"
-        QT_MOC_LITERAL(195, 7),  // "rawName"
-        QT_MOC_LITERAL(203, 11),  // "selectGroup"
-        QT_MOC_LITERAL(215, 5),  // "group"
-        QT_MOC_LITERAL(221, 12),  // "refreshNodes"
-        QT_MOC_LITERAL(234, 12),  // "runSpeedTest"
-        QT_MOC_LITERAL(247, 13),  // "setNodeFilter"
-        QT_MOC_LITERAL(261, 6),  // "filter"
-        QT_MOC_LITERAL(268, 16),  // "clearConnections"
-        QT_MOC_LITERAL(285, 13),  // "applyMacGlass"
-        QT_MOC_LITERAL(299, 8),  // "QWindow*"
-        QT_MOC_LITERAL(308, 6),  // "window"
-        QT_MOC_LITERAL(315, 4),  // "dark"
-        QT_MOC_LITERAL(320, 11),  // "coreRunning"
-        QT_MOC_LITERAL(332, 12),  // "proxyEnabled"
-        QT_MOC_LITERAL(345, 10),  // "tunEnabled"
-        QT_MOC_LITERAL(356, 6),  // "upText"
-        QT_MOC_LITERAL(363, 8),  // "downText"
-        QT_MOC_LITERAL(372, 7),  // "upBytes"
-        QT_MOC_LITERAL(380, 9),  // "downBytes"
-        QT_MOC_LITERAL(390, 16),  // "connectionsCount"
-        QT_MOC_LITERAL(407, 13),  // "totalDownText"
-        QT_MOC_LITERAL(421, 9),  // "nodeModel"
-        QT_MOC_LITERAL(431, 14),  // "NodeListModel*"
-        QT_MOC_LITERAL(446, 12),  // "selectedNode"
-        QT_MOC_LITERAL(459, 6),  // "groups"
-        QT_MOC_LITERAL(466, 13),  // "selectedGroup"
-        QT_MOC_LITERAL(480, 12),  // "speedTesting"
-        QT_MOC_LITERAL(493, 4),  // "mode"
-        QT_MOC_LITERAL(498, 7),  // "lastLog"
-        QT_MOC_LITERAL(506, 7),  // "version"
-        QT_MOC_LITERAL(514, 11)   // "initialDark"
+        QT_MOC_LITERAL(59, 22),  // "connectionsListChanged"
+        QT_MOC_LITERAL(82, 12),  // "nodesChanged"
+        QT_MOC_LITERAL(95, 13),  // "groupsChanged"
+        QT_MOC_LITERAL(109, 19),  // "speedTestingChanged"
+        QT_MOC_LITERAL(129, 11),  // "modeChanged"
+        QT_MOC_LITERAL(141, 11),  // "logAppended"
+        QT_MOC_LITERAL(153, 4),  // "line"
+        QT_MOC_LITERAL(158, 10),  // "toggleCore"
+        QT_MOC_LITERAL(169, 11),  // "toggleProxy"
+        QT_MOC_LITERAL(181, 9),  // "toggleTun"
+        QT_MOC_LITERAL(191, 7),  // "setMode"
+        QT_MOC_LITERAL(199, 7),  // "display"
+        QT_MOC_LITERAL(207, 10),  // "selectNode"
+        QT_MOC_LITERAL(218, 7),  // "rawName"
+        QT_MOC_LITERAL(226, 11),  // "selectGroup"
+        QT_MOC_LITERAL(238, 5),  // "group"
+        QT_MOC_LITERAL(244, 12),  // "refreshNodes"
+        QT_MOC_LITERAL(257, 12),  // "runSpeedTest"
+        QT_MOC_LITERAL(270, 13),  // "setNodeFilter"
+        QT_MOC_LITERAL(284, 6),  // "filter"
+        QT_MOC_LITERAL(291, 16),  // "clearConnections"
+        QT_MOC_LITERAL(308, 18),  // "refreshConnections"
+        QT_MOC_LITERAL(327, 19),  // "closeConnectionById"
+        QT_MOC_LITERAL(347, 2),  // "id"
+        QT_MOC_LITERAL(350, 13),  // "applyMacGlass"
+        QT_MOC_LITERAL(364, 8),  // "QWindow*"
+        QT_MOC_LITERAL(373, 6),  // "window"
+        QT_MOC_LITERAL(380, 4),  // "dark"
+        QT_MOC_LITERAL(385, 11),  // "coreRunning"
+        QT_MOC_LITERAL(397, 12),  // "proxyEnabled"
+        QT_MOC_LITERAL(410, 10),  // "tunEnabled"
+        QT_MOC_LITERAL(421, 6),  // "upText"
+        QT_MOC_LITERAL(428, 8),  // "downText"
+        QT_MOC_LITERAL(437, 7),  // "upBytes"
+        QT_MOC_LITERAL(445, 9),  // "downBytes"
+        QT_MOC_LITERAL(455, 16),  // "connectionsCount"
+        QT_MOC_LITERAL(472, 13),  // "totalDownText"
+        QT_MOC_LITERAL(486, 11),  // "connections"
+        QT_MOC_LITERAL(498, 9),  // "nodeModel"
+        QT_MOC_LITERAL(508, 14),  // "NodeListModel*"
+        QT_MOC_LITERAL(523, 12),  // "selectedNode"
+        QT_MOC_LITERAL(536, 6),  // "groups"
+        QT_MOC_LITERAL(543, 13),  // "selectedGroup"
+        QT_MOC_LITERAL(557, 12),  // "speedTesting"
+        QT_MOC_LITERAL(570, 4),  // "mode"
+        QT_MOC_LITERAL(575, 7),  // "lastLog"
+        QT_MOC_LITERAL(583, 7),  // "version"
+        QT_MOC_LITERAL(591, 11)   // "initialDark"
     },
     "QmlBridge",
     "statusChanged",
     "",
     "trafficChanged",
     "connectionsChanged",
+    "connectionsListChanged",
     "nodesChanged",
     "groupsChanged",
     "speedTestingChanged",
@@ -218,6 +234,9 @@ Q_CONSTINIT static const qt_meta_stringdata_CLASSQmlBridgeENDCLASS_t qt_meta_str
     "setNodeFilter",
     "filter",
     "clearConnections",
+    "refreshConnections",
+    "closeConnectionById",
+    "id",
     "applyMacGlass",
     "QWindow*",
     "window",
@@ -231,6 +250,7 @@ Q_CONSTINIT static const qt_meta_stringdata_CLASSQmlBridgeENDCLASS_t qt_meta_str
     "downBytes",
     "connectionsCount",
     "totalDownText",
+    "connections",
     "nodeModel",
     "NodeListModel*",
     "selectedNode",
@@ -252,35 +272,38 @@ Q_CONSTINIT static const uint qt_meta_data_CLASSQmlBridgeENDCLASS[] = {
       11,       // revision
        0,       // classname
        0,    0, // classinfo
-      19,   14, // methods
-      18,  161, // properties
+      22,   14, // methods
+      19,  184, // properties
        0,    0, // enums/sets
        0,    0, // constructors
        0,       // flags
-       8,       // signalCount
+       9,       // signalCount
 
  // signals: name, argc, parameters, tag, flags, initial metatype offsets
-       1,    0,  128,    2, 0x06,   19 /* Public */,
-       3,    0,  129,    2, 0x06,   20 /* Public */,
-       4,    0,  130,    2, 0x06,   21 /* Public */,
-       5,    0,  131,    2, 0x06,   22 /* Public */,
-       6,    0,  132,    2, 0x06,   23 /* Public */,
-       7,    0,  133,    2, 0x06,   24 /* Public */,
-       8,    0,  134,    2, 0x06,   25 /* Public */,
-       9,    1,  135,    2, 0x06,   26 /* Public */,
+       1,    0,  146,    2, 0x06,   20 /* Public */,
+       3,    0,  147,    2, 0x06,   21 /* Public */,
+       4,    0,  148,    2, 0x06,   22 /* Public */,
+       5,    0,  149,    2, 0x06,   23 /* Public */,
+       6,    0,  150,    2, 0x06,   24 /* Public */,
+       7,    0,  151,    2, 0x06,   25 /* Public */,
+       8,    0,  152,    2, 0x06,   26 /* Public */,
+       9,    0,  153,    2, 0x06,   27 /* Public */,
+      10,    1,  154,    2, 0x06,   28 /* Public */,
 
  // methods: name, argc, parameters, tag, flags, initial metatype offsets
-      11,    0,  138,    2, 0x02,   28 /* Public */,
-      12,    0,  139,    2, 0x02,   29 /* Public */,
-      13,    0,  140,    2, 0x02,   30 /* Public */,
-      14,    1,  141,    2, 0x02,   31 /* Public */,
-      16,    1,  144,    2, 0x02,   33 /* Public */,
-      18,    1,  147,    2, 0x02,   35 /* Public */,
-      20,    0,  150,    2, 0x02,   37 /* Public */,
-      21,    0,  151,    2, 0x02,   38 /* Public */,
-      22,    1,  152,    2, 0x02,   39 /* Public */,
-      24,    0,  155,    2, 0x02,   41 /* Public */,
-      25,    2,  156,    2, 0x02,   42 /* Public */,
+      12,    0,  157,    2, 0x02,   30 /* Public */,
+      13,    0,  158,    2, 0x02,   31 /* Public */,
+      14,    0,  159,    2, 0x02,   32 /* Public */,
+      15,    1,  160,    2, 0x02,   33 /* Public */,
+      17,    1,  163,    2, 0x02,   35 /* Public */,
+      19,    1,  166,    2, 0x02,   37 /* Public */,
+      21,    0,  169,    2, 0x02,   39 /* Public */,
+      22,    0,  170,    2, 0x02,   40 /* Public */,
+      23,    1,  171,    2, 0x02,   41 /* Public */,
+      25,    0,  174,    2, 0x02,   43 /* Public */,
+      26,    0,  175,    2, 0x02,   44 /* Public */,
+      27,    1,  176,    2, 0x02,   45 /* Public */,
+      29,    2,  179,    2, 0x02,   47 /* Public */,
 
  // signals: parameters
     QMetaType::Void,
@@ -290,40 +313,44 @@ Q_CONSTINIT static const uint qt_meta_data_CLASSQmlBridgeENDCLASS[] = {
     QMetaType::Void,
     QMetaType::Void,
     QMetaType::Void,
-    QMetaType::Void, QMetaType::QString,   10,
+    QMetaType::Void,
+    QMetaType::Void, QMetaType::QString,   11,
 
  // methods: parameters
     QMetaType::Void,
     QMetaType::Void,
     QMetaType::Void,
-    QMetaType::Void, QMetaType::QString,   15,
-    QMetaType::Void, QMetaType::QString,   17,
-    QMetaType::Void, QMetaType::QString,   19,
+    QMetaType::Void, QMetaType::QString,   16,
+    QMetaType::Void, QMetaType::QString,   18,
+    QMetaType::Void, QMetaType::QString,   20,
     QMetaType::Void,
     QMetaType::Void,
-    QMetaType::Void, QMetaType::QString,   23,
+    QMetaType::Void, QMetaType::QString,   24,
     QMetaType::Void,
-    QMetaType::Void, 0x80000000 | 26, QMetaType::Bool,   27,   28,
+    QMetaType::Void,
+    QMetaType::Void, QMetaType::QString,   28,
+    QMetaType::Void, 0x80000000 | 30, QMetaType::Bool,   31,   32,
 
  // properties: name, type, flags
-      29, QMetaType::Bool, 0x00015001, uint(0), 0,
-      30, QMetaType::Bool, 0x00015001, uint(0), 0,
-      31, QMetaType::Bool, 0x00015001, uint(0), 0,
-      32, QMetaType::QString, 0x00015001, uint(1), 0,
-      33, QMetaType::QString, 0x00015001, uint(1), 0,
-      34, QMetaType::Double, 0x00015001, uint(1), 0,
-      35, QMetaType::Double, 0x00015001, uint(1), 0,
-      36, QMetaType::Int, 0x00015001, uint(2), 0,
-      37, QMetaType::QString, 0x00015001, uint(2), 0,
-      38, 0x80000000 | 39, 0x00015409, uint(-1), 0,
-      40, QMetaType::QString, 0x00015001, uint(3), 0,
-      41, QMetaType::QStringList, 0x00015001, uint(4), 0,
-      42, QMetaType::QString, 0x00015001, uint(4), 0,
-      43, QMetaType::Bool, 0x00015001, uint(5), 0,
-      44, QMetaType::QString, 0x00015001, uint(6), 0,
-      45, QMetaType::QString, 0x00015001, uint(7), 0,
-      46, QMetaType::QString, 0x00015401, uint(-1), 0,
-      47, QMetaType::Bool, 0x00015401, uint(-1), 0,
+      33, QMetaType::Bool, 0x00015001, uint(0), 0,
+      34, QMetaType::Bool, 0x00015001, uint(0), 0,
+      35, QMetaType::Bool, 0x00015001, uint(0), 0,
+      36, QMetaType::QString, 0x00015001, uint(1), 0,
+      37, QMetaType::QString, 0x00015001, uint(1), 0,
+      38, QMetaType::Double, 0x00015001, uint(1), 0,
+      39, QMetaType::Double, 0x00015001, uint(1), 0,
+      40, QMetaType::Int, 0x00015001, uint(2), 0,
+      41, QMetaType::QString, 0x00015001, uint(2), 0,
+      42, QMetaType::QVariantList, 0x00015001, uint(3), 0,
+      43, 0x80000000 | 44, 0x00015409, uint(-1), 0,
+      45, QMetaType::QString, 0x00015001, uint(4), 0,
+      46, QMetaType::QStringList, 0x00015001, uint(5), 0,
+      47, QMetaType::QString, 0x00015001, uint(5), 0,
+      48, QMetaType::Bool, 0x00015001, uint(6), 0,
+      49, QMetaType::QString, 0x00015001, uint(7), 0,
+      50, QMetaType::QString, 0x00015001, uint(8), 0,
+      51, QMetaType::QString, 0x00015401, uint(-1), 0,
+      52, QMetaType::Bool, 0x00015401, uint(-1), 0,
 
        0        // eod
 };
@@ -353,6 +380,8 @@ Q_CONSTINIT const QMetaObject QmlBridge::staticMetaObject = { {
         QtPrivate::TypeAndForceComplete<int, std::true_type>,
         // property 'totalDownText'
         QtPrivate::TypeAndForceComplete<QString, std::true_type>,
+        // property 'connections'
+        QtPrivate::TypeAndForceComplete<QVariantList, std::true_type>,
         // property 'nodeModel'
         QtPrivate::TypeAndForceComplete<NodeListModel*, std::true_type>,
         // property 'selectedNode'
@@ -378,6 +407,8 @@ Q_CONSTINIT const QMetaObject QmlBridge::staticMetaObject = { {
         // method 'trafficChanged'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
         // method 'connectionsChanged'
+        QtPrivate::TypeAndForceComplete<void, std::false_type>,
+        // method 'connectionsListChanged'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
         // method 'nodesChanged'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
@@ -414,6 +445,11 @@ Q_CONSTINIT const QMetaObject QmlBridge::staticMetaObject = { {
         QtPrivate::TypeAndForceComplete<const QString &, std::false_type>,
         // method 'clearConnections'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
+        // method 'refreshConnections'
+        QtPrivate::TypeAndForceComplete<void, std::false_type>,
+        // method 'closeConnectionById'
+        QtPrivate::TypeAndForceComplete<void, std::false_type>,
+        QtPrivate::TypeAndForceComplete<const QString &, std::false_type>,
         // method 'applyMacGlass'
         QtPrivate::TypeAndForceComplete<void, std::false_type>,
         QtPrivate::TypeAndForceComplete<QWindow *, std::false_type>,
@@ -431,22 +467,25 @@ void QmlBridge::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, v
         case 0: _t->statusChanged(); break;
         case 1: _t->trafficChanged(); break;
         case 2: _t->connectionsChanged(); break;
-        case 3: _t->nodesChanged(); break;
-        case 4: _t->groupsChanged(); break;
-        case 5: _t->speedTestingChanged(); break;
-        case 6: _t->modeChanged(); break;
-        case 7: _t->logAppended((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 8: _t->toggleCore(); break;
-        case 9: _t->toggleProxy(); break;
-        case 10: _t->toggleTun(); break;
-        case 11: _t->setMode((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 12: _t->selectNode((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 13: _t->selectGroup((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 14: _t->refreshNodes(); break;
-        case 15: _t->runSpeedTest(); break;
-        case 16: _t->setNodeFilter((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
-        case 17: _t->clearConnections(); break;
-        case 18: _t->applyMacGlass((*reinterpret_cast< std::add_pointer_t<QWindow*>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<bool>>(_a[2]))); break;
+        case 3: _t->connectionsListChanged(); break;
+        case 4: _t->nodesChanged(); break;
+        case 5: _t->groupsChanged(); break;
+        case 6: _t->speedTestingChanged(); break;
+        case 7: _t->modeChanged(); break;
+        case 8: _t->logAppended((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 9: _t->toggleCore(); break;
+        case 10: _t->toggleProxy(); break;
+        case 11: _t->toggleTun(); break;
+        case 12: _t->setMode((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 13: _t->selectNode((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 14: _t->selectGroup((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 15: _t->refreshNodes(); break;
+        case 16: _t->runSpeedTest(); break;
+        case 17: _t->setNodeFilter((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 18: _t->clearConnections(); break;
+        case 19: _t->refreshConnections(); break;
+        case 20: _t->closeConnectionById((*reinterpret_cast< std::add_pointer_t<QString>>(_a[1]))); break;
+        case 21: _t->applyMacGlass((*reinterpret_cast< std::add_pointer_t<QWindow*>>(_a[1])),(*reinterpret_cast< std::add_pointer_t<bool>>(_a[2]))); break;
         default: ;
         }
     } else if (_c == QMetaObject::IndexOfMethod) {
@@ -474,43 +513,50 @@ void QmlBridge::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, v
         }
         {
             using _t = void (QmlBridge::*)();
-            if (_t _q_method = &QmlBridge::nodesChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
+            if (_t _q_method = &QmlBridge::connectionsListChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
                 *result = 3;
                 return;
             }
         }
         {
             using _t = void (QmlBridge::*)();
-            if (_t _q_method = &QmlBridge::groupsChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
+            if (_t _q_method = &QmlBridge::nodesChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
                 *result = 4;
                 return;
             }
         }
         {
             using _t = void (QmlBridge::*)();
-            if (_t _q_method = &QmlBridge::speedTestingChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
+            if (_t _q_method = &QmlBridge::groupsChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
                 *result = 5;
                 return;
             }
         }
         {
             using _t = void (QmlBridge::*)();
-            if (_t _q_method = &QmlBridge::modeChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
+            if (_t _q_method = &QmlBridge::speedTestingChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
                 *result = 6;
+                return;
+            }
+        }
+        {
+            using _t = void (QmlBridge::*)();
+            if (_t _q_method = &QmlBridge::modeChanged; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
+                *result = 7;
                 return;
             }
         }
         {
             using _t = void (QmlBridge::*)(const QString & );
             if (_t _q_method = &QmlBridge::logAppended; *reinterpret_cast<_t *>(_a[1]) == _q_method) {
-                *result = 7;
+                *result = 8;
                 return;
             }
         }
     } else if (_c == QMetaObject::RegisterPropertyMetaType) {
         switch (_id) {
         default: *reinterpret_cast<int*>(_a[0]) = -1; break;
-        case 9:
+        case 10:
             *reinterpret_cast<int*>(_a[0]) = qRegisterMetaType< NodeListModel* >(); break;
         }
     } else if (_c == QMetaObject::ReadProperty) {
@@ -527,15 +573,16 @@ void QmlBridge::qt_static_metacall(QObject *_o, QMetaObject::Call _c, int _id, v
         case 6: *reinterpret_cast< double*>(_v) = _t->downBytes(); break;
         case 7: *reinterpret_cast< int*>(_v) = _t->connectionsCount(); break;
         case 8: *reinterpret_cast< QString*>(_v) = _t->totalDownText(); break;
-        case 9: *reinterpret_cast< NodeListModel**>(_v) = _t->nodeModel(); break;
-        case 10: *reinterpret_cast< QString*>(_v) = _t->selectedNode(); break;
-        case 11: *reinterpret_cast< QStringList*>(_v) = _t->groups(); break;
-        case 12: *reinterpret_cast< QString*>(_v) = _t->selectedGroup(); break;
-        case 13: *reinterpret_cast< bool*>(_v) = _t->speedTesting(); break;
-        case 14: *reinterpret_cast< QString*>(_v) = _t->mode(); break;
-        case 15: *reinterpret_cast< QString*>(_v) = _t->lastLog(); break;
-        case 16: *reinterpret_cast< QString*>(_v) = _t->version(); break;
-        case 17: *reinterpret_cast< bool*>(_v) = _t->initialDark(); break;
+        case 9: *reinterpret_cast< QVariantList*>(_v) = _t->connections(); break;
+        case 10: *reinterpret_cast< NodeListModel**>(_v) = _t->nodeModel(); break;
+        case 11: *reinterpret_cast< QString*>(_v) = _t->selectedNode(); break;
+        case 12: *reinterpret_cast< QStringList*>(_v) = _t->groups(); break;
+        case 13: *reinterpret_cast< QString*>(_v) = _t->selectedGroup(); break;
+        case 14: *reinterpret_cast< bool*>(_v) = _t->speedTesting(); break;
+        case 15: *reinterpret_cast< QString*>(_v) = _t->mode(); break;
+        case 16: *reinterpret_cast< QString*>(_v) = _t->lastLog(); break;
+        case 17: *reinterpret_cast< QString*>(_v) = _t->version(); break;
+        case 18: *reinterpret_cast< bool*>(_v) = _t->initialDark(); break;
         default: break;
         }
     } else if (_c == QMetaObject::WriteProperty) {
@@ -563,18 +610,18 @@ int QmlBridge::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 19)
+        if (_id < 22)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 19;
+        _id -= 22;
     } else if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 19)
+        if (_id < 22)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 19;
+        _id -= 22;
     }else if (_c == QMetaObject::ReadProperty || _c == QMetaObject::WriteProperty
             || _c == QMetaObject::ResetProperty || _c == QMetaObject::BindableProperty
             || _c == QMetaObject::RegisterPropertyMetaType) {
         qt_static_metacall(this, _c, _id, _a);
-        _id -= 18;
+        _id -= 19;
     }
     return _id;
 }
@@ -598,33 +645,39 @@ void QmlBridge::connectionsChanged()
 }
 
 // SIGNAL 3
-void QmlBridge::nodesChanged()
+void QmlBridge::connectionsListChanged()
 {
     QMetaObject::activate(this, &staticMetaObject, 3, nullptr);
 }
 
 // SIGNAL 4
-void QmlBridge::groupsChanged()
+void QmlBridge::nodesChanged()
 {
     QMetaObject::activate(this, &staticMetaObject, 4, nullptr);
 }
 
 // SIGNAL 5
-void QmlBridge::speedTestingChanged()
+void QmlBridge::groupsChanged()
 {
     QMetaObject::activate(this, &staticMetaObject, 5, nullptr);
 }
 
 // SIGNAL 6
-void QmlBridge::modeChanged()
+void QmlBridge::speedTestingChanged()
 {
     QMetaObject::activate(this, &staticMetaObject, 6, nullptr);
 }
 
 // SIGNAL 7
+void QmlBridge::modeChanged()
+{
+    QMetaObject::activate(this, &staticMetaObject, 7, nullptr);
+}
+
+// SIGNAL 8
 void QmlBridge::logAppended(const QString & _t1)
 {
     void *_a[] = { nullptr, const_cast<void*>(reinterpret_cast<const void*>(std::addressof(_t1))) };
-    QMetaObject::activate(this, &staticMetaObject, 7, _a);
+    QMetaObject::activate(this, &staticMetaObject, 8, _a);
 }
 QT_WARNING_POP

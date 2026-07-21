@@ -84,6 +84,7 @@ qt_add_qml_module(clashauto-qml
         qml/NodeRow.qml
         qml/BandwidthChart.qml
         qml/LogTimeline.qml
+        qml/ConnectionsWindow.qml
 )
 
 # Windows：把 assets/icon.ico 作为 exe 图标嵌入。

@@ -21,14 +21,14 @@ Item {
 
             GridLayout {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 130 // 2 行 × 60px 卡 + 行距
+                Layout.preferredHeight: 170 // 2 行 × 60px 卡 + 行距
                 columns: 2
                 rowSpacing: 6
                 columnSpacing: 10
 
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 60
+                    Layout.preferredHeight: 80
                     Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("上传")
@@ -37,7 +37,7 @@ Item {
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 60
+                    Layout.preferredHeight: 80
                     Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("下载")
@@ -46,33 +46,59 @@ Item {
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 60
+                    Layout.preferredHeight: 80
                     Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("进程数")
                     value: bridge.connectionsCount
                     accentColor: "#466ea8"
 
-                    // 右上角：清空全部连接
+                    // 右上角按钮组：👁 查看全部连接（开独立窗口）| ✕ 清空全部连接
                     Rectangle {
                         anchors.top: parent.top
                         anchors.right: parent.right
-                        width: 26
+                        width: 52
                         height: 22
                         radius: 4
-                        color: Qt.rgba(1, 0, 0, 0.30)
-                        Text {
-                            anchors.centerIn: parent
-                            text: "✕"
-                            color: "white"
-                            font.pixelSize: 12
+                        clip: true
+                        color: Qt.rgba(0, 0, 0, 0.32)
+
+                        Row {
+                            anchors.fill: parent
+                            Item {
+                                width: 26
+                                height: parent.height
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "👁"
+                                    font.pixelSize: 13
+                                }
+                                TapHandler {
+                                    onTapped: {
+                                        connWindow.show();
+                                        connWindow.raise();
+                                        connWindow.requestActivate();
+                                    }
+                                }
+                            }
+                            Rectangle { width: 1; height: parent.height; color: Qt.rgba(1, 1, 1, 0.15) }
+                            Item {
+                                width: 25
+                                height: parent.height
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "✕"
+                                    color: "#ff6b6b"
+                                    font.pixelSize: 12
+                                }
+                                TapHandler { onTapped: bridge.clearConnections() }
+                            }
                         }
-                        TapHandler { onTapped: bridge.clearConnections() }
                     }
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 60
+                    Layout.preferredHeight: 80
                     Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("总下载")
@@ -186,4 +212,7 @@ Item {
             downChart.push(bridge.downBytes);
         }
     }
+
+    // 全部连接：独立窗口（对齐旧版 QDialog 的显示方式），由进程卡 👁 按钮打开。
+    ConnectionsWindow { id: connWindow }
 }

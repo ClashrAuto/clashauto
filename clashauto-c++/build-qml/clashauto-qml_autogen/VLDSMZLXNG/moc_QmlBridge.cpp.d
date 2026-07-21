@@ -639,6 +639,7 @@
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QTimer \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QUrl \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QVariant \
+  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QVariantList \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QVector \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/q20memory.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/q20type_traits.h \
@@ -755,6 +756,7 @@
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qutf8stringview.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/quuid.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qvariant.h \
+  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qvariantlist.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qvarlengtharray.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qvector.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qversiontagging.h \

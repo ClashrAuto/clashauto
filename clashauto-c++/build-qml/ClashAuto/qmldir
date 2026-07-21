@@ -15,4 +15,5 @@ MetricCard 1.0 qml/MetricCard.qml
 NodeRow 1.0 qml/NodeRow.qml
 BandwidthChart 1.0 qml/BandwidthChart.qml
 LogTimeline 1.0 qml/LogTimeline.qml
+ConnectionsWindow 1.0 qml/ConnectionsWindow.qml
 

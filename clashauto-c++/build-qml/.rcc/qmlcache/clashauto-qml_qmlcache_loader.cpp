@@ -103,6 +103,13 @@ namespace _qt_qml_ClashAuto_qml_LogTimeline_qml {
         reinterpret_cast<const QV4::CompiledData::Unit*>(&qmlData), &aotBuiltFunctions[0], nullptr
     };
 }
+namespace _qt_qml_ClashAuto_qml_ConnectionsWindow_qml { 
+    extern const unsigned char qmlData[];
+    extern const QQmlPrivate::TypedFunction aotBuiltFunctions[];
+    const QQmlPrivate::CachedQmlUnit unit = {
+        reinterpret_cast<const QV4::CompiledData::Unit*>(&qmlData), &aotBuiltFunctions[0], nullptr
+    };
+}
 
 }
 namespace {
@@ -131,6 +138,7 @@ Registry::Registry() {
     resourcePathToCachedUnit.insert(QStringLiteral("/qt/qml/ClashAuto/qml/NodeRow.qml"), &QmlCacheGeneratedCode::_qt_qml_ClashAuto_qml_NodeRow_qml::unit);
     resourcePathToCachedUnit.insert(QStringLiteral("/qt/qml/ClashAuto/qml/BandwidthChart.qml"), &QmlCacheGeneratedCode::_qt_qml_ClashAuto_qml_BandwidthChart_qml::unit);
     resourcePathToCachedUnit.insert(QStringLiteral("/qt/qml/ClashAuto/qml/LogTimeline.qml"), &QmlCacheGeneratedCode::_qt_qml_ClashAuto_qml_LogTimeline_qml::unit);
+    resourcePathToCachedUnit.insert(QStringLiteral("/qt/qml/ClashAuto/qml/ConnectionsWindow.qml"), &QmlCacheGeneratedCode::_qt_qml_ClashAuto_qml_ConnectionsWindow_qml::unit);
     QQmlPrivate::RegisterQmlUnitCacheHook registration;
     registration.structVersion = 0;
     registration.lookupCachedQmlUnit = &lookupCachedUnit;
