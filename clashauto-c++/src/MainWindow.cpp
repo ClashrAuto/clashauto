@@ -386,6 +386,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
 
     auto *root = new QFrame(this);
     root->setObjectName("root");
+#if defined(Q_OS_MACOS)
+    // 标题栏已做成透明 + FullSizeContentView（内容铺满整窗）。但 Qt 默认会把 macOS 安全区
+    // （标题栏高度）当内边距加到控件上，导致内容仍被顶到标题栏下方、「没超过标题栏」。
+    // 主窗口 + 中央控件都关掉这个属性，内容才真正铺到窗口顶端。
+    setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+    root->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+#endif
     auto *outer = new QVBoxLayout(root);
     outer->setContentsMargins(0, 0, 0, 0);
     outer->setSpacing(0);
