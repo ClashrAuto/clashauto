@@ -712,35 +712,69 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          # —— 构建必需（缺一不可，一条命令、任一失败即报错）——
-          # QML 前端：CMake 现在 find_package(Qt6 ... Qml Quick QuickControls2)：
-          #   qt6-declarative-dev        → Qt6Qml/Quick/QuickControls2 的 CMake config
-          #   qt6-declarative-dev-tools  → qmlcachegen / qmltyperegistrar（qt_add_qml_module 构建期用）
+          # —— 构建/打包必需（Qt 改由 aqt 装 6.8.3，不再用系统 qt6-*：22.04=6.2/24.04=6.4 太旧，
+          #    缺 loadFromModule 等 Qt 6.5+ QML API）。缺一不可，一条命令、任一失败即报错 ——
+          #   build-essential/cmake/ninja-build → 编译
+          #   libgl1-mesa-dev                   → Qt6::Gui/Quick 链接 OpenGL
+          #   patchelf                          → 给主程序写 $ORIGIN/lib 的 RPATH（自带 Qt 运行时）
+          #   python3-pip                       → 装 aqtinstall
+          #   fakeroot/zip                      → 打 .deb / 便携 zip
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             ninja-build \
-            qt6-base-dev \
-            qt6-tools-dev-tools \
-            qt6-declarative-dev \
-            qt6-declarative-dev-tools \
             libgl1-mesa-dev \
+            patchelf \
+            python3-pip \
             fakeroot \
             zip
-          # —— 运行时 QML 模块 —— 便携包/本机运行时加载 .qml 需要；仅作 .deb Depends 声明给
-          # 终端用户即可，构建机本身并不强依赖它们。包名在不同 Ubuntu 版本可能有差异，
-          # 故单独安装且不阻断构建（装不上只告警）。
+          # —— 非阻断：aqt 版 Qt 的构建工具(qmlcachegen 依赖 libglib2.0) 与 xcb 平台插件的运行期系统库。
+          # 构建机不运行 app，装不上仅告警不阻断（22.04/24.04 间包名可能不同）；这些库最终以 .deb Depends
+          # 声明给终端用户。
           sudo apt-get install -y --no-install-recommends \
-            qml6-module-qtquick \
-            qml6-module-qtquick-controls \
-            qml6-module-qtquick-layouts \
-            qml6-module-qtquick-templates \
-            qml6-module-qtquick-window \
-            || echo "::warning::部分 qml6 运行时模块未安装（不影响构建，仅影响便携包本机直接运行）"
+            libglib2.0-0 \
+            libgl1 \
+            libegl1 \
+            libdbus-1-3 \
+            libfontconfig1 \
+            libxkbcommon0 libxkbcommon-x11-0 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+            libxcb-randr0 libxcb-render-util0 libxcb-shape0 libxcb-xkb1 \
+            || echo "::warning::部分 Qt 运行时系统库未安装（不影响构建，仅影响本机直接运行便携包）"
+
+      - name: Install Qt (aqt)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 与 Windows/macOS 同版 Qt 6.8.3。arm64 是独立 host：
+          #   x64  → host=linux        arch=linux_gcc_64
+          #   arm64→ host=linux_arm64  arch=linux_gcc_arm64（Qt 6.7+ 起官方提供 linux 桌面 arm64 二进制；
+          #          aqtinstall ≥3.1.12 起可拉取，本处装最新版 aqt）
+          python3 -m pip install --user aqtinstall \
+            || python3 -m pip install --user --break-system-packages aqtinstall
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            python3 -m aqt install-qt linux_arm64 desktop "$QT_VERSION" linux_gcc_arm64 -O "$HOME/Qt"
+          else
+            python3 -m aqt install-qt linux desktop "$QT_VERSION" linux_gcc_64 -O "$HOME/Qt"
+          fi
+          # aqt 不同版本落地目录名可能是 gcc_64 / linux_gcc_64（arm64 同理），用 qmake 反查根目录避免写死。
+          qmake_path="$(find "$HOME/Qt/$QT_VERSION" -type f -name qmake -path '*/bin/qmake' | head -n1)"
+          if [ -z "$qmake_path" ]; then
+            echo "找不到已安装的 Qt（qmake 缺失）" >&2
+            find "$HOME/Qt" -maxdepth 3 -type d >&2 || true
+            exit 1
+          fi
+          qt_root="$(dirname "$(dirname "$qmake_path")")"
+          echo "QT_ROOT=$qt_root" >> "$GITHUB_ENV"
+          echo "Qt root: $qt_root"
 
       - name: Configure
         shell: bash
-        run: cmake -S clashauto-c++ -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Release -DAPP_VERSION="$APP_VERSION"
+        run: |
+          cmake -S clashauto-c++ -B "$BUILD_DIR" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+            -DAPP_VERSION="$APP_VERSION"
 
       - name: Build
         shell: bash
@@ -759,6 +793,33 @@ jobs:
           cp "$BUILD_DIR/clashauto-qml" "$app_dir/"
           chmod +x "$app_dir/clashauto-qml"
 
+          # —— 打包 Qt 6.8.3 运行时（用户系统已无匹配 Qt，必须随包自带库+插件+QML 模块）——
+          # 保持 Qt 的「prefix 相对布局」：app_dir 作 prefix，lib/ plugins/ qml/ 维持与其原始相同的
+          # 相对关系，这样 Qt 各库/插件/QML 插件内置的 RUNPATH($ORIGIN/../../lib 等)无需 patch 即自洽；
+          # 仅主程序需用 patchelf 写 $ORIGIN/lib 的 RPATH。
+          mkdir -p "$app_dir/lib" "$app_dir/plugins" "$app_dir/qml"
+          # 全部 Qt6 共享库 + ICU（-a 保留符号链接与 so 版本号链）
+          cp -a "$QT_ROOT"/lib/libQt6*.so* "$app_dir/lib/"
+          cp -a "$QT_ROOT"/lib/libicu*.so* "$app_dir/lib/" 2>/dev/null || true
+          # 插件整目录拷更稳：platforms/libqxcb、tls(openssl 后端，HTTPS 订阅/更新必需)、
+          # imageformats、iconengines、xcbglintegrations、platforminputcontexts 等
+          cp -a "$QT_ROOT"/plugins/. "$app_dir/plugins/"
+          # QML 运行时模块：QtQuick、QtQuick.Controls[Basic]、QtQuick.Layouts、QtQuick.Templates、
+          # QtQuick.Window、QtQml 等（整目录拷）
+          cp -a "$QT_ROOT"/qml/. "$app_dir/qml/"
+
+          # qt.conf 指向自带的 plugins/qml（相对可执行文件目录）
+          cat > "$app_dir/qt.conf" <<'EOF'
+          [Paths]
+          Prefix = .
+          Libraries = lib
+          Plugins = plugins
+          Qml2Imports = qml
+          EOF
+
+          # 主程序 RPATH 指向自带 lib（$ORIGIN 相对二进制真实路径，经 /usr/bin 符号链接调用也成立）
+          patchelf --set-rpath '$ORIGIN/lib' "$app_dir/clashauto-qml"
+
           for item in command config language mihomo static version; do
             if [ -e "Clashr-Auto/$item" ]; then
               cp -a "Clashr-Auto/$item" "$resource_dir/"
@@ -769,6 +830,11 @@ jobs:
 
           test -x "$app_dir/clashauto-qml"
           test -f "$resource_dir/config/config.yaml"
+          # 关键运行时校验：平台插件 + Qt Quick 库必须已入包（缺则包必崩，就地失败）
+          test -e "$app_dir/plugins/platforms/libqxcb.so"
+          test -e "$app_dir/lib/libQt6Quick.so.6"
+          ls "$app_dir/plugins/tls/"*.so >/dev/null 2>&1 \
+            || echo "::warning::未见 plugins/tls 后端（HTTPS 订阅/更新可能不可用，请核对 aqt Qt 是否含 openssl 后端）"
           # 内核不再随包分发：不校验 command/clash 下的核心是否存在
 
       - name: Create portable tar.gz
@@ -807,7 +873,7 @@ jobs:
           Architecture: ${{ matrix.deb_arch }}
           Installed-Size: ${installed_size}
           Maintainer: Clash Auto <auto@clash.com>
-          Depends: libc6, libstdc++6, libqt6core6 | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libqt6network6 | libqt6network6t64, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qml6-module-qtquick-templates, qml6-module-qtquick-window
+          Depends: libc6, libstdc++6, libgl1, libegl1, libglib2.0-0 | libglib2.0-0t64, libdbus-1-3, libfontconfig1, libfreetype6, libssl3 | libssl3t64, libx11-6, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcb-glx0, libxcb-util1, libxkbcommon0, libxkbcommon-x11-0
           Description: Clash Auto Qt desktop client
            Clash Auto desktop client built with Qt Quick (QML).
           EOF
