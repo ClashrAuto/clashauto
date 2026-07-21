@@ -21,14 +21,14 @@ Item {
 
             GridLayout {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 68 // 原 200 的约 1/3（卡片高度减 2/3）
+                Layout.preferredHeight: 130 // 2 行 × 60px 卡 + 行距
                 columns: 2
                 rowSpacing: 6
                 columnSpacing: 10
 
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 30
+                    Layout.preferredHeight: 60
                     Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("上传")
@@ -37,7 +37,7 @@ Item {
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 30
+                    Layout.preferredHeight: 60
                     Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("下载")
@@ -46,7 +46,7 @@ Item {
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 30
+                    Layout.preferredHeight: 60
                     Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("进程数")
@@ -72,7 +72,7 @@ Item {
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 30
+                    Layout.preferredHeight: 60
                     Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("总下载")
@@ -163,7 +163,7 @@ Item {
                 clip: true
                 model: nodeModel
                 spacing: 5
-                rightMargin: 10 // 行右缘离卡片右边 10px（滚动条悬浮）
+                rightMargin: 4 // QML 滚动条是悬浮式、不占宽；这里只留 4px 小边距，行更靠右
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                 delegate: NodeRow {
