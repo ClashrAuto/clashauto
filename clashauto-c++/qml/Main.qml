@@ -76,7 +76,7 @@ ApplicationWindow {
                 Repeater {
                     model: [qsTr("状态"), qsTr("订阅"), qsTr("设置"), qsTr("日志"), qsTr("关于")]
                     delegate: NavButton {
-                        Layout.alignment: Qt.AlignHCenter
+                        Layout.fillWidth: true // 铺满侧栏宽、右缘紧贴内容卡
                         Layout.topMargin: index === 0 ? 0 : 5
                         label: modelData
                         current: window.currentPage === index
@@ -110,7 +110,7 @@ ApplicationWindow {
 
                 StackLayout {
                     anchors.fill: parent
-                    anchors.margins: 10
+                    anchors.margins: 5 // 主内容区(卡片内)统一 padding 5px
                     currentIndex: window.currentPage
 
                     StatusPage {}
@@ -162,12 +162,67 @@ ApplicationWindow {
                     }
 
                     ComboBox {
+                        id: modeCombo
                         Layout.preferredWidth: 120
                         Layout.preferredHeight: 28
                         model: [qsTr("规则"), qsTr("全局"), qsTr("直连")]
                         currentIndex: Math.max(0, model.indexOf(bridge.mode))
                         font.pixelSize: 12
                         onActivated: bridge.setMode(currentText)
+
+                        // 纯黑(暗)/纯白(亮) + 圆角 3（同「核心」按钮 FooterSwitch）
+                        background: Rectangle {
+                            radius: 3
+                            color: Theme.dark ? "#000000" : "#ffffff"
+                        }
+                        contentItem: Text {
+                            leftPadding: 10
+                            text: modeCombo.displayText
+                            font: modeCombo.font
+                            color: Theme.textPrimary
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+                        indicator: Text {
+                            x: modeCombo.width - width - 9
+                            y: (modeCombo.height - height) / 2
+                            text: "▾"
+                            font.pixelSize: 10
+                            color: Theme.textMuted
+                        }
+                        popup: Popup {
+                            y: modeCombo.height + 2
+                            width: modeCombo.width
+                            padding: 4
+                            background: Rectangle {
+                                radius: 3
+                                color: Theme.dark ? "#000000" : "#ffffff"
+                                border.width: 1
+                                border.color: Theme.divider
+                            }
+                            contentItem: ListView {
+                                clip: true
+                                implicitHeight: contentHeight
+                                model: modeCombo.popup.visible ? modeCombo.delegateModel : null
+                                currentIndex: modeCombo.highlightedIndex
+                            }
+                        }
+                        delegate: ItemDelegate {
+                            width: modeCombo.width - 8
+                            height: 28
+                            highlighted: modeCombo.highlightedIndex === index
+                            contentItem: Text {
+                                text: modelData
+                                leftPadding: 6
+                                font.pixelSize: 12
+                                color: Theme.textPrimary
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: 3
+                                color: highlighted ? Theme.hover : "transparent"
+                            }
+                        }
                     }
                 }
             }

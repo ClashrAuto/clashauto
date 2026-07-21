@@ -178,3 +178,40 @@
 37488	41469	1784614737047620009	CMakeFiles/clashauto-qml.dir/src/MacWindow.mm.o	3931616af8ae8099
 38214	42250	1784614737773119758	CMakeFiles/clashauto-qml.dir/src/MacSpeedItem.mm.o	da7a693aee2eca1
 42251	42707	1784614741810067976	Clash Auto.app/Contents/MacOS/Clash Auto	7a91341558601121
+208	278	1784615544860782803	ClashAuto/qml/Main.qml	b7be1bfc74c0f694
+208	278	1784615544860782803	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/Main.qml	b7be1bfc74c0f694
+211	278	1784615544862225068	ClashAuto/qml/StatusPage.qml	76a31e495bf62371
+211	278	1784615544862225068	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/StatusPage.qml	76a31e495bf62371
+216	278	1784615544867418837	ClashAuto/qml/NavButton.qml	db5e321bfbcea465
+216	278	1784615544867418837	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/NavButton.qml	db5e321bfbcea465
+259	312	1784615544914155336	ClashAuto/qml/MetricCard.qml	94acdc6593636860
+259	312	1784615544914155336	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/MetricCard.qml	94acdc6593636860
+269	609	1784615545211478059	.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+269	609	1784615545211478059	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+619	671	1784615545273761316	.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+619	671	1784615545273761316	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+615	846	1784615545435749747	.rcc/qmlcache/clashauto-qml_qml/MetricCard_qml.cpp	55be8d0433ea0db9
+615	846	1784615545435749747	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/MetricCard_qml.cpp	55be8d0433ea0db9
+613	854	1784615545449575586	.rcc/qmlcache/clashauto-qml_qml/NavButton_qml.cpp	d98bedf526dc589a
+613	854	1784615545449575586	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/NavButton_qml.cpp	d98bedf526dc589a
+611	933	1784615545526442567	.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp	c04f92d4b8bf737b
+611	933	1784615545526442567	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp	c04f92d4b8bf737b
+609	1220	1784615545786086044	.rcc/qmlcache/clashauto-qml_qml/Main_qml.cpp	e9d43b3e68649534
+609	1220	1784615545786086044	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/Main_qml.cpp	e9d43b3e68649534
+1228	1668	1784615545833610483	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp.o	6f3d9af9a562fdb3
+1221	9341	1784615545826669788	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp.o	abff2fa10d7ff37d
+1223	9393	1784615545828116396	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/NavButton_qml.cpp.o	d2e33217578e27e2
+1225	9528	1784615545830074627	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/MetricCard_qml.cpp.o	55455250b94ff781
+1220	9584	1784615545825225889	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/Main_qml.cpp.o	baed712bc7465767
+9584	10237	1784615554189715380	Clash Auto.app/Contents/MacOS/Clash Auto	7a91341558601121
+79	124	1784615683854834334	ClashAuto/qml/StatusPage.qml	76a31e495bf62371
+79	124	1784615683854834334	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/StatusPage.qml	76a31e495bf62371
+82	261	1784615683990269350	.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+82	261	1784615683990269350	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+264	311	1784615684040808200	.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+264	311	1784615684040808200	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+261	449	1784615684171250036	.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp	c04f92d4b8bf737b
+261	449	1784615684171250036	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp	c04f92d4b8bf737b
+452	687	1784615684184026718	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp.o	6f3d9af9a562fdb3
+450	3909	1784615684182158664	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp.o	abff2fa10d7ff37d
+3910	4610	1784615687641989715	Clash Auto.app/Contents/MacOS/Clash Auto	7a91341558601121

@@ -13,35 +13,33 @@ Rectangle {
     radius: 4
     color: Theme.metricBg
 
+    // 紧凑单行布局：图标 + 「标题 数值」并排，适配减到 ~1/3 的卡高。
     Row {
         anchors.fill: parent
-        anchors.margins: 8
         anchors.leftMargin: 10
         anchors.rightMargin: 10
-        spacing: 16
+        spacing: 10
 
         Text {
-            width: 50
             anchors.verticalCenter: parent.verticalCenter
-            horizontalAlignment: Text.AlignHCenter
             text: root.glyph
             font.family: Theme.iconFont
-            font.pixelSize: 30
+            font.pixelSize: 18
             color: Theme.dark ? "#aaaaaa" : "#888888"
         }
-        Column {
+        Text {
             anchors.verticalCenter: parent.verticalCenter
-            spacing: 2
-            Text {
-                text: root.title
-                font.pixelSize: 12
-                color: root.accentColor
-            }
-            Text {
-                text: root.value
-                font.pixelSize: 18
-                color: root.accentColor
-            }
+            text: root.title
+            font.pixelSize: 12
+            color: root.accentColor
+        }
+        Item { width: 2; height: 1 }
+        Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.value
+            font.pixelSize: 15
+            font.bold: true
+            color: root.accentColor
         }
     }
 }

@@ -13,6 +13,7 @@ Item {
 
     Rectangle {
         anchors.fill: parent
+        anchors.rightMargin: -radius // 右侧超出 radius：右角落在内容卡内(同色无缝)、可见处为直角、紧贴内容
         radius: 5
         color: root.current ? Theme.card : (hover.hovered ? Theme.hover : "transparent")
     }

@@ -9,7 +9,7 @@ Item {
 
     RowLayout {
         anchors.fill: parent
-        anchors.margins: 10
+        anchors.margins: 0 // 卡片内边距已由 StackLayout 提供 5px，这里不再叠加
         spacing: 10
 
         // —————————————————— 左列 ——————————————————
@@ -21,14 +21,15 @@ Item {
 
             GridLayout {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 200
+                Layout.preferredHeight: 68 // 原 200 的约 1/3（卡片高度减 2/3）
                 columns: 2
-                rowSpacing: 10
+                rowSpacing: 6
                 columnSpacing: 10
 
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.fillHeight: true
+                    Layout.preferredHeight: 30
+                    Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("上传")
                     value: bridge.upText
@@ -36,7 +37,8 @@ Item {
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.fillHeight: true
+                    Layout.preferredHeight: 30
+                    Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("下载")
                     value: bridge.downText
@@ -44,7 +46,8 @@ Item {
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.fillHeight: true
+                    Layout.preferredHeight: 30
+                    Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("进程数")
                     value: bridge.connectionsCount
@@ -69,7 +72,8 @@ Item {
                 }
                 MetricCard {
                     Layout.fillWidth: true
-                    Layout.fillHeight: true
+                    Layout.preferredHeight: 30
+                    Layout.fillHeight: false
                     glyph: ""
                     title: qsTr("总下载")
                     value: bridge.totalDownText
