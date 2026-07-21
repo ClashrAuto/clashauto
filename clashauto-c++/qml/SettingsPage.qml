@@ -363,6 +363,8 @@ Item {
                             allowSwitch.checked,
                             blockCombo.editText,
                             blockSwitch.checked)
+                        // 「跟随系统深浅色」实时生效：更新 bridge 的跟随态；开启则立刻按当前系统外观切主题。
+                        bridge.setAutoTheme(autoThemeSwitch.checked)
                     }
                 }
             }

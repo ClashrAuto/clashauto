@@ -44,6 +44,11 @@ ApplicationWindow {
         target: Theme
         function onDarkChanged() { window.applyChrome(); }
     }
+    // 跟随系统深浅色：运行中系统外观变化时（仅当设置里勾了「跟随系统」），bridge 发来新外观 → 切主题。
+    Connections {
+        target: bridge
+        function onSystemThemeChanged(dark) { Theme.dark = dark; }
+    }
 
     // 背景拖动：按住窗口任意「非交互」空白/文字/卡片背景即可拖动整窗。铺满窗口并置于所有
     // 内容之后(z:-1)。列表/ComboBox(select) 等控件在其上层先占用按下事件；本 handler 用

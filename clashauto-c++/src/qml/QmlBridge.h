@@ -114,6 +114,13 @@ public:
     // 增强(TUN)开着（config use:true）而当前非提权，先按需提权重启，让提权实例带 TUN 冷启动。
     Q_INVOKABLE void autoStartCore();
 
+    // —— 跟随系统深浅色（设置页「跟随系统深浅色」= config.autoTheme）——
+    // 当前系统是否为暗色外观（Qt 6.5+ 用 QStyleHints::colorScheme；低版本回退启动主题）。
+    Q_INVOKABLE bool systemDark() const;
+    // 设置页「应用」后调用：更新「跟随系统」开关的实时状态；开启时立刻按当前系统外观切主题
+    // （通过 systemThemeChanged 通知 QML 设 Theme.dark）。对齐 Widgets 版保存后立即 applyTheme。
+    Q_INVOKABLE void setAutoTheme(bool on);
+
 #if defined(Q_OS_WIN)
     // 增强(TUN) 的「按需提权」：当前进程是否已以管理员身份运行；否则建不了 wintun 虚拟网卡。
     static bool isProcessElevated();
@@ -133,6 +140,8 @@ signals:
     void spinnerChanged();
     void modeChanged();
     void logAppended(const QString &line);
+    // 系统深浅色变化（仅在「跟随系统」开启时发出）：dark=true 暗色。Main.qml 据此设 Theme.dark。
+    void systemThemeChanged(bool dark);
 
 private:
     static QString speedText(qint64 value);
@@ -144,6 +153,7 @@ private:
     void persistConfigBool(const QString &key, bool value);
 
     QString m_userDir; // 用户可写配置目录（config.yaml 所在），用于 persistConfigBool
+    bool m_autoTheme = false; // 是否跟随系统深浅色（config.autoTheme）；控制是否响应系统外观变化
     CoreController *m_core = nullptr;
     ClashService *m_clash = nullptr;
     SubscriptionStore *m_subs = nullptr;

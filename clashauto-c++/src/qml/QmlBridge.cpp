@@ -9,9 +9,11 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QGuiApplication>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QStyleHints>
 #include <QTimer>
 #include <QVariantMap>
 #include <QWindow>
@@ -38,10 +40,29 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
 {
     if (config) {
         m_userDir = config->userDir; // persistConfigBool 落盘 config.yaml 用
+        m_autoTheme = config->autoTheme;
         const QString t = config->theme;
-        m_initialDark = !(t.compare("light", Qt::CaseInsensitive) == 0
-                          || t.compare("white", Qt::CaseInsensitive) == 0);
+        const bool manualDark = !(t.compare("light", Qt::CaseInsensitive) == 0
+                                  || t.compare("white", Qt::CaseInsensitive) == 0);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+        // 跟随系统深浅色：启动时若开了 autoTheme，主题以系统外观为准（此前只认保存的手动主题，
+        // 是「没获取系统主题」bug 的根因）；否则用保存的手动主题。
+        m_initialDark = m_autoTheme
+            ? (QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark)
+            : manualDark;
+#else
+        m_initialDark = manualDark;
+#endif
     }
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    // 运行中系统深浅色切换：仅当「跟随系统」开启时，把新外观推给 QML（Main.qml 设 Theme.dark）。
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
+            [this](Qt::ColorScheme scheme) {
+                if (m_autoTheme)
+                    emit systemThemeChanged(scheme == Qt::ColorScheme::Dark);
+            });
+#endif
 
     // —— 流量卡 ——
     connect(m_clash, &ClashService::trafficUpdated, this, [this](qint64 up, qint64 down) {
@@ -206,6 +227,24 @@ void QmlBridge::persistConfigBool(const QString &key, bool value)
         out.write(yaml.toUtf8());
         out.close();
     }
+}
+
+bool QmlBridge::systemDark() const
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
+#else
+    return m_initialDark; // 低版本 Qt 无系统外观检测：回退启动主题
+#endif
+}
+
+void QmlBridge::setAutoTheme(bool on)
+{
+    m_autoTheme = on;
+    // 打开「跟随系统」即刻按当前系统外观切主题（对齐 Widgets：保存后立即 applyTheme）。
+    // 关闭时不动：保留用户手动选定的主题（由设置页主题下拉/config theme: 决定）。
+    if (on)
+        emit systemThemeChanged(systemDark());
 }
 
 void QmlBridge::autoStartCore()
