@@ -428,7 +428,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     auto *right = new QFrame(rightColumn);
     right->setObjectName("rightPane");
     auto *rightLayout = new QVBoxLayout(right);
-    rightLayout->setContentsMargins(10, 10, 10, 0);
+    // 右内边距 2（而非 10）：可滚动内容（节点/订阅/设置列表）的竖滚动条占 8px，2+8=10，
+    // 让列表行右缘离卡片右边刚好 10px（此前 10+8=18 看着太空）。左/上仍 10。
+    rightLayout->setContentsMargins(10, 10, 2, 0);
     rightLayout->setSpacing(0);
 
     m_pages = new QStackedWidget(right);
