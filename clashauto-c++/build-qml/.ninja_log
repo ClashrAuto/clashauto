@@ -236,3 +236,43 @@
 478	658	1784617470242652562	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp.o	6f3d9af9a562fdb3
 477	4020	1784617470241034619	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp.o	abff2fa10d7ff37d
 4020	4814	1784617473784129634	Clash Auto.app/Contents/MacOS/Clash Auto	7d0db0bc7bebf360
+134	172	1784617997565870120	ClashAuto/qml/ConnectionsWindow.qml	106446d3bcd23bcc
+134	172	1784617997565870120	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/ConnectionsWindow.qml	106446d3bcd23bcc
+133	178	1784617997571842314	ClashAuto/qml/StatusPage.qml	76a31e495bf62371
+133	178	1784617997571842314	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/StatusPage.qml	76a31e495bf62371
+134	277	1784617997669784322	.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+134	277	1784617997669784322	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+277	427	1784617997671959422	clashauto-qml_autogen/timestamp	6829e93480905683
+277	427	1784617997671959422	clashauto-qml_autogen/mocs_compilation.cpp	6829e93480905683
+277	427	1784617997671959422	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/timestamp	6829e93480905683
+277	427	1784617997671959422	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/mocs_compilation.cpp	6829e93480905683
+428	447	1784617997841422092	meta_types/clashauto-qml_json_file_list.txt	184dbb35758bd1fa
+428	447	1784617997841422092	meta_types/clashauto-qml_json_file_list.txt.timestamp	184dbb35758bd1fa
+428	447	1784617997841422092	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/meta_types/clashauto-qml_json_file_list.txt	184dbb35758bd1fa
+428	447	1784617997841422092	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/meta_types/clashauto-qml_json_file_list.txt.timestamp	184dbb35758bd1fa
+428	461	1784617997854655375	.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+428	461	1784617997854655375	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+447	485	1784617997842450573	meta_types/qt6clashauto-qml_metatypes.json.gen	74030646959241f9
+447	485	1784617997842450573	meta_types/qt6clashauto-qml_metatypes.json	74030646959241f9
+447	485	1784617997842450573	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/meta_types/qt6clashauto-qml_metatypes.json.gen	74030646959241f9
+447	485	1784617997842450573	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/meta_types/qt6clashauto-qml_metatypes.json	74030646959241f9
+486	611	1784617997998150354	.rcc/qmlcache/clashauto-qml_qml/ConnectionsWindow_qml.cpp	a837d40106b0d898
+486	611	1784617997998150354	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/ConnectionsWindow_qml.cpp	a837d40106b0d898
+486	623	1784617998009329627	.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp	c04f92d4b8bf737b
+486	623	1784617998009329627	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp	c04f92d4b8bf737b
+625	836	1784617998020682611	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp.o	6f3d9af9a562fdb3
+624	2744	1784617998018925063	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp.o	abff2fa10d7ff37d
+624	2781	1784617998019274493	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/ConnectionsWindow_qml.cpp.o	55e5e34cf5c43f5b
+623	2957	1784617998018567871	CMakeFiles/clashauto-qml.dir/src/qml/QmlBridge.cpp.o	f212dd36b024b320
+2957	3358	1784618000352195766	Clash Auto.app/Contents/MacOS/Clash Auto	7d0db0bc7bebf360
+47	83	1784618058467200096	ClashAuto/qml/StatusPage.qml	76a31e495bf62371
+47	83	1784618058467200096	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/StatusPage.qml	76a31e495bf62371
+48	173	1784618058556846700	.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+48	173	1784618058556846700	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+174	212	1784618058595771444	.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+174	212	1784618058595771444	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+174	315	1784618058690430315	.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp	c04f92d4b8bf737b
+174	315	1784618058690430315	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp	c04f92d4b8bf737b
+315	480	1784618058701041081	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp.o	6f3d9af9a562fdb3
+315	1802	1784618058700696037	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp.o	abff2fa10d7ff37d
+1802	2219	1784618060188052800	Clash Auto.app/Contents/MacOS/Clash Auto	7d0db0bc7bebf360

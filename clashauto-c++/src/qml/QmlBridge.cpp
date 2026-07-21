@@ -182,8 +182,8 @@ void QmlBridge::refreshConnections()
             m["type"] = type;
             m["host"] = host;
             m["chain"] = chain0;
-            m["download"] = speedText(c.value("download").toInteger());
-            m["upload"] = speedText(c.value("upload").toInteger());
+            m["download"] = static_cast<qlonglong>(c.value("download").toInteger()); // 原始字节，QML 按旧格式(无空格)自行格式化
+            m["upload"] = static_cast<qlonglong>(c.value("upload").toInteger());
             m["id"] = c.value("id").toString();
             m["offline"] = c.value("offline").toBool();
             list.append(m);
