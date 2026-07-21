@@ -1,3 +1,5 @@
 clashauto-c++/build-ninja/
 screenshots/
 *.png
+clashauto-c++/build-qml/
+clashauto-c++/build-release/

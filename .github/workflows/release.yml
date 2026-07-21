@@ -183,7 +183,7 @@ jobs:
           $resourceDir = Join-Path $stage "Clashr-Auto"
 
           New-Item -ItemType Directory -Force $appDir, $resourceDir | Out-Null
-          Copy-Item "$env:BUILD_DIR\Release\clashauto-cpp.exe" $appDir -Force
+          Copy-Item "$env:BUILD_DIR\Release\clashauto-qml.exe" $appDir -Force
 
           $deployTool = Join-Path $env:QT_ROOT "bin\windeployqt.exe"
           if (-not (Test-Path $deployTool)) {
@@ -195,7 +195,10 @@ jobs:
           if (-not (Test-Path $deployTool)) {
             throw "Cannot find windeployqt"
           }
-          & $deployTool --release --no-translations "$appDir\clashauto-cpp.exe"
+          # QML 应用：--qmldir 让 windeployqt 扫描本 app 的 .qml 源并部署所需 Qt Quick 运行时
+          # + QML 模块插件（Qt6Quick、QtQuick.Controls[Basic]、QtQuick.Layouts、QtQuick.Templates、QtQuick.Window）。
+          $qmlSrcDir = Join-Path $pwd "clashauto-c++\qml"
+          & $deployTool --release --no-translations --qmldir "$qmlSrcDir" "$appDir\clashauto-qml.exe"
 
           # 显式打包 MSVC 运行库：--compiler-runtime 实测不落 msvcp140_1/_2.dll，
           # 未装 VC++ redist 的机器启动即 0xC0000135（真机验证）。从 VC Tools Redist 目录直接复制。
@@ -237,7 +240,7 @@ jobs:
             }
           }
 
-          if (-not (Test-Path "$appDir\clashauto-cpp.exe")) {
+          if (-not (Test-Path "$appDir\clashauto-qml.exe")) {
             throw "Missing staged executable"
           }
           if (-not (Test-Path "$resourceDir\config\config.yaml")) {
@@ -272,14 +275,14 @@ jobs:
             SetOutPath "$INSTDIR"
             File /r "dist\package\ClashAuto\*"
             CreateDirectory "$SMPROGRAMS\Clash Auto"
-            CreateShortcut "$SMPROGRAMS\Clash Auto\Clash Auto.lnk" "$INSTDIR\clashauto-c++\clashauto-cpp.exe"
-            CreateShortcut "$DESKTOP\Clash Auto.lnk" "$INSTDIR\clashauto-c++\clashauto-cpp.exe"
+            CreateShortcut "$SMPROGRAMS\Clash Auto\Clash Auto.lnk" "$INSTDIR\clashauto-c++\clashauto-qml.exe"
+            CreateShortcut "$DESKTOP\Clash Auto.lnk" "$INSTDIR\clashauto-c++\clashauto-qml.exe"
             WriteUninstaller "$INSTDIR\Uninstall.exe"
             ; 交互安装装完自动打开程序（0.1.110 之前的一键更新走「打开安装包」老路径，
             ; 装完不会回到应用——由安装器补上）；静默(/S)不启，launchSilentUpdateAndRestart
             ; 的守护进程负责重启，避免双开
             IfSilent +2
-            Exec '"$INSTDIR\clashauto-c++\clashauto-cpp.exe"'
+            Exec '"$INSTDIR\clashauto-c++\clashauto-qml.exe"'
           SectionEnd
 
           Section "Uninstall"
@@ -707,16 +710,33 @@ jobs:
       - name: Install build dependencies
         shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
+          # —— 构建必需（缺一不可，一条命令、任一失败即报错）——
+          # QML 前端：CMake 现在 find_package(Qt6 ... Qml Quick QuickControls2)：
+          #   qt6-declarative-dev        → Qt6Qml/Quick/QuickControls2 的 CMake config
+          #   qt6-declarative-dev-tools  → qmlcachegen / qmltyperegistrar（qt_add_qml_module 构建期用）
           sudo apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             ninja-build \
             qt6-base-dev \
             qt6-tools-dev-tools \
+            qt6-declarative-dev \
+            qt6-declarative-dev-tools \
             libgl1-mesa-dev \
             fakeroot \
             zip
+          # —— 运行时 QML 模块 —— 便携包/本机运行时加载 .qml 需要；仅作 .deb Depends 声明给
+          # 终端用户即可，构建机本身并不强依赖它们。包名在不同 Ubuntu 版本可能有差异，
+          # 故单独安装且不阻断构建（装不上只告警）。
+          sudo apt-get install -y --no-install-recommends \
+            qml6-module-qtquick \
+            qml6-module-qtquick-controls \
+            qml6-module-qtquick-layouts \
+            qml6-module-qtquick-templates \
+            qml6-module-qtquick-window \
+            || echo "::warning::部分 qml6 运行时模块未安装（不影响构建，仅影响便携包本机直接运行）"
 
       - name: Configure
         shell: bash
@@ -736,8 +756,8 @@ jobs:
           rm -rf "$stage"
           mkdir -p "$app_dir" "$resource_dir"
 
-          cp "$BUILD_DIR/clashauto-cpp" "$app_dir/"
-          chmod +x "$app_dir/clashauto-cpp"
+          cp "$BUILD_DIR/clashauto-qml" "$app_dir/"
+          chmod +x "$app_dir/clashauto-qml"
 
           for item in command config language mihomo static version; do
             if [ -e "Clashr-Auto/$item" ]; then
@@ -747,7 +767,7 @@ jobs:
             fi
           done
 
-          test -x "$app_dir/clashauto-cpp"
+          test -x "$app_dir/clashauto-qml"
           test -f "$resource_dir/config/config.yaml"
           # 内核不再随包分发：不校验 command/clash 下的核心是否存在
 
@@ -767,13 +787,13 @@ jobs:
           mkdir -p "$install_root" "$pkg_root/usr/share/applications" "$pkg_root/usr/bin" "$pkg_root/DEBIAN"
 
           cp -a "$STAGE_DIR/." "$install_root/"
-          ln -s /opt/ClashAuto/clashauto-c++/clashauto-cpp "$pkg_root/usr/bin/clashauto-cpp"
+          ln -s /opt/ClashAuto/clashauto-c++/clashauto-qml "$pkg_root/usr/bin/clashauto-qml"
 
           cat > "$pkg_root/usr/share/applications/clashauto.desktop" <<'EOF'
           [Desktop Entry]
           Type=Application
           Name=Clash Auto
-          Exec=/opt/ClashAuto/clashauto-c++/clashauto-cpp
+          Exec=/opt/ClashAuto/clashauto-c++/clashauto-qml
           Terminal=false
           Categories=Network;
           EOF
@@ -787,9 +807,9 @@ jobs:
           Architecture: ${{ matrix.deb_arch }}
           Installed-Size: ${installed_size}
           Maintainer: Clash Auto <auto@clash.com>
-          Depends: libc6, libstdc++6, libqt6core6 | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libqt6network6 | libqt6network6t64
+          Depends: libc6, libstdc++6, libqt6core6 | libqt6core6t64, libqt6gui6 | libqt6gui6t64, libqt6widgets6 | libqt6widgets6t64, libqt6network6 | libqt6network6t64, qml6-module-qtquick, qml6-module-qtquick-controls, qml6-module-qtquick-layouts, qml6-module-qtquick-templates, qml6-module-qtquick-window
           Description: Clash Auto Qt desktop client
-           Clash Auto desktop client built with Qt Widgets.
+           Clash Auto desktop client built with Qt Quick (QML).
           EOF
 
           fakeroot dpkg-deb --build "$pkg_root" "dist/ClashAuto-${APP_VERSION}-linux-${{ matrix.arch }}.deb"
@@ -836,4 +856,45 @@ jobs:
           make_latest: true
           overwrite_files: true
           files: |
-            dist/ClashAuto-*
+            dist/ClashAuto-*-linux-*
+
+  # macOS 正式包不在本 CI 打（无签名/公证证书）——由外部构建仓库的「专用分支」承载
+  # （该分支已配 Developer ID 签名+公证，workflow 用 on:push 监听本分支）。push 到
+  # master/main 时，本 job 用 PAT 向那个专用分支推一个空提交来触发 mac 打包；对方
+  # checkout clashauto 的 master（即刚发布的 release commit）、构建 universal、签名公证
+  # 后发布到 clashauto 同一个 Release。打包内容完全不在外部仓库的默认分支上。
+  # 目标仓库地址/令牌/分支都放本仓库 Secrets，不在代码里明文暴露：
+  #   SCHAT_BUILD_REPO   —— 目标仓库 owner/repo
+  #   SCHAT_BUILD_TOKEN  —— 对该仓库有 contents:write 的 PAT
+  #   SCHAT_BUILD_BRANCH —— 专用打包分支名（可选，缺省 clashauto-mac）
+  # 必需 secret（REPO/TOKEN）未配置时本 job 自动跳过（不失败）。
+  trigger-mac:
+    name: Trigger signed macOS build
+    needs: [windows, linux]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger macOS build via empty commit
+        env:
+          SCHAT_TOKEN: ${{ secrets.SCHAT_BUILD_TOKEN }}
+          SCHAT_REPO: ${{ secrets.SCHAT_BUILD_REPO }}
+          SCHAT_BRANCH: ${{ secrets.SCHAT_BUILD_BRANCH }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SCHAT_TOKEN:-}" ] || [ -z "${SCHAT_REPO:-}" ]; then
+            echo "::warning::SCHAT_BUILD_TOKEN/REPO 未配置，跳过 macOS 签名构建触发"
+            exit 0
+          fi
+          branch="${SCHAT_BRANCH:-clashauto-mac}"
+          tmp="$(mktemp -d)"
+          origin="https://x-access-token:${SCHAT_TOKEN}@github.com/${SCHAT_REPO}.git"
+          mask() { sed 's#x-access-token:[^@]*@#x-access-token:***@#g'; }
+          git clone --depth 1 --branch "$branch" "$origin" "$tmp/repo" 2>&1 | mask
+          cd "$tmp/repo"
+          git config user.name "clashauto-ci"
+          git config user.email "ci@clashauto.local"
+          # 空提交本身不改任何文件，只为触发对方分支的 on:push → mac 打包
+          git commit --allow-empty -m "trigger: build clashauto@${GITHUB_SHA} macOS"
+          git push "$origin" "HEAD:${branch}" 2>&1 | mask
+          echo "已向 ${branch} 推空提交，触发 macOS 签名构建：clashauto@${GITHUB_SHA}"

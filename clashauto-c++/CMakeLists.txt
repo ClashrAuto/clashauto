@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(clashauto_cpp VERSION 0.1.1 LANGUAGES CXX)
+project(clashauto_cpp VERSION 0.2.1 LANGUAGES CXX)
 
 # Version string shown in the app UI. Defaults to the project version for
 # local builds; CI overrides it with -DAPP_VERSION=<major.minor.commitcount>.
