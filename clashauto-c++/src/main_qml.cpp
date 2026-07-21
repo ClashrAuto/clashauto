@@ -2,8 +2,9 @@
 // SubscriptionStore/TrayController），仅通过 QmlBridge 这层薄胶水暴露给 QML。
 // 用 QApplication（而非 QGuiApplication）：TrayController/QSystemTrayIcon 依赖 QtWidgets。
 //
-// 注意：本入口**不**自动启动 mihomo 核心，也不切换系统代理/TUN——核心生命周期只由用户
-// 在 UI 里点「核心/网页/增强」触发。ClashService::start() 只是只读轮询 REST API，安全。
+// 启动行为：正式版**默认自动拉起核心**（对齐旧 Widgets 版 MainWindow 的 startCore-on-launch）。
+// 本地测 UI 时设环境变量 CLASHAUTO_NO_AUTOSTART=1 可跳过自动起核心——本机常已有一个实例在跑，
+// 避免端口(9090)/系统代理/TUN 冲突。ClashService::start() 只是只读轮询 REST API，始终安全。
 #include "AppConfig.h"
 #include "ClashService.h"
 #include "CoreController.h"
@@ -22,6 +23,7 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QTimer>
 
 int main(int argc, char *argv[])
 {
@@ -83,6 +85,16 @@ int main(int argc, char *argv[])
     if (engine.rootObjects().isEmpty())
         return -1;
 
-    clash->start(); // 只读轮询；不启动核心
+    clash->start(); // 只读轮询 REST API
+
+    // 正式版：启动即自动拉起核心（复刻旧版 MainWindow：有内核就起，没内核只记日志，
+    // 用户到「设置 → 系统」下载）。延时 600ms 让 UI 先就绪，与旧版一致。
+    // 本地测 UI 时 CLASHAUTO_NO_AUTOSTART=1 跳过（本机已有实例，避免端口/代理/TUN 冲突）。
+    if (qEnvironmentVariableIsEmpty("CLASHAUTO_NO_AUTOSTART")) {
+        QTimer::singleShot(600, core, [core] {
+            if (core && core->isCoreInstalled() && !core->isRunning())
+                core->startCore();
+        });
+    }
     return app.exec();
 }
