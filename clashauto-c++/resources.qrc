@@ -4,9 +4,8 @@
         <file>assets/iconfont.ttf</file>
         <file>assets/chevron-dark.svg</file>
         <file>assets/chevron-light.svg</file>
-        <!-- 正文/UI：MiSans（Regular + Semibold 供 font.bold 映射）。代码/等宽：Sarasa Mono SC。 -->
+        <!-- 全 UI 字体：MiSans（Regular + Semibold 供 font.bold 映射）。 -->
         <file>assets/fonts/MiSans-Regular.ttf</file>
         <file>assets/fonts/MiSans-Semibold.ttf</file>
-        <file>assets/fonts/SarasaMonoSC-Regular.ttf</file>
     </qresource>
 </RCC>

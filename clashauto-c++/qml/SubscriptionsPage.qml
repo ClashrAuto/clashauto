@@ -212,7 +212,6 @@ Item {
                     Text {
                         Layout.fillWidth: true
                         text: model.url
-                        font.family: Theme.monoFont // 订阅地址(URL/路径)——等宽技术文本
                         elide: Text.ElideMiddle
                         font.pixelSize: 11
                         color: Theme.textMuted
@@ -314,7 +313,6 @@ Item {
                 ThemedField {
                     id: fUrl
                     Layout.fillWidth: true
-                    font.family: Theme.monoFont // 输入订阅 URL/路径——等宽
                     placeholderText: "https://..."
                 }
                 Text { text: qsTr("名称"); font.pixelSize: 12; color: Theme.textSecondary }

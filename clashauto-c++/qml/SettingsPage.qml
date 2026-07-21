@@ -607,7 +607,6 @@ Item {
                                 Label { text: modelData.type; color: Theme.textMuted
                                     font.pixelSize: 12; Layout.preferredWidth: 90 }
                                 Label { text: modelData.rule; color: Theme.textSecondary
-                                    font.family: Theme.monoFont // 区域匹配式(正则)——等宽代码
                                     font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                                 PillButton {
                                     text: "✎"; implicitWidth: 30; implicitHeight: 24
@@ -668,12 +667,10 @@ Item {
                                 anchors.rightMargin: 6
                                 spacing: 8
                                 Label { text: modelData.type; color: Theme.textPrimary
-                                    font.family: Theme.monoFont // 规则类型关键字(DOMAIN-SUFFIX 等)——等宽代码
                                     font.pixelSize: 13; Layout.preferredWidth: 150; elide: Text.ElideRight }
                                 Label { text: modelData.node; color: Theme.accentStrong
                                     font.pixelSize: 12; Layout.preferredWidth: 130; elide: Text.ElideRight }
                                 Label { text: modelData.value; color: Theme.textSecondary
-                                    font.family: Theme.monoFont // 规则值(域名/IP/CIDR)——等宽代码
                                     font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                                 PillButton {
                                     text: "✎"; implicitWidth: 30; implicitHeight: 24

@@ -70,16 +70,11 @@ There is **no YAML library**. `AppConfig`, `ConfigBuilder`, and `SubscriptionSto
 
 User-writable state lives under the Qt `AppDataLocation`, i.e. `%AppData%/ClashAuto/Clash Auto/clash-auto/` on Windows: the user's `config.yaml` (copied from the bundled one on first run), the generated `full.yaml`, and `logs/qt-main.log`. The user copy takes precedence over the bundled `Clashr-Auto/config/config.yaml`.
 
-### Fonts — MiSans for UI, Sarasa Mono SC for code/mono
+### Fonts — MiSans everywhere
 
-Two font families are **bundled** in `clashauto-c++/assets/fonts/` (committed to git, ~40 MB total, embedded into the binary via `resources.qrc`):
+The whole UI uses one family, **`MiSans`**, bundled in `clashauto-c++/assets/fonts/` (committed to git, embedded into the binary via `resources.qrc`): `MiSans-Regular.ttf` + `MiSans-Semibold.ttf` (the Semibold is the `MiSans`-typographic-family face so `font.bold` maps to it instead of synthesizing). Source: the `dsrkafuu/misans` mirror (static TTFs). There is **no monospace font** — an earlier Sarasa Mono SC pass was reverted; everything is MiSans.
 
-- **`MiSans`** — body/UI text. Two weights bundled: `MiSans-Regular.ttf` + `MiSans-Semibold.ttf` (the Semibold is the `MiSans`-typographic-family face so `font.bold` maps to it instead of synthesizing). Source: the `dsrkafuu/misans` mirror (static TTFs).
-- **`Sarasa Mono SC`** — code/monospace text. `SarasaMonoSC-Regular.ttf`, full-CJK (25 MB — not subsetted, because logs contain arbitrary Chinese). Source: `be5invis/Sarasa-Gothic` release (`.7z`, extracted).
-
-`main_qml.cpp` registers all three with `QFontDatabase::addApplicationFont` and sets the **global default app font to `MiSans`** (`app.setFont`), so every QML `Text`/control that doesn't set `font.family` inherits it — that *is* how "UI uses MiSans" is enforced; you rarely set the family for UI text. The two family names are also exposed as `Theme.uiFont` (`"MiSans"`) and `Theme.monoFont` (`"Sarasa Mono SC"`).
-
-**Convention when adding UI:** leave normal UI/label/name text alone (it inherits MiSans). Set `font.family: Theme.monoFont` only on **code / numeric / tabular** text — the surfaces already doing so are the log timeline, connections window (host + chain/speed badges), live traffic numbers (`MetricCard`), node latency badge, subscription URLs, and rule/area type·value·regex. `Canvas`-drawn text does **not** inherit the app default, so it must name the family explicitly (see `BandwidthChart.qml`, which uses `Theme.uiFont`/`Theme.monoFont` in its `ctx.font` strings).
+`main_qml.cpp` registers both weights with `QFontDatabase::addApplicationFont` and sets the **global default app font to `MiSans`** (`app.setFont`), so every QML `Text`/control that doesn't set `font.family` inherits it — that *is* how "UI uses MiSans" is enforced; you essentially never set `font.family` for text. The family name is also exposed as `Theme.uiFont` (`"MiSans"`) for the one case that needs it explicitly: `Canvas`-drawn text does **not** inherit the app default (see `BandwidthChart.qml`, which names `Theme.uiFont` in its `ctx.font` strings).
 
 ## Releases & CI (`.github/workflows/release.yml`)
 

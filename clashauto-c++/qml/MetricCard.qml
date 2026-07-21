@@ -37,7 +37,6 @@ Rectangle {
             }
             Text {
                 text: root.value
-                font.family: Theme.monoFont // 实时数值等宽：每秒刷新不抖动
                 font.pixelSize: 17
                 font.bold: true
                 color: root.accentColor

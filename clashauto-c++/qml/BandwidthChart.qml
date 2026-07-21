@@ -92,9 +92,9 @@ Item {
                 ctx.stroke();
             }
 
-            // 右侧速度刻度（max / ¾ / ½ / ¼）——等宽数字（Canvas 不继承应用默认字体，显式指定）
+            // 右侧速度刻度（max / ¾ / ½ / ¼）——正文字体（Canvas 不继承应用默认字体，显式指定）
             ctx.fillStyle = "#969696";
-            ctx.font = "8px '" + Theme.monoFont + "'";
+            ctx.font = "10px '" + Theme.uiFont + "'";
             ctx.textAlign = "right";
             var labels = [max, max * 3 / 4, max / 2, max / 4];
             for (var li = 0; li < 4; ++li)

@@ -45,10 +45,8 @@ QtObject {
 
     // —— 字体 ——
     // uiFont：正文/UI（MiSans）。已在 main_qml 里设为全局默认字体，故绝大多数 Text 无需显式指定；
-    //         此常量供个别需强调「就是正文字体」的场景显式引用。
-    // monoFont：代码/等宽（Sarasa Mono SC）——日志、连接列表、实时流量数字等技术/表格文本用它，
-    //           等宽可避免数字每秒刷新时宽度抖动。iconFont：图标字体（logo/流量卡图标）。
+    //         此常量供 Canvas 等不继承应用默认字体的场景显式引用（如 BandwidthChart）。
+    // iconFont：图标字体（logo/流量卡图标）。全 UI 统一 MiSans，不再用等宽字体。
     readonly property string uiFont: "MiSans"
-    readonly property string monoFont: "Sarasa Mono SC"
     readonly property string iconFont: "iconfont"
 }
