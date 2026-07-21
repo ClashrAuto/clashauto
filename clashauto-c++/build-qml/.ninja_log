@@ -236,3 +236,14 @@
 434	3361	1784616240510713040	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp.o	abff2fa10d7ff37d
 435	3362	1784616240512178080	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/MetricCard_qml.cpp.o	55455250b94ff781
 3362	3894	1784616243439525082	Clash Auto.app/Contents/MacOS/Clash Auto	7a91341558601121
+140	193	1784616535777322336	ClashAuto/qml/BandwidthChart.qml	db105600f504958d
+140	193	1784616535777322336	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qml/BandwidthChart.qml	db105600f504958d
+142	336	1784616535919350012	.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+142	336	1784616535919350012	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.qt_plugins/Qt6_QmlPlugins_Imports_clashauto-qml.cmake	7aa3c532055b1abb
+338	387	1784616535971344077	.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+338	387	1784616535971344077	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp	5a61b22cec95836
+337	489	1784616536062786553	.rcc/qmlcache/clashauto-qml_qml/BandwidthChart_qml.cpp	f1b6b996a7df7251
+337	489	1784616536062786553	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/BandwidthChart_qml.cpp	f1b6b996a7df7251
+491	680	1784616536077757655	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp.o	6f3d9af9a562fdb3
+489	2717	1784616536075201738	CMakeFiles/clashauto-qml.dir/build-qml/.rcc/qmlcache/clashauto-qml_qml/BandwidthChart_qml.cpp.o	44584b3a68de040a
+2717	3266	1784616538303681653	Clash Auto.app/Contents/MacOS/Clash Auto	7a91341558601121
