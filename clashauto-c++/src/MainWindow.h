@@ -46,6 +46,11 @@ protected:
     void closeEvent(QCloseEvent *event) override;
     void showEvent(QShowEvent *event) override;
     bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
+    // 仅 macOS 实际使用：装在各 QTabBar 上，Show/Hide/Move 后重新恢复整窗毛玻璃。
+    // QTabBar 每次显示/隐藏/移动都会走 Qt Cocoa 的 applyContentBorderThickness，
+    // 其中无条件把 NSWindow.titlebarAppearsTransparent 置回 NO——标题栏立刻变回不透明底
+    // （切到设置/日志页毛玻璃「碎掉」的根因）。无法从应用侧拦截，只能事后重新断言。
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     QWidget *buildTitleBar();
@@ -196,6 +201,7 @@ private:
     bool m_inSizeMove = false;        // Windows 交互式拖动/缩放进行中（WM_ENTERSIZEMOVE~EXITSIZEMOVE）
     QSize m_sizeMoveEntrySize;        // 进入拖动/缩放时的客户区尺寸：尺寸没变=纯移动，擦底可整个跳过
     bool m_nodeResyncPending = false; // 拖动/缩放期间挂起的节点列表刷新，结束后补一次
+    bool m_macGlassReassertPending = false; // macOS：毛玻璃重断言已排队（合并同一轮事件里的多次触发）
     bool m_closeToTray = true;
     bool m_trayHintShown = false;
     bool m_nodeSwitchNote = true;

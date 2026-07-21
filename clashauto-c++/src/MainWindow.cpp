@@ -64,6 +64,7 @@
 #include <QStyleHints>
 #include <QSysInfo>
 #include <QSystemTrayIcon>
+#include <QTabBar> // macOS：给各 QTabBar 装事件过滤器，Show/Hide/Move 后恢复毛玻璃（见 eventFilter）
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTextEdit>
@@ -443,6 +444,19 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     bodyLayout->addWidget(rightColumn, 1);
     outer->addWidget(body, 1);
     setCentralWidget(root);
+
+#if defined(Q_OS_MACOS)
+    // 毛玻璃保活：QTabBar（设置页 settingsTabs / 日志页 logsTabs）每次 Show/Hide/Move 都会
+    // 触发 Qt Cocoa 的 applyContentBorderThickness，无条件把 NSWindow.titlebarAppearsTransparent
+    // 置回 NO——切到带 tab 的页面标题栏立刻变回不透明底、毛玻璃「碎掉」。应用侧无法拦截该
+    // 调用（QTabBar 直连平台插件），只能在其后重新断言（见 eventFilter，排队到事件处理之后）。
+    // 此时全部页面已构建完，一次性给主窗内所有 QTabBar 装过滤器；独立对话框是另外的
+    // NSWindow，不影响主窗，无需处理。
+    const auto tabBars = findChildren<QTabBar *>();
+    for (QTabBar *tabBar : tabBars) {
+        tabBar->installEventFilter(this);
+    }
+#endif
 
     applyTheme(config.theme);
     setCurrentPage(0);
@@ -3653,6 +3667,39 @@ void MainWindow::showEvent(QShowEvent *event)
 {
     QMainWindow::showEvent(event);
     applyTitleBarColor(); // 窗口显示后给系统标题栏着色（需窗口已实体化）
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+#if defined(Q_OS_MACOS)
+    // 只装在 QTabBar 上（构造函数末尾）。QTabBar 的 show/hide/Move 处理器会调
+    // QTabBarPrivate::updateMacBorderMetrics → Cocoa registerContentBorderArea →
+    // QCocoaWindow::applyContentBorderThickness；后者在无“内容边框渐变”（本应用恒无，
+    // 没有 unified toolbar）时无条件执行 window.titlebarAppearsTransparent = NO，
+    // 标题栏重新画出不透明底，盖住毛玻璃。事件过滤器先于目标控件处理事件，
+    // 此刻破坏尚未发生，故排队到本轮事件处理完之后再重新断言（applyTitleBarColor 会
+    // 依次调 configureMacTitleBar + enableMacBlur，均幂等：恢复 titlebarAppearsTransparent、
+    // 透明底色与玻璃层）。用 m_macGlassReassertPending 合并同一轮内的多次触发。
+    switch (event->type()) {
+    case QEvent::Show:
+    case QEvent::Hide:
+    case QEvent::Move:
+        if (qobject_cast<QTabBar *>(watched) && !m_macGlassReassertPending) {
+            m_macGlassReassertPending = true;
+            QMetaObject::invokeMethod(
+                this,
+                [this] {
+                    m_macGlassReassertPending = false;
+                    applyTitleBarColor();
+                },
+                Qt::QueuedConnection);
+        }
+        break;
+    default:
+        break;
+    }
+#endif
+    return QMainWindow::eventFilter(watched, event);
 }
 
 bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
