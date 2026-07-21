@@ -1,0 +1,28 @@
+{
+	"BUILD_DIR" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen",
+	"CMAKE_BINARY_DIR" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml",
+	"CMAKE_CURRENT_BINARY_DIR" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml",
+	"CMAKE_CURRENT_SOURCE_DIR" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++",
+	"CMAKE_SOURCE_DIR" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++",
+	"CROSS_CONFIG" : false,
+	"GENERATOR" : "Ninja",
+	"INCLUDE_DIR" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/include",
+	"INPUTS" : 
+	[
+		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/assets/icon.ico",
+		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/assets/chevron-dark.svg",
+		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/assets/chevron-light.svg",
+		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/assets/iconfont.ttf"
+	],
+	"LOCK_FILE" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/CMakeFiles/clashauto-qml_autogen.dir/AutoRcc_resources_EWIEGA46WW_Lock.lock",
+	"MULTI_CONFIG" : false,
+	"OPTIONS" : [ "--no-zstd", "-name", "resources" ],
+	"OUTPUT_CHECKSUM" : "EWIEGA46WW",
+	"OUTPUT_NAME" : "qrc_resources.cpp",
+	"RCC_EXECUTABLE" : "/Users/wangchao/Qt/6.5.3/macos/./libexec/rcc",
+	"RCC_LIST_OPTIONS" : [ "--list" ],
+	"SETTINGS_FILE" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/CMakeFiles/clashauto-qml_autogen.dir/AutoRcc_resources_EWIEGA46WW_Used.txt",
+	"SOURCE" : "/Users/wangchao/Desktop/github/clashauto/clashauto-c++/resources.qrc",
+	"USE_BETTER_GRAPH" : false,
+	"VERBOSITY" : 0
+}

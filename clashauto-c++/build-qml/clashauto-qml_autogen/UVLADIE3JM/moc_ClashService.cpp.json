@@ -1,0 +1,120 @@
+{
+    "classes": [
+        {
+            "className": "ClashService",
+            "object": true,
+            "qualifiedClassName": "ClashService",
+            "signals": [
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "up",
+                            "type": "qint64"
+                        },
+                        {
+                            "name": "down",
+                            "type": "qint64"
+                        }
+                    ],
+                    "name": "trafficUpdated",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "count",
+                            "type": "int"
+                        },
+                        {
+                            "name": "downloadTotal",
+                            "type": "qint64"
+                        }
+                    ],
+                    "name": "connectionsUpdated",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "nodes",
+                            "type": "QList<NodeInfo>"
+                        },
+                        {
+                            "name": "selected",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "nodesUpdated",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "groups",
+                            "type": "QStringList"
+                        },
+                        {
+                            "name": "selectedGroup",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "proxyGroupsUpdated",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "message",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "logUpdated",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "tun",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "proxy",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "core",
+                            "type": "bool"
+                        }
+                    ],
+                    "name": "statusUpdated",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "running",
+                            "type": "bool"
+                        }
+                    ],
+                    "name": "speedTestRunning",
+                    "returnType": "void"
+                }
+            ],
+            "superClasses": [
+                {
+                    "access": "public",
+                    "name": "QObject"
+                }
+            ]
+        }
+    ],
+    "inputFile": "ClashService.h",
+    "outputRevision": 68
+}

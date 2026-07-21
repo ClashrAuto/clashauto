@@ -1,0 +1,407 @@
+{
+    "classes": [
+        {
+            "className": "QmlBridge",
+            "methods": [
+                {
+                    "access": "public",
+                    "name": "toggleCore",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "toggleProxy",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "toggleTun",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "display",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "setMode",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "rawName",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "selectNode",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "group",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "selectGroup",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "refreshNodes",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "runSpeedTest",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "filter",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "setNodeFilter",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "clearConnections",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "window",
+                            "type": "QWindow*"
+                        },
+                        {
+                            "name": "dark",
+                            "type": "bool"
+                        }
+                    ],
+                    "name": "applyMacGlass",
+                    "returnType": "void"
+                }
+            ],
+            "object": true,
+            "properties": [
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 0,
+                    "name": "coreRunning",
+                    "notify": "statusChanged",
+                    "read": "coreRunning",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 1,
+                    "name": "proxyEnabled",
+                    "notify": "statusChanged",
+                    "read": "proxyEnabled",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 2,
+                    "name": "tunEnabled",
+                    "notify": "statusChanged",
+                    "read": "tunEnabled",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 3,
+                    "name": "upText",
+                    "notify": "trafficChanged",
+                    "read": "upText",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 4,
+                    "name": "downText",
+                    "notify": "trafficChanged",
+                    "read": "downText",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 5,
+                    "name": "upBytes",
+                    "notify": "trafficChanged",
+                    "read": "upBytes",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "double",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 6,
+                    "name": "downBytes",
+                    "notify": "trafficChanged",
+                    "read": "downBytes",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "double",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 7,
+                    "name": "connectionsCount",
+                    "notify": "connectionsChanged",
+                    "read": "connectionsCount",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 8,
+                    "name": "totalDownText",
+                    "notify": "connectionsChanged",
+                    "read": "totalDownText",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 9,
+                    "name": "nodeModel",
+                    "read": "nodeModel",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "NodeListModel*",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 10,
+                    "name": "selectedNode",
+                    "notify": "nodesChanged",
+                    "read": "selectedNode",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 11,
+                    "name": "groups",
+                    "notify": "groupsChanged",
+                    "read": "groups",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QStringList",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 12,
+                    "name": "selectedGroup",
+                    "notify": "groupsChanged",
+                    "read": "selectedGroup",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 13,
+                    "name": "speedTesting",
+                    "notify": "speedTestingChanged",
+                    "read": "speedTesting",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 14,
+                    "name": "mode",
+                    "notify": "modeChanged",
+                    "read": "mode",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 15,
+                    "name": "lastLog",
+                    "notify": "logAppended",
+                    "read": "lastLog",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 16,
+                    "name": "version",
+                    "read": "version",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 17,
+                    "name": "initialDark",
+                    "read": "initialDark",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                }
+            ],
+            "qualifiedClassName": "QmlBridge",
+            "signals": [
+                {
+                    "access": "public",
+                    "name": "statusChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "trafficChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "connectionsChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "nodesChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "groupsChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "speedTestingChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "modeChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "line",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "logAppended",
+                    "returnType": "void"
+                }
+            ],
+            "superClasses": [
+                {
+                    "access": "public",
+                    "name": "QObject"
+                }
+            ]
+        }
+    ],
+    "inputFile": "QmlBridge.h",
+    "outputRevision": 68
+}

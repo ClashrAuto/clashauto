@@ -1,0 +1,19 @@
+<RCC>
+  <qresource prefix="/qt/qml/ClashAuto/">
+    <file alias="qml/Main.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/Main.qml</file>
+    <file alias="qml/Theme.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/Theme.qml</file>
+    <file alias="qml/StatusPage.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/StatusPage.qml</file>
+    <file alias="qml/SubscriptionsPage.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/SubscriptionsPage.qml</file>
+    <file alias="qml/SettingsPage.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/SettingsPage.qml</file>
+    <file alias="qml/LogsPage.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/LogsPage.qml</file>
+    <file alias="qml/AboutPage.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/AboutPage.qml</file>
+    <file alias="qml/Card.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/Card.qml</file>
+    <file alias="qml/NavButton.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/NavButton.qml</file>
+    <file alias="qml/FooterSwitch.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/FooterSwitch.qml</file>
+    <file alias="qml/MetricCard.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/MetricCard.qml</file>
+    <file alias="qml/NodeRow.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/NodeRow.qml</file>
+    <file alias="qml/BandwidthChart.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/BandwidthChart.qml</file>
+    <file alias="qml/LogTimeline.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/LogTimeline.qml</file>
+  </qresource>
+</RCC>
+

@@ -1,0 +1,753 @@
+{
+    "classes": [
+        {
+            "className": "SettingsController",
+            "methods": [
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "host",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "uiPort",
+                            "type": "int"
+                        },
+                        {
+                            "name": "mixedPort",
+                            "type": "int"
+                        },
+                        {
+                            "name": "webProxy",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "nodeOnly",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "clearConnections",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "increment",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "closeToTray",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "autoStart",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "nodeNote",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "mirror",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "autoUpdate",
+                            "type": "int"
+                        },
+                        {
+                            "name": "themeLight",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "autoTheme",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "language",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "allowRule",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "allowUse",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "noAllowRule",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "noAllowUse",
+                            "type": "bool"
+                        }
+                    ],
+                    "name": "apply",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "on",
+                            "type": "bool"
+                        }
+                    ],
+                    "name": "setNodeOnly",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "on",
+                            "type": "bool"
+                        }
+                    ],
+                    "name": "setMirror",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "text",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "setRuleFilter",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "index",
+                            "type": "int"
+                        }
+                    ],
+                    "name": "ruleAt",
+                    "returnType": "QVariantMap"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "index",
+                            "type": "int"
+                        }
+                    ],
+                    "name": "areaAt",
+                    "returnType": "QVariantMap"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "editIndex",
+                            "type": "int"
+                        },
+                        {
+                            "name": "type",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "value",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "node",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "saveRule",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "index",
+                            "type": "int"
+                        }
+                    ],
+                    "name": "deleteRule",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "editIndex",
+                            "type": "int"
+                        },
+                        {
+                            "name": "name",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "type",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "proxiesText",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "url",
+                            "type": "QString"
+                        },
+                        {
+                            "name": "interval",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "saveArea",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "proxyGroupNames",
+                    "returnType": "QStringList"
+                },
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "wantPath",
+                            "type": "bool"
+                        }
+                    ],
+                    "name": "processChoices",
+                    "returnType": "QStringList"
+                },
+                {
+                    "access": "public",
+                    "name": "updateCore",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "updateGeoip",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "refreshMacHelperStatus",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "installMacHelper",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "uninstallMacHelper",
+                    "returnType": "void"
+                }
+            ],
+            "object": true,
+            "properties": [
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 0,
+                    "name": "host",
+                    "read": "host",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 1,
+                    "name": "uiPort",
+                    "read": "uiPort",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 2,
+                    "name": "mixedPort",
+                    "read": "mixedPort",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 3,
+                    "name": "webProxy",
+                    "read": "webProxy",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 4,
+                    "name": "nodeOnlyAvailable",
+                    "read": "nodeOnlyAvailable",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 5,
+                    "name": "clearConnections",
+                    "read": "clearConnections",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 6,
+                    "name": "increment",
+                    "read": "increment",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 7,
+                    "name": "closeToTray",
+                    "read": "closeToTray",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 8,
+                    "name": "autoStart",
+                    "read": "autoStart",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 9,
+                    "name": "nodeSwitchNote",
+                    "read": "nodeSwitchNote",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 10,
+                    "name": "mirror",
+                    "notify": "mirrorChanged",
+                    "read": "mirror",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 11,
+                    "name": "autoUpdateMinutes",
+                    "read": "autoUpdateMinutes",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 12,
+                    "name": "themeLight",
+                    "read": "themeLight",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 13,
+                    "name": "autoTheme",
+                    "read": "autoTheme",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 14,
+                    "name": "language",
+                    "read": "language",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 15,
+                    "name": "allowRuleEnabled",
+                    "read": "allowRuleEnabled",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 16,
+                    "name": "allowRule",
+                    "read": "allowRule",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 17,
+                    "name": "noAllowRuleEnabled",
+                    "read": "noAllowRuleEnabled",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 18,
+                    "name": "noAllowRule",
+                    "read": "noAllowRule",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 19,
+                    "name": "allowRulePresets",
+                    "read": "allowRulePresets",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QStringList",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 20,
+                    "name": "noAllowRulePresets",
+                    "read": "noAllowRulePresets",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QStringList",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 21,
+                    "name": "ruleRows",
+                    "notify": "rulesChanged",
+                    "read": "ruleRows",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QVariantList",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 22,
+                    "name": "ruleTotal",
+                    "notify": "rulesChanged",
+                    "read": "ruleTotal",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 23,
+                    "name": "ruleShown",
+                    "notify": "rulesChanged",
+                    "read": "ruleShown",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 24,
+                    "name": "areaRows",
+                    "notify": "areasChanged",
+                    "read": "areaRows",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QVariantList",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 25,
+                    "name": "areaTotal",
+                    "notify": "areasChanged",
+                    "read": "areaTotal",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 26,
+                    "name": "coreUpdating",
+                    "notify": "coreUpdatingChanged",
+                    "read": "coreUpdating",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 27,
+                    "name": "coreUpdateStatus",
+                    "notify": "coreUpdateStatusChanged",
+                    "read": "coreUpdateStatus",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 28,
+                    "name": "geoipUpdating",
+                    "notify": "geoipUpdatingChanged",
+                    "read": "geoipUpdating",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 29,
+                    "name": "geoipStatus",
+                    "notify": "geoipStatusChanged",
+                    "read": "geoipStatus",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": true,
+                    "designable": true,
+                    "final": false,
+                    "index": 30,
+                    "name": "macHelperSupported",
+                    "read": "macHelperSupported",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "bool",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 31,
+                    "name": "macHelperStatus",
+                    "notify": "macHelperStatusChanged",
+                    "read": "macHelperStatus",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 32,
+                    "name": "lastMessage",
+                    "notify": "messageChanged",
+                    "read": "lastMessage",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "QString",
+                    "user": false
+                }
+            ],
+            "qualifiedClassName": "SettingsController",
+            "signals": [
+                {
+                    "access": "public",
+                    "name": "rulesChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "areasChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "mirrorChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "coreUpdatingChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "coreUpdateStatusChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "geoipUpdatingChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "geoipStatusChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "macHelperStatusChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "messageChanged",
+                    "returnType": "void"
+                }
+            ],
+            "superClasses": [
+                {
+                    "access": "public",
+                    "name": "QObject"
+                }
+            ]
+        }
+    ],
+    "inputFile": "SettingsController.h",
+    "outputRevision": 68
+}

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- daemon 标签 = mach service 名 = helper bundle id -->
+    <key>Label</key>
+    <string>com.yuehongsun.auto.helper</string>
+
+    <!-- 可执行路径，相对 .app bundle 根（SMAppService daemon 用 BundleProgram） -->
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/com.yuehongsun.auto.helper</string>
+
+    <!-- launchd 广告这个 mach service；应用用同名 NSXPCConnection 连接 -->
+    <key>MachServices</key>
+    <dict>
+        <key>com.yuehongsun.auto.helper</key>
+        <true/>
+    </dict>
+
+    <!-- 让「系统设置 → 登录项」把本后台项归到主应用名下，显示更友好 -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.yuehongsun.auto</string>
+    </array>
+</dict>
+</plist>
