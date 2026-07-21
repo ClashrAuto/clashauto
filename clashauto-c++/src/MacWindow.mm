@@ -17,6 +17,8 @@ void configureMacTitleBar(WId winId, const QColor &bg)
     window.titlebarAppearsTransparent = YES;
     window.titleVisibility = NSWindowTitleHidden;
     window.styleMask |= NSWindowStyleMaskFullSizeContentView;
+    // 拖窗改由 Qt 侧 MainWindow::mousePressEvent → startSystemMove() 实现（跨平台且对 Qt 的
+    // 单 NSView 架构可靠）；movableByWindowBackground 对 Qt 基本无效，故不用。
     // 显式给窗口底色，避免主题切换瞬间标题栏区域闪出系统灰。
     window.backgroundColor = [NSColor colorWithSRGBRed:bg.redF()
                                                  green:bg.greenF()

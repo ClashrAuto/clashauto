@@ -4360,14 +4360,16 @@ void MainWindow::syncNodeRows()
 
 void MainWindow::mousePressEvent(QMouseEvent *event)
 {
-    // 系统标题栏之外，允许按住侧栏空白处拖拽移动窗口（菜单按钮自行消费点击，不会触发拖拽）
-    if (event->button() == Qt::LeftButton && event->pos().x() < SidebarWidth && !isMaximized()) {
-        // 版本号链接例外：QLabel 只开 LinksAccessibleByMouse 时 press 会被 ignore 上抛到这里，
-        // 一旦进了系统移动模态循环，release 就被它吃掉，linkActivated 永远不触发（点了没反应）。
-        // 放行给默认处理：release 仍会派发回标签，完成「点击检查更新」。
-        if (m_sidebarVersionLabel && childAt(event->pos()) == m_sidebarVersionLabel) {
-            QMainWindow::mousePressEvent(event);
-            return;
+    // 除按钮/下拉/列表等交互控件（它们自行消费点击、不会上抛到这里）外，按住任意背景区域拖窗。
+    if (event->button() == Qt::LeftButton && !isMaximized()) {
+        // 链接标签例外（侧栏版本号、关于页链接等）：QLabel 开 LinksAccessibleByMouse 时 press 会被
+        // ignore 上抛到这里，一旦进了系统移动模态循环，release 就被它吃掉，linkActivated 永远不触发
+        // （点了没反应）。放行给默认处理：release 仍会派发回标签，完成链接点击。
+        if (auto *lbl = qobject_cast<QLabel *>(childAt(event->pos()))) {
+            if (lbl->textInteractionFlags() & Qt::LinksAccessibleByMouse) {
+                QMainWindow::mousePressEvent(event);
+                return;
+            }
         }
         // 交给系统的模态移动循环（与拖系统标题栏同路径）：DWM 整体平移已合成的窗口表面，
         // 拖动全程客户区不重绘。此前逐 mouseMove 调 move()，每步 SetWindowPos 都触发
@@ -4408,7 +4410,7 @@ QString MainWindow::appStyle() const
         #titleButton:hover { background:#333; }
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
-        #rightPane { background:#222; }
+        #rightPane { background:#000; }
         #sidebar { background:#222; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
@@ -4449,9 +4451,9 @@ QString MainWindow::appStyle() const
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
-        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#222; }
-        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#222; }
-        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#222; }
+        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#000; }
+        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#000; }
+        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#000; }
         #nodeRow, #plainCard { background:#252525; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #83bdff; }
         #nodeName { color:#ccc; font-size:12px; padding-left:5px; }
@@ -4511,7 +4513,7 @@ QString MainWindow::lightStyle() const
         #titleButton:hover { background:#fff; }
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
-        #rightPane { background:#eee; }
+        #rightPane { background:#fff; }
         #sidebar { background:#eee; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
@@ -4521,7 +4523,7 @@ QString MainWindow::lightStyle() const
         #menuButton:hover { background:rgb(210,210,210); padding-left:36px; }
         #menuButton:checked { background:#fff; color:#333; border-left:3px solid #4898f8; }
         #version { color:#666; font-size:12px; }
-        #metricCard { background:#fff; border:0; border-radius:4px; min-height:70px; }
+        #metricCard { background:#eee; border:0; border-radius:4px; min-height:70px; }
         #metricIcon { font-size:30px; color:#888; font-family:'iconfont'; }
         #metricTitle { color:#3d3d3d; font-size:12px; }
         #metricValue { color:#3d3d3d; font-size:18px; }
@@ -4552,10 +4554,10 @@ QString MainWindow::lightStyle() const
         #iconButton { color:#4898f8; background:transparent; border:0; font-size:18px; }
         #cardCorner { color:#fff; background:rgba(0,0,0,0.30); border:0; border-radius:0 0 0 5px; font-size:12px; }
         #cardCornerDanger { color:#fff; background:rgba(255,0,0,0.30); border:0; border-radius:0 5px 0 0; font-size:12px; }
-        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#eee; }
-        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#eee; }
-        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#eee; }
-        #nodeRow, #plainCard { background:#fff; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
+        #nodeScroll, #nodeScroll > QWidget > QWidget, #nodeListBody { background:#fff; }
+        #subScroll, #subScroll > QWidget > QWidget, #subListBody { background:#fff; }
+        #sysScroll, #sysScroll > QWidget > QWidget, #sysBody { background:#fff; }
+        #nodeRow, #plainCard { background:#eee; border:0; border-left:3px solid transparent; border-radius:4px; min-height:40px; }
         #nodeRow[active="true"] { background:rgba(72,151,248,0.69); border-left:3px solid #1f6fd2; }
         #nodeName { color:#333; font-size:12px; padding-left:5px; }
         #delayBadge { color:#333; border-radius:5px; padding:3px 5px; font-size:12px; }
