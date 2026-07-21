@@ -23,6 +23,9 @@ signals:
     void toggleCoreRequested();
     void toggleProxyRequested();
     void toggleTunRequested();
+    // 请求重开/前置主窗口（托盘单击、「控制面板」菜单、mac 菜单栏「控制面板」都发它）。
+    // QML 版无 MainWindow，由 main_qml 连到 QQuickWindow 的 show/raise；Widgets 版 m_window 亦仍处理。
+    void openWindowRequested();
 
 #if defined(Q_OS_MACOS)
 public:

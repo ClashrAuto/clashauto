@@ -24,7 +24,25 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QQuickWindow>
 #include <QTimer>
+
+#if defined(Q_OS_MACOS)
+#include "MacWindow.h" // installMacReopenHandler：点 Dock 图标重开主窗（实现在 MacWindow.mm）
+#include <QPointer>
+namespace {
+// 供下方 C 回调（NSApp 的 applicationShouldHandleReopen）重开主窗：Dock 图标被点击时调用。
+QPointer<QQuickWindow> g_macMainWindow;
+void reopenMacMainWindow()
+{
+    if (g_macMainWindow) {
+        g_macMainWindow->show();
+        g_macMainWindow->raise();
+        g_macMainWindow->requestActivate();
+    }
+}
+} // namespace
+#endif
 
 int main(int argc, char *argv[])
 {
@@ -35,6 +53,9 @@ int main(int argc, char *argv[])
     QApplication::setApplicationName("Clash Auto");
     QApplication::setOrganizationName("ClashAuto");
     QApplication::setWindowIcon(QIcon(":/assets/icon.ico"));
+    // 关闭主窗口不再退出程序：✕ 只隐藏窗口（mac 恒隐藏、留 Dock；Win/Linux 按「关闭到托盘」决定，
+    // 见 Main.qml onClosing）。真正退出走托盘/菜单栏「退出程序」或 mac 的 Cmd+Q。
+    QApplication::setQuitOnLastWindowClosed(false);
     QFontDatabase::addApplicationFont(":/assets/iconfont.ttf"); // family "iconfont"（logo/流量卡图标）
 
     // —— 应用字体 ——
@@ -56,8 +77,8 @@ int main(int argc, char *argv[])
     auto *core = new CoreController(config, &app);
     auto *clash = new ClashService(&app);
     auto *subs = new SubscriptionStore(config, &app);
-    // TrayController 只在 m_window 非空时用它做 show/raise；QML 版暂传 nullptr（托盘的
-    // 「控制面板」项后续再接上 QML 窗口）。托盘图标 + 流量 + 三个 toggle 信号仍可用。
+    // TrayController 用 MainWindow* 做 show/raise；QML 版无 MainWindow，传 nullptr，改用它的
+    // openWindowRequested 信号重开 QML 主窗（见下方连接）。托盘图标 + 流量 + 三个 toggle 信号仍可用。
     auto *tray = new TrayController(nullptr, &app);
 
     clash->setEndpoint(config.host, config.uiPort);
@@ -101,6 +122,23 @@ int main(int argc, char *argv[])
     engine.loadFromModule("ClashAuto", "Main");
     if (engine.rootObjects().isEmpty())
         return -1;
+
+    // 主窗（ApplicationWindow 根即 QQuickWindow）：托盘/菜单栏「控制面板」与 mac Dock 图标据此重开。
+    // 关闭主窗只是 hide（见 Main.qml onClosing），这里负责再把它显示出来。
+    auto *rootWindow = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+    QObject::connect(tray, &TrayController::openWindowRequested, rootWindow, [rootWindow] {
+        if (rootWindow) {
+            rootWindow->show();
+            rootWindow->raise();
+            rootWindow->requestActivate();
+        }
+    });
+#if defined(Q_OS_MACOS)
+    // mac：点 Dock 图标重开主窗（Qt 默认不处理 reopen）。延到事件循环第一拍装，确保 Qt 的
+    // NSApp delegate 已就位（安装是安全幂等：仅当 Qt 未自带 reopen 处理时补上，见 MacWindow.mm）。
+    g_macMainWindow = rootWindow;
+    QTimer::singleShot(0, rootWindow, [] { installMacReopenHandler(&reopenMacMainWindow); });
+#endif
 
     clash->start(); // 只读轮询 REST API
 

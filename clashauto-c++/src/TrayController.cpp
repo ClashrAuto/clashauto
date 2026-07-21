@@ -52,10 +52,13 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
     refreshIcon(); // 初始（核心未起）用原色图标
     m_tray.setToolTip("Clash Auto");
     connect(&m_tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
-        if (reason == QSystemTrayIcon::Trigger && m_window) {
-            m_window->showNormal();
-            m_window->raise();
-            m_window->activateWindow();
+        if (reason == QSystemTrayIcon::Trigger) {
+            emit openWindowRequested(); // QML 版：main_qml 连到 QQuickWindow 重开
+            if (m_window) {
+                m_window->showNormal();
+                m_window->raise();
+                m_window->activateWindow();
+            }
         }
     });
     buildMenu();
@@ -66,6 +69,7 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
 #if defined(Q_OS_MACOS)
 void TrayController::macOpenWindow()
 {
+    emit openWindowRequested(); // QML 版：main_qml 连到 QQuickWindow 重开（mac 菜单栏「控制面板」）
     if (m_window) {
         m_window->showNormal();
         m_window->raise();
@@ -84,6 +88,7 @@ void TrayController::buildMenu()
     // 此前流量每秒 rebuildMenu()：new QMenu 换给 setContextMenu（它不接管旧菜单
     // 所有权），旧菜单+全部 QAction 每秒泄漏一份；用户正开着菜单时还会被整个换掉。
     m_menu.addAction("控制面板", this, [this] {
+        emit openWindowRequested(); // QML 版：main_qml 连到 QQuickWindow 重开
         if (m_window) {
             m_window->showNormal();
             m_window->raise();

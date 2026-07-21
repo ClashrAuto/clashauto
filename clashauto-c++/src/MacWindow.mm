@@ -1,6 +1,7 @@
 #include "MacWindow.h"
 
 #import <AppKit/AppKit.h>
+#import <objc/runtime.h>
 
 namespace {
 
@@ -82,4 +83,42 @@ void enableMacBlur(WId winId, bool dark)
     blur.material = NSVisualEffectMaterialSidebar;
     // Active：窗口失焦时也保持磨砂，不退化成一块发灰的纯色底。
     blur.state = NSVisualEffectStateActive;
+}
+
+namespace {
+void (*g_reopenCallback)(void) = nullptr;
+
+// 补到 Qt 的 NSApp delegate 上的方法实现：点 Dock 图标时 AppKit 调用它 → 回调重开主窗。
+// 返回 YES 表示已处理（AppKit 不再做默认动作）。签名须严格匹配委托方法。
+BOOL clashautoAppShouldHandleReopen(id self, SEL sel, NSApplication *app, BOOL hasVisibleWindows)
+{
+    (void)self;
+    (void)sel;
+    (void)app;
+    (void)hasVisibleWindows; // 无论有无可见窗口都把主窗显示到前台（已可见时 show/raise 亦无害）
+    if (g_reopenCallback) {
+        g_reopenCallback();
+    }
+    return YES;
+}
+} // namespace
+
+void installMacReopenHandler(void (*callback)(void))
+{
+    g_reopenCallback = callback;
+    id<NSApplicationDelegate> delegate = [NSApp delegate];
+    if (!delegate) {
+        return; // Qt 的 delegate 尚未就位；调用方应在事件循环第一拍再调
+    }
+    SEL sel = @selector(applicationShouldHandleReopen:hasVisibleWindows:);
+    // 仅当 Qt 的 delegate 未自带该方法时补上：Qt 若自带则尊重其实现，行为始终安全。
+    // 类型编码用 @encode 动态拼（BOOL 在 x86_64 是 'c'、arm64 是 'B'，不能硬编码 "c@:@c"）：
+    // 返回 BOOL、self(id)、SEL、NSApplication*、BOOL。
+    if (![delegate respondsToSelector:sel]) {
+        NSString *types = [NSString stringWithFormat:@"%s%s%s%s%s", @encode(BOOL), @encode(id),
+                                                      @encode(SEL), @encode(NSApplication *),
+                                                      @encode(BOOL)];
+        class_addMethod(object_getClass(delegate), sel, (IMP)clashautoAppShouldHandleReopen,
+                        types.UTF8String);
+    }
 }

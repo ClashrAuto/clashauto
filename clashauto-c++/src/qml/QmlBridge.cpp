@@ -41,6 +41,7 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
     if (config) {
         m_userDir = config->userDir; // persistConfigBool 落盘 config.yaml 用
         m_autoTheme = config->autoTheme;
+        m_closeToTray = config->closeToTray;
         const QString t = config->theme;
         const bool manualDark = !(t.compare("light", Qt::CaseInsensitive) == 0
                                   || t.compare("white", Qt::CaseInsensitive) == 0);
@@ -245,6 +246,14 @@ void QmlBridge::setAutoTheme(bool on)
     // 关闭时不动：保留用户手动选定的主题（由设置页主题下拉/config theme: 决定）。
     if (on)
         emit systemThemeChanged(systemDark());
+}
+
+void QmlBridge::setCloseToTray(bool on)
+{
+    if (m_closeToTray == on)
+        return;
+    m_closeToTray = on;
+    emit closeToTrayChanged();
 }
 
 void QmlBridge::autoStartCore()

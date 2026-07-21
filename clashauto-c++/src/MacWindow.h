@@ -15,3 +15,9 @@ void configureMacTitleBar(WId winId);
 // DarkAqua/Aqua，让材质跟随应用主题而非系统设置。幂等：重复调用只更新材质/外观，
 // 不会重复插入效果视图（按 identifier 查重）。窗口未实体化（无 NSWindow）时静默返回。
 void enableMacBlur(WId winId, bool dark);
+
+// macOS 专用：点击 Dock 图标（尤其当无可见窗口时）重新打开主窗——Qt 默认不处理 reopen，
+// 关闭主窗后点 Dock 图标不会有反应。这里把 applicationShouldHandleReopen:hasVisibleWindows:
+// 补到 Qt 的 NSApp delegate 上（仅当其未自带该方法时，安全幂等），触发时在主线程回调 callback。
+// callback 通常用于 show()/raise() 主窗。应在事件循环启动后调用（Qt 的 delegate 已就位）。
+void installMacReopenHandler(void (*callback)(void));

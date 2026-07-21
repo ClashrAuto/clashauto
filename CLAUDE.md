@@ -70,6 +70,17 @@ There is **no YAML library**. `AppConfig`, `ConfigBuilder`, and `SubscriptionSto
 
 User-writable state lives under the Qt `AppDataLocation`, i.e. `%AppData%/ClashAuto/Clash Auto/clash-auto/` on Windows: the user's `config.yaml` (copied from the bundled one on first run), the generated `full.yaml`, and `logs/qt-main.log`. The user copy takes precedence over the bundled `Clashr-Auto/config/config.yaml`.
 
+### Fonts — MiSans for UI, Sarasa Mono SC for code/mono
+
+Two font families are **bundled** in `clashauto-c++/assets/fonts/` (committed to git, ~40 MB total, embedded into the binary via `resources.qrc`):
+
+- **`MiSans`** — body/UI text. Two weights bundled: `MiSans-Regular.ttf` + `MiSans-Semibold.ttf` (the Semibold is the `MiSans`-typographic-family face so `font.bold` maps to it instead of synthesizing). Source: the `dsrkafuu/misans` mirror (static TTFs).
+- **`Sarasa Mono SC`** — code/monospace text. `SarasaMonoSC-Regular.ttf`, full-CJK (25 MB — not subsetted, because logs contain arbitrary Chinese). Source: `be5invis/Sarasa-Gothic` release (`.7z`, extracted).
+
+`main_qml.cpp` registers all three with `QFontDatabase::addApplicationFont` and sets the **global default app font to `MiSans`** (`app.setFont`), so every QML `Text`/control that doesn't set `font.family` inherits it — that *is* how "UI uses MiSans" is enforced; you rarely set the family for UI text. The two family names are also exposed as `Theme.uiFont` (`"MiSans"`) and `Theme.monoFont` (`"Sarasa Mono SC"`).
+
+**Convention when adding UI:** leave normal UI/label/name text alone (it inherits MiSans). Set `font.family: Theme.monoFont` only on **code / numeric / tabular** text — the surfaces already doing so are the log timeline, connections window (host + chain/speed badges), live traffic numbers (`MetricCard`), node latency badge, subscription URLs, and rule/area type·value·regex. `Canvas`-drawn text does **not** inherit the app default, so it must name the family explicitly (see `BandwidthChart.qml`, which uses `Theme.uiFont`/`Theme.monoFont` in its `ctx.font` strings).
+
 ## Releases & CI (`.github/workflows/release.yml`)
 
 - The release version **auto-increments per commit**: the "Resolve build version" step takes `major.minor` from `project(... VERSION x.y.z)` in `clashauto-c++/CMakeLists.txt` and uses the git commit count (`git rev-list --count HEAD`) as the patch/build number → `major.minor.<count>` (e.g. `0.1.15`), tag `v<version>`. Bump `major`/`minor` in CMakeLists to start a new line; the build number rises on its own each commit. This is why both checkout steps use `fetch-depth: 0` (full history is needed for the count), and both jobs compute the same version from the same `github.sha`. The resolved `APP_VERSION` is passed to CMake (`-DAPP_VERSION=`), which `configure_file`s `src/Version.h.in` → `Version.h` (`#define APP_VERSION`), so the **app UI (sidebar `Ver:` + About page) shows the exact packaged version**. Local builds default `APP_VERSION` to `PROJECT_VERSION`.

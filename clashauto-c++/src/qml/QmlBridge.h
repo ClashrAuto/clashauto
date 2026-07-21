@@ -54,6 +54,9 @@ class QmlBridge final : public QObject
     Q_PROPERTY(QString lastLog READ lastLog NOTIFY logAppended)
     Q_PROPERTY(QString version READ version CONSTANT)
     Q_PROPERTY(bool initialDark READ initialDark CONSTANT)
+    // 关闭到托盘（config.mini）：✕ 隐藏窗口而非退出（Win/Linux 用；mac 恒隐藏不看此值）。
+    // 随设置页「应用」更新，故非 CONSTANT。见 Main.qml onClosing。
+    Q_PROPERTY(bool closeToTray READ closeToTray NOTIFY closeToTrayChanged)
 
 public:
     QmlBridge(AppConfig *config, CoreController *core, ClashService *clash,
@@ -81,6 +84,7 @@ public:
     QString lastLog() const { return m_lastLog; }
     QString version() const;
     bool initialDark() const { return m_initialDark; }
+    bool closeToTray() const { return m_closeToTray; }
 
     // —— UI 动作 → 后端 slot ——
     Q_INVOKABLE void toggleCore();
@@ -120,6 +124,8 @@ public:
     // 设置页「应用」后调用：更新「跟随系统」开关的实时状态；开启时立刻按当前系统外观切主题
     // （通过 systemThemeChanged 通知 QML 设 Theme.dark）。对齐 Widgets 版保存后立即 applyTheme。
     Q_INVOKABLE void setAutoTheme(bool on);
+    // 设置页「应用」后调用：更新「关闭到托盘」实时状态，供下次 ✕ 关闭时 Main.qml onClosing 判定。
+    Q_INVOKABLE void setCloseToTray(bool on);
 
 #if defined(Q_OS_WIN)
     // 增强(TUN) 的「按需提权」：当前进程是否已以管理员身份运行；否则建不了 wintun 虚拟网卡。
@@ -142,6 +148,7 @@ signals:
     void logAppended(const QString &line);
     // 系统深浅色变化（仅在「跟随系统」开启时发出）：dark=true 暗色。Main.qml 据此设 Theme.dark。
     void systemThemeChanged(bool dark);
+    void closeToTrayChanged();
 
 private:
     static QString speedText(qint64 value);
@@ -154,6 +161,7 @@ private:
 
     QString m_userDir; // 用户可写配置目录（config.yaml 所在），用于 persistConfigBool
     bool m_autoTheme = false; // 是否跟随系统深浅色（config.autoTheme）；控制是否响应系统外观变化
+    bool m_closeToTray = true; // ✕ 关闭到托盘而非退出（config.mini）；Win/Linux 用
     CoreController *m_core = nullptr;
     ClashService *m_clash = nullptr;
     SubscriptionStore *m_subs = nullptr;

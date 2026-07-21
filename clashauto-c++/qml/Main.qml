@@ -19,6 +19,18 @@ ApplicationWindow {
     readonly property bool isWin: Qt.platform.os === "windows"
     property int currentPage: 0
 
+    // 点 ✕ 关闭主窗口不退出程序：只隐藏窗口（核心/托盘继续在跑），之后可经托盘/菜单栏「控制面板」
+    // 或 mac 点 Dock 图标重新打开。mac 恒隐藏（留 Dock，符合 mac 习惯）；Win/Linux 按「关闭到托盘」
+    // (config.mini) 决定——关则真正退出。真正退出统一走 Qt.quit()（aboutToQuit 停核心、还原系统代理）。
+    onClosing: (close) => {
+        if (isMac || bridge.closeToTray) {
+            close.accepted = false; // 不销毁窗口，仅隐藏，供后续重开
+            window.hide();
+        } else {
+            Qt.quit();
+        }
+    }
+
     // 所有平台都用系统原生窗（带标题栏）。mac 由 applyMacGlass 把标题栏变透明+整窗毛玻璃；
     // Windows 由 applyWindowsTitleBar 用 DWM 把标题栏背景染成窗口壳色；Linux 保持系统原生标题栏
     // （颜色由 WM 决定，应用无法强制）。不再对 Win/Linux 用无边框。
