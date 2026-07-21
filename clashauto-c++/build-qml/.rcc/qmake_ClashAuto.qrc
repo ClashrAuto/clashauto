@@ -1,6 +1,0 @@
-<RCC>
-  <qresource prefix="/qt/qml/ClashAuto">
-    <file alias="qmldir">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/ClashAuto/qmldir</file>
-  </qresource>
-</RCC>
-
