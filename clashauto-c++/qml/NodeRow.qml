@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import ClashAuto
 
-// 节点列表行：名称（省略号）+ 延迟/速度药丸 + 应用按钮。活动行整行高亮 + 左强调条。
+// 节点列表行：名称（省略号）+ 延迟/速度药丸 + 应用按钮。活动行整行高亮（无左竖条）。
 Rectangle {
     id: root
     property string display: ""
@@ -18,12 +18,6 @@ Rectangle {
     height: 40
     radius: 4
     color: active ? Theme.nodeRowActive : Theme.nodeRowBg
-
-    Rectangle {
-        width: 3
-        height: parent.height
-        color: root.active ? Theme.accentStrong : "transparent"
-    }
 
     RowLayout {
         anchors.fill: parent

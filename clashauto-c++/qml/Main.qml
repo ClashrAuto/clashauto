@@ -45,6 +45,22 @@ ApplicationWindow {
         function onDarkChanged() { window.applyChrome(); }
     }
 
+    // 背景拖动：按住窗口任意「非交互」空白/文字/卡片背景即可拖动整窗。铺满窗口并置于所有
+    // 内容之后(z:-1)。列表/ComboBox(select) 等控件在其上层先占用按下事件；本 handler 用
+    // 「不夺取」的 grabPermissions（无 CanTakeOver 位），故在这些控件上按住拖动不会移动窗口，
+    // 只有空白/文字处才触发。mac 由原生透明标题栏负责移动，仅非 mac 调 startSystemMove。
+    Item {
+        anchors.fill: parent
+        z: -1
+        DragHandler {
+            target: null
+            grabPermissions: PointerHandler.ApprovesTakeOverByItems
+                             | PointerHandler.ApprovesTakeOverByHandlersOfDifferentType
+                             | PointerHandler.ApprovesTakeOverByHandlersOfSameType
+            onActiveChanged: if (active && !window.isMac) window.startSystemMove()
+        }
+    }
+
     RowLayout {
         anchors.fill: parent
         spacing: 0
@@ -60,7 +76,7 @@ ApplicationWindow {
                 anchors.bottomMargin: 5
                 spacing: 0
 
-                // logo（网络图标，随状态变色）+ 背景拖动把手
+                // logo（网络图标，随状态变色）——窗口拖动由上方窗口级背景 handler 统一负责。
                 Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 118
@@ -73,10 +89,6 @@ ApplicationWindow {
                              : bridge.coreRunning ? "#ffff00"
                              : (Theme.dark ? "#ffffff" : "#333333")
                     }
-                    DragHandler {
-                        target: null
-                        onActiveChanged: if (active && !window.isMac) window.startSystemMove()
-                    }
                 }
 
                 // 导航（与 StackLayout 索引 1:1 对齐）
@@ -84,6 +96,7 @@ ApplicationWindow {
                     model: [qsTr("状态"), qsTr("订阅"), qsTr("设置"), qsTr("日志"), qsTr("关于")]
                     delegate: NavButton {
                         Layout.fillWidth: true // 铺满侧栏宽、右缘紧贴内容卡
+                        Layout.leftMargin: 20  // 按钮左侧留 20px 间距
                         Layout.topMargin: index === 0 ? 0 : 5
                         label: modelData
                         current: window.currentPage === index

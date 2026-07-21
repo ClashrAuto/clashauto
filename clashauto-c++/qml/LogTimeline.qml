@@ -44,19 +44,13 @@ Card {
                 anchors.fill: parent
                 spacing: 8
 
-                // —— 竖轴 + 圆点 ——
+                // —— 圆点（severity 颜色）——去掉了旧的左侧竖轴 ——
                 Item {
                     id: rail
                     Layout.preferredWidth: 14
                     Layout.fillHeight: true
                     implicitHeight: texts.implicitHeight
 
-                    Rectangle { // 竖轴
-                        x: 6
-                        width: 2
-                        height: parent.height
-                        color: Theme.divider
-                    }
                     Rectangle { // 圆点（对齐 Widgets：圆心 y≈9）
                         x: 3
                         y: 5

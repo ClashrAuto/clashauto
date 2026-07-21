@@ -172,14 +172,6 @@ Item {
                 width: ListView.view.width - ListView.view.rightMargin
                 implicitHeight: 108
 
-                // 启用态：左侧 3px 强调条
-                Rectangle {
-                    width: 3
-                    height: parent.height
-                    radius: 2
-                    color: model.use ? Theme.accent : "transparent"
-                }
-
                 ColumnLayout {
                     anchors.fill: parent
                     anchors.leftMargin: 12
