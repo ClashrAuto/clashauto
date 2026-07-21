@@ -28,27 +28,18 @@ ApplicationWindow {
         while (n >= 1024.0 && i < 4) { n /= 1024.0; ++i; }
         return n.toFixed(2) + u[i];
     }
-    function onlineCount() {
-        var n = 0;
-        for (var i = 0; i < bridge.connections.length; ++i)
-            if (!bridge.connections[i].offline) ++n;
-        return n;
+
+    // 过滤状态推给 C++ 模型（增量套用）：开关/搜索变化 + 窗口打开时都同步一次。
+    function applyFilter() {
+        bridge.connectionsModel.setFilter(win.showOnline, win.showOffline, win.query);
     }
-    function filtered() {
-        var q = win.query.toLowerCase();
-        var out = [];
-        for (var i = 0; i < bridge.connections.length; ++i) {
-            var c = bridge.connections[i];
-            if (c.offline && !win.showOffline) continue;
-            if (!c.offline && !win.showOnline) continue;
-            if (q.length && ("" + c.host).toLowerCase().indexOf(q) < 0) continue;
-            out.push(c);
-        }
-        return out;
-    }
+    onShowOnlineChanged: win.applyFilter()
+    onShowOfflineChanged: win.applyFilter()
+    onQueryChanged: win.applyFilter()
 
     onVisibleChanged: {
         if (visible) {
+            win.applyFilter();
             bridge.refreshConnections();
             refresh.start();
         } else {
@@ -104,35 +95,44 @@ ApplicationWindow {
             Layout.rightMargin: 5
             spacing: 10
 
-            Row {
-                spacing: 0
+            // 分段按钮组：离线段左端塞到在线段底下 3px（重叠），中间无缝、只外侧圆角。
+            Item {
+                Layout.preferredWidth: onSeg.width + offSeg.width - 3
+                Layout.preferredHeight: 26
                 Rectangle {
-                    width: onLbl.implicitWidth + 24
+                    id: offSeg
+                    x: onSeg.width - 3
+                    width: offLbl.implicitWidth + 27
                     height: 26
                     radius: 3
-                    color: win.showOnline ? "#4898f8" : "#909399"
-                    Text {
-                        id: onLbl
-                        anchors.centerIn: parent
-                        text: "Online (" + win.onlineCount() + ")"
-                        color: "#fff"
-                        font.pixelSize: 12
-                    }
-                    TapHandler { onTapped: win.showOnline = !win.showOnline }
-                }
-                Rectangle {
-                    width: offLbl.implicitWidth + 24
-                    height: 26
-                    radius: 3
+                    z: 0 // 在下：左端圆角被在线段盖住
                     color: win.showOffline ? "#4898f8" : "#909399"
                     Text {
                         id: offLbl
-                        anchors.centerIn: parent
-                        text: "Offline (" + (bridge.connections.length - win.onlineCount()) + ")"
+                        x: (parent.width - width) / 2 + 1.5
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Offline (" + (bridge.connectionsModel.count - bridge.connectionsModel.onlineTotal) + ")"
                         color: "#fff"
                         font.pixelSize: 12
                     }
                     TapHandler { onTapped: win.showOffline = !win.showOffline }
+                }
+                Rectangle {
+                    id: onSeg
+                    x: 0
+                    width: onLbl.implicitWidth + 24
+                    height: 26
+                    radius: 3
+                    z: 1 // 在上：盖住离线段左端
+                    color: win.showOnline ? "#4898f8" : "#909399"
+                    Text {
+                        id: onLbl
+                        anchors.centerIn: parent
+                        text: "Online (" + bridge.connectionsModel.onlineTotal + ")"
+                        color: "#fff"
+                        font.pixelSize: 12
+                    }
+                    TapHandler { onTapped: win.showOnline = !win.showOnline }
                 }
             }
 
@@ -182,7 +182,7 @@ ApplicationWindow {
                 anchors.fill: parent
                 anchors.margins: 5
                 clip: true
-                model: win.filtered()
+                model: bridge.connectionsModel
                 spacing: 8
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
@@ -201,26 +201,26 @@ ApplicationWindow {
                         Text {
                             text: "●"
                             font.pixelSize: 10
-                            color: modelData.offline ? "#999999" : "#67c23a"
+                            color: model.offline ? "#999999" : "#67c23a"
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: "[" + modelData.type + "] " + modelData.host
+                            text: "[" + model.type + "] " + model.host
                             font.pixelSize: 14
                             elide: Text.ElideRight
-                            color: modelData.offline ? "#999999" : (Theme.dark ? "#eeeeee" : "#333333")
+                            color: model.offline ? "#999999" : (Theme.dark ? "#eeeeee" : "#333333")
                         }
 
-                        ConnBadge { glyph: String.fromCharCode(0xe6bc); label: modelData.chain; bg: Qt.rgba(0, 0, 0, 0.35); fg: "#ffffff" }
-                        ConnBadge { glyph: String.fromCharCode(0xe6cd); label: modelData.download > 0 ? win.spd(modelData.download) : "-"; bg: Qt.rgba(0, 1, 0, 0.5); fg: "#333333" }
-                        ConnBadge { glyph: String.fromCharCode(0xe6cc); label: modelData.upload > 0 ? win.spd(modelData.upload) : "-"; bg: Qt.rgba(1, 0, 0, 0.5); fg: "#333333" }
+                        ConnBadge { glyph: String.fromCharCode(0xe6bc); label: model.chain; bg: Qt.rgba(0, 0, 0, 0.35); fg: "#ffffff" }
+                        ConnBadge { glyph: String.fromCharCode(0xe6cd); label: model.download > 0 ? win.spd(model.download) : "-"; bg: Qt.rgba(0, 1, 0, 0.5); fg: "#333333" }
+                        ConnBadge { glyph: String.fromCharCode(0xe6cc); label: model.upload > 0 ? win.spd(model.upload) : "-"; bg: Qt.rgba(1, 0, 0, 0.5); fg: "#333333" }
 
                         Rectangle {
                             Layout.preferredWidth: 30
                             Layout.preferredHeight: 30
                             radius: 3
-                            enabled: !modelData.offline
-                            color: delHover.hovered && !modelData.offline ? "#f56c6c"
+                            enabled: !model.offline
+                            color: delHover.hovered && !model.offline ? "#f56c6c"
                                  : (Theme.dark ? "#333333" : "#eeeeee")
                             border.width: Theme.dark ? 0 : 1
                             border.color: "#dddddd"
@@ -228,13 +228,13 @@ ApplicationWindow {
                                 anchors.centerIn: parent
                                 text: "✕"
                                 font.pixelSize: 12
-                                color: modelData.offline ? (Theme.dark ? "#666666" : "#cccccc")
+                                color: model.offline ? (Theme.dark ? "#666666" : "#cccccc")
                                      : (delHover.hovered ? "#ffffff" : "#f56c6c")
                             }
                             HoverHandler { id: delHover }
                             TapHandler {
-                                enabled: !modelData.offline
-                                onTapped: bridge.closeConnectionById(modelData.id)
+                                enabled: !model.offline
+                                onTapped: bridge.closeConnectionById(model.connId)
                             }
                         }
                     }

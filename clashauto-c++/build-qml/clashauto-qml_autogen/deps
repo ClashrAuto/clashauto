@@ -654,6 +654,8 @@ clashauto-qml_autogen/timestamp: \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/main_qml.cpp \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/AboutController.cpp \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/AboutController.h \
+	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/ConnectionsModel.cpp \
+	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/ConnectionsModel.h \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/LogModel.cpp \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/LogModel.h \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/NodeListModel.cpp \

@@ -7,6 +7,7 @@
 //   2) 把 UI 动作转成对后端 slot 的调用（Q_INVOKABLE）；
 //   3) 提供一个 NodeListModel 给 StatusPage 的 ListView。
 // 后端对象的生命周期由 main_qml.cpp 拥有；本类只持有裸指针、不接管所有权。
+#include "ConnectionsModel.h"
 #include "NodeListModel.h"
 
 #include <QObject>
@@ -34,8 +35,8 @@ class QmlBridge final : public QObject
     Q_PROPERTY(double downBytes READ downBytes NOTIFY trafficChanged)
     Q_PROPERTY(int connectionsCount READ connectionsCount NOTIFY connectionsChanged)
     Q_PROPERTY(QString totalDownText READ totalDownText NOTIFY connectionsChanged)
-    // 连接列表（进程卡「查看全部连接」弹窗按需刷新）：每项 {type,host,chain,download,upload,id,offline}
-    Q_PROPERTY(QVariantList connections READ connections NOTIFY connectionsListChanged)
+    // 连接列表模型（进程卡「查看全部连接」弹窗按需刷新）：增量更新，保滚动位置。
+    Q_PROPERTY(ConnectionsModel *connectionsModel READ connectionsModel CONSTANT)
     // —— 节点 / 组 ——
     Q_PROPERTY(NodeListModel *nodeModel READ nodeModel CONSTANT)
     Q_PROPERTY(QString selectedNode READ selectedNode NOTIFY nodesChanged)
@@ -61,7 +62,7 @@ public:
     double downBytes() const { return static_cast<double>(m_downBytes); }
     int connectionsCount() const { return m_connectionsCount; }
     QString totalDownText() const { return m_totalDownText; }
-    QVariantList connections() const { return m_connections; }
+    ConnectionsModel *connectionsModel() { return &m_connModel; }
     NodeListModel *nodeModel() { return &m_nodeModel; }
     QString selectedNode() const { return m_selectedNode; }
     QStringList groups() const { return m_groups; }
@@ -83,7 +84,7 @@ public:
     Q_INVOKABLE void runSpeedTest();
     Q_INVOKABLE void setNodeFilter(const QString &filter);
     Q_INVOKABLE void clearConnections();
-    Q_INVOKABLE void refreshConnections();               // 拉取当前连接列表（异步，完成后 connectionsListChanged）
+    Q_INVOKABLE void refreshConnections();               // 拉取当前连接列表（异步，完成后 m_connModel.setRaw）
     Q_INVOKABLE void closeConnectionById(const QString &id); // 断开单个连接，随后刷新列表
 
     // macOS 毛玻璃：把 QML 窗口交给原生层做「透明标题栏 + 整窗 NSVisualEffectView」。
@@ -94,7 +95,6 @@ signals:
     void statusChanged();
     void trafficChanged();
     void connectionsChanged();
-    void connectionsListChanged();
     void nodesChanged();
     void groupsChanged();
     void speedTestingChanged();
@@ -119,7 +119,7 @@ private:
     qint64 m_downBytes = 0;
     int m_connectionsCount = 0;
     QString m_totalDownText = QStringLiteral("0.00 B");
-    QVariantList m_connections;
+    ConnectionsModel m_connModel;
     QString m_selectedNode;
     QStringList m_groups;
     QString m_selectedGroup;

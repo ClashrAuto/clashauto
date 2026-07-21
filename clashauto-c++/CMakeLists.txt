@@ -49,6 +49,7 @@ set(BACKEND_SOURCES
 set(QML_GLUE_SOURCES
     src/qml/QmlBridge.cpp     src/qml/QmlBridge.h
     src/qml/NodeListModel.cpp src/qml/NodeListModel.h
+    src/qml/ConnectionsModel.cpp src/qml/ConnectionsModel.h
     src/qml/SubscriptionsController.cpp src/qml/SubscriptionsController.h
     src/qml/LogModel.cpp                src/qml/LogModel.h
     src/qml/AboutController.cpp         src/qml/AboutController.h

@@ -1,0 +1,80 @@
+{
+    "classes": [
+        {
+            "className": "ConnectionsModel",
+            "methods": [
+                {
+                    "access": "public",
+                    "arguments": [
+                        {
+                            "name": "showOnline",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "showOffline",
+                            "type": "bool"
+                        },
+                        {
+                            "name": "query",
+                            "type": "QString"
+                        }
+                    ],
+                    "name": "setFilter",
+                    "returnType": "void"
+                }
+            ],
+            "object": true,
+            "properties": [
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 0,
+                    "name": "count",
+                    "notify": "countChanged",
+                    "read": "count",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                },
+                {
+                    "constant": false,
+                    "designable": true,
+                    "final": false,
+                    "index": 1,
+                    "name": "onlineTotal",
+                    "notify": "onlineTotalChanged",
+                    "read": "onlineTotal",
+                    "required": false,
+                    "scriptable": true,
+                    "stored": true,
+                    "type": "int",
+                    "user": false
+                }
+            ],
+            "qualifiedClassName": "ConnectionsModel",
+            "signals": [
+                {
+                    "access": "public",
+                    "name": "countChanged",
+                    "returnType": "void"
+                },
+                {
+                    "access": "public",
+                    "name": "onlineTotalChanged",
+                    "returnType": "void"
+                }
+            ],
+            "superClasses": [
+                {
+                    "access": "public",
+                    "name": "QAbstractListModel"
+                }
+            ]
+        }
+    ],
+    "inputFile": "ConnectionsModel.h",
+    "outputRevision": 68
+}

@@ -188,8 +188,7 @@ void QmlBridge::refreshConnections()
             m["offline"] = c.value("offline").toBool();
             list.append(m);
         }
-        m_connections = list;
-        emit connectionsListChanged();
+        m_connModel.setRaw(list); // 增量套用（保 ListView 滚动位置）
     });
 }
 

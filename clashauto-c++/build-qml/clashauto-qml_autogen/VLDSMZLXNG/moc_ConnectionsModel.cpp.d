@@ -1,4 +1,4 @@
-/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/VLDSMZLXNG/moc_QmlBridge.cpp: /Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/QmlBridge.h \
+/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/VLDSMZLXNG/moc_ConnectionsModel.cpp: /Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/ConnectionsModel.h \
   /Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/moc_predefs.h \
   /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/Availability.h \
   /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/AvailabilityInternal.h \
@@ -624,21 +624,9 @@
   /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/sys/qos.h \
   /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include/time.h \
   /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/clang/14.0.3/include/stdarg.h \
-  /Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/ClashService.h \
-  /Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/ConnectionsModel.h \
-  /Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/NodeListModel.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QAbstractListModel \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QFlags \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QHash \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QJsonArray \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QList \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QMetaType \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QObject \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QSharedDataPointer \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QString \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QStringList \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QTimer \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QUrl \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QVariant \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QVariantList \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/QVector \
@@ -654,15 +642,11 @@
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qatomic.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qatomic_cxx11.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qbasicatomic.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qbasictimer.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qbindingstorage.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qbytearray.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qbytearrayalgorithms.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qbytearraylist.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qbytearrayview.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcalendar.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcborcommon.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcborvalue.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qchar.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcompare.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcompare_impl.h \
@@ -673,10 +657,8 @@
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcontainerinfo.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcontainertools_impl.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcontiguouscache.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qcryptographichash.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qdarwinhelpers.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qdatastream.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qdatetime.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qdebug.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qexceptionhandling.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qflags.h \
@@ -688,14 +670,10 @@
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qglobalstatic.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qhash.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qhashfunctions.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qiodevice.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qiodevicebase.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qiterable.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qiterator.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qjsonarray.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qjsonvalue.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qlist.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qlocale.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qlogging.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qmalloc.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qmap.h \
@@ -713,7 +691,6 @@
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qpair.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qprocessordetection.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qrefcount.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qregularexpression.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qscopedpointer.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qscopeguard.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qset.h \
@@ -742,7 +719,6 @@
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtdeprecationmarkers.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtenvironmentvariables.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtextstream.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtimer.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtmetamacros.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtnoop.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtpreprocessorsupport.h \
@@ -753,29 +729,10 @@
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtversionchecks.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtypeinfo.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qtypes.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qurl.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qutf8stringview.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/quuid.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qvariant.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qvariantlist.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qvarlengtharray.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qvector.h \
   /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qversiontagging.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qxptype_traits.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/QNetworkAccessManager \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/QSslConfiguration \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/QSslPreSharedKeyAuthenticator \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qabstractsocket.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qhostaddress.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qnetworkaccessmanager.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qnetworkrequest.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qssl.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qsslcertificate.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qsslconfiguration.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qsslerror.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qsslpresharedkeyauthenticator.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qsslsocket.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qtcpsocket.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qtnetwork-config.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qtnetworkexports.h \
-  /Users/wangchao/Qt/6.5.3/macos/lib/QtNetwork.framework/Versions/A/Headers/qtnetworkglobal.h
+  /Users/wangchao/Qt/6.5.3/macos/lib/QtCore.framework/Versions/A/Headers/qxptype_traits.h

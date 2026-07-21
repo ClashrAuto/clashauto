@@ -791,6 +791,12 @@
 			null
 		],
 		[
+			"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/ConnectionsModel.h",
+			"MU",
+			"VLDSMZLXNG/moc_ConnectionsModel.cpp",
+			null
+		],
+		[
 			"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/LogModel.h",
 			"MU",
 			"VLDSMZLXNG/moc_LogModel.cpp",
@@ -1001,6 +1007,11 @@
 		],
 		[
 			"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/AboutController.cpp",
+			"MU",
+			null
+		],
+		[
+			"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/ConnectionsModel.cpp",
 			"MU",
 			null
 		],

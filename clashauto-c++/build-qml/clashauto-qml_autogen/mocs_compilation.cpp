@@ -4,6 +4,7 @@
 #include "UVLADIE3JM/moc_SubscriptionStore.cpp"
 #include "UVLADIE3JM/moc_TrayController.cpp"
 #include "VLDSMZLXNG/moc_AboutController.cpp"
+#include "VLDSMZLXNG/moc_ConnectionsModel.cpp"
 #include "VLDSMZLXNG/moc_LogModel.cpp"
 #include "VLDSMZLXNG/moc_NodeListModel.cpp"
 #include "VLDSMZLXNG/moc_QmlBridge.cpp"
