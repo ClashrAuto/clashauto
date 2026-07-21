@@ -1,7 +1,7 @@
 ﻿#include "MainWindow.h"
 #if defined(Q_OS_MACOS)
 #include "MacHelperClient.h" // 开启增强(TUN)时确保特权 helper 已就绪并以 root 起核心
-#include "MacWindow.h"       // 系统标题栏透明 + 内容铺满整窗（标题栏与背景同色）
+#include "MacWindow.h"       // 系统标题栏透明 + 内容铺满整窗 + 整窗毛玻璃（NSVisualEffectView）
 #endif
 
 #include <QAbstractItemView>
@@ -392,6 +392,12 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     // 主窗口 + 中央控件都关掉这个属性，内容才真正铺到窗口顶端。
     setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
     root->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+    // 整窗毛玻璃（enableMacBlur 在窗底垫 NSVisualEffectView）：顶层窗口开半透明，
+    // backing store 以全透明清底，凡样式表里是 transparent 的区域（root/侧栏/页脚）都露出
+    // 玻璃；主内容 #rightPane 仍是不透明纯色卡片（见 appStyle/lightStyle + applyTheme 的
+    // mac 覆写）。必须在原生窗创建前设置——下方 applyTheme → applyTitleBarColor 会调
+    // winId() 触发创建。仅影响 macOS，Windows/Linux 不走此属性。
+    setAttribute(Qt::WA_TranslucentBackground, true);
 #endif
     auto *outer = new QVBoxLayout(root);
     outer->setContentsMargins(0, 0, 0, 0);
@@ -4410,7 +4416,7 @@ QString MainWindow::appStyle() const
         #titleButton:hover { background:#333; }
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
-        #rightPane { background:#000; }
+        #rightPane { background:#000; border-radius:5px; }
         #sidebar { background:#222; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
@@ -4513,7 +4519,7 @@ QString MainWindow::lightStyle() const
         #titleButton:hover { background:#fff; }
         #closeButton:hover { background:red; color:white; }
         #body, #page { background:rgba(0,0,0,0); }
-        #rightPane { background:#fff; }
+        #rightPane { background:#fff; border-radius:5px; }
         #sidebar { background:#eee; }
         #logo { color:#ffff00; background:transparent; min-width:80px; max-width:80px; min-height:80px; max-height:80px; font-size:70px; font-family:'iconfont'; }
         #logo[state="tun"] { color:#ff0000; }
@@ -4611,7 +4617,20 @@ void MainWindow::applyTheme(const QString &theme)
     const bool light = theme.compare("light", Qt::CaseInsensitive) == 0
                        || theme.compare("white", Qt::CaseInsensitive) == 0;
     m_theme = light ? "white" : "black";
-    setStyleSheet(light ? lightStyle() : appStyle());
+    QString style = light ? lightStyle() : appStyle();
+#if defined(Q_OS_MACOS)
+    // 整窗毛玻璃：窗口底层垫着 NSVisualEffectView（enableMacBlur）。把「窗口壳」——主窗、
+    // root、侧栏、页脚——的纯色底覆写成透明，玻璃从这些区域透出；主内容 #rightPane 保持
+    // 基础样式表里的不透明纯色（深 #000 / 浅 #fff）+ 5px 圆角，成为浮在玻璃上的实底卡片。
+    // 追加在基础样式表之后，同优先级下后者胜，Windows/Linux 不受影响。
+    style += R"(
+        QMainWindow { background:transparent; }
+        #root { background:transparent; }
+        #sidebar { background:transparent; }
+        #footer { background:transparent; }
+    )";
+#endif
+    setStyleSheet(style);
     // 呼吸圆点是自绘的，随主题切换刷新其颜色（关/浅色白、关/深色灰、开=蓝）
     for (QWidget *dot : {m_tunDot, m_proxyDot, m_coreDot}) {
         if (dot)
@@ -4640,10 +4659,13 @@ void MainWindow::applyTitleBarColor()
     const COLORREF text = light ? RGB(0x33, 0x33, 0x33) : RGB(0xEE, 0xEE, 0xEE);
     DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR, &text, sizeof(text));
 #elif defined(Q_OS_MACOS)
-    // 让系统标题栏透明、内容铺满整窗：标题栏区域透出内容底色（浅 #eee / 深 #222），
-    // 与背景同色；内容随之上移，页面顶部贴近窗口上边缘（仅剩右栏 10px 内边距）。
+    // 让系统标题栏透明、内容铺满整窗，再给整窗垫毛玻璃（NSVisualEffectView，BehindWindow）：
+    // 标题栏与侧栏/页脚等透明区域透出磨砂桌面，主内容 #rightPane 保持不透明圆角卡片。
+    // 玻璃深浅随应用主题（深色主题 → DarkAqua 深玻璃）。两个调用均幂等，showEvent 与
+    // 每次主题切换重复调用是安全的。
     const bool light = (m_theme == "white");
-    configureMacTitleBar(winId(), light ? QColor(0xEE, 0xEE, 0xEE) : QColor(0x22, 0x22, 0x22));
+    configureMacTitleBar(winId());
+    enableMacBlur(winId(), !light);
 #endif
 }
 

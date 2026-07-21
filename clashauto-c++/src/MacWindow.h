@@ -2,9 +2,16 @@
 
 #include <qwindowdefs.h> // WId
 
-class QColor;
+// macOS 专用：把系统标题栏做成「透明 + 内容延伸到顶」，标题栏文字隐藏、内容铺满整窗
+// （含标题栏区域）。窗口底色不再填不透明纯色——透明底交给 enableMacBlur() 的毛玻璃层，
+// 标题栏区域直接透出玻璃/内容。每次主题变化重复调用即可（styleMask 用 OR，幂等）。
+void configureMacTitleBar(WId winId);
 
-// macOS 专用：把系统标题栏做成「透明 + 内容延伸到顶」，标题栏区域直接透出窗口背景色，
-// 从而与内容同色；同时内容上移，页面顶部贴近窗口上边缘（仅剩各自布局的 ~10px 内边距）。
-// 每次主题变化重复调用即可（styleMask 用 OR，幂等；backgroundColor 随主题更新）。
-void configureMacTitleBar(WId winId, const QColor &bg);
+// macOS 专用：整窗毛玻璃。在窗框视图（contentView 的父视图）里、Qt 内容视图的下层插入
+// 一块铺满整窗的 NSVisualEffectView（blendingMode=BehindWindow，桌面/后方窗口被模糊后
+// 透进来），并把 NSWindow 设为非不透明 + clear 底色——Qt 侧配合 WA_TranslucentBackground，
+// 凡未被不透明控件（如 #rightPane 内容卡）覆盖的区域都露出玻璃。
+// dark 决定玻璃深浅：应用主题独立于系统外观，故通过 NSWindow.appearance 显式指定
+// DarkAqua/Aqua，让材质跟随应用主题而非系统设置。幂等：重复调用只更新材质/外观，
+// 不会重复插入效果视图（按 identifier 查重）。窗口未实体化（无 NSWindow）时静默返回。
+void enableMacBlur(WId winId, bool dark);
