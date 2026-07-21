@@ -42,6 +42,7 @@ Rectangle {
                 id: badge
                 anchors.centerIn: parent
                 text: root.badgeText
+                font.family: Theme.monoFont // 延迟(ms)/速度数字等宽
                 font.pixelSize: 12
                 color: "#222222"
             }

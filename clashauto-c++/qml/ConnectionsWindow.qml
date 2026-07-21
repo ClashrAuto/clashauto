@@ -77,6 +77,7 @@ ApplicationWindow {
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: badge.label
+                font.family: Theme.monoFont // 代理链名/速度数字等宽
                 font.pixelSize: 12
                 color: badge.fg
             }
@@ -206,6 +207,7 @@ ApplicationWindow {
                         Text {
                             Layout.fillWidth: true
                             text: "[" + model.type + "] " + model.host
+                            font.family: Theme.monoFont // 协议/主机(IP·域名)等宽——技术文本
                             font.pixelSize: 14
                             elide: Text.ElideRight
                             color: model.offline ? "#999999" : (Theme.dark ? "#eeeeee" : "#333333")

@@ -92,17 +92,17 @@ Item {
                 ctx.stroke();
             }
 
-            // 右侧速度刻度（max / ¾ / ½ / ¼）
+            // 右侧速度刻度（max / ¾ / ½ / ¼）——等宽数字（Canvas 不继承应用默认字体，显式指定）
             ctx.fillStyle = "#969696";
-            ctx.font = "8px sans-serif";
+            ctx.font = "8px '" + Theme.monoFont + "'";
             ctx.textAlign = "right";
             var labels = [max, max * 3 / 4, max / 2, max / 4];
             for (var li = 0; li < 4; ++li)
                 ctx.fillText(root.speedText(labels[li]), W - 6, H / 4 * li + 12);
 
-            // 左上标题
+            // 左上标题——正文字体（与 UI 一致）
             ctx.fillStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.70);
-            ctx.font = "bold 11px sans-serif";
+            ctx.font = "bold 11px '" + Theme.uiFont + "'";
             ctx.textAlign = "left";
             ctx.fillText(root.title, 10, 18);
 

@@ -71,12 +71,14 @@ Card {
 
                     Text {
                         text: model.time
+                        font.family: Theme.monoFont // 时间戳等宽对齐
                         font.pixelSize: 11
                         color: Theme.textMuted
                     }
                     Text {
                         Layout.fillWidth: true
                         text: model.text
+                        font.family: Theme.monoFont // 日志正文用等宽（代码/技术输出）
                         font.pixelSize: 13
                         color: Theme.textSecondary
                         wrapMode: Text.Wrap

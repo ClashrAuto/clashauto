@@ -18,6 +18,7 @@
 #include "qml/UpdateController.h"
 
 #include <QApplication>
+#include <QFont>
 #include <QFontDatabase>
 #include <QIcon>
 #include <QQmlApplicationEngine>
@@ -35,6 +36,20 @@ int main(int argc, char *argv[])
     QApplication::setOrganizationName("ClashAuto");
     QApplication::setWindowIcon(QIcon(":/assets/icon.ico"));
     QFontDatabase::addApplicationFont(":/assets/iconfont.ttf"); // family "iconfont"（logo/流量卡图标）
+
+    // —— 应用字体 ——
+    // 正文/UI 用 MiSans；代码/等宽（日志、连接列表等）用 Sarasa Mono SC（见 Theme.uiFont/monoFont）。
+    // MiSans 装两档：Regular 作正文，Semibold 供 font.bold 映射到真实半粗体（避免合成粗体发虚）。
+    QFontDatabase::addApplicationFont(":/assets/fonts/MiSans-Regular.ttf");  // family "MiSans"
+    QFontDatabase::addApplicationFont(":/assets/fonts/MiSans-Semibold.ttf"); // 归入 "MiSans"（typo family），weight=Semibold
+    QFontDatabase::addApplicationFont(":/assets/fonts/SarasaMonoSC-Regular.ttf"); // family "Sarasa Mono SC"（等宽）
+    // 全局默认字体设为 MiSans：所有未显式指定 family 的 QML Text 自动继承 → 正文/UI 即用 MiSans。
+    // 仅换 family、保留原默认字号，字号仍由各 QML 的 font.pixelSize 决定。
+    {
+        QFont uiFont = app.font();
+        uiFont.setFamily(QStringLiteral("MiSans"));
+        app.setFont(uiFont);
+    }
 
     // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 负责 sibling Clashr-Auto 发现）。
     AppConfig config = AppConfigLoader::load();
