@@ -142,7 +142,6 @@ private:
     QScrollArea *m_clashScroll = nullptr;
     QString m_logFilePath;
     QFile m_logFile; // 常开的日志文件句柄：避免每条日志 open/append/close（VM 上文件打开慢）
-    QLabel *m_usersLabel = nullptr;
     QLabel *m_versionLabel = nullptr; // 关于页版本行；发现新版本时高亮提示
     QLabel *m_sidebarVersionLabel = nullptr; // 侧栏底部版本行；发现新版本时变红提示（点击检查/更新）
     QString m_proxyHost = QStringLiteral("127.0.0.1"); // 下载走代理用的主机（对齐 config.host）

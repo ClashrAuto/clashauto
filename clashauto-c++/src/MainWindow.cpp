@@ -2215,16 +2215,10 @@ QWidget *MainWindow::buildFooter()
     layout->setContentsMargins(10, 0, 5, 0); // 页脚已在右侧列内，无需再为侧栏留 120 左边距
     layout->setSpacing(5);
 
-    m_usersLabel = new QLabel(QString::fromUtf8("◉ -"), footer);
-    m_usersLabel->setObjectName("usersBadge");
-    auto *footerArrow = new QLabel(QChar(0xE625), footer); // iconfont icon-arrow-2（方向-向右-粗）
-    footerArrow->setObjectName("footerArrow");
     m_logLabel = new QLabel("Ready", footer);
     m_logLabel->setObjectName("footerLog");
     // 不参与最小宽度计算：长日志只在可用空间内截断，不把右侧开关挤出窗口、也不阻止窗口缩小
     m_logLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    layout->addWidget(m_usersLabel);
-    layout->addWidget(footerArrow);
     layout->addWidget(m_logLabel, 1);
 
     auto addSwitch = [&](const QString &text, QWidget **dot, std::function<void()> onClick) {
@@ -4466,8 +4460,6 @@ QString MainWindow::appStyle() const
         #nodeButton:hover { background:#333; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
         #footer { background:#222; }
-        #usersBadge { color:#fff; background:#000; border-radius:3px; padding:3px 5px; font-size:12px; }
-        #footerArrow { color:#666; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#ccc; font-size:12px; }
         #switchButton { color:#eee; background:#000; border:0; border-radius:3px; min-height:28px; padding-left:32px; padding-right:8px; font-size:12px; }
         #switchDot { background:#666; border:4px solid rgba(102,102,102,0.15); border-radius:8px; }
@@ -4571,8 +4563,6 @@ QString MainWindow::lightStyle() const
         #nodeButton:hover { background:#c1c1c1; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
         #footer { background:#eee; }
-        #usersBadge { color:#333; background:#fff; border-radius:3px; padding:3px 5px; font-size:12px; }
-        #footerArrow { color:#e8e8e8; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#333; font-size:12px; }
         #switchButton { color:#333; background:#eee; border:0; border-radius:3px; min-height:28px; padding-left:32px; padding-right:8px; font-size:12px; }
         #switchDot { background:#fff; border:4px solid rgba(255,255,255,0.15); border-radius:8px; }
