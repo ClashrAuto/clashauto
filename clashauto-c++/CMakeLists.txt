@@ -54,6 +54,7 @@ set(QML_GLUE_SOURCES
     src/qml/LogModel.cpp                src/qml/LogModel.h
     src/qml/AboutController.cpp         src/qml/AboutController.h
     src/qml/SettingsController.cpp      src/qml/SettingsController.h
+    src/qml/UpdateController.cpp        src/qml/UpdateController.h
 )
 
 qt_add_executable(clashauto-qml
@@ -86,6 +87,7 @@ qt_add_qml_module(clashauto-qml
         qml/BandwidthChart.qml
         qml/LogTimeline.qml
         qml/ConnectionsWindow.qml
+        qml/UpdateWindow.qml
 )
 
 # Windows：把 assets/icon.ico 作为 exe 图标嵌入。

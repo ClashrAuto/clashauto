@@ -10,3 +10,4 @@
 #include "VLDSMZLXNG/moc_QmlBridge.cpp"
 #include "VLDSMZLXNG/moc_SettingsController.cpp"
 #include "VLDSMZLXNG/moc_SubscriptionsController.cpp"
+#include "VLDSMZLXNG/moc_UpdateController.cpp"

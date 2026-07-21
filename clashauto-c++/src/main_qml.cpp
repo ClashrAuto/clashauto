@@ -14,6 +14,7 @@
 #include "qml/LogModel.h"
 #include "qml/AboutController.h"
 #include "qml/SettingsController.h"
+#include "qml/UpdateController.h"
 
 #include <QApplication>
 #include <QFontDatabase>
@@ -54,6 +55,7 @@ int main(int argc, char *argv[])
     auto *logModel = new LogModel(core, clash, &app);
     auto *about = new AboutController(&app);
     auto *settingsCtrl = new SettingsController(core, clash, &app);
+    auto *updateCtrl = new UpdateController(config, core, &app);
 
     // 托盘 toggle → 后端（与 Widgets 版契约一致）。核心生命周期仍由用户显式触发。
     QObject::connect(tray, &TrayController::toggleCoreRequested, core, &CoreController::toggleCore);
@@ -72,6 +74,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("logModel", logModel);
     engine.rootContext()->setContextProperty("about", about);
     engine.rootContext()->setContextProperty("settings", settingsCtrl);
+    engine.rootContext()->setContextProperty("updater", updateCtrl);
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,

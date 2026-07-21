@@ -666,6 +666,8 @@ clashauto-qml_autogen/timestamp: \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/SettingsController.h \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/SubscriptionsController.cpp \
 	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/SubscriptionsController.h \
+	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/UpdateController.cpp \
+	/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/UpdateController.h \
 	/Users/wangchao/Library/Python/3.8/lib/python/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXInformation.cmake \
 	/Users/wangchao/Library/Python/3.8/lib/python/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCheckCompilerFlagCommonPatterns.cmake \
 	/Users/wangchao/Library/Python/3.8/lib/python/site-packages/cmake/data/share/cmake-4.4/Modules/CMakeCommonLanguageInclude.cmake \

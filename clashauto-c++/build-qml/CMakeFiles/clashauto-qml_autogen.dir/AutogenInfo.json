@@ -825,6 +825,12 @@
 			"MU",
 			"VLDSMZLXNG/moc_SubscriptionsController.cpp",
 			null
+		],
+		[
+			"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/UpdateController.h",
+			"MU",
+			"VLDSMZLXNG/moc_UpdateController.cpp",
+			null
 		]
 	],
 	"HEADER_EXTENSIONS" : [ "h", "hh", "h++", "hm", "hpp", "hxx", "in", "txx" ],
@@ -931,6 +937,7 @@
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/SubscriptionsPage_qml.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/Theme_qml.cpp",
+		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/UpdateWindow_qml.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_qmake_ClashAuto.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_qmltyperegistrations.cpp"
@@ -1039,6 +1046,11 @@
 			"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/SubscriptionsController.cpp",
 			"MU",
 			null
+		],
+		[
+			"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/src/qml/UpdateController.cpp",
+			"MU",
+			null
 		]
 	],
 	"UIC_OPTIONS" : [],
@@ -1060,6 +1072,7 @@
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/StatusPage_qml.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/SubscriptionsPage_qml.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/Theme_qml.cpp",
+		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qmlcache/clashauto-qml_qml/UpdateWindow_qml.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_clashauto-qml_raw_qml_0.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/.rcc/qrc_qmake_ClashAuto.cpp",
 		"/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_qmltyperegistrations.cpp"

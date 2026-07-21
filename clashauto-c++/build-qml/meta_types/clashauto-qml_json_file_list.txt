@@ -9,3 +9,4 @@
 /Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/include/../VLDSMZLXNG/moc_QmlBridge.cpp.json
 /Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/include/../VLDSMZLXNG/moc_SettingsController.cpp.json
 /Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/include/../VLDSMZLXNG/moc_SubscriptionsController.cpp.json
+/Users/wangchao/Desktop/github/clashauto/clashauto-c++/build-qml/clashauto-qml_autogen/include/../VLDSMZLXNG/moc_UpdateController.cpp.json

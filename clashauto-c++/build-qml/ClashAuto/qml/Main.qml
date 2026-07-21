@@ -86,11 +86,18 @@ ApplicationWindow {
 
                 Item { Layout.fillHeight: true }
 
+                // 版本行：点击打开更新窗（复刻 Widgets 版侧栏「Ver:」——平时灰色，
+                // 发现新版本转红并加 ⬆；点击都走更新流程）。
                 Text {
                     Layout.alignment: Qt.AlignHCenter
-                    text: "Ver: " + bridge.version
+                    text: about.updateAvailable ? ("Ver: " + bridge.version + " ⬆")
+                                                : ("Ver: " + bridge.version)
                     font.pixelSize: 12
-                    color: Theme.versionColor
+                    font.bold: about.updateAvailable
+                    color: about.updateAvailable ? Theme.danger : Theme.versionColor
+
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: updateWindow.show() }
                 }
             }
         }
@@ -227,5 +234,17 @@ ApplicationWindow {
                 }
             }
         }
+    }
+
+    // 更新窗（独立顶层窗口，默认隐藏；点击侧栏「Ver:」→ updateWindow.show()）。
+    UpdateWindow { id: updateWindow }
+
+    // 启动 3 秒后静默检查一次（对齐 Widgets 版 checkForUpdate(true)）：有新版本时
+    // about.updateAvailable 置真，侧栏「Ver:」转红加 ⬆。
+    Timer {
+        interval: 3000
+        running: true
+        repeat: false
+        onTriggered: about.check()
     }
 }

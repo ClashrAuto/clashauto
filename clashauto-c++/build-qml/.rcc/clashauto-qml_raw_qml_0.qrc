@@ -15,6 +15,7 @@
     <file alias="qml/BandwidthChart.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/BandwidthChart.qml</file>
     <file alias="qml/LogTimeline.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/LogTimeline.qml</file>
     <file alias="qml/ConnectionsWindow.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/ConnectionsWindow.qml</file>
+    <file alias="qml/UpdateWindow.qml">/Users/wangchao/Desktop/github/clashauto/clashauto-c++/qml/UpdateWindow.qml</file>
   </qresource>
 </RCC>
 
