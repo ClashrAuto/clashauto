@@ -222,7 +222,7 @@ protected:
     void paintEvent(QPaintEvent *) override
     {
         const QColor core = m_on ? QColor(0x48, 0x98, 0xf8)
-                                 : (m_light ? QColor(0xff, 0xff, 0xff) : QColor(0x66, 0x66, 0x66));
+                                 : (m_light ? QColor(0xc0, 0xc0, 0xc0) : QColor(0x66, 0x66, 0x66));
         QColor halo = core;
         halo.setAlphaF(m_on ? 0.30 : 0.15);
         QPainter p(this);
@@ -4564,7 +4564,8 @@ QString MainWindow::lightStyle() const
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
         #footer { background:#eee; }
         #footerLog { color:#333; font-size:12px; }
-        #switchButton { color:#333; background:#eee; border:0; border-radius:3px; min-height:28px; padding-left:32px; padding-right:8px; font-size:12px; }
+        #switchButton { color:#333; background:#fff; border:0; border-radius:3px; min-height:28px; padding-left:32px; padding-right:8px; font-size:12px; }
+        #switchButton:hover { background:#f5f5f5; }
         #switchDot { background:#fff; border:4px solid rgba(255,255,255,0.15); border-radius:8px; }
         #switchDot[on="true"] { background:#4898f8; border-color:rgba(72,152,248,0.30); }
         #timelineBody { background:#fff; }
@@ -4599,7 +4600,7 @@ QString MainWindow::lightStyle() const
         QListWidget { background:#eee; color:#333; border:1px solid #ccc; border-radius:5px; font-size:12px; }
         QListWidget::item { padding:5px; border-radius:5px; }
         QListWidget::item:selected { background:#4898f8; color:white; }
-        #footer QComboBox { background:#eee; border:0; font-size:12px; }
+        #footer QComboBox { background:#fff; border:0; font-size:12px; }
     )";
 }
 
