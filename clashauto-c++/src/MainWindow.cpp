@@ -428,9 +428,10 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     auto *right = new QFrame(rightColumn);
     right->setObjectName("rightPane");
     auto *rightLayout = new QVBoxLayout(right);
-    // 右内边距 2（而非 10）：可滚动内容（节点/订阅/设置列表）的竖滚动条占 8px，2+8=10，
-    // 让列表行右缘离卡片右边刚好 10px（此前 10+8=18 看着太空）。左/上仍 10。
-    rightLayout->setContentsMargins(10, 10, 2, 0);
+    // 四周常规 10px 内边距。mac 上滚动条是原生悬浮式（transient：浮在内容上、不占宽、
+    // 不滚动时自动隐藏，见 applyTheme——QScrollBar 规则仅在非 mac 追加），列表行右缘
+    // 无论长短表都恰好离卡片右边 10px；Win/Linux 保留 8px 细条样式滚动条（占宽）。
+    rightLayout->setContentsMargins(10, 10, 10, 0);
     rightLayout->setSpacing(0);
 
     m_pages = new QStackedWidget(right);
@@ -4495,14 +4496,6 @@ QString MainWindow::appStyle() const
         #metricCard[kind="download"] QLabel { color:rgb(72,165,167); }
         #sectionTitle { color:#eee; font-size:18px; font-weight:400; }
         QScrollArea { background:transparent; border:0; }
-        QScrollBar:vertical { background:transparent; width:8px; margin:0; }
-        QScrollBar::handle:vertical { background:#555; border-radius:4px; min-height:24px; }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; width:0; background:transparent; border:0; }
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
-        QScrollBar:horizontal { background:transparent; height:8px; margin:0; }
-        QScrollBar::handle:horizontal { background:#555; border-radius:4px; min-width:24px; }
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { height:0; width:0; background:transparent; border:0; }
-        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }
         QLineEdit, QComboBox, QTextEdit, QSpinBox { color:#fff; background:#444; border:1px solid #333; border-radius:3px; min-height:28px; padding:0 8px; }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border:1px solid #4898f8; }
         QComboBox { padding-right:24px; }
@@ -4599,14 +4592,6 @@ QString MainWindow::lightStyle() const
         #metricCard[kind="download"] QLabel { color:rgb(72,165,167); }
         #sectionTitle { color:#111; font-size:18px; font-weight:400; }
         QScrollArea { background:transparent; border:0; }
-        QScrollBar:vertical { background:transparent; width:8px; margin:0; }
-        QScrollBar::handle:vertical { background:#ccc; border-radius:4px; min-height:24px; }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; width:0; background:transparent; border:0; }
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
-        QScrollBar:horizontal { background:transparent; height:8px; margin:0; }
-        QScrollBar::handle:horizontal { background:#ccc; border-radius:4px; min-width:24px; }
-        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { height:0; width:0; background:transparent; border:0; }
-        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }
         QLineEdit, QComboBox, QTextEdit, QSpinBox { color:#333; background:#eaeaea; border:1px solid #ccc; border-radius:3px; min-height:28px; padding:0 8px; }
         QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border:1px solid #4898f8; }
         QComboBox { padding-right:24px; }
@@ -4673,6 +4658,29 @@ QString MainWindow::lightStyle() const
     )";
 }
 
+#if !defined(Q_OS_MACOS)
+// Win/Linux 专用：8px 细条样式滚动条。从 appStyle()/lightStyle() 拆出来单独追加，因为
+// QScrollBar 一旦被任何样式表规则命中，QStyleSheetStyle 对 SH_ScrollBar_Transient 一律
+// 返回 0（qstylesheetstyle.cpp：!hasNativeBorder||hasBox||hasDrawable → 0），QMacStyle 的
+// 原生悬浮滚动条（transient：浮在内容上、不占宽、不滚动时自动淡出）就被禁用了。
+// 所以 mac 上不追加任何 QScrollBar 规则、走原生；只有 Win/Linux（无原生悬浮）用此样式。
+static QString nonMacScrollBarStyle(bool light)
+{
+    const QString handle = light ? QStringLiteral("#ccc") : QStringLiteral("#555");
+    return QStringLiteral(R"(
+        QScrollBar:vertical { background:transparent; width:8px; margin:0; }
+        QScrollBar::handle:vertical { background:%1; border-radius:4px; min-height:24px; }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; width:0; background:transparent; border:0; }
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background:transparent; }
+        QScrollBar:horizontal { background:transparent; height:8px; margin:0; }
+        QScrollBar::handle:horizontal { background:%1; border-radius:4px; min-width:24px; }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { height:0; width:0; background:transparent; border:0; }
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background:transparent; }
+    )")
+        .arg(handle);
+}
+#endif
+
 void MainWindow::applyTheme(const QString &theme)
 {
     const bool light = theme.compare("light", Qt::CaseInsensitive) == 0
@@ -4690,6 +4698,10 @@ void MainWindow::applyTheme(const QString &theme)
         #sidebar { background:transparent; }
         #footer { background:transparent; }
     )";
+    // 注意：mac 上不追加任何 QScrollBar 规则——保持无规则才能启用 QMacStyle 的原生悬浮
+    // 滚动条（不占宽、自动隐藏），见 nonMacScrollBarStyle 上方说明。
+#else
+    style += nonMacScrollBarStyle(light);
 #endif
     setStyleSheet(style);
     // 呼吸圆点是自绘的，随主题切换刷新其颜色（关/浅色白、关/深色灰、开=蓝）
