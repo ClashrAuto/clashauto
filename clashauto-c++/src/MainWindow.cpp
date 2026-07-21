@@ -416,9 +416,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     rightColumn->setObjectName("rightColumn");
     auto *rightColLayout = new QVBoxLayout(rightColumn);
 #if defined(Q_OS_MACOS)
-    // 毛玻璃下让主内容（及页脚）离窗口上、右边缘各留 10px，透出玻璃、像浮起的圆角卡片。
-    // 左边贴侧栏、下边贴窗口底，故只给 top/right = 10。
-    rightColLayout->setContentsMargins(0, 10, 10, 0);
+    // 毛玻璃下让主内容（及页脚）离窗口上、右边缘各留 5px，透出玻璃、像浮起的圆角卡片。
+    // 左边贴侧栏、下边贴窗口底，故只给 top/right = 5。
+    rightColLayout->setContentsMargins(0, 5, 5, 0);
 #else
     rightColLayout->setContentsMargins(0, 0, 0, 0);
 #endif
@@ -2224,13 +2224,17 @@ QWidget *MainWindow::buildFooter()
     footer->setObjectName("footer");
     footer->setFixedHeight(FooterHeight);
     auto *layout = new QHBoxLayout(footer);
-    layout->setContentsMargins(10, 0, 5, 0); // 页脚已在右侧列内，无需再为侧栏留 120 左边距
+    // 右内边距 0：最右的模式下拉框贴到页脚框右缘；页脚框本身由右侧列留 5px（离窗口右边 5px）。
+    layout->setContentsMargins(10, 0, 0, 0);
     layout->setSpacing(5);
 
+    auto *footerArrow = new QLabel(QChar(0xE625), footer); // iconfont icon-arrow-2（方向-向右-粗）
+    footerArrow->setObjectName("footerArrow");
     m_logLabel = new QLabel("Ready", footer);
     m_logLabel->setObjectName("footerLog");
     // 不参与最小宽度计算：长日志只在可用空间内截断，不把右侧开关挤出窗口、也不阻止窗口缩小
     m_logLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    layout->addWidget(footerArrow);
     layout->addWidget(m_logLabel, 1);
 
     auto addSwitch = [&](const QString &text, QWidget **dot, std::function<void()> onClick) {
@@ -4474,6 +4478,7 @@ QString MainWindow::appStyle() const
         #nodeButton:hover { background:#333; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
         #footer { background:#222; }
+        #footerArrow { color:#666; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#ccc; font-size:12px; }
         #switchButton { color:#eee; background:#000; border:0; border-radius:3px; min-height:28px; padding-left:32px; padding-right:8px; font-size:12px; }
         #switchDot { background:#666; border:4px solid rgba(102,102,102,0.15); border-radius:8px; }
@@ -4577,6 +4582,7 @@ QString MainWindow::lightStyle() const
         #nodeButton:hover { background:#c1c1c1; }
         #primaryButton { color:white; background:#4898f8; border:0; border-radius:4px; min-height:30px; }
         #footer { background:#eee; }
+        #footerArrow { color:#999; font-size:14px; font-family:'iconfont'; }
         #footerLog { color:#333; font-size:12px; }
         #switchButton { color:#333; background:#fff; border:0; border-radius:3px; min-height:28px; padding-left:32px; padding-right:8px; font-size:12px; }
         #switchButton:hover { background:#f5f5f5; }
