@@ -10,6 +10,7 @@
 #include "ConnectionsModel.h"
 #include "NodeListModel.h"
 
+#include <QColor>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -104,6 +105,10 @@ public:
     // macOS 毛玻璃：把 QML 窗口交给原生层做「透明标题栏 + 整窗 NSVisualEffectView」。
     // 非 macOS 上是安全 no-op。dark 决定玻璃深浅（跟随应用主题）。
     Q_INVOKABLE void applyMacGlass(QWindow *window, bool dark);
+
+    // Windows 原生标题栏染色：DWM 把标题栏背景染成 bg（窗口壳色），与应用背景融为一体。
+    // 非 Windows 上是安全 no-op。旧 Windows(非 Win11)上 DWM 忽略 → 保持系统默认标题栏。
+    Q_INVOKABLE void applyWindowsTitleBar(QWindow *window, const QColor &bg, bool dark);
 
 signals:
     void statusChanged();

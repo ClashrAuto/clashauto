@@ -15,6 +15,9 @@
 #if defined(Q_OS_MACOS)
 #include "../MacWindow.h" // configureMacTitleBar / enableMacBlur（纯 C++ 接口，实现在 MacWindow.mm）
 #endif
+#if defined(Q_OS_WIN)
+#include "../WinWindow.h" // setWindowsCaptionColor（DWM 标题栏染色，实现在 WinWindow.cpp）
+#endif
 
 QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clash,
                      SubscriptionStore *subs, QObject *parent)
@@ -298,6 +301,19 @@ void QmlBridge::applyMacGlass(QWindow *window, bool dark)
     enableMacBlur(wid, dark);
 #else
     Q_UNUSED(window);
+    Q_UNUSED(dark);
+#endif
+}
+
+void QmlBridge::applyWindowsTitleBar(QWindow *window, const QColor &bg, bool dark)
+{
+#if defined(Q_OS_WIN)
+    if (!window)
+        return;
+    setWindowsCaptionColor(window->winId(), bg, dark);
+#else
+    Q_UNUSED(window);
+    Q_UNUSED(bg);
     Q_UNUSED(dark);
 #endif
 }

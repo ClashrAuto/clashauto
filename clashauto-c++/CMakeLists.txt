@@ -98,6 +98,8 @@ if(WIN32)
         "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
         @ONLY)
     target_sources(clashauto-qml PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+    # Windows 原生标题栏染色（DWM）——仅 Windows 编译，链接的 dwmapi 已在下方 target_link_libraries。
+    target_sources(clashauto-qml PRIVATE src/WinWindow.cpp src/WinWindow.h)
 endif()
 
 target_link_libraries(clashauto-qml PRIVATE

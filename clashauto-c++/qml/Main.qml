@@ -16,26 +16,33 @@ ApplicationWindow {
     title: "Clash Auto"
 
     readonly property bool isMac: Qt.platform.os === "osx"
+    readonly property bool isWin: Qt.platform.os === "windows"
     property int currentPage: 0
 
-    flags: isMac ? Qt.Window : (Qt.Window | Qt.FramelessWindowHint)
-    // mac 透明底露玻璃；其它平台用壳色（侧栏/页脚透明后即透出此色）。
+    // 所有平台都用系统原生窗（带标题栏）。mac 由 applyMacGlass 把标题栏变透明+整窗毛玻璃；
+    // Windows 由 applyWindowsTitleBar 用 DWM 把标题栏背景染成窗口壳色；Linux 保持系统原生标题栏
+    // （颜色由 WM 决定，应用无法强制）。不再对 Win/Linux 用无边框。
+    flags: Qt.Window
+    // mac 透明底露玻璃；其它平台用壳色（标题栏在 Windows 上也会被染成此色）。
     color: isMac ? "transparent" : Theme.shell
 
-    function applyGlass() {
+    // 平台窗口装饰：mac 毛玻璃 / Windows 标题栏染色 / Linux 无操作。
+    function applyChrome() {
         if (isMac)
             bridge.applyMacGlass(window, Theme.dark);
+        else if (isWin)
+            bridge.applyWindowsTitleBar(window, Theme.shell, Theme.dark);
     }
 
     Component.onCompleted: {
         Theme.dark = bridge.initialDark;
-        applyGlass();
+        applyChrome();
     }
-    onVisibleChanged: if (visible) applyGlass()
-    // 主题切换后毛玻璃深浅需重设
+    onVisibleChanged: if (visible) applyChrome()
+    // 主题切换后毛玻璃深浅 / 标题栏颜色需重设
     Connections {
         target: Theme
-        function onDarkChanged() { window.applyGlass(); }
+        function onDarkChanged() { window.applyChrome(); }
     }
 
     RowLayout {
