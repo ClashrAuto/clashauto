@@ -870,7 +870,9 @@ jobs:
   # 必需 secret（REPO/TOKEN）未配置时本 job 自动跳过（不失败）。
   trigger-mac:
     name: Trigger signed macOS build
-    needs: [windows, linux]
+    # 只依赖 windows（release 由它创建，mac DMG 随后追加）；mac 构建与 linux 无关，
+    # 不因 linux 失败被 skip。
+    needs: [windows]
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
