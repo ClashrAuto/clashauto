@@ -415,7 +415,13 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
     auto *rightColumn = new QFrame(body);
     rightColumn->setObjectName("rightColumn");
     auto *rightColLayout = new QVBoxLayout(rightColumn);
+#if defined(Q_OS_MACOS)
+    // 毛玻璃下让主内容（及页脚）离窗口上、右边缘各留 10px，透出玻璃、像浮起的圆角卡片。
+    // 左边贴侧栏、下边贴窗口底，故只给 top/right = 10。
+    rightColLayout->setContentsMargins(0, 10, 10, 0);
+#else
     rightColLayout->setContentsMargins(0, 0, 0, 0);
+#endif
     rightColLayout->setSpacing(0);
 
     auto *right = new QFrame(rightColumn);
