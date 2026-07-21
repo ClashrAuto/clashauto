@@ -114,6 +114,10 @@ public:
     // 非 Windows 上是安全 no-op。旧 Windows(非 Win11)上 DWM 忽略 → 保持系统默认标题栏。
     Q_INVOKABLE void applyWindowsTitleBar(QWindow *window, const QColor &bg, bool dark);
 
+    // macOS：窗口可见时显示 Dock 图标（Regular），隐藏（✕ 关闭）时移除 Dock 图标（Accessory），
+    // 即「关闭窗口不留 Dock」。由 Main.qml onVisibleChanged 驱动。非 macOS 上是安全 no-op。
+    Q_INVOKABLE void setMacDockVisible(bool visible);
+
     // 启动自动拉起核心（main_qml.cpp 延时调用）：有内核且未在跑就起核心。Windows 上若上次退出时
     // 增强(TUN)开着（config use:true）而当前非提权，先按需提权重启，让提权实例带 TUN 冷启动。
     Q_INVOKABLE void autoStartCore();

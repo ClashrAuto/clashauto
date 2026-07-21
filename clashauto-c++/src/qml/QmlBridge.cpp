@@ -480,6 +480,15 @@ void QmlBridge::applyMacGlass(QWindow *window, bool dark)
 #endif
 }
 
+void QmlBridge::setMacDockVisible(bool visible)
+{
+#if defined(Q_OS_MACOS)
+    setMacDockIconVisible(visible); // Regular(有 Dock) / Accessory(无 Dock，仅菜单栏)
+#else
+    Q_UNUSED(visible);
+#endif
+}
+
 void QmlBridge::applyWindowsTitleBar(QWindow *window, const QColor &bg, bool dark)
 {
 #if defined(Q_OS_WIN)

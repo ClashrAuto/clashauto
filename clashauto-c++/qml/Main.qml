@@ -50,7 +50,13 @@ ApplicationWindow {
         Theme.dark = bridge.initialDark;
         applyChrome();
     }
-    onVisibleChanged: if (visible) applyChrome()
+    onVisibleChanged: {
+        if (visible)
+            applyChrome();
+        // mac：窗口显示时恢复 Dock 图标（Regular），✕ 隐藏时移除 Dock 图标（Accessory）——关闭不留 Dock。
+        if (isMac)
+            bridge.setMacDockVisible(visible);
+    }
     // 主题切换后毛玻璃深浅 / 标题栏颜色需重设
     Connections {
         target: Theme

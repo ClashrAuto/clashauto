@@ -27,23 +27,6 @@
 #include <QQuickWindow>
 #include <QTimer>
 
-#if defined(Q_OS_MACOS)
-#include "MacWindow.h" // installMacReopenHandler：点 Dock 图标重开主窗（实现在 MacWindow.mm）
-#include <QPointer>
-namespace {
-// 供下方 C 回调（NSApp 的 applicationShouldHandleReopen）重开主窗：Dock 图标被点击时调用。
-QPointer<QQuickWindow> g_macMainWindow;
-void reopenMacMainWindow()
-{
-    if (g_macMainWindow) {
-        g_macMainWindow->show();
-        g_macMainWindow->raise();
-        g_macMainWindow->requestActivate();
-    }
-}
-} // namespace
-#endif
-
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
@@ -123,8 +106,9 @@ int main(int argc, char *argv[])
     if (engine.rootObjects().isEmpty())
         return -1;
 
-    // 主窗（ApplicationWindow 根即 QQuickWindow）：托盘/菜单栏「控制面板」与 mac Dock 图标据此重开。
-    // 关闭主窗只是 hide（见 Main.qml onClosing），这里负责再把它显示出来。
+    // 主窗（ApplicationWindow 根即 QQuickWindow）：托盘/菜单栏「控制面板」据此重开。
+    // 关闭主窗只是 hide（见 Main.qml onClosing），这里负责再把它显示出来。mac 上窗口再显示时
+    // Main.qml 的 onVisibleChanged 会经 bridge.setMacDockVisible(true) 让 Dock 图标回来。
     auto *rootWindow = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
     QObject::connect(tray, &TrayController::openWindowRequested, rootWindow, [rootWindow] {
         if (rootWindow) {
@@ -133,12 +117,6 @@ int main(int argc, char *argv[])
             rootWindow->requestActivate();
         }
     });
-#if defined(Q_OS_MACOS)
-    // mac：点 Dock 图标重开主窗（Qt 默认不处理 reopen）。延到事件循环第一拍装，确保 Qt 的
-    // NSApp delegate 已就位（安装是安全幂等：仅当 Qt 未自带 reopen 处理时补上，见 MacWindow.mm）。
-    g_macMainWindow = rootWindow;
-    QTimer::singleShot(0, rootWindow, [] { installMacReopenHandler(&reopenMacMainWindow); });
-#endif
 
     clash->start(); // 只读轮询 REST API
 
