@@ -19,6 +19,7 @@ class AppConfig;
 class ClashService;
 class CoreController;
 class SubscriptionStore;
+class QTimer;
 class QWindow;
 
 class QmlBridge final : public QObject
@@ -43,6 +44,10 @@ class QmlBridge final : public QObject
     Q_PROPERTY(QStringList groups READ groups NOTIFY groupsChanged)
     Q_PROPERTY(QString selectedGroup READ selectedGroup NOTIFY groupsChanged)
     Q_PROPERTY(bool speedTesting READ speedTesting NOTIFY speedTestingChanged)
+    // —— 节点切换加载态（对齐旧项目 beginNodeSwitch/endNodeSwitch + 转圈动画）——
+    Q_PROPERTY(bool switching READ switching NOTIFY switchingChanged)       // 是否有切换/禁用在途
+    Q_PROPERTY(QString switchTarget READ switchTarget NOTIFY switchingChanged) // 正在切换的目标节点原名
+    Q_PROPERTY(QString spinnerGlyph READ spinnerGlyph NOTIFY spinnerChanged)   // 当前转圈帧 ◐◓◑◒
     // —— 页脚 / 页眉 ——
     Q_PROPERTY(QString mode READ mode NOTIFY modeChanged)
     Q_PROPERTY(QString lastLog READ lastLog NOTIFY logAppended)
@@ -68,6 +73,9 @@ public:
     QStringList groups() const { return m_groups; }
     QString selectedGroup() const { return m_selectedGroup; }
     bool speedTesting() const { return m_speedTesting; }
+    bool switching() const { return m_switching; }
+    QString switchTarget() const { return m_switchTarget; }
+    QString spinnerGlyph() const;
     QString mode() const { return m_mode; }
     QString lastLog() const { return m_lastLog; }
     QString version() const;
@@ -79,6 +87,12 @@ public:
     Q_INVOKABLE void toggleTun();
     Q_INVOKABLE void setMode(const QString &display); // 传中文「规则/全局/直连」即可
     Q_INVOKABLE void selectNode(const QString &rawName);
+    // 禁用当前正在使用的节点：把它从订阅池摘除并重建配置（对齐旧项目 disableNodeByName）。
+    // rawNow 为组行实际使用的叶子（node.now）；空则用 rawName 本身。
+    Q_INVOKABLE void disableNode(const QString &rawName, const QString &rawNow);
+    // 进入切换加载态：目标按钮转圈、其余按钮禁用（对齐旧项目 beginNodeSwitch）。
+    // 由 QML 的 apply()/disable() 在调用 selectNode/disableNode 之前调用；已在途则忽略（防重入）。
+    Q_INVOKABLE void beginNodeSwitch(const QString &target);
     Q_INVOKABLE void selectGroup(const QString &group);
     Q_INVOKABLE void refreshNodes();
     Q_INVOKABLE void runSpeedTest();
@@ -98,12 +112,15 @@ signals:
     void nodesChanged();
     void groupsChanged();
     void speedTestingChanged();
+    void switchingChanged();
+    void spinnerChanged();
     void modeChanged();
     void logAppended(const QString &line);
 
 private:
     static QString speedText(qint64 value);
     void refreshStatusFromCore(); // 以 CoreController 为准刷新三盏灯
+    void endNodeSwitch();          // 结束切换加载态：停转圈、清态（对齐旧项目 endNodeSwitch）
 
     CoreController *m_core = nullptr;
     ClashService *m_clash = nullptr;
@@ -124,6 +141,13 @@ private:
     QStringList m_groups;
     QString m_selectedGroup;
     bool m_speedTesting = false;
+    // —— 切换加载态 ——
+    bool m_switching = false;
+    QString m_switchTarget;   // 正在切换/禁用的目标节点原名（转圈落在它的按钮上）
+    QString m_switchFrom;     // 点击切换前的活动节点；核心报告的 selected 不再等于它 = 切换已确认
+    int m_spinnerFrame = 0;
+    QTimer *m_spinnerTimer = nullptr;  // 120ms 推进转圈帧
+    QTimer *m_failsafeTimer = nullptr; // 6s 兜底：未确认则强制结束，避免永久卡加载态
     QString m_mode = QString::fromUtf8("规则");
     QString m_lastLog = QStringLiteral("Ready");
     bool m_initialDark = true;

@@ -730,6 +730,32 @@
                         "access": "public",
                         "arguments": [
                             {
+                                "name": "rawName",
+                                "type": "QString"
+                            },
+                            {
+                                "name": "rawNow",
+                                "type": "QString"
+                            }
+                        ],
+                        "name": "disableNode",
+                        "returnType": "void"
+                    },
+                    {
+                        "access": "public",
+                        "arguments": [
+                            {
+                                "name": "target",
+                                "type": "QString"
+                            }
+                        ],
+                        "name": "beginNodeSwitch",
+                        "returnType": "void"
+                    },
+                    {
+                        "access": "public",
+                        "arguments": [
+                            {
                                 "name": "group",
                                 "type": "QString"
                             }
@@ -1010,6 +1036,48 @@
                         "designable": true,
                         "final": false,
                         "index": 15,
+                        "name": "switching",
+                        "notify": "switchingChanged",
+                        "read": "switching",
+                        "required": false,
+                        "scriptable": true,
+                        "stored": true,
+                        "type": "bool",
+                        "user": false
+                    },
+                    {
+                        "constant": false,
+                        "designable": true,
+                        "final": false,
+                        "index": 16,
+                        "name": "switchTarget",
+                        "notify": "switchingChanged",
+                        "read": "switchTarget",
+                        "required": false,
+                        "scriptable": true,
+                        "stored": true,
+                        "type": "QString",
+                        "user": false
+                    },
+                    {
+                        "constant": false,
+                        "designable": true,
+                        "final": false,
+                        "index": 17,
+                        "name": "spinnerGlyph",
+                        "notify": "spinnerChanged",
+                        "read": "spinnerGlyph",
+                        "required": false,
+                        "scriptable": true,
+                        "stored": true,
+                        "type": "QString",
+                        "user": false
+                    },
+                    {
+                        "constant": false,
+                        "designable": true,
+                        "final": false,
+                        "index": 18,
                         "name": "mode",
                         "notify": "modeChanged",
                         "read": "mode",
@@ -1023,7 +1091,7 @@
                         "constant": false,
                         "designable": true,
                         "final": false,
-                        "index": 16,
+                        "index": 19,
                         "name": "lastLog",
                         "notify": "logAppended",
                         "read": "lastLog",
@@ -1037,7 +1105,7 @@
                         "constant": true,
                         "designable": true,
                         "final": false,
-                        "index": 17,
+                        "index": 20,
                         "name": "version",
                         "read": "version",
                         "required": false,
@@ -1050,7 +1118,7 @@
                         "constant": true,
                         "designable": true,
                         "final": false,
-                        "index": 18,
+                        "index": 21,
                         "name": "initialDark",
                         "read": "initialDark",
                         "required": false,
@@ -1090,6 +1158,16 @@
                     {
                         "access": "public",
                         "name": "speedTestingChanged",
+                        "returnType": "void"
+                    },
+                    {
+                        "access": "public",
+                        "name": "switchingChanged",
+                        "returnType": "void"
+                    },
+                    {
+                        "access": "public",
+                        "name": "spinnerChanged",
                         "returnType": "void"
                     },
                     {

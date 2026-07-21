@@ -198,7 +198,20 @@ Item {
                     badgeText: model.badgeText
                     badgeColor: model.badgeColor
                     active: model.active
-                    onApply: bridge.selectNode(model.rawName)
+                    // 切换加载态：目标行转圈、其余灰化禁用（对齐旧项目 createNodeRow 的 disableLoading）
+                    switching: bridge.switching
+                    isTarget: bridge.switching && model.rawName === bridge.switchTarget
+                    spinnerText: bridge.spinnerGlyph
+                    // 应用/禁用都先进入切换加载态，再调用后端（严格对齐旧项目 createNodeRow：beginNodeSwitch 在前）
+                    onApply: {
+                        bridge.beginNodeSwitch(model.rawName)
+                        bridge.selectNode(model.rawName)
+                    }
+                    onDisable: {
+                        bridge.beginNodeSwitch(model.rawName)
+                        bridge.disableNode(model.rawName, model.rawNow)
+                        subs.reload() // 刷新订阅页，反映刚禁用的节点（对齐旧项目 disableNodeByName→reloadSubscriptions）
+                    }
                 }
             }
         }
