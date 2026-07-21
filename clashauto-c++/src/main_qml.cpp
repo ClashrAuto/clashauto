@@ -60,9 +60,11 @@ int main(int argc, char *argv[])
     auto *updateCtrl = new UpdateController(config, core, &app);
 
     // 托盘 toggle → 后端（与 Widgets 版契约一致）。核心生命周期仍由用户显式触发。
+    // 增强(TUN) 走 bridge.toggleTun（而非直连 core）：Windows 上开启且非提权时先弹 UAC 提权重启，
+    // 与页脚「增强」开关同一入口。否则托盘开增强会绕过提权、建不了 wintun 网卡。
     QObject::connect(tray, &TrayController::toggleCoreRequested, core, &CoreController::toggleCore);
     QObject::connect(tray, &TrayController::toggleProxyRequested, core, &CoreController::toggleProxy);
-    QObject::connect(tray, &TrayController::toggleTunRequested, core, &CoreController::toggleTun);
+    QObject::connect(tray, &TrayController::toggleTunRequested, &bridge, &QmlBridge::toggleTun);
     QObject::connect(clash, &ClashService::trafficUpdated, tray, &TrayController::setTraffic);
     QObject::connect(core, &CoreController::statusChanged, tray, &TrayController::setStatus);
 
@@ -87,14 +89,26 @@ int main(int argc, char *argv[])
 
     clash->start(); // 只读轮询 REST API
 
-    // 正式版：启动即自动拉起核心（复刻旧版 MainWindow：有内核就起，没内核只记日志，
-    // 用户到「设置 → 系统」下载）。延时 600ms 让 UI 先就绪，与旧版一致。
-    // 本地测 UI 时 CLASHAUTO_NO_AUTOSTART=1 跳过（本机已有实例，避免端口/代理/TUN 冲突）。
-    if (qEnvironmentVariableIsEmpty("CLASHAUTO_NO_AUTOSTART")) {
-        QTimer::singleShot(600, core, [core] {
-            if (core && core->isCoreInstalled() && !core->isRunning())
+#if defined(Q_OS_WIN)
+    // 由页脚/托盘「增强」以管理员身份重启而来（--tun-elevated）：等旧(非提权)实例硬杀核心、
+    // 释放 9090/系统代理并退出后，本(提权)实例带 TUN 冷启动核心（对齐 Widgets 版）。
+    const bool tunElevated = app.arguments().contains(QStringLiteral("--tun-elevated"));
+#else
+    const bool tunElevated = false;
+#endif
+
+    if (tunElevated) {
+        QTimer::singleShot(1000, core, [core] {
+            if (core && !core->isRunning()) {
+                core->setTunEnabled(true);
                 core->startCore();
+            }
         });
+    } else if (qEnvironmentVariableIsEmpty("CLASHAUTO_NO_AUTOSTART")) {
+        // 正式版：启动即自动拉起核心（复刻旧版 MainWindow：有内核就起）。延时 600ms 让 UI 先就绪。
+        // Windows 上若上次开着增强(TUN)而当前非提权，autoStartCore 会先按需提权重启（见 QmlBridge）。
+        // 本地测 UI 时 CLASHAUTO_NO_AUTOSTART=1 跳过（本机已有实例，避免端口/代理/TUN 冲突）。
+        QTimer::singleShot(600, &bridge, &QmlBridge::autoStartCore);
     }
     return app.exec();
 }

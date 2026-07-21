@@ -110,6 +110,18 @@ public:
     // 非 Windows 上是安全 no-op。旧 Windows(非 Win11)上 DWM 忽略 → 保持系统默认标题栏。
     Q_INVOKABLE void applyWindowsTitleBar(QWindow *window, const QColor &bg, bool dark);
 
+    // 启动自动拉起核心（main_qml.cpp 延时调用）：有内核且未在跑就起核心。Windows 上若上次退出时
+    // 增强(TUN)开着（config use:true）而当前非提权，先按需提权重启，让提权实例带 TUN 冷启动。
+    Q_INVOKABLE void autoStartCore();
+
+#if defined(Q_OS_WIN)
+    // 增强(TUN) 的「按需提权」：当前进程是否已以管理员身份运行；否则建不了 wintun 虚拟网卡。
+    static bool isProcessElevated();
+    // 以管理员身份重启自身并带 --tun-elevated：先落盘 use:true、硬杀本(非提权)核心并退出，
+    // 让提权实例接管。true = 已成功发起重启（本实例即将退出）。取消/失败时回滚 use: 并返回 false。
+    bool relaunchElevatedForTun();
+#endif
+
 signals:
     void statusChanged();
     void trafficChanged();
@@ -126,7 +138,12 @@ private:
     static QString speedText(qint64 value);
     void refreshStatusFromCore(); // 以 CoreController 为准刷新三盏灯
     void endNodeSwitch();          // 结束切换加载态：停转圈、清态（对齐旧项目 endNodeSwitch）
+    void pushLog(const QString &message); // 写页脚日志：更新 lastLog 并广播（同构造里的 pushLog）
+    // 轻量落盘：只改 config.yaml 的单个键、保留其余内容（复刻 MainWindow/SettingsController::persistConfigBool）。
+    // 增强(TUN) 每次切换即把 use: 落盘，重启/一键更新/提权重启后据此恢复。
+    void persistConfigBool(const QString &key, bool value);
 
+    QString m_userDir; // 用户可写配置目录（config.yaml 所在），用于 persistConfigBool
     CoreController *m_core = nullptr;
     ClashService *m_clash = nullptr;
     SubscriptionStore *m_subs = nullptr;

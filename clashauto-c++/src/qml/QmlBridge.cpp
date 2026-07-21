@@ -6,8 +6,12 @@
 #include "../SubscriptionStore.h"
 #include "Version.h"
 
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QVariantMap>
 #include <QWindow>
@@ -17,6 +21,15 @@
 #endif
 #if defined(Q_OS_WIN)
 #include "../WinWindow.h" // setWindowsCaptionColor（DWM 标题栏染色，实现在 WinWindow.cpp）
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h> // ShellExecuteExW（runas 提权重启，开启增强(TUN) 需管理员）
+#include <string>     // std::wstring（传给 ShellExecuteExW 的宽字符路径/参数）
 #endif
 
 QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clash,
@@ -24,6 +37,7 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
     : QObject(parent), m_core(core), m_clash(clash), m_subs(subs)
 {
     if (config) {
+        m_userDir = config->userDir; // persistConfigBool 落盘 config.yaml 用
         const QString t = config->theme;
         m_initialDark = !(t.compare("light", Qt::CaseInsensitive) == 0
                           || t.compare("white", Qt::CaseInsensitive) == 0);
@@ -105,12 +119,14 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
     });
 
     // —— 日志（页脚 + 后续 LogsPage）——
-    auto pushLog = [this](const QString &message) {
-        m_lastLog = message;
-        emit logAppended(message);
-    };
-    connect(m_core, &CoreController::logUpdated, this, pushLog);
-    connect(m_clash, &ClashService::logUpdated, this, pushLog);
+    connect(m_core, &CoreController::logUpdated, this, &QmlBridge::pushLog);
+    connect(m_clash, &ClashService::logUpdated, this, &QmlBridge::pushLog);
+}
+
+void QmlBridge::pushLog(const QString &message)
+{
+    m_lastLog = message;
+    emit logAppended(message);
 }
 
 QString QmlBridge::version() const { return QString::fromUtf8(APP_VERSION); }
@@ -144,9 +160,120 @@ void QmlBridge::toggleProxy()
 
 void QmlBridge::toggleTun()
 {
-    if (m_core)
-        m_core->toggleTun();
+    // 增强(TUN) 开关统一入口（页脚开关 + 托盘共用，对齐 Widgets 版 onToggleTunRequested）。
+    if (!m_core)
+        return;
+    const bool turningOn = !m_core->isTunEnabled();
+#if defined(Q_OS_WIN)
+    // 未安装内核：开启增强前先引导下载，否则提权重启也没有核心可跑（对齐 Widgets promptDownloadCore）。
+    if (turningOn && !m_core->isCoreInstalled()) {
+        pushLog(QString::fromUtf8("未检测到 mihomo 内核，请先在「设置 → 系统」下载后再开启增强"));
+        return;
+    }
+    // 增强(TUN) 需要管理员权限创建 wintun 虚拟网卡：正要开启且当前非提权 → 先以管理员身份重启自身
+    // （对齐 Widgets 版按需提权）。关闭 TUN 或已提权时走正常热重载。这正是「QML 版丢失提权」的修复点。
+    if (turningOn && !isProcessElevated()) {
+        relaunchElevatedForTun();
+        return;
+    }
+#endif
+    m_core->toggleTun();
+    // 切换即落盘：重启/一键更新/提权重启后按 use: 恢复增强状态。
+    persistConfigBool(QStringLiteral("use"), m_core->isTunEnabled());
 }
+
+void QmlBridge::persistConfigBool(const QString &key, bool value)
+{
+    // 轻量持久化：只改 config.yaml 的单个键、保留其余内容（复刻 MainWindow/SettingsController::persistConfigBool）。
+    const QString path = QDir(m_userDir).filePath(QStringLiteral("config.yaml"));
+    QString yaml;
+    QFile in(path);
+    if (in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        yaml = QString::fromUtf8(in.readAll());
+        in.close();
+    }
+    const QString line = QStringLiteral("%1: %2").arg(key, value ? "true" : "false");
+    const QRegularExpression re(QStringLiteral("(?m)^%1:.*$").arg(QRegularExpression::escape(key)));
+    if (re.match(yaml).hasMatch()) {
+        yaml.replace(re, line);
+    } else {
+        if (!yaml.isEmpty() && !yaml.endsWith('\n'))
+            yaml += '\n';
+        yaml += line + '\n';
+    }
+    QFile out(path);
+    if (out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        out.write(yaml.toUtf8());
+        out.close();
+    }
+}
+
+void QmlBridge::autoStartCore()
+{
+    // 启动自动拉起核心（对齐 Widgets 版 MainWindow 的 startCore-on-launch）：无内核/已在跑则不动。
+    if (!m_core || !m_core->isCoreInstalled() || m_core->isRunning())
+        return;
+#if defined(Q_OS_WIN)
+    // 恢复上次退出前的增强(TUN)状态（config 的 use:，每次切换即落盘；一键更新自动重启后也走这里）。
+    // 非管理员进程建不了 wintun 网卡 → 先按需提权重启，让提权实例带 TUN 冷启动。
+    if (m_core->isTunEnabled() && !isProcessElevated()) {
+        if (relaunchElevatedForTun())
+            return; // 提权实例接管，本实例即将退出
+        m_core->setTunEnabled(false); // 取消/失败：本次不带 TUN 启动（use: 已由 relaunch 回滚）
+    }
+#endif
+    m_core->startCore();
+}
+
+#if defined(Q_OS_WIN)
+bool QmlBridge::isProcessElevated()
+{
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        return false;
+    TOKEN_ELEVATION elevation{};
+    DWORD size = 0;
+    const bool ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size);
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated != 0;
+}
+
+bool QmlBridge::relaunchElevatedForTun()
+{
+    if (!m_core)
+        return false;
+    const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
+    const std::wstring exeW = exe.toStdWString();
+    const std::wstring paramsW = L"--tun-elevated";
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    // NOASYNC：本进程随后即退出，必须等 shell 操作（含 UAC）完成再返回，否则可能启动不了。
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    sei.lpVerb = L"runas"; // 触发 UAC 以管理员身份运行
+    sei.lpFile = exeW.c_str();
+    sei.lpParameters = paramsW.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+
+    // 先落盘 use:true：提权实例启动即读 config，保证它按「增强开启」恢复；取消/失败时下面回滚。
+    persistConfigBool(QStringLiteral("use"), true);
+    if (ShellExecuteExW(&sei)) {
+        if (sei.hProcess)
+            CloseHandle(sei.hProcess);
+        // 提权实例已启动：立即硬杀本(非提权)核心并还原系统代理，把 9090/代理让给新实例，再退出。
+        m_core->killCoreNow();
+        qApp->quit();
+        return true;
+    }
+    persistConfigBool(QStringLiteral("use"), false); // 未提权成功：回滚，避免下次启动误弹 UAC「恢复」
+    const DWORD err = GetLastError();
+    if (err == ERROR_CANCELLED)
+        pushLog(QString::fromUtf8("增强(TUN) 需要管理员权限：已取消授权，未开启"));
+    else
+        pushLog(QString::fromUtf8("增强(TUN) 提权失败（错误码 %1）").arg(err));
+    return false;
+}
+#endif
 
 void QmlBridge::setMode(const QString &display)
 {
