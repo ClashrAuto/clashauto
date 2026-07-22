@@ -27,8 +27,11 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
         anchors.left: parent.left
         anchors.leftMargin: root.current || hover.hovered ? 34 : 32
+        anchors.right: parent.right
+        anchors.rightMargin: 8 // 右缘留白：长译文（如某些语言的「订阅/设置」）到此省略号，不溢出侧栏
         text: root.label
         font.pixelSize: 14
+        elide: Text.ElideRight
         color: root.current ? Theme.textSecondary : Theme.textPrimary
 
         Behavior on anchors.leftMargin {

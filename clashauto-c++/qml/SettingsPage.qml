@@ -267,6 +267,7 @@ Item {
             font: btn.font
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight // 定宽按钮（如「应用」）长译文省略号，不溢出（自适应宽按钮不受影响）
             opacity: btn.enabled ? 1 : 0.5
         }
         background: Rectangle {
@@ -290,6 +291,7 @@ Item {
             color: tb.checked ? Theme.accent : Theme.textSecondary
             horizontalAlignment: Text.AlignHCenter
             verticalAlignment: Text.AlignVCenter
+            elide: Text.ElideRight // 长译文（如某些语言的「区域/规则」）在标签内省略号，不溢出到相邻标签
         }
         background: Rectangle {
             color: "transparent"

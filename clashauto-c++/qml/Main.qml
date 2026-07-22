@@ -282,6 +282,7 @@ ApplicationWindow {
                         }
                         contentItem: Text {
                             leftPadding: 10
+                            rightPadding: 22 // 给右侧 ▾ 指示器留位，长译文省略号不压到箭头
                             text: modeCombo.displayText
                             font: modeCombo.font
                             color: Theme.textPrimary
@@ -319,9 +320,11 @@ ApplicationWindow {
                             contentItem: Text {
                                 text: modelData
                                 leftPadding: 6
+                                rightPadding: 6
                                 font.pixelSize: 12
                                 color: Theme.textPrimary
                                 verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight // 长译文（如某些语言的「规则/全局/直连」）省略号，不溢出弹层
                             }
                             background: Rectangle {
                                 radius: 3

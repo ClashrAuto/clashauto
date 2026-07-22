@@ -21,6 +21,7 @@ Rectangle {
         spacing: 12
 
         Text {
+            id: metricIcon
             anchors.verticalCenter: parent.verticalCenter
             text: root.glyph
             font.family: Theme.iconFont
@@ -29,13 +30,19 @@ Rectangle {
         }
         Column {
             anchors.verticalCenter: parent.verticalCenter
+            // 占满图标右侧剩余宽，供标题/数值省略号（长译文如「总下载/进程数」不溢出卡片）
+            width: parent.width - metricIcon.width - parent.spacing
             spacing: 2
             Text {
+                width: parent.width
+                elide: Text.ElideRight
                 text: root.title
                 font.pixelSize: 12
                 color: root.accentColor
             }
             Text {
+                width: parent.width
+                elide: Text.ElideRight
                 text: root.value
                 font.pixelSize: 17
                 font.bold: true

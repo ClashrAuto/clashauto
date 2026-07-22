@@ -56,6 +56,9 @@ Rectangle {
             color: (applyHover.hovered && !root.switching) ? Theme.hover : "transparent"
             Text {
                 anchors.centerIn: parent
+                width: parent.width - 8 // 长译文（如某些语言的「禁用/应用」）在按钮内省略号，不溢出
+                horizontalAlignment: Text.AlignHCenter
+                elide: Text.ElideRight
                 text: root.isTarget ? root.spinnerText
                                     : (root.active ? qsTr("禁用") : qsTr("应用"))
                 font.pixelSize: 12
