@@ -42,6 +42,7 @@ class SettingsController final : public QObject
     Q_PROPERTY(int autoUpdateMinutes READ autoUpdateMinutes CONSTANT)
     Q_PROPERTY(bool themeLight READ themeLight CONSTANT)
     Q_PROPERTY(bool autoTheme READ autoTheme CONSTANT)
+    Q_PROPERTY(bool autoLanguage READ autoLanguage CONSTANT)
     Q_PROPERTY(QString language READ language CONSTANT)
     Q_PROPERTY(bool allowRuleEnabled READ allowRuleEnabled CONSTANT)
     Q_PROPERTY(QString allowRule READ allowRule CONSTANT)
@@ -90,6 +91,7 @@ public:
     int autoUpdateMinutes() const { return m_autoUpdate; }
     bool themeLight() const { return m_themeLight; }
     bool autoTheme() const { return m_autoTheme; }
+    bool autoLanguage() const { return m_autoLanguage; }
     QString language() const { return m_language; }
     bool allowRuleEnabled() const { return m_allowUse; }
     QString allowRule() const { return m_allowRule; }
@@ -118,7 +120,7 @@ public:
     Q_INVOKABLE void apply(const QString &host, int uiPort, int mixedPort, bool webProxy,
                            bool nodeOnly, bool clearConnections, bool increment, bool closeToTray,
                            bool autoStart, bool nodeNote, bool mirror, int autoUpdate,
-                           bool themeLight, bool autoTheme, const QString &language,
+                           bool themeLight, bool autoTheme, const QString &language, bool autoLanguage,
                            const QString &allowRule, bool allowUse,
                            const QString &noAllowRule, bool noAllowUse);
 
@@ -200,6 +202,8 @@ private:
     int m_autoUpdate = 0;
     bool m_themeLight = false;
     bool m_autoTheme = false;
+    bool m_autoLanguage = true; // 默认开，跟随系统语言（实际值由 config 覆盖）
+    QString m_effectiveLang = QStringLiteral("zh-CN"); // 当前实际生效的语言码（跟随系统时=系统语言）
     QString m_language = QStringLiteral("zh-CN");
     bool m_allowUse = false;
     QString m_allowRule;

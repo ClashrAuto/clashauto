@@ -33,6 +33,9 @@ class I18n final : public QObject
 public:
     explicit I18n(QQmlEngine *engine, QObject *parent = nullptr);
 
+    // 按系统区域推断界面语言码：中文区域→"zh-CN"，其余→"en-US"。供「跟随系统语言」用。
+    static QString systemLanguage();
+
 public slots:
     // 启动时与设置页切换语言时都调它。运行时调用会 engine->retranslate() 让已加载界面即时刷新。
     void setLanguage(const QString &lang);

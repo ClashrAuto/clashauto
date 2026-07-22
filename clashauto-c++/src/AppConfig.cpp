@@ -102,6 +102,7 @@ AppConfig AppConfigLoader::load()
     config.noAllowRuleEnabled = nestedBoolFromYaml(yaml, "use_rule", "noallowUse", false);
     config.theme = valueFromYaml(yaml, "theme", config.theme);
     config.autoTheme = boolFromYaml(yaml, "autoTheme", config.autoTheme);
+    config.autoLanguage = boolFromYaml(yaml, "autoLanguage", config.autoLanguage);
     config.mirror = boolFromYaml(yaml, "mirror", config.mirror);
     config.language = valueFromYaml(yaml, "language", config.language);
     config.secret = valueFromYaml(yaml, "secret", QString());

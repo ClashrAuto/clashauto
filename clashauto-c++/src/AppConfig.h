@@ -26,6 +26,7 @@ struct AppConfig {
     QString noAllowRule;
     QString theme = "black";
     bool autoTheme = false;
+    bool autoLanguage = true; // 跟随系统语言（默认开）：按系统区域自动选 zh-CN/en-US，忽略 language 手选；关则用 language
     bool mirror = false;               // 「国内加速 / 国内代理下载」共用：下载走国内镜像(ghfast.top)
     QString language = "zh-CN";
 

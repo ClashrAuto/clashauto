@@ -3,6 +3,7 @@
 #include "AppConfig.h"
 #include "ClashService.h"
 #include "CoreController.h"
+#include "I18n.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -163,7 +164,9 @@ void SettingsController::loadInitialValues()
     m_autoUpdate = c.autoUpdateMinutes;
     m_themeLight = c.theme.compare(QLatin1String("light"), Qt::CaseInsensitive) == 0;
     m_autoTheme = c.autoTheme;
+    m_autoLanguage = c.autoLanguage;
     m_language = c.language;
+    m_effectiveLang = c.autoLanguage ? I18n::systemLanguage() : c.language;
     m_allowUse = c.allowRuleEnabled;
     m_allowRule = c.allowRule.isEmpty() ? QStringLiteral("\\[0\\.[0-9]+\\]") : c.allowRule;
     m_noAllowUse = c.noAllowRuleEnabled;
@@ -276,7 +279,7 @@ void SettingsController::applyAutoStart(bool enabled)
 void SettingsController::apply(const QString &host, int uiPort, int mixedPort, bool webProxy,
                                bool nodeOnly, bool clearConnections, bool increment, bool closeToTray,
                                bool autoStart, bool nodeNote, bool mirror, int autoUpdate,
-                               bool themeLight, bool autoTheme, const QString &language,
+                               bool themeLight, bool autoTheme, const QString &language, bool autoLanguage,
                                const QString &allowRule, bool allowUse,
                                const QString &noAllowRule, bool noAllowUse)
 {
@@ -305,6 +308,7 @@ void SettingsController::apply(const QString &host, int uiPort, int mixedPort, b
         out << "autoUpdate: " << QString::number(autoUpdate) << "\n";
         out << "theme: " << (themeLight ? "light" : "black") << "\n";
         out << "autoTheme: " << (autoTheme ? "true" : "false") << "\n";
+        out << "autoLanguage: " << (autoLanguage ? "true" : "false") << "\n";
         out << "language: " << language << "\n";
         out << "use_rule:\n";
         out << "  allow: " << allowRule << "\n";
@@ -330,10 +334,14 @@ void SettingsController::apply(const QString &host, int uiPort, int mixedPort, b
     emit mirrorChanged();
     m_nodeOnly = nodeOnly;
 
-    // 语言切换：码变了才发信号，交给 main_qml 的 I18n 运行时切换界面语言（装/卸翻译器 + retranslate）。
-    if (language != m_language) {
-        m_language = language;
-        emit languageChangeRequested(language);
+    // 语言切换：实际生效语言 = 跟随系统时用系统语言、否则用手选 language。生效码变了才发信号，
+    // 交给 main_qml 的 I18n 运行时切换界面语言（装/卸翻译器 + retranslate + 托盘重刷）。
+    m_language = language;
+    m_autoLanguage = autoLanguage;
+    const QString newEffective = autoLanguage ? I18n::systemLanguage() : language;
+    if (newEffective != m_effectiveLang) {
+        m_effectiveLang = newEffective;
+        emit languageChangeRequested(newEffective);
     }
 
     // API 端口变更：external-controller 不能热重载，改后需重启核心

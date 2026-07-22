@@ -359,6 +359,7 @@ Item {
                             themeCombo.currentIndex === 1,   // themeLight
                             autoThemeSwitch.checked,
                             langCombo.currentIndex === 1 ? "en-US" : "zh-CN",
+                            autoLangSwitch.checked,
                             allowCombo.editText,
                             allowSwitch.checked,
                             blockCombo.editText,
@@ -520,10 +521,13 @@ Item {
 
                         Divider {}
                         GroupTitle { text: qsTr("其他") }
+                        RowLayout { RowLabel { text: qsTr("跟随系统语言") }
+                            ThemedSwitch { id: autoLangSwitch; checked: settings.autoLanguage } }
                         RowLayout {
                             RowLabel { text: qsTr("语言") }
                             ThemedCombo {
                                 id: langCombo
+                                enabled: !autoLangSwitch.checked // 跟随系统时手选无效，置灰
                                 // 展示各语言本名（不翻译），值仍存语言码 zh-CN/en-US（见 apply 里的映射）。
                                 model: ["简体中文", "English"]
                                 currentIndex: settings.language === "en-US" ? 1 : 0

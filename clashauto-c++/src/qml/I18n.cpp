@@ -4,7 +4,15 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLocale>
 #include <QQmlEngine>
+
+QString I18n::systemLanguage()
+{
+    // 只区分中/英：系统区域是中文（zh_*）→ zh-CN，其余一律回落 en-US。
+    return QLocale::system().language() == QLocale::Chinese ? QStringLiteral("zh-CN")
+                                                            : QStringLiteral("en-US");
+}
 
 bool JsonTranslator::loadMap(const QString &jsonPath)
 {
