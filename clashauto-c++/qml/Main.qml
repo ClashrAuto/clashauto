@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
+import QtCore
 import ClashAuto
 
 // 应用主窗（shell）：左侧栏(logo/导航/版本) + 中间页面区(StackLayout) + 底部页脚(开关/模式)。
@@ -18,6 +20,46 @@ ApplicationWindow {
     readonly property bool isMac: Qt.platform.os === "osx"
     readonly property bool isWin: Qt.platform.os === "windows"
     property int currentPage: 0
+
+    // 记住窗口位置：退出/移动时把 x/y 持久化，下次启动恢复到上一次的位置；无历史位置则落在右下角。
+    // 用 QtCore 的 Settings（沿用应用的 组织名/应用名 → 与其它 QSettings 存同一处）。
+    property bool geometryReady: false
+    Settings {
+        id: winPos
+        category: "window"
+        property int posX: 0
+        property int posY: 0
+        property bool saved: false // 是否已有历史位置（首次运行为 false → 用右下角默认）
+    }
+
+    // 判断某屏幕坐标点是否落在任一屏幕内（换了显示器/改了分辨率后，旧位置可能已不可见）。
+    function pointOnAnyScreen(px, py) {
+        var screens = Qt.application.screens;
+        for (var i = 0; i < screens.length; ++i) {
+            var s = screens[i];
+            if (px >= s.virtualX && px < s.virtualX + s.width
+                    && py >= s.virtualY && py < s.virtualY + s.height)
+                return true;
+        }
+        return false;
+    }
+
+    // 启动定位：有历史且仍可见 → 恢复；否则落到（当前屏可用区的）右下角。
+    function restoreWindowPos() {
+        // 用标题栏内一点(+40,+10)判定可见性，避免整窗被移出屏幕后无法再拖回来。
+        if (winPos.saved && pointOnAnyScreen(winPos.posX + 40, winPos.posY + 10)) {
+            window.x = winPos.posX;
+            window.y = winPos.posY;
+        } else {
+            // desktopAvailable* 已扣除任务栏/程序坞，贴着可用区右下角摆放。
+            window.x = Screen.virtualX + Screen.desktopAvailableWidth - window.width;
+            window.y = Screen.virtualY + Screen.desktopAvailableHeight - window.height;
+        }
+        geometryReady = true; // 之后窗口移动才开始回写（避免把启动瞬间的默认位置误存下来）
+    }
+
+    onXChanged: if (geometryReady) { winPos.posX = x; winPos.saved = true; }
+    onYChanged: if (geometryReady) { winPos.posY = y; winPos.saved = true; }
 
     // 点 ✕ 关闭主窗口不退出程序：只隐藏窗口（核心/托盘继续在跑），之后可经托盘/菜单栏「控制面板」
     // 或 mac 点 Dock 图标重新打开。mac 恒隐藏（留 Dock，符合 mac 习惯）；Win/Linux 按「关闭到托盘」
@@ -47,6 +89,7 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        restoreWindowPos(); // 先定位（此时窗口尚未真正显示，恢复到上次位置/右下角不会闪一下）
         Theme.dark = bridge.initialDark;
         applyChrome();
     }
