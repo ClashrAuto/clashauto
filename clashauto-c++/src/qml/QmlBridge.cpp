@@ -42,6 +42,7 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
         m_userDir = config->userDir; // persistConfigBool 落盘 config.yaml 用
         m_autoTheme = config->autoTheme;
         m_closeToTray = config->closeToTray;
+        m_nodeSwitchNote = config->nodeSwitchNote;
         const QString t = config->theme;
         const bool manualDark = !(t.compare("light", Qt::CaseInsensitive) == 0
                                   || t.compare("white", Qt::CaseInsensitive) == 0);
@@ -101,9 +102,18 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
             [this](const QVector<NodeInfo> &nodes, const QString &selected) {
         // 先更新活动节点（对齐旧项目 635 在切换确认判断 637 之前）
         if (selected != m_selectedNode) {
+            // 节点切换通知（对齐旧项目 config.note / MainWindow 631）：跳过首次填充避免启动即误报，
+            // 仅设置开启且活动节点非空时发；经 notifyRequested → main_qml → TrayController::notify 到托盘。
+            if (m_nodeInitialized && m_nodeSwitchNote && !selected.isEmpty())
+                emit notifyRequested(QStringLiteral("节点切换"),
+                                     QStringLiteral("已切换到 %1").arg(selected));
             m_selectedNode = selected;
             emit nodesChanged();
         }
+        // 见到首个「非空」活动节点后才允许发通知：避免核心刚启动/空态首帧把首个节点误报成「切换」
+        // （比旧项目无条件置位更稳；空态首帧仍不置位，等真正有活动节点的那帧作基准）。
+        if (!selected.isEmpty())
+            m_nodeInitialized = true;
         // 分支1：切换在途且核心报告的活动节点已不同于切换前 → 切换已确认，结束加载态并整表 reconcile
         if (m_switching && !m_switchFrom.isEmpty() && selected != m_switchFrom) {
             endNodeSwitch();
@@ -254,6 +264,17 @@ void QmlBridge::setCloseToTray(bool on)
         return;
     m_closeToTray = on;
     emit closeToTrayChanged();
+}
+
+void QmlBridge::setNodeSwitchNote(bool on)
+{
+    const bool wasOff = !m_nodeSwitchNote;
+    m_nodeSwitchNote = on;
+    // 用户把「切换通知」从关手动切到开：请求重注册系统通知（重显托盘图标），尝试恢复此前在系统里
+    // 被清掉/失效的通知注册。仅此「关→开」手动动作触发，绝不自动重注册（对齐「只能由用户手动触发」）。
+    // 注：用户在系统设置里对本应用的显式「屏蔽」是 OS 级隐私开关，程序无法绕过，需其自行到系统设置放开。
+    if (on && wasOff)
+        emit reinitNotificationsRequested();
 }
 
 void QmlBridge::autoStartCore()

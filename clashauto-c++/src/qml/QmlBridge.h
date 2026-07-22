@@ -131,6 +131,9 @@ public:
     Q_INVOKABLE void setAutoTheme(bool on);
     // 设置页「应用」后调用：更新「关闭到托盘」实时状态，供下次 ✕ 关闭时 Main.qml onClosing 判定。
     Q_INVOKABLE void setCloseToTray(bool on);
+    // 设置页「应用」后调用：更新「切换通知」(config.note) 实时状态。若从「关」手动切到「开」，
+    // 发 reinitNotificationsRequested 让托盘重注册系统通知（尝试恢复此前失效/被清的注册；仅手动触发）。
+    Q_INVOKABLE void setNodeSwitchNote(bool on);
 
 #if defined(Q_OS_WIN)
     // 增强(TUN) 的「按需提权」：当前进程是否已以管理员身份运行；否则建不了 wintun 虚拟网卡。
@@ -154,6 +157,10 @@ signals:
     // 系统深浅色变化（仅在「跟随系统」开启时发出）：dark=true 暗色。Main.qml 据此设 Theme.dark。
     void systemThemeChanged(bool dark);
     void closeToTrayChanged();
+    // 请求发一条系统托盘通知（节点切换等）：main_qml 连到 TrayController::notify。
+    void notifyRequested(const QString &title, const QString &message);
+    // 请求重注册系统通知（重显托盘图标）：仅在用户把「切换通知」从关手动切到开时发。
+    void reinitNotificationsRequested();
 
 private:
     static QString speedText(qint64 value);
@@ -167,6 +174,7 @@ private:
     QString m_userDir; // 用户可写配置目录（config.yaml 所在），用于 persistConfigBool
     bool m_autoTheme = false; // 是否跟随系统深浅色（config.autoTheme）；控制是否响应系统外观变化
     bool m_closeToTray = false; // 关闭到托盘（config.mini）：启动静默 + ✕ 隐藏；默认关（实际值由 config 覆盖）
+    bool m_nodeSwitchNote = true; // 切换节点是否发系统通知（config.note）；设置页实时更新，仅它为真时发通知
     CoreController *m_core = nullptr;
     ClashService *m_clash = nullptr;
     SubscriptionStore *m_subs = nullptr;
@@ -183,6 +191,7 @@ private:
     QString m_totalDownText = QStringLiteral("0.00 B");
     ConnectionsModel m_connModel;
     QString m_selectedNode;
+    bool m_nodeInitialized = false; // 首次节点填充跳过切换通知，避免启动即误报（对齐 MainWindow m_nodeInitialized）
     QStringList m_groups;
     QString m_selectedGroup;
     bool m_speedTesting = false;

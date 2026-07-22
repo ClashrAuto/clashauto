@@ -187,6 +187,20 @@ void TrayController::notify(const QString &title, const QString &message)
 #endif
 }
 
+void TrayController::reinitForNotifications()
+{
+#if defined(Q_OS_MACOS)
+    // macOS 原生托盘：重装一次（幂等）。系统通知是否显示由 macOS 通知设置决定，程序无法强制放开。
+    MacTrayHandlers h{this, &macCbOpen, &macCbCore, &macCbProxy, &macCbTun, &macCbQuit};
+    macTrayInstall(h);
+#else
+    // 非 mac：hide→show 让 Qt 重新 Shell_NotifyIcon(NIM_ADD)，重建通知注册（对显式 OS 屏蔽无效）。
+    if (m_tray.isVisible())
+        m_tray.hide();
+    m_tray.show();
+#endif
+}
+
 QString TrayController::speedText(qint64 value) const
 {
     double number = static_cast<double>(qMax<qint64>(0, value));

@@ -368,6 +368,9 @@ Item {
                         // 「关闭到托盘」：更新 bridge。✕ 关闭行为即时生效（Main.qml onClosing）；
                         // 「启动是否静默到托盘」下次启动生效（Main.qml Component.onCompleted）。
                         bridge.setCloseToTray(traySwitch.checked)
+                        // 「切换通知」实时生效：更新 bridge（决定切换节点是否发系统通知）。
+                        // 关→开会顺带重注册系统通知（重显托盘图标），尝试恢复此前失效的通知。
+                        bridge.setNodeSwitchNote(noteSwitch.checked)
                     }
                 }
             }

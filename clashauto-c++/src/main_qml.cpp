@@ -86,6 +86,12 @@ int main(int argc, char *argv[])
     QObject::connect(clash, &ClashService::trafficUpdated, tray, &TrayController::setTraffic);
     QObject::connect(core, &CoreController::statusChanged, tray, &TrayController::setStatus);
 
+    // 节点切换通知（config.note「切换通知」开时）：QmlBridge 检出活动节点变化 → 托盘气泡。
+    QObject::connect(&bridge, &QmlBridge::notifyRequested, tray, &TrayController::notify);
+    // 用户把「切换通知」关→开：重注册系统通知（重显托盘图标），尝试恢复失效的通知注册。
+    QObject::connect(&bridge, &QmlBridge::reinitNotificationsRequested, tray,
+                     &TrayController::reinitForNotifications);
+
     // 退出时停核心、还原系统代理（对齐 Widgets 版 aboutToQuit）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, core, &CoreController::stopCore);
 

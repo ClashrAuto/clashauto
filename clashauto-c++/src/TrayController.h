@@ -18,6 +18,10 @@ public slots:
     void setStatus(bool tun, bool proxy, bool core);
     void setTraffic(qint64 up, qint64 down);
     void notify(const QString &title, const QString &message);
+    // 重注册系统通知：非 mac 把托盘图标 hide→show 重新 Shell_NotifyIcon(NIM_ADD)，恢复失效/丢失的
+    // 通知注册（如 explorer 重启后图标丢失）。由用户手动把「切换通知」关→开触发（见 QmlBridge）。
+    // 注意：这不能解除用户在系统设置里对本应用的显式通知屏蔽（OS 级隐私开关，程序无权绕过）。
+    void reinitForNotifications();
 
 signals:
     void toggleCoreRequested();
