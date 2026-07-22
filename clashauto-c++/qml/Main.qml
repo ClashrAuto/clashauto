@@ -147,20 +147,51 @@ ApplicationWindow {
                 anchors.bottomMargin: 5
                 spacing: 0
 
-                // logo（网络图标，随状态变色）——窗口拖动由上方窗口级背景 handler 统一负责。
+                // logo：圆角蓝底 + 纯白地球 + 右下状态角标（同桌面图标设计）。窗口拖动由上方窗口级背景 handler 负责。
                 Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 118
-                    Text {
+                    Item {
+                        id: logoBox
+                        width: 84
+                        height: 84
                         anchors.centerIn: parent
-                        text: ""
-                        font.family: Theme.iconFont
-                        font.pixelSize: 70
-                        color: bridge.tunEnabled ? "#ff0000"
-                             : bridge.coreRunning ? "#ffff00"
-                             : (Theme.dark ? "#ffffff" : "#333333")
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: 18
+                            color: "#4898f8"
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            text: "" // 地球字形 U+E600
+                            font.family: Theme.iconFont
+                            font.pixelSize: 56
+                            color: "#ffffff"
+                        }
+                        // 状态角标（右下）：白圆角背景 + 字母——增强 T / 网页 W / 核心开 C / 核心关 N。
+                        Rectangle {
+                            width: 28
+                            height: 28
+                            radius: 8
+                            color: "#ffffff"
+                            anchors.right: parent.right
+                            anchors.bottom: parent.bottom
+                            anchors.rightMargin: -3
+                            anchors.bottomMargin: -3
+                            Text {
+                                anchors.centerIn: parent
+                                text: bridge.tunEnabled ? "T"
+                                    : bridge.proxyEnabled ? "W"
+                                    : bridge.coreRunning ? "C" : "N"
+                                font.pixelSize: 16
+                                font.bold: true
+                                color: "#4898f8"
+                            }
+                        }
                     }
                 }
+
 
                 // 导航（与 StackLayout 索引 1:1 对齐）
                 Repeater {

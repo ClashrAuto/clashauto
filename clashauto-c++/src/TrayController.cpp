@@ -5,10 +5,54 @@
 #include <QApplication>
 #include <QBuffer>
 #include <QColor>
+#include <QFont>
+#include <QFontMetricsF>
 #include <QIcon>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 #include <QTimer>
+
+namespace {
+// 画「单独的地球」托盘图标：size×size 透明底，地球字形(U+E600)填 globeColor；
+// badge 非空则在右下角叠一个白色圆角方块，中间写字母（增强 T / 网页 W / 核心开 C / 核心关 N）。
+QPixmap renderTrayGlobe(int size, const QColor &globeColor, const QString &badge)
+{
+    QPixmap pm(size, size);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+
+    QFont gf(QStringLiteral("iconfont"));
+    gf.setPixelSize(qRound(size * 0.94));
+    // 按字形【实际墨迹】居中：AlignCenter 只按字体度量盒居中，本地球字形墨迹在盒内偏右~2%，
+    // 会显得没居中；用 tightBoundingRect 量出墨迹，令其正中对齐图标中心。
+    const QString glyph(QChar(char16_t(0xE600)));
+    const QRectF ink = QFontMetricsF(gf).tightBoundingRect(glyph);
+    p.setFont(gf);
+    p.setPen(globeColor);
+    p.drawText(QPointF(size / 2.0 - ink.x() - ink.width() / 2.0,
+                       size / 2.0 - ink.y() - ink.height() / 2.0),
+               glyph);
+
+    if (!badge.isEmpty()) {
+        const qreal bs = size * 0.5; // 角标边长（约图标一半），叠在右下
+        const QRectF br(size - bs, size - bs, bs, bs);
+        QPainterPath bp;
+        bp.addRoundedRect(br, bs * 0.28, bs * 0.28);
+        p.fillPath(bp, Qt::white);
+        QFont bf(QStringLiteral("MiSans"));
+        bf.setPixelSize(qRound(bs * 0.66));
+        bf.setBold(true);
+        p.setFont(bf);
+        p.setPen(QColor(0x48, 0x98, 0xF8));
+        p.drawText(br, Qt::AlignCenter, badge);
+    }
+    p.end();
+    return pm;
+}
+} // namespace
 
 #if defined(Q_OS_MACOS)
 #include "MacSpeedItem.h" // 原生托盘（图标+两行速率合成一项 + 原生菜单），取代 Qt 托盘项
@@ -30,19 +74,7 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
     // 此时创建的状态项可能不会被真正排进菜单栏；旧版（分离的纯文字项）也是构造期创建、
     // 但要等运行期 setVisible(YES) 才现身。singleShot(0) 复刻这一已知可用的时序，
     // 配合原生层安装时显式 visible=YES（还破除旧版持久化进 defaults 的隐藏态）。
-    {
-        // 把 Qt 的图标资源（和以前托盘同一张）转 PNG 传给原生层，避免依赖可能为空的
-        // applicationIconImage 导致整项透明「消失」。
-        const QPixmap pm = QIcon(QStringLiteral(":/assets/icon.ico")).pixmap(64, 64);
-        QByteArray png;
-        QBuffer buf(&png);
-        buf.open(QIODevice::WriteOnly);
-        pm.save(&buf, "PNG");
-        buf.close();
-        if (!png.isEmpty()) {
-            macTraySetIconPng(png.constData(), static_cast<long>(png.size()));
-        }
-    }
+    updateMacTrayIcon(); // mac 托盘用白色地球(+状态角标) PNG 喂原生层（先缓存，install 时渲染）
     macTraySetStatus(false, false, false);
     QTimer::singleShot(0, this, [this] {
         MacTrayHandlers h{this, &macCbOpen, &macCbCore, &macCbProxy, &macCbTun, &macCbQuit};
@@ -122,6 +154,7 @@ void TrayController::setStatus(bool tun, bool proxy, bool core)
     m_core = core;
 #if defined(Q_OS_MACOS)
     macTraySetStatus(tun, proxy, core); // 原生托盘：更新菜单项文字 + 核心在跑才显示速率
+    updateMacTrayIcon();                 // 状态变了重画白色地球 + 角标（T/W/C/N）
 #else
     m_tray.setToolTip(QString("Clash Auto - %1").arg(core ? tr("运行中") : tr("已停止")));
     refreshIcon(); // 状态变了刷新图标颜色（增强=红、核心在跑=黄）
@@ -149,32 +182,32 @@ void TrayController::retranslate()
 
 void TrayController::refreshIcon()
 {
-    // 托盘状态色（比侧栏 logo 更柔和、不刺眼）：增强(TUN)开=暗红、核心在跑=米色、否则原色。
-    // TUN 必然核心在跑，故暗红优先于米色。
-    QColor tint;
-    if (m_tun) {
-        tint = QColor(0xB0, 0x3A, 0x3A); // 暗红（增强/TUN）
-    } else if (m_core) {
-        tint = QColor(0xD6, 0xC6, 0x8E); // 米色（核心在跑）
-    }
-
-    const QIcon base(":/assets/icon.ico");
-    if (!tint.isValid()) {
-        m_tray.setIcon(base); // 空闲：原色应用图标
-        return;
-    }
-    // 用 SourceIn 把图标非透明像素整体染成状态色（保留图标轮廓，只换颜色）。
-    QPixmap pm = base.pixmap(64, 64);
-    if (pm.isNull()) {
-        m_tray.setIcon(base);
-        return;
-    }
-    QPainter p(&pm);
-    p.setCompositionMode(QPainter::CompositionMode_SourceIn);
-    p.fillRect(pm.rect(), tint);
-    p.end();
-    m_tray.setIcon(QIcon(pm));
+    // 托盘图标 = 单独的蓝色(#4898F8)地球 + 右下状态角标（增强 T / 网页 W / 核心开 C / 核心关 N）。
+    const QString badge = m_tun ? QStringLiteral("T")
+                        : m_proxy ? QStringLiteral("W")
+                        : m_core ? QStringLiteral("C")
+                        : QStringLiteral("N");
+    m_tray.setIcon(QIcon(renderTrayGlobe(64, QColor(0x48, 0x98, 0xF8), badge)));
 }
+
+#if defined(Q_OS_MACOS)
+void TrayController::updateMacTrayIcon()
+{
+    // mac：单独的白色地球 + 右下状态角标（T/W/C/N），转 PNG 喂原生托盘层。
+    const QString badge = m_tun ? QStringLiteral("T")
+                        : m_proxy ? QStringLiteral("W")
+                        : m_core ? QStringLiteral("C")
+                        : QStringLiteral("N");
+    const QPixmap pm = renderTrayGlobe(64, QColor(Qt::white), badge);
+    QByteArray png;
+    QBuffer buf(&png);
+    buf.open(QIODevice::WriteOnly);
+    pm.save(&buf, "PNG");
+    buf.close();
+    if (!png.isEmpty())
+        macTraySetIconPng(png.constData(), static_cast<long>(png.size()));
+}
+#endif
 
 void TrayController::setTraffic(qint64 up, qint64 down)
 {

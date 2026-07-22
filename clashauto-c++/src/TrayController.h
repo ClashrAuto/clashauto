@@ -45,7 +45,10 @@ public:
 
 private:
     void buildMenu();   // 只在构造时建一次；之后 setStatus/setTraffic 仅改对应行的文本
-    void refreshIcon(); // 按状态给托盘图标着色 + macOS 上把上/下行速率画在图标右侧
+    void refreshIcon(); // 非 mac：按状态重画「蓝色地球 + 角标」托盘图标
+#if defined(Q_OS_MACOS)
+    void updateMacTrayIcon(); // mac：按状态重画「白色地球 + 角标」PNG 喂原生托盘
+#endif
     QString speedText(qint64 value) const;        // 菜单里的长文本："2.00 MB"
     QString speedTextCompact(qint64 value) const; // 图标旁的紧凑文本："2.0 MB/s"
 
