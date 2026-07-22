@@ -265,11 +265,11 @@ void ClashService::startSpeedTestForValidNodes()
 void ClashService::startSpeedTest(const QStringList &names)
 {
     if (m_speedTesting) {
-        emit logUpdated(QString::fromUtf8("下载测速进行中，忽略重复请求"));
+        emit logUpdated(tr("下载测速进行中，忽略重复请求"));
         return;
     }
     if (names.isEmpty()) {
-        emit logUpdated(QString::fromUtf8("没有可测速的有效节点"));
+        emit logUpdated(tr("没有可测速的有效节点"));
         emit speedTestRunning(false);
         return;
     }
@@ -282,7 +282,7 @@ void ClashService::startSpeedTest(const QStringList &names)
     m_measuredSpeeds.clear(); // 每轮重测：清掉上轮速度，避免旧值残留
     // 代理指向混合端口：本 QNAM 的所有请求都经核心代理，路由由规则送回主选择组 → 钉在当前选中的测速节点
     m_speedNetwork.setProxy(QNetworkProxy(QNetworkProxy::HttpProxy, m_host, static_cast<quint16>(m_mixedPort)));
-    emit logUpdated(QString::fromUtf8("开始下载测速：%1 个节点（并发 %2）").arg(names.size()).arg(kSpeedConcurrency));
+    emit logUpdated(tr("开始下载测速：%1 个节点（并发 %2）").arg(names.size()).arg(kSpeedConcurrency));
     emit speedTestRunning(true);
     pumpSpeedTest(); // 启动第一个握手；后续在每个下载「建连」后自动补位到并发上限
 }
@@ -303,7 +303,7 @@ void ClashService::pumpSpeedTest()
         auto finish = [this] {
             m_speedTesting = false;
             m_speedRestoring = false;
-            emit logUpdated(QString::fromUtf8("下载测速完成"));
+            emit logUpdated(tr("下载测速完成"));
             emit speedTestRunning(false);
             pollNodes(); // 立即刷新一次，让最终速度/排序落到列表
         };
@@ -328,7 +328,7 @@ void ClashService::pumpSpeedTest()
                         if (!ok) {
                             m_measuredSpeeds.insert(name, 0);
                             m_speedSelecting = false;
-                            emit logUpdated(QString::fromUtf8("测速选中失败 %1: %2").arg(name, error));
+                            emit logUpdated(tr("测速选中失败 %1: %2").arg(name, error));
                             pumpSpeedTest();
                             return;
                         }
@@ -377,7 +377,7 @@ void ClashService::beginSpeedDownload(const QString &name)
         const qint64 ms = timer->elapsed();
         const qint64 bps = (ms > 0) ? (*bytes * 1000 / ms) : 0; // 字节/秒——与 UI speedText 的字节单位一致
         m_measuredSpeeds.insert(name, bps);
-        emit logUpdated(QString::fromUtf8("测速 %1 -> %2 KB/s").arg(name).arg(bps / 1024));
+        emit logUpdated(tr("测速 %1 -> %2 KB/s").arg(name).arg(bps / 1024));
         reply->deleteLater();
         release(); // 兜底：若从未 readyRead（失败/立即结束），在此释放串行锁
         delete bytes;

@@ -1,7 +1,16 @@
 #include "MacSpeedItem.h"
 
 #import <AppKit/AppKit.h>
+#include <QCoreApplication>
 #include <QString>
+
+// 原生菜单文案走 Qt 翻译（JsonTranslator 忽略 context，按中文源串命中英文表）。语言在启动装翻译器
+// 之后、macTrayInstall(singleShot 0) 之前就位，故首帧即目标语言；运行中切语言由 setStatus 刷新动态项，
+// 静态项（控制面板/退出程序）需重启生效。
+static NSString *trTray(const char *zh)
+{
+    return QCoreApplication::translate("TrayController", zh).toNSString();
+}
 
 // 菜单/点击的 ObjC 目标：转发到 C++ 回调。
 @interface ClashTrayTarget : NSObject
@@ -130,7 +139,7 @@ void macTrayInstall(const MacTrayHandlers &handlers)
     NSMenu *menu = [[NSMenu alloc] init];
     menu.autoenablesItems = NO; // 自己控制启用态：UP/DOWN 行常灰，其余可点
 
-    NSMenuItem *panel = [menu addItemWithTitle:@"控制面板" action:@selector(openWindow:) keyEquivalent:@""];
+    NSMenuItem *panel = [menu addItemWithTitle:trTray("控制面板") action:@selector(openWindow:) keyEquivalent:@""];
     panel.target = g_target;
     [menu addItem:[NSMenuItem separatorItem]];
     // 各行文字取当前缓存值：安装被推迟到事件循环起来之后，此前的 setSpeed/setStatus 只更新了缓存。
@@ -141,17 +150,17 @@ void macTrayInstall(const MacTrayHandlers &handlers)
                                  action:nil keyEquivalent:@""];
     g_downItem.enabled = NO;
     [menu addItem:[NSMenuItem separatorItem]];
-    g_coreItem = [menu addItemWithTitle:(g_core ? @"停止核心" : @"启动核心")
+    g_coreItem = [menu addItemWithTitle:(g_core ? trTray("停止核心") : trTray("启动核心"))
                                  action:@selector(toggleCore:) keyEquivalent:@""];
     g_coreItem.target = g_target;
-    g_proxyItem = [menu addItemWithTitle:(g_proxy ? @"关闭网页代理" : @"打开网页代理")
+    g_proxyItem = [menu addItemWithTitle:(g_proxy ? trTray("关闭网页代理") : trTray("打开网页代理"))
                                   action:@selector(toggleProxy:) keyEquivalent:@""];
     g_proxyItem.target = g_target;
-    g_tunItem = [menu addItemWithTitle:(g_tun ? @"关闭增强模式" : @"打开增强模式")
+    g_tunItem = [menu addItemWithTitle:(g_tun ? trTray("关闭增强模式") : trTray("打开增强模式"))
                                 action:@selector(toggleTun:) keyEquivalent:@""];
     g_tunItem.target = g_target;
     [menu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *quit = [menu addItemWithTitle:@"退出程序" action:@selector(quit:) keyEquivalent:@""];
+    NSMenuItem *quit = [menu addItemWithTitle:trTray("退出程序") action:@selector(quit:) keyEquivalent:@""];
     quit.target = g_target;
 
     // 设了 menu：点击图标即弹菜单，「控制面板」为首项负责打开主界面。
@@ -178,9 +187,9 @@ void macTraySetStatus(bool tun, bool proxy, bool core)
     g_core = core;
     g_proxy = proxy;
     g_tun = tun;
-    if (g_coreItem) g_coreItem.title = core ? @"停止核心" : @"启动核心";
-    if (g_proxyItem) g_proxyItem.title = proxy ? @"关闭网页代理" : @"打开网页代理";
-    if (g_tunItem) g_tunItem.title = tun ? @"关闭增强模式" : @"打开增强模式";
+    if (g_coreItem) g_coreItem.title = core ? trTray("停止核心") : trTray("启动核心");
+    if (g_proxyItem) g_proxyItem.title = proxy ? trTray("关闭网页代理") : trTray("打开网页代理");
+    if (g_tunItem) g_tunItem.title = tun ? trTray("关闭增强模式") : trTray("打开增强模式");
     redrawTray(); // 核心开/停会切换「图标only ↔ 图标+速率」布局
 }
 

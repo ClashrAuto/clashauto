@@ -121,11 +121,11 @@ bool macApplyProxies(AuthorizationRef auth, bool enable, const QString &host, in
     SCPreferencesRef prefs = SCPreferencesCreateWithAuthorization(
         kCFAllocatorDefault, CFSTR("ClashAuto"), nullptr, auth);
     if (!prefs) {
-        if (err) *err = QStringLiteral("SCPreferencesCreateWithAuthorization 返回空");
+        if (err) *err = QObject::tr("SCPreferencesCreateWithAuthorization 返回空");
         return false;
     }
     if (!SCPreferencesLock(prefs, true)) {
-        if (err) *err = QStringLiteral("SCPreferencesLock 失败（无权限或配置被占用）");
+        if (err) *err = QObject::tr("SCPreferencesLock 失败（无权限或配置被占用）");
         CFRelease(prefs);
         return false;
     }
@@ -176,9 +176,9 @@ bool macApplyProxies(AuthorizationRef auth, bool enable, const QString &host, in
         CFRelease(services);
 
         committed = SCPreferencesCommitChanges(prefs) && SCPreferencesApplyChanges(prefs);
-        if (!committed && err) *err = QStringLiteral("SCPreferencesCommit/Apply 失败");
+        if (!committed && err) *err = QObject::tr("SCPreferencesCommit/Apply 失败");
     } else if (err) {
-        *err = QStringLiteral("SCNetworkServiceCopyAll 返回空");
+        *err = QObject::tr("SCNetworkServiceCopyAll 返回空");
     }
 
     SCPreferencesUnlock(prefs);
@@ -216,7 +216,7 @@ CoreController::CoreController(AppConfig config, QObject *parent)
     });
     connect(&m_core, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this](int code) {
         stopProxy();
-        emit logUpdated(QString("Clash 核心已退出，代码: %1").arg(code));
+        emit logUpdated(tr("Clash 核心已退出，代码: %1").arg(code));
         emitStatus();
     });
 }
@@ -242,7 +242,7 @@ bool CoreController::ensureMacAuthorization()
     OSStatus st = AuthorizationCreate(nullptr, kAuthorizationEmptyEnvironment,
                                       kAuthorizationFlagDefaults, &authRef);
     if (st != errAuthorizationSuccess) {
-        emit logUpdated(QString::fromUtf8("创建授权会话失败（AuthorizationCreate=%1）").arg(st));
+        emit logUpdated(tr("创建授权会话失败（AuthorizationCreate=%1）").arg(st));
         return false;
     }
     // 预授权修改网络配置的权限：弹一次密码框；成功后授权缓存在 authRef 上，
@@ -257,7 +257,7 @@ bool CoreController::ensureMacAuthorization()
     if (st != errAuthorizationSuccess) {
         // 用户取消或权限不足：放弃，不再退回逐次弹窗的 networksetup
         AuthorizationFree(authRef, kAuthorizationFlagDefaults);
-        emit logUpdated(QString::fromUtf8("未获得网络配置授权（用户取消或权限不足，AuthorizationCopyRights=%1）").arg(st));
+        emit logUpdated(tr("未获得网络配置授权（用户取消或权限不足，AuthorizationCopyRights=%1）").arg(st));
         return false;
     }
     m_macAuthRef = authRef;
@@ -308,13 +308,13 @@ void CoreController::startCore()
     const QString cfg = m_fullConfigPath.isEmpty() ? m_config.clashConfig() : m_fullConfigPath;
     if (!QFileInfo::exists(exe)) {
         // 不再预装内核：未找到时提示用户去「设置 → 系统」下载，而不是静默失败
-        emit logUpdated(QString::fromUtf8("未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1").arg(exe));
+        emit logUpdated(tr("未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1").arg(exe));
         emit coreMissing(exe);
         emitStatus();
         return;
     }
     if (!QFileInfo::exists(cfg)) {
-        emit logUpdated(QString("找不到 Clash 配置: %1").arg(cfg));
+        emit logUpdated(tr("找不到 Clash 配置: %1").arg(cfg));
         emitStatus();
         return;
     }
@@ -325,7 +325,7 @@ void CoreController::startCore()
     const QString bundledMmdb = QDir(m_config.sourceRoot).filePath("config/Country.mmdb");
     if (!QFileInfo::exists(mmdb) && QFileInfo::exists(bundledMmdb)) {
         QFile::copy(bundledMmdb, mmdb);
-        emit logUpdated(QString("Country.mmdb 已就位: %1").arg(mmdb));
+        emit logUpdated(tr("Country.mmdb 已就位: %1").arg(mmdb));
     }
 
 #if defined(Q_OS_WIN)
@@ -337,7 +337,7 @@ void CoreController::startCore()
                                                     : (cpu.contains("64") ? "x64" : "x86");
         const QString wintunFrom = QDir(m_config.sourceRoot).filePath(QString("command/wintun/bin/%1/wintun.dll").arg(archDir));
         if (QFileInfo::exists(wintunFrom) && QFile::copy(wintunFrom, wintunTo)) {
-            emit logUpdated(QString("wintun.dll 已部署: %1").arg(wintunTo));
+            emit logUpdated(tr("wintun.dll 已部署: %1").arg(wintunTo));
         }
     }
 #endif
@@ -353,7 +353,7 @@ void CoreController::startCore()
         if (MacHelper::startCore(exe, cfg, m_config.userDir, &herr)) {
             m_helperCoreRunning = true;
             startCoreLogTail();
-            emit logUpdated(QString::fromUtf8("核心已由特权 helper 以 root 启动（支持 TUN）"));
+            emit logUpdated(tr("核心已由特权 helper 以 root 启动（支持 TUN）"));
             if (m_proxyEnabled) {
                 startProxy();
             }
@@ -361,7 +361,7 @@ void CoreController::startCore()
             return;
         }
         // 经 helper 起失败：不再静默退回——讲清楚原因，再以非 root QProcess 兜底（TUN 将不可用）。
-        emit logUpdated(QString::fromUtf8("经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效").arg(herr));
+        emit logUpdated(tr("经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效").arg(herr));
     }
 #endif
 
@@ -372,7 +372,7 @@ void CoreController::startCore()
     m_core.setWorkingDirectory(QFileInfo(exe).absolutePath());
     m_core.start();
     if (!m_core.waitForStarted(3000)) {
-        emit logUpdated(QString("启动 Clash 核心失败: %1").arg(m_core.errorString()));
+        emit logUpdated(tr("启动 Clash 核心失败: %1").arg(m_core.errorString()));
     } else {
         emit logUpdated("Start clash is OK!");
         if (m_proxyEnabled) {
@@ -391,7 +391,7 @@ void CoreController::stopCore()
         MacHelper::stopCore(&herr);
         m_helperCoreRunning = false;
         stopCoreLogTail();
-        emit logUpdated(QString::fromUtf8("核心已停止（helper）"));
+        emit logUpdated(tr("核心已停止（helper）"));
         emitStatus();
         return;
     }
@@ -476,7 +476,7 @@ void CoreController::toggleTun()
     } else {
         m_configBuilder.writeTunEnabled(m_fullConfigPath, m_tunEnabled);
     }
-    emit logUpdated(m_tunEnabled ? "已开启增强模式，正在重载 TUN 配置" : "已关闭增强模式，正在重载 TUN 配置");
+    emit logUpdated(m_tunEnabled ? tr("已开启增强模式，正在重载 TUN 配置") : tr("已关闭增强模式，正在重载 TUN 配置"));
     reloadConfig();
     emitStatus();
 }
@@ -497,7 +497,7 @@ void CoreController::startProxy()
     if (MacHelper::isReady()) {
         QString herr;
         if (!MacHelper::setSystemProxy(true, m_config.host, m_config.mixedPort, macBypass, &herr)) {
-            emit logUpdated(QString::fromUtf8("设置系统代理失败（helper）：%1").arg(herr));
+            emit logUpdated(tr("设置系统代理失败（helper）：%1").arg(herr));
             return;
         }
         m_sysproxyActive = true;
@@ -506,13 +506,13 @@ void CoreController::startProxy()
     }
     // 经 SCPreferences（带一次性授权）设代理：混合端口同时服务 HTTP/HTTPS/SOCKS，三种都指向它
     if (!ensureMacAuthorization()) {
-        emit logUpdated(QString::fromUtf8("设置系统代理失败：未获得授权"));
+        emit logUpdated(tr("设置系统代理失败：未获得授权"));
         return;
     }
     QString err;
     if (!macApplyProxies(static_cast<AuthorizationRef>(m_macAuthRef), true,
                          m_config.host, m_config.mixedPort, macBypass, &err)) {
-        emit logUpdated(QString::fromUtf8("设置系统代理失败：%1").arg(err));
+        emit logUpdated(tr("设置系统代理失败：%1").arg(err));
         return;
     }
     m_sysproxyActive = true;
@@ -521,7 +521,7 @@ void CoreController::startProxy()
     // 进程内直调 WinINET，无子进程、无外部二进制
     const QString server = QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort);
     if (!setWinSystemProxy(true, server, QStringLiteral("localhost;127.*;10.*;172.16.*;192.168.*;<local>"))) {
-        emit logUpdated(QString::fromUtf8("设置系统代理失败（WinINET InternetSetOption）"));
+        emit logUpdated(tr("设置系统代理失败（WinINET InternetSetOption）"));
         return;
     }
     m_sysproxyActive = true;
@@ -530,7 +530,7 @@ void CoreController::startProxy()
     // Linux：gsettings（GNOME/Cinnamon 系桌面）。混合端口同时服务 HTTP/HTTPS/SOCKS。
     // 非 GNOME 桌面（如 KDE）gsettings 不存在或 schema 缺失时报错并放弃，不再依赖捆绑二进制。
     if (runHidden("gsettings", {"set", "org.gnome.system.proxy", "mode", "manual"}, 10000) != 0) {
-        emit logUpdated(QString::fromUtf8("设置系统代理失败：gsettings 不可用（非 GNOME 系桌面？）"));
+        emit logUpdated(tr("设置系统代理失败：gsettings 不可用（非 GNOME 系桌面？）"));
         return;
     }
     const QString port = QString::number(m_config.mixedPort);
@@ -557,7 +557,7 @@ void CoreController::stopProxy()
     if (MacHelper::isReady()) {
         QString herr;
         if (!MacHelper::setSystemProxy(false, m_config.host, m_config.mixedPort, {}, &herr)) {
-            emit logUpdated(QString::fromUtf8("还原系统代理失败（helper）：%1").arg(herr));
+            emit logUpdated(tr("还原系统代理失败（helper）：%1").arg(herr));
         }
         m_sysproxyActive = false;
         emit logUpdated("Stop sysproxy ok!");
@@ -568,7 +568,7 @@ void CoreController::stopProxy()
         QString err;
         if (!macApplyProxies(static_cast<AuthorizationRef>(m_macAuthRef), false,
                              m_config.host, m_config.mixedPort, {}, &err)) {
-            emit logUpdated(QString::fromUtf8("还原系统代理失败：%1").arg(err));
+            emit logUpdated(tr("还原系统代理失败：%1").arg(err));
         }
     }
     m_sysproxyActive = false;
@@ -597,7 +597,7 @@ void CoreController::reloadConfig()
     if (QFileInfo::exists(exe)) {
         const int rc = runHidden(exe, {"-t", "-d", m_config.userDir, "-f", m_fullConfigPath});
         if (rc != 0) {
-            emit logUpdated(QString::fromUtf8("配置校验未通过，已跳过热重载（保留当前运行配置）"));
+            emit logUpdated(tr("配置校验未通过，已跳过热重载（保留当前运行配置）"));
             return;
         }
     }
@@ -616,7 +616,7 @@ void CoreController::reloadConfig()
         const bool ok = reply->error() == QNetworkReply::NoError;
         const QString error = reply->errorString();
         reply->deleteLater();
-        emit logUpdated(ok ? "Clash 配置已重载" : QString("重载 Clash 配置失败: %1 %2").arg(error, QString::fromUtf8(body)));
+        emit logUpdated(ok ? tr("Clash 配置已重载") : tr("重载 Clash 配置失败: %1 %2").arg(error, QString::fromUtf8(body)));
     });
 }
 

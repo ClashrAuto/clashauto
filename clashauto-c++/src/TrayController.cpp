@@ -87,7 +87,7 @@ void TrayController::buildMenu()
     // 菜单只建这一次，之后 setStatus/setTraffic 只改各行 QAction 的文本。
     // 此前流量每秒 rebuildMenu()：new QMenu 换给 setContextMenu（它不接管旧菜单
     // 所有权），旧菜单+全部 QAction 每秒泄漏一份；用户正开着菜单时还会被整个换掉。
-    m_menu.addAction("控制面板", this, [this] {
+    m_panelAction = m_menu.addAction(tr("控制面板"), this, [this] {
         emit openWindowRequested(); // QML 版：main_qml 连到 QQuickWindow 重开
         if (m_window) {
             m_window->showNormal();
@@ -101,11 +101,11 @@ void TrayController::buildMenu()
     m_downAction = m_menu.addAction(QString("DOWN: %1").arg(speedText(0)));
     m_downAction->setEnabled(false);
     m_menu.addSeparator();
-    m_coreAction = m_menu.addAction("启动核心", this, &TrayController::toggleCoreRequested);
-    m_proxyAction = m_menu.addAction("打开网页代理", this, &TrayController::toggleProxyRequested);
-    m_tunAction = m_menu.addAction("打开增强模式", this, &TrayController::toggleTunRequested);
+    m_coreAction = m_menu.addAction(tr("启动核心"), this, &TrayController::toggleCoreRequested);
+    m_proxyAction = m_menu.addAction(tr("打开网页代理"), this, &TrayController::toggleProxyRequested);
+    m_tunAction = m_menu.addAction(tr("打开增强模式"), this, &TrayController::toggleTunRequested);
     m_menu.addSeparator();
-    m_menu.addAction("退出程序", qApp, &QApplication::quit);
+    m_quitAction = m_menu.addAction(tr("退出程序"), qApp, &QApplication::quit);
     m_tray.setContextMenu(&m_menu);
 }
 
@@ -123,11 +123,27 @@ void TrayController::setStatus(bool tun, bool proxy, bool core)
 #if defined(Q_OS_MACOS)
     macTraySetStatus(tun, proxy, core); // 原生托盘：更新菜单项文字 + 核心在跑才显示速率
 #else
-    m_tray.setToolTip(QString("Clash Auto - %1").arg(core ? "运行中" : "已停止"));
+    m_tray.setToolTip(QString("Clash Auto - %1").arg(core ? tr("运行中") : tr("已停止")));
     refreshIcon(); // 状态变了刷新图标颜色（增强=红、核心在跑=黄）
-    m_coreAction->setText(core ? "停止核心" : "启动核心");
-    m_proxyAction->setText(proxy ? "关闭网页代理" : "打开网页代理");
-    m_tunAction->setText(tun ? "关闭增强模式" : "打开增强模式");
+    m_coreAction->setText(core ? tr("停止核心") : tr("启动核心"));
+    m_proxyAction->setText(proxy ? tr("关闭网页代理") : tr("打开网页代理"));
+    m_tunAction->setText(tun ? tr("关闭增强模式") : tr("打开增强模式"));
+#endif
+}
+
+// 语言切换后重刷托盘菜单/状态文案（托盘在翻译器安装前就已构造，故启动后与切换时都需调）。
+void TrayController::retranslate()
+{
+#if defined(Q_OS_MACOS)
+    // 原生托盘：重刷动态项文案（控制面板/退出程序等静态项由 macTrayInstall 建时定，切换语言后需重启生效）。
+    macTraySetStatus(m_tun, m_proxy, m_core);
+#else
+    if (m_panelAction) m_panelAction->setText(tr("控制面板"));
+    if (m_quitAction) m_quitAction->setText(tr("退出程序"));
+    if (m_coreAction) m_coreAction->setText(m_core ? tr("停止核心") : tr("启动核心"));
+    if (m_proxyAction) m_proxyAction->setText(m_proxy ? tr("关闭网页代理") : tr("打开网页代理"));
+    if (m_tunAction) m_tunAction->setText(m_tun ? tr("关闭增强模式") : tr("打开增强模式"));
+    m_tray.setToolTip(QString("Clash Auto - %1").arg(m_core ? tr("运行中") : tr("已停止")));
 #endif
 }
 

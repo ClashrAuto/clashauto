@@ -22,6 +22,8 @@ public slots:
     // 通知注册（如 explorer 重启后图标丢失）。由用户手动把「切换通知」关→开触发（见 QmlBridge）。
     // 注意：这不能解除用户在系统设置里对本应用的显式通知屏蔽（OS 级隐私开关，程序无权绕过）。
     void reinitForNotifications();
+    // 语言切换后重刷托盘菜单/状态文案：main_qml 在装好翻译器后与 languageChangeRequested 时调用。
+    void retranslate();
 
 signals:
     void toggleCoreRequested();
@@ -50,11 +52,13 @@ private:
     MainWindow *m_window = nullptr;
     QSystemTrayIcon m_tray;
     QMenu m_menu;                    // 常驻托盘菜单（此前每秒 new 一个换给 setContextMenu，旧的全泄漏）
+    QAction *m_panelAction = nullptr; // 「控制面板」（静态，语言切换时重刷）
     QAction *m_upAction = nullptr;   // UP/DOWN 实时速率行
     QAction *m_downAction = nullptr;
     QAction *m_coreAction = nullptr; // 三个开关行（文本随状态翻转）
     QAction *m_proxyAction = nullptr;
     QAction *m_tunAction = nullptr;
+    QAction *m_quitAction = nullptr; // 「退出程序」（静态，语言切换时重刷）
     bool m_tun = false;
     bool m_proxy = false;
     bool m_core = false;

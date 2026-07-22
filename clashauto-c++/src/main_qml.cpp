@@ -109,7 +109,9 @@ int main(int argc, char *argv[])
     // 不装翻译器 → 用中文源串；en-US 装英文表）。设置页切语言经 languageChangeRequested → 运行时 retranslate。
     auto *i18n = new I18n(&engine, &app);
     i18n->setLanguage(config.language);
+    tray->retranslate(); // 托盘菜单在翻译器安装前就已构造（Qt 托盘）；装好后刷成目标语言
     QObject::connect(settingsCtrl, &SettingsController::languageChangeRequested, i18n, &I18n::setLanguage);
+    QObject::connect(settingsCtrl, &SettingsController::languageChangeRequested, tray, &TrayController::retranslate);
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,

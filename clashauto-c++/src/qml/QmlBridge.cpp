@@ -105,8 +105,8 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
             // 节点切换通知（对齐旧项目 config.note / MainWindow 631）：跳过首次填充避免启动即误报，
             // 仅设置开启且活动节点非空时发；经 notifyRequested → main_qml → TrayController::notify 到托盘。
             if (m_nodeInitialized && m_nodeSwitchNote && !selected.isEmpty())
-                emit notifyRequested(QStringLiteral("节点切换"),
-                                     QStringLiteral("已切换到 %1").arg(selected));
+                emit notifyRequested(tr("节点切换"),
+                                     tr("已切换到 %1").arg(selected));
             m_selectedNode = selected;
             emit nodesChanged();
         }
@@ -199,7 +199,7 @@ void QmlBridge::toggleTun()
 #if defined(Q_OS_WIN)
     // 未安装内核：开启增强前先引导下载，否则提权重启也没有核心可跑（对齐 Widgets promptDownloadCore）。
     if (turningOn && !m_core->isCoreInstalled()) {
-        pushLog(QString::fromUtf8("未检测到 mihomo 内核，请先在「设置 → 系统」下载后再开启增强"));
+        pushLog(tr("未检测到 mihomo 内核，请先在「设置 → 系统」下载后再开启增强"));
         return;
     }
     // 增强(TUN) 需要管理员权限创建 wintun 虚拟网卡：正要开启且当前非提权 → 先以管理员身份重启自身
@@ -337,9 +337,9 @@ bool QmlBridge::relaunchElevatedForTun()
     persistConfigBool(QStringLiteral("use"), false); // 未提权成功：回滚，避免下次启动误弹 UAC「恢复」
     const DWORD err = GetLastError();
     if (err == ERROR_CANCELLED)
-        pushLog(QString::fromUtf8("增强(TUN) 需要管理员权限：已取消授权，未开启"));
+        pushLog(tr("增强(TUN) 需要管理员权限：已取消授权，未开启"));
     else
-        pushLog(QString::fromUtf8("增强(TUN) 提权失败（错误码 %1）").arg(err));
+        pushLog(tr("增强(TUN) 提权失败（错误码 %1）").arg(err));
     return false;
 }
 #endif
