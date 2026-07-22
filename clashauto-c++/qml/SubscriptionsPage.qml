@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Shapes
 import ClashAuto
 
 // 订阅页：可滚动的订阅卡列表（名称/类型/URL/节点数/启用态/更新周期）+ 动作
@@ -9,27 +10,57 @@ import ClashAuto
 Item {
     id: page
 
+    // ————————————————— 简洁线性图标（Feather 风格：描边 SVG 路径，24 视框缩放到 size）—————————————————
+    readonly property var ic: ({
+        "check":   "M20 6L9 17l-5-5",
+        "eye":     "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z M12 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6z",
+        "pencil":  "M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z",
+        "refresh": "M23 4v6h-6 M20.49 15a9 9 0 1 1-2.12-9.36L23 10",
+        "close":   "M18 6L6 18M6 6l12 12",
+        "plus":    "M12 5v14M5 12h14"
+    })
+    component LineIcon: Shape {
+        id: li
+        property string d: ""
+        property color color: Theme.textSecondary
+        property real sw: 2.2
+        implicitWidth: 15
+        implicitHeight: 15
+        antialiasing: true
+        transform: Scale { xScale: li.width / 24; yScale: li.height / 24 }
+        ShapePath {
+            strokeColor: li.color
+            strokeWidth: li.sw
+            fillColor: "transparent"
+            capStyle: ShapePath.RoundCap
+            joinStyle: ShapePath.RoundJoin
+            PathSvg { path: li.d }
+        }
+    }
+
     // ————————————————— 小圆形动作按钮（内联组件）—————————————————
     component CircleBtn: Rectangle {
         id: cb
-        property string glyph: ""
+        property string path: ""
         property string tip: ""
         property bool on: false
         property bool danger: false
         signal act()
 
-        implicitWidth: 26
-        implicitHeight: 26
-        radius: 13
+        implicitWidth: 28
+        implicitHeight: 28
+        radius: 14
         color: danger
-               ? (hover.hovered ? Qt.rgba(1, 0.30, 0.31, 0.30) : Qt.rgba(1, 0.30, 0.31, 0.16))
+               ? (hover.hovered ? Qt.rgba(1, 0.30, 0.31, 0.28) : Qt.rgba(1, 0.30, 0.31, 0.12))
                : on
-                 ? Qt.rgba(72 / 255, 151 / 255, 248 / 255, 0.85)
+                 ? Theme.accent
                  : (hover.hovered ? Theme.hover : Theme.metricBg)
-        Text {
+        Behavior on color { ColorAnimation { duration: 120 } }
+        LineIcon {
             anchors.centerIn: parent
-            text: cb.glyph
-            font.pixelSize: 13
+            width: 15
+            height: 15
+            d: cb.path
             color: cb.on ? "white" : (cb.danger ? Theme.danger : Theme.textSecondary)
         }
         HoverHandler { id: hover }
@@ -52,24 +83,38 @@ Item {
         }
     }
 
-    // ————————————————— 主题化文字按钮 —————————————————
+    // ————————————————— 主题化文字按钮（可带前置线性图标）—————————————————
     component TextBtn: Rectangle {
         id: tb
         property string label: ""
+        property string path: "" // 可选前置图标（SVG 路径），空则纯文字
         property bool primary: true
         signal act()
-        implicitWidth: Math.max(84, txt.implicitWidth + 24)
+        implicitWidth: Math.max(84, row.implicitWidth + 24)
         implicitHeight: 30
         radius: Theme.radius
         color: primary
                ? (h.hovered ? Theme.accentStrong : Theme.accent)
                : (h.hovered ? Theme.hover : Theme.metricBg)
-        Text {
-            id: txt
+        Row {
+            id: row
             anchors.centerIn: parent
-            text: tb.label
-            font.pixelSize: 13
-            color: tb.primary ? "white" : Theme.textSecondary
+            spacing: 6
+            LineIcon {
+                visible: tb.path.length > 0
+                width: 14
+                height: 14
+                anchors.verticalCenter: parent.verticalCenter
+                d: tb.path
+                color: tb.primary ? "white" : Theme.textSecondary
+            }
+            Text {
+                id: txt
+                anchors.verticalCenter: parent.verticalCenter
+                text: tb.label
+                font.pixelSize: 13
+                color: tb.primary ? "white" : Theme.textSecondary
+            }
         }
         HoverHandler { id: h }
         TapHandler { onTapped: tb.act() }
@@ -134,16 +179,19 @@ Item {
 
             TextBtn {
                 label: qsTr("添加订阅")
+                path: page.ic.plus
                 primary: false
                 onAct: page.openAdd()
             }
             TextBtn {
                 label: qsTr("应用")
+                path: page.ic.check
                 primary: false
                 onAct: subs.apply()
             }
             TextBtn {
                 label: qsTr("更新全部")
+                path: page.ic.refresh
                 onAct: subs.updateAll()
             }
         }
@@ -234,29 +282,29 @@ Item {
                         spacing: 4
 
                         CircleBtn {
-                            glyph: "✓"
+                            path: page.ic.check
                             tip: qsTr("启用/停用")
                             on: model.use
                             onAct: subs.setEnabled(index, !model.use)
                         }
                         CircleBtn {
-                            glyph: "👁"
+                            path: page.ic.eye
                             tip: qsTr("查看节点")
                             onAct: page.openNodes(index)
                         }
                         CircleBtn {
-                            glyph: "⚙"
+                            path: page.ic.pencil
                             tip: qsTr("编辑")
                             onAct: page.openEdit(index, model.name, model.url, model.type, model.updateTime)
                         }
                         CircleBtn {
-                            glyph: "⟳"
+                            path: page.ic.refresh
                             tip: qsTr("更新")
                             onAct: subs.update(index)
                         }
                         Item { Layout.fillWidth: true }
                         CircleBtn {
-                            glyph: "✕"
+                            path: page.ic.close
                             tip: qsTr("删除")
                             danger: true
                             onAct: {
