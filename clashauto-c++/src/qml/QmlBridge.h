@@ -54,8 +54,9 @@ class QmlBridge final : public QObject
     Q_PROPERTY(QString lastLog READ lastLog NOTIFY logAppended)
     Q_PROPERTY(QString version READ version CONSTANT)
     Q_PROPERTY(bool initialDark READ initialDark CONSTANT)
-    // 关闭到托盘（config.mini）：✕ 隐藏窗口而非退出（Win/Linux 用；mac 恒隐藏不看此值）。
-    // 随设置页「应用」更新，故非 CONSTANT。见 Main.qml onClosing。
+    // 关闭到托盘（config.mini）：两处用途——(1) 启动时开→静默启动仅托盘、不显示窗口，关→正常显示
+    // 窗口（见 Main.qml Component.onCompleted）；(2) ✕ 时开→隐藏窗口而非退出（Win/Linux 用；mac 恒隐藏
+    // 不看此值，见 Main.qml onClosing）。随设置页「应用」更新，故非 CONSTANT（(2) 即时生效；(1) 下次启动生效）。
     Q_PROPERTY(bool closeToTray READ closeToTray NOTIFY closeToTrayChanged)
 
 public:
@@ -165,7 +166,7 @@ private:
 
     QString m_userDir; // 用户可写配置目录（config.yaml 所在），用于 persistConfigBool
     bool m_autoTheme = false; // 是否跟随系统深浅色（config.autoTheme）；控制是否响应系统外观变化
-    bool m_closeToTray = true; // ✕ 关闭到托盘而非退出（config.mini）；Win/Linux 用
+    bool m_closeToTray = false; // 关闭到托盘（config.mini）：启动静默 + ✕ 隐藏；默认关（实际值由 config 覆盖）
     CoreController *m_core = nullptr;
     ClashService *m_clash = nullptr;
     SubscriptionStore *m_subs = nullptr;

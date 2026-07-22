@@ -365,7 +365,8 @@ Item {
                             blockSwitch.checked)
                         // 「跟随系统深浅色」实时生效：更新 bridge 的跟随态；开启则立刻按当前系统外观切主题。
                         bridge.setAutoTheme(autoThemeSwitch.checked)
-                        // 「关闭到托盘」实时生效：更新 bridge，供下次 ✕ 关闭时 Main.qml onClosing 判定。
+                        // 「关闭到托盘」：更新 bridge。✕ 关闭行为即时生效（Main.qml onClosing）；
+                        // 「启动是否静默到托盘」下次启动生效（Main.qml Component.onCompleted）。
                         bridge.setCloseToTray(traySwitch.checked)
                     }
                 }

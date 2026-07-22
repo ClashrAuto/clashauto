@@ -17,7 +17,7 @@ struct AppConfig {
     bool nodeOnlyAvailable = true;
     bool clearConnections = true;
     bool increment = false;
-    bool closeToTray = true;
+    bool closeToTray = false; // 关闭到托盘（config.mini）默认关：正常显示窗口 + ✕ 退出。见 AppConfigLoader::load 首次落地归一化
     bool autoStart = false;
     bool nodeSwitchNote = true;
     bool allowRuleEnabled = false;

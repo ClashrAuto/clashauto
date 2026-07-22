@@ -10,7 +10,9 @@ import ClashAuto
 // 不透明圆角卡片（离窗顶/右 5px）；其它平台：无边框 + 背景拖动。
 ApplicationWindow {
     id: window
-    visible: true
+    // 默认不显示；由 Component.onCompleted 依「关闭到托盘」(config.mini) 决定是否显示——
+    // 开→静默启动仅托盘、关→正常显示。默认 false 可避免「先闪一下再隐藏」。
+    visible: false
     width: 900
     height: 510
     minimumWidth: 640
@@ -91,7 +93,10 @@ ApplicationWindow {
     Component.onCompleted: {
         restoreWindowPos(); // 先定位（此时窗口尚未真正显示，恢复到上次位置/右下角不会闪一下）
         Theme.dark = bridge.initialDark;
-        applyChrome();
+        // 「关闭到托盘」(config.mini)：开 → 静默启动，不显示窗口只留托盘（之后经托盘/菜单栏「控制面板」
+        // 或 mac Dock 重开）；关 → 正常显示窗口。设 visible=true 会触发 onVisibleChanged → applyChrome，
+        // 故显示分支无需再手动 applyChrome；隐藏分支等首次显示（重开）时再上标题栏/毛玻璃。
+        window.visible = !bridge.closeToTray;
     }
     onVisibleChanged: {
         if (visible)

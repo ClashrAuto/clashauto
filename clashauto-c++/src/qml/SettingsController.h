@@ -191,7 +191,7 @@ private:
     bool m_nodeOnly = true;
     bool m_clearConnections = true;
     bool m_increment = false;
-    bool m_closeToTray = true;
+    bool m_closeToTray = false; // 默认关（实际值由 config 覆盖）
     bool m_autoStart = false;
     bool m_nodeNote = true;
     bool m_mirror = false;

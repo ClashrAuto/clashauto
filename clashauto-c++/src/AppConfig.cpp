@@ -60,6 +60,23 @@ AppConfig AppConfigLoader::load()
     const QString userConfig = QDir(config.userDir).filePath("config.yaml");
     if (!QFile::exists(userConfig) && QFile::exists(bundledConfig)) {
         QFile::copy(bundledConfig, userConfig);
+        // 首次落地用户配置时把「关闭到托盘」(mini) 归一到本 App 默认「关」。bundle 配置源自 Electron 版
+        // 发布（固定写 mini: true），但 C++ 版默认关闭到托盘为关（新用户默认正常显示窗口 + ✕ 退出，
+        // 与设置页开关的未勾选态一致）。仅首次 seed 时处理，用户之后在设置里的改动照常保存、不再被覆盖。
+        QFile seed(userConfig);
+        if (seed.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QString c = QString::fromUtf8(seed.readAll());
+            seed.close(); // 先关读句柄，避免与下面的写在 Windows 上争用
+            static const QRegularExpression miniLine(QStringLiteral("(?m)^[ \\t]*mini[ \\t]*:.*$"));
+            if (miniLine.match(c).hasMatch())
+                c.replace(miniLine, QStringLiteral("mini: false"));
+            else
+                c += (c.isEmpty() || c.endsWith('\n') ? QString() : QStringLiteral("\n")) + QStringLiteral("mini: false\n");
+            if (seed.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+                seed.write(c.toUtf8());
+                seed.close();
+            }
+        }
     }
 
     QFile file(QFile::exists(userConfig) ? userConfig : bundledConfig);
