@@ -119,7 +119,8 @@ ApplicationWindow {
     // 背景拖动：按住窗口任意「非交互」空白/文字/卡片背景即可拖动整窗。铺满窗口并置于所有
     // 内容之后(z:-1)。列表/ComboBox(select) 等控件在其上层先占用按下事件；本 handler 用
     // 「不夺取」的 grabPermissions（无 CanTakeOver 位），故在这些控件上按住拖动不会移动窗口，
-    // 只有空白/文字处才触发。mac 由原生透明标题栏负责移动，仅非 mac 调 startSystemMove。
+    // 只有空白/文字处才触发。所有平台（含 mac）都用 startSystemMove——mac 原生只在标题栏可拖，
+    // 这里让空白/卡片背景等非交互处也能拖动整窗（Qt6 的 startSystemMove 在 mac 同样有效）。
     Item {
         anchors.fill: parent
         z: -1
@@ -128,7 +129,7 @@ ApplicationWindow {
             grabPermissions: PointerHandler.ApprovesTakeOverByItems
                              | PointerHandler.ApprovesTakeOverByHandlersOfDifferentType
                              | PointerHandler.ApprovesTakeOverByHandlersOfSameType
-            onActiveChanged: if (active && !window.isMac) window.startSystemMove()
+            onActiveChanged: if (active) window.startSystemMove()
         }
     }
 

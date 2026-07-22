@@ -36,7 +36,11 @@ int main(int argc, char *argv[])
     QQuickStyle::setStyle("Basic");
     QApplication::setApplicationName("Clash Auto");
     QApplication::setOrganizationName("ClashAuto");
+#ifndef Q_OS_MACOS
+    // mac 的 Dock/程序坞图标由 .app 包内的 icon.icns 提供（含 macOS 规范留白，尺寸与其它 App 一致）；
+    // 若在此 setWindowIcon(全出血的 icon.ico) 会覆盖 Dock 图标、显得比别的图标大一圈，故 mac 不设。
     QApplication::setWindowIcon(QIcon(":/assets/icon.ico"));
+#endif
     // 关闭主窗口不再退出程序：✕ 只隐藏窗口（mac 恒隐藏、留 Dock；Win/Linux 按「关闭到托盘」决定，
     // 见 Main.qml onClosing）。真正退出走托盘/菜单栏「退出程序」或 mac 的 Cmd+Q。
     QApplication::setQuitOnLastWindowClosed(false);
