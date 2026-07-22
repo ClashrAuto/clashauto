@@ -358,7 +358,7 @@ Item {
                             autoUpdateSpin.value,
                             themeCombo.currentIndex === 1,   // themeLight
                             autoThemeSwitch.checked,
-                            langCombo.currentText,
+                            langCombo.currentIndex === 1 ? "en-US" : "zh-CN",
                             allowCombo.editText,
                             allowSwitch.checked,
                             blockCombo.editText,
@@ -524,8 +524,9 @@ Item {
                             RowLabel { text: qsTr("语言") }
                             ThemedCombo {
                                 id: langCombo
-                                model: ["zh-CN", "en-US"]
-                                currentIndex: Math.max(0, model.indexOf(settings.language))
+                                // 展示各语言本名（不翻译），值仍存语言码 zh-CN/en-US（见 apply 里的映射）。
+                                model: ["简体中文", "English"]
+                                currentIndex: settings.language === "en-US" ? 1 : 0
                             }
                         }
                         RowLayout {

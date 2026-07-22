@@ -11,6 +11,7 @@
 #include "SubscriptionStore.h"
 #include "TrayController.h"
 #include "qml/QmlBridge.h"
+#include "qml/I18n.h"
 #include "qml/SubscriptionsController.h"
 #include "qml/LogModel.h"
 #include "qml/AboutController.h"
@@ -103,6 +104,12 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("about", about);
     engine.rootContext()->setContextProperty("settings", settingsCtrl);
     engine.rootContext()->setContextProperty("updater", updateCtrl);
+
+    // 界面语言（i18n）：按 config.language 在「加载 QML 前」装好翻译器，首帧即是目标语言（zh-CN 为默认，
+    // 不装翻译器 → 用中文源串；en-US 装英文表）。设置页切语言经 languageChangeRequested → 运行时 retranslate。
+    auto *i18n = new I18n(&engine, &app);
+    i18n->setLanguage(config.language);
+    QObject::connect(settingsCtrl, &SettingsController::languageChangeRequested, i18n, &I18n::setLanguage);
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,

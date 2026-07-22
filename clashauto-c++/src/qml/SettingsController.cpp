@@ -330,6 +330,12 @@ void SettingsController::apply(const QString &host, int uiPort, int mixedPort, b
     emit mirrorChanged();
     m_nodeOnly = nodeOnly;
 
+    // 语言切换：码变了才发信号，交给 main_qml 的 I18n 运行时切换界面语言（装/卸翻译器 + retranslate）。
+    if (language != m_language) {
+        m_language = language;
+        emit languageChangeRequested(language);
+    }
+
     // API 端口变更：external-controller 不能热重载，改后需重启核心
     const int newPort = uiPort;
     const bool portChanged = (newPort > 0 && m_core && newPort != m_core->uiPort());

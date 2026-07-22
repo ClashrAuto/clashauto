@@ -156,6 +156,8 @@ signals:
     void geoipStatusChanged();
     void macHelperStatusChanged();
     void messageChanged();
+    // 「应用」时语言码变化：main_qml 连到 I18n::setLanguage 做运行时切换（装/卸翻译器 + retranslate）。
+    void languageChangeRequested(const QString &lang);
 
 private:
     void loadInitialValues();      // 从 AppConfigLoader::load() 填初始值

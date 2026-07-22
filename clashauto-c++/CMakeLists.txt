@@ -54,7 +54,8 @@ set(QML_GLUE_SOURCES
     src/qml/LogModel.cpp                src/qml/LogModel.h
     src/qml/AboutController.cpp         src/qml/AboutController.h
     src/qml/SettingsController.cpp      src/qml/SettingsController.h
-    src/qml/UpdateController.cpp        src/qml/UpdateController.h
+    src/qml/UpdateController.cpp         src/qml/UpdateController.h
+    src/qml/I18n.cpp                     src/qml/I18n.h
 )
 
 qt_add_executable(clashauto-qml

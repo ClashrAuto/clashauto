@@ -7,5 +7,7 @@
         <!-- 全 UI 字体：MiSans（Regular + Semibold 供 font.bold 映射）。 -->
         <file>assets/fonts/MiSans-Regular.ttf</file>
         <file>assets/fonts/MiSans-Semibold.ttf</file>
+        <!-- i18n：英文翻译表（中文源串 → English）。zh-CN 为默认，无需翻译表。 -->
+        <file>assets/i18n/en-US.json</file>
     </qresource>
 </RCC>

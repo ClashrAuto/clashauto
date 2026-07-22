@@ -264,7 +264,14 @@ ApplicationWindow {
                         Layout.preferredWidth: 120
                         Layout.preferredHeight: 28
                         model: [qsTr("规则"), qsTr("全局"), qsTr("直连")]
-                        currentIndex: Math.max(0, model.indexOf(bridge.mode))
+                        // bridge.mode 存的是当次选择的「显示串」(可能中/英)，翻译后不能用 model.indexOf 直接匹配；
+                        // 按规范值(中/英都认)映射到固定档位，切语言后仍正确回显。
+                        currentIndex: {
+                            var m = bridge.mode;
+                            if (m === "全局" || m === "Global") return 1;
+                            if (m === "直连" || m === "Direct") return 2;
+                            return 0; // 规则 / Rule / Rules
+                        }
                         font.pixelSize: 12
                         onActivated: bridge.setMode(currentText)
 
