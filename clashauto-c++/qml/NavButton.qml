@@ -1,7 +1,7 @@
 import QtQuick
 import ClashAuto
 
-// 侧栏导航项：左侧 3px 强调条（选中时点亮），文字左对齐，hover 高亮。
+// 侧栏导航项：文字左对齐（距左 10px），hover / 选中高亮。无左侧强调竖条。
 Item {
     id: root
     property string label: ""
@@ -17,26 +17,16 @@ Item {
         radius: 5
         color: root.current ? Theme.card : (hover.hovered ? Theme.hover : "transparent")
     }
-    Rectangle {
-        width: 3
-        height: parent.height
-        anchors.left: parent.left
-        color: root.current ? Theme.accent : "transparent"
-    }
     Text {
         anchors.verticalCenter: parent.verticalCenter
         anchors.left: parent.left
-        anchors.leftMargin: root.current || hover.hovered ? 34 : 32
+        anchors.leftMargin: 10 // 文字距左 10px
         anchors.right: parent.right
         anchors.rightMargin: 8 // 右缘留白：长译文（如某些语言的「订阅/设置」）到此省略号，不溢出侧栏
         text: root.label
         font.pixelSize: 14
         elide: Text.ElideRight
         color: root.current ? Theme.textSecondary : Theme.textPrimary
-
-        Behavior on anchors.leftMargin {
-            NumberAnimation { duration: 90 }
-        }
     }
 
     HoverHandler { id: hover }
