@@ -358,7 +358,7 @@ Item {
                             autoUpdateSpin.value,
                             themeCombo.currentIndex === 1,   // themeLight
                             autoThemeSwitch.checked,
-                            langCombo.currentIndex === 1 ? "en-US" : "zh-CN",
+                            langCombo.langCodes[langCombo.currentIndex],
                             autoLangSwitch.checked,
                             allowCombo.editText,
                             allowSwitch.checked,
@@ -528,9 +528,11 @@ Item {
                             ThemedCombo {
                                 id: langCombo
                                 enabled: !autoLangSwitch.checked // 跟随系统时手选无效，置灰
-                                // 展示各语言本名（不翻译），值仍存语言码 zh-CN/en-US（见 apply 里的映射）。
-                                model: ["简体中文", "English"]
-                                currentIndex: settings.language === "en-US" ? 1 : 0
+                                // 显示各语言本名（不翻译），值存语言码；apply 传 langCodes[currentIndex]、
+                                // 初值按 settings.language 反查。model 与 langCodes 一一对应、顺序一致。
+                                readonly property var langCodes: ["zh-CN", "en-US", "zh-TW", "ja", "ko", "ru", "es", "fr", "de", "pt-BR", "it", "tr", "vi"]
+                                model: ["简体中文", "English", "繁體中文", "日本語", "한국어", "Русский", "Español", "Français", "Deutsch", "Português", "Italiano", "Türkçe", "Tiếng Việt"]
+                                currentIndex: Math.max(0, langCodes.indexOf(settings.language))
                             }
                         }
                         RowLayout {

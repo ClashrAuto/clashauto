@@ -9,9 +9,26 @@
 
 QString I18n::systemLanguage()
 {
-    // 只区分中/英：系统区域是中文（zh_*）→ zh-CN，其余一律回落 en-US。
-    return QLocale::system().language() == QLocale::Chinese ? QStringLiteral("zh-CN")
-                                                            : QStringLiteral("en-US");
+    const QLocale loc = QLocale::system();
+    switch (loc.language()) {
+    case QLocale::Chinese:
+        // 简/繁：繁体脚本或台港澳地区 → zh-TW，其余中文 → zh-CN。
+        if (loc.script() == QLocale::TraditionalHanScript || loc.territory() == QLocale::Taiwan
+            || loc.territory() == QLocale::HongKong || loc.territory() == QLocale::Macao)
+            return QStringLiteral("zh-TW");
+        return QStringLiteral("zh-CN");
+    case QLocale::Japanese:   return QStringLiteral("ja");
+    case QLocale::Korean:     return QStringLiteral("ko");
+    case QLocale::Russian:    return QStringLiteral("ru");
+    case QLocale::Spanish:    return QStringLiteral("es");
+    case QLocale::French:     return QStringLiteral("fr");
+    case QLocale::German:     return QStringLiteral("de");
+    case QLocale::Portuguese: return QStringLiteral("pt-BR");
+    case QLocale::Italian:    return QStringLiteral("it");
+    case QLocale::Turkish:    return QStringLiteral("tr");
+    case QLocale::Vietnamese: return QStringLiteral("vi");
+    default:                  return QStringLiteral("en-US"); // 未覆盖语言一律英文
+    }
 }
 
 bool JsonTranslator::loadMap(const QString &jsonPath)
@@ -55,19 +72,28 @@ void I18n::setLanguage(const QString &lang)
     if (lang == m_current)
         return;
 
-    // 先卸掉英文翻译器（切到中文或换语言时）。移除后未装任何翻译器 → 源串(中文)生效。
-    if (m_en)
-        QCoreApplication::removeTranslator(m_en);
+    // 先卸掉当前翻译器。卸载后若不再装 → 源串(简体中文)生效。
+    if (m_active) {
+        QCoreApplication::removeTranslator(m_active);
+        m_active = nullptr;
+    }
 
-    // en-US / en*：装英文翻译器（懒加载一次）。其它一律回落中文源串。
-    if (lang.compare(QStringLiteral("en-US"), Qt::CaseInsensitive) == 0
-        || lang.startsWith(QStringLiteral("en"), Qt::CaseInsensitive)) {
-        if (!m_en) {
-            m_en = new JsonTranslator(this);
-            m_en->loadMap(QStringLiteral(":/assets/i18n/en-US.json"));
+    // zh-CN（及空）= 源语言，不装翻译器；其余按 <lang>.json 懒加载并缓存后安装。
+    if (!lang.isEmpty() && lang.compare(QStringLiteral("zh-CN"), Qt::CaseInsensitive) != 0) {
+        JsonTranslator *t = m_translators.value(lang, nullptr);
+        if (!t) {
+            t = new JsonTranslator(this);
+            if (t->loadMap(QStringLiteral(":/assets/i18n/%1.json").arg(lang)) && !t->isEmpty()) {
+                m_translators.insert(lang, t); // 加载成功才缓存
+            } else {
+                delete t; // 无此语言表：回落源串(中文)
+                t = nullptr;
+            }
         }
-        if (m_en && !m_en->isEmpty())
-            QCoreApplication::installTranslator(m_en);
+        if (t) {
+            QCoreApplication::installTranslator(t);
+            m_active = t;
+        }
     }
 
     m_current = lang;

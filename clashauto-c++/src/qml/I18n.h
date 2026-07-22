@@ -26,14 +26,15 @@ private:
 };
 
 // 语言管理：按语言码安装/卸载翻译器，并让 QML 引擎 retranslate() 以运行时即时切换界面语言。
-// zh-CN 为默认（源串即中文，不装翻译器）；en-US 装 JsonTranslator。
+// zh-CN 为默认（简体中文即源串，不装翻译器）；其余语言码 <code> 加载 :/assets/i18n/<code>.json。
+// 各语言翻译器按需懒加载并缓存，切换只换「已装」的那个。
 class I18n final : public QObject
 {
     Q_OBJECT
 public:
     explicit I18n(QQmlEngine *engine, QObject *parent = nullptr);
 
-    // 按系统区域推断界面语言码：中文区域→"zh-CN"，其余→"en-US"。供「跟随系统语言」用。
+    // 按系统区域推断界面语言码：中(简/繁)/日/韩/俄/西/法/德/葡/意/土/越 → 对应码，其余 → "en-US"。
     static QString systemLanguage();
 
 public slots:
@@ -42,6 +43,7 @@ public slots:
 
 private:
     QQmlEngine *m_engine = nullptr;
-    JsonTranslator *m_en = nullptr; // 英文翻译器（首次切到英文时懒加载）
-    QString m_current;              // 当前语言码，避免重复安装/无谓 retranslate
+    QHash<QString, JsonTranslator *> m_translators; // 语言码 → 已加载翻译器（懒加载缓存）
+    JsonTranslator *m_active = nullptr;             // 当前已安装的翻译器（zh-CN 时为空）
+    QString m_current;                              // 当前语言码，避免重复安装/无谓 retranslate
 };
