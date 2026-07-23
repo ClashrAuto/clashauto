@@ -26,10 +26,13 @@ Card {
     ListView {
         id: view
         anchors.fill: parent
-        anchors.margins: 6
+        anchors.topMargin: 6
+        anchors.leftMargin: 10  // 时间线全宽，行左右各内缩 10
+        anchors.rightMargin: 10
         clip: true
         spacing: 0
-        rightMargin: 8 // 行右缘离卡片边 8px（滚动条悬浮其上）
+        rightMargin: 0
+        bottomMargin: 10 // 滚到底时末行距底 10
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 

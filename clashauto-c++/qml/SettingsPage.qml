@@ -341,9 +341,12 @@ Item {
             anchors.margins: 0
             spacing: 8
 
-            // —— 顶栏：Tab + 应用 ——
+            // —— 顶栏：Tab + 应用（上左右内距 10）——
             RowLayout {
                 Layout.fillWidth: true
+                Layout.topMargin: 10
+                Layout.leftMargin: 10
+                Layout.rightMargin: 10
                 spacing: 4
 
                 TabBar {
@@ -403,6 +406,8 @@ Item {
             // 反馈提示
             Text {
                 Layout.fillWidth: true
+                Layout.leftMargin: 10
+                Layout.rightMargin: 10
                 text: settings.lastMessage
                 color: Theme.textMuted
                 font.pixelSize: 11
@@ -421,7 +426,8 @@ Item {
                     ScrollBar.vertical.policy: ScrollBar.AsNeeded
 
                     ColumnLayout {
-                        width: page.width - 60
+                        x: 10 // 滚动区全宽，内容左右各内缩 10
+                        width: page.width - 20
                         spacing: 8
 
                         GroupTitle { icon: "\uEBCA"; text: qsTr("系统") }
@@ -554,39 +560,45 @@ Item {
                             ThemedSpin { id: autoUpdateSpin; value: settings.autoUpdateMinutes }
                             Label { text: qsTr("分钟"); color: Theme.textMuted; font.pixelSize: 12 }
                         }
-                        Item { Layout.preferredHeight: 6 }
+                        Item { Layout.preferredHeight: 10 } // 末项距底 10
                     }
                 }
 
-                // ============================ TAB 1：过滤 ============================
-                ColumnLayout {
-                    spacing: 10
+                // ============================ TAB 1：过滤（内容左右内缩 10、距底 10）============================
+                Item {
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 10
+                        anchors.bottomMargin: 10
+                        spacing: 10
 
-                    RowLayout {
-                        RowLabel { text: qsTr("启用允许规则") }
-                        ThemedSwitch { id: allowSwitch; checked: settings.allowRuleEnabled }
-                    }
-                    RowLayout {
-                        RowLabel { text: qsTr("允许规则(正则)") }
-                        ThemedEditCombo {
-                            id: allowCombo
-                            model: settings.allowRulePresets
-                            editText: settings.allowRule
+                        RowLayout {
+                            RowLabel { text: qsTr("启用允许规则") }
+                            ThemedSwitch { id: allowSwitch; checked: settings.allowRuleEnabled }
                         }
-                    }
-                    RowLayout {
-                        RowLabel { text: qsTr("启用排除规则") }
-                        ThemedSwitch { id: blockSwitch; checked: settings.noAllowRuleEnabled }
-                    }
-                    RowLayout {
-                        RowLabel { text: qsTr("排除规则(正则)") }
-                        ThemedEditCombo {
-                            id: blockCombo
-                            model: settings.noAllowRulePresets
-                            editText: settings.noAllowRule
+                        RowLayout {
+                            RowLabel { text: qsTr("允许规则(正则)") }
+                            ThemedEditCombo {
+                                id: allowCombo
+                                model: settings.allowRulePresets
+                                editText: settings.allowRule
+                            }
                         }
+                        RowLayout {
+                            RowLabel { text: qsTr("启用排除规则") }
+                            ThemedSwitch { id: blockSwitch; checked: settings.noAllowRuleEnabled }
+                        }
+                        RowLayout {
+                            RowLabel { text: qsTr("排除规则(正则)") }
+                            ThemedEditCombo {
+                                id: blockCombo
+                                model: settings.noAllowRulePresets
+                                editText: settings.noAllowRule
+                            }
+                        }
+                        Item { Layout.fillHeight: true }
                     }
-                    Item { Layout.fillHeight: true }
                 }
 
                 // ============================ TAB 2：区域 ============================
@@ -595,6 +607,8 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
+                        Layout.leftMargin: 10
+                        Layout.rightMargin: 10
                         spacing: 8
                         PillButton {
                             text: qsTr("＋ 添加")
@@ -616,9 +630,11 @@ Item {
                         clip: true
                         model: settings.areaRows
                         spacing: 4
+                        bottomMargin: 10 // 末项距底 10
                         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                         delegate: Rectangle {
-                            width: ListView.view.width
+                            x: 10 // 列表全宽，项左右各内缩 10
+                            width: ListView.view.width - 20
                             height: 36
                             radius: 3
                             color: Theme.nodeRowBg
@@ -651,6 +667,8 @@ Item {
 
                     RowLayout {
                         Layout.fillWidth: true
+                        Layout.leftMargin: 10
+                        Layout.rightMargin: 10
                         spacing: 8
                         PillButton {
                             text: qsTr("＋ 添加")
@@ -680,9 +698,11 @@ Item {
                         clip: true
                         model: settings.ruleRows
                         spacing: 4
+                        bottomMargin: 10 // 末项距底 10
                         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                         delegate: Rectangle {
-                            width: ListView.view.width
+                            x: 10 // 列表全宽，项左右各内缩 10
+                            width: ListView.view.width - 20
                             height: 36
                             radius: 3
                             color: Theme.nodeRowBg

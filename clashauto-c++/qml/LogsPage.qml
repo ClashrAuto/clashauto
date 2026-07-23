@@ -48,10 +48,13 @@ Item {
         anchors.margins: 0 // 日志页内距 0
         spacing: 8
 
-        // —————————————————— 标签栏 ——————————————————
+        // —————————————————— 标签栏（上左右内距 10）——————————————————
         TabBar {
             id: bar
             Layout.fillWidth: true
+            Layout.topMargin: 10
+            Layout.leftMargin: 10
+            Layout.rightMargin: 10
             spacing: 6
 
             background: Rectangle { color: "transparent" }
