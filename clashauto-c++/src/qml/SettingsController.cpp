@@ -213,9 +213,9 @@ void SettingsController::setGeoipStatus(const QString &msg, bool updating)
 
 // —————————————————————————— 持久化 ——————————————————————————
 
-void SettingsController::persistConfigBool(const QString &key, bool value)
+void SettingsController::persistConfigScalar(const QString &key, const QString &value)
 {
-    // 轻量持久化：只改 config.yaml 的单个键、保留其余内容（复刻 MainWindow::persistConfigBool）
+    // 轻量持久化：只改 config.yaml 的单个顶层键、保留其余内容（复刻 MainWindow::persistConfigBool）
     const QString path = userConfigPath();
     QString yaml;
     QFile in(path);
@@ -223,7 +223,7 @@ void SettingsController::persistConfigBool(const QString &key, bool value)
         yaml = QString::fromUtf8(in.readAll());
         in.close();
     }
-    const QString line = QStringLiteral("%1: %2").arg(key, value ? "true" : "false");
+    const QString line = QStringLiteral("%1: %2").arg(key, value);
     const QRegularExpression re(QStringLiteral("(?m)^%1:.*$").arg(QRegularExpression::escape(key)));
     if (re.match(yaml).hasMatch()) {
         yaml.replace(re, line);
@@ -238,6 +238,11 @@ void SettingsController::persistConfigBool(const QString &key, bool value)
         out.write(yaml.toUtf8());
         out.close();
     }
+}
+
+void SettingsController::persistConfigBool(const QString &key, bool value)
+{
+    persistConfigScalar(key, value ? QStringLiteral("true") : QStringLiteral("false"));
 }
 
 void SettingsController::setNodeOnly(bool on)
@@ -259,6 +264,93 @@ void SettingsController::setMirror(bool on)
     m_mirror = on;
     persistConfigBool(QStringLiteral("mirror"), on);
     emit mirrorChanged();
+}
+
+// —— 系统 tab 的即时 setter：切换即落盘 + 即生效（副作用与 apply() 一一对应）——
+
+void SettingsController::setAutoStart(bool on)
+{
+    m_autoStart = on;
+    persistConfigBool(QStringLiteral("sys"), on);
+    applyAutoStart(on);
+}
+
+void SettingsController::setCloseToTray(bool on)
+{
+    m_closeToTray = on;
+    persistConfigBool(QStringLiteral("mini"), on);
+}
+
+void SettingsController::setIncrement(bool on)
+{
+    m_increment = on;
+    persistConfigBool(QStringLiteral("increment"), on);
+}
+
+void SettingsController::setNodeNote(bool on)
+{
+    m_nodeNote = on;
+    persistConfigBool(QStringLiteral("note"), on);
+}
+
+void SettingsController::setWebProxy(bool on)
+{
+    m_webProxy = on;
+    persistConfigBool(QStringLiteral("web"), on);
+    if (m_core && on != m_core->isProxyEnabled()) {
+        m_core->toggleProxy();
+    }
+}
+
+void SettingsController::setClearConnections(bool on)
+{
+    m_clearConnections = on;
+    persistConfigBool(QStringLiteral("clearConnections"), on);
+    if (m_clash) {
+        m_clash->setClearConnectionsOnSwitch(on);
+    }
+}
+
+void SettingsController::setAutoTheme(bool on)
+{
+    m_autoTheme = on;
+    persistConfigBool(QStringLiteral("autoTheme"), on);
+}
+
+void SettingsController::setThemeLight(bool light)
+{
+    m_themeLight = light;
+    persistConfigScalar(QStringLiteral("theme"),
+                        light ? QStringLiteral("light") : QStringLiteral("black"));
+}
+
+void SettingsController::setAutoUpdateMinutes(int minutes)
+{
+    m_autoUpdate = minutes;
+    persistConfigScalar(QStringLiteral("autoUpdate"), QString::number(minutes));
+}
+
+void SettingsController::applyEffectiveLanguage()
+{
+    const QString newEffective = m_autoLanguage ? I18n::systemLanguage() : m_language;
+    if (newEffective != m_effectiveLang) {
+        m_effectiveLang = newEffective;
+        emit languageChangeRequested(newEffective);
+    }
+}
+
+void SettingsController::setLanguage(const QString &lang)
+{
+    m_language = lang;
+    persistConfigScalar(QStringLiteral("language"), lang);
+    applyEffectiveLanguage();
+}
+
+void SettingsController::setAutoLanguage(bool on)
+{
+    m_autoLanguage = on;
+    persistConfigBool(QStringLiteral("autoLanguage"), on);
+    applyEffectiveLanguage();
 }
 
 void SettingsController::applyAutoStart(bool enabled)

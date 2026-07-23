@@ -128,6 +128,19 @@ public:
     Q_INVOKABLE void setNodeOnly(bool on);
     Q_INVOKABLE void setMirror(bool on);
 
+    // 系统 tab 开关/下拉全部即时落盘+即时生效；「应用」按钮仍整表保存（Host/端口等文本项用）。
+    Q_INVOKABLE void setAutoStart(bool on);          // sys：写注册表 Run 键
+    Q_INVOKABLE void setCloseToTray(bool on);        // mini（✕ 行为由 QML 侧同步 bridge）
+    Q_INVOKABLE void setIncrement(bool on);          // increment
+    Q_INVOKABLE void setNodeNote(bool on);           // note（通知开关由 QML 侧同步 bridge）
+    Q_INVOKABLE void setWebProxy(bool on);           // web：与当前代理态不一致则立即切换
+    Q_INVOKABLE void setClearConnections(bool on);   // clearConnections：同步 ClashService
+    Q_INVOKABLE void setAutoTheme(bool on);          // autoTheme（跟随即时换肤由 QML 侧同步 bridge）
+    Q_INVOKABLE void setThemeLight(bool light);      // theme: light|black
+    Q_INVOKABLE void setAutoUpdateMinutes(int minutes); // autoUpdate
+    Q_INVOKABLE void setLanguage(const QString &lang);  // language：生效码变了发 languageChangeRequested
+    Q_INVOKABLE void setAutoLanguage(bool on);          // autoLanguage：同上
+
     // —— 规则 / 区域 ——
     Q_INVOKABLE void setRuleFilter(const QString &text);
     Q_INVOKABLE QVariantMap ruleAt(int index) const;   // 编辑器回填：{type,node,value}
@@ -166,6 +179,8 @@ private:
     QString userConfigPath() const;
     QString defaultConfigPath() const; // userDir/default.yaml（缺失时从 bundle 复制）
     void persistConfigBool(const QString &key, bool value);
+    void persistConfigScalar(const QString &key, const QString &value); // 单键改写，保留其余内容
+    void applyEffectiveLanguage(); // 依 m_autoLanguage/m_language 重算生效语言，变了发信号
     void applyAutoStart(bool enabled);
 
     QJsonArray loadRuleSection(const QString &section) const;

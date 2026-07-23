@@ -12,33 +12,69 @@ Item {
 
     // ————————————————————————— 复用样式组件（inline）—————————————————————————
 
-    component GroupTitle: RowLayout {
-        id: gtRoot
-        property alias text: gtLabel.text
-        property string icon: "" // Remix 码点，空则不显示图标
-        spacing: 6
-        Layout.topMargin: 6
-        Text {
-            visible: gtRoot.icon.length > 0
-            text: gtRoot.icon
-            font.family: Theme.riFont
-            font.pixelSize: 15
-            color: Theme.accentStrong
-            Layout.alignment: Qt.AlignVCenter
-        }
-        Label {
-            id: gtLabel
-            color: Theme.accentStrong
-            font.pixelSize: 13
-            font.bold: true
-            Layout.alignment: Qt.AlignVCenter
+    // 设置分组卡（同订阅卡观感）：头部 图标+标题，行内容经 default 别名追加到卡内列。
+    component SettingCard: Card {
+        id: sc
+        property string icon: ""
+        property string title: ""
+        default property alias content: scBody.data
+        Layout.fillWidth: true
+        color: Theme.metricBg
+        implicitHeight: scBody.implicitHeight + 24
+
+        ColumnLayout {
+            id: scBody
+            anchors.fill: parent
+            anchors.leftMargin: 14
+            anchors.rightMargin: 14
+            anchors.topMargin: 12
+            anchors.bottomMargin: 12
+            spacing: 0
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.bottomMargin: 6
+                spacing: 6
+                Text {
+                    visible: sc.icon.length > 0
+                    text: sc.icon
+                    font.family: Theme.riFont
+                    font.pixelSize: 15
+                    color: Theme.accentStrong
+                }
+                Label {
+                    text: sc.title
+                    color: Theme.accentStrong
+                    font.pixelSize: 13
+                    font.bold: true
+                }
+                Item { Layout.fillWidth: true }
+            }
         }
     }
 
-    component Divider: Rectangle {
+    // 卡内设置行：标签靠左、控件靠右（多个控件按声明顺序靠右排列）。
+    component SettingRow: RowLayout {
+        property alias label: srLabel.text
         Layout.fillWidth: true
-        height: 1
+        Layout.preferredHeight: 40
+        spacing: 8
+        Label {
+            id: srLabel
+            Layout.fillWidth: true
+            color: Theme.textSecondary
+            font.pixelSize: 13
+            elide: Text.ElideRight
+        }
+    }
+
+    // 卡内行间细分隔线
+    component CardDivider: Rectangle {
+        Layout.fillWidth: true
+        Layout.preferredHeight: 1
+        implicitHeight: 1
         color: Theme.divider
+        opacity: 0.6
     }
 
     component RowLabel: Label {
@@ -330,6 +366,12 @@ Item {
 
     Component.onCompleted: settings.refreshMacHelperStatus()
 
+    // 点击页面任意空白处：把焦点收回页面根，输入框（Host/端口/搜索等）随即失焦。
+    // 开关/下拉/按钮自身点击会拿走焦点，无需单独处理。
+    TapHandler {
+        onTapped: page.forceActiveFocus()
+    }
+
     // ————————————————————————— 布局 —————————————————————————
 
     Card {
@@ -420,7 +462,7 @@ Item {
                 Layout.fillHeight: true
                 currentIndex: tabs.currentIndex
 
-                // ============================ TAB 0：系统 ============================
+                // ============================ TAB 0：系统（卡片分组；开关/下拉即时生效）============================
                 ScrollView {
                     clip: true
                     ScrollBar.vertical.policy: ScrollBar.AsNeeded
@@ -428,139 +470,139 @@ Item {
                     ColumnLayout {
                         x: 10 // 滚动区全宽，内容左右各内缩 10
                         width: page.width - 20
-                        spacing: 8
+                        spacing: 10
 
-                        GroupTitle { icon: "\uEBCA"; text: qsTr("系统") }
-                        RowLayout { RowLabel { text: qsTr("开机自启") }
-                            ThemedSwitch { id: autoStartSwitch; checked: settings.autoStart } }
-                        RowLayout { RowLabel { text: qsTr("关闭到托盘") }
-                            ThemedSwitch { id: traySwitch; checked: settings.closeToTray } }
+                        SettingCard {
+                            icon: "\uEBCA"
+                            title: qsTr("系统")
 
-                        Divider {}
-                        GroupTitle { icon: "\uF0E0"; text: qsTr("节点") }
-                        RowLayout { RowLabel { text: qsTr("仅可用节点") }
-                            ThemedSwitch { id: nodeSwitch; checked: settings.nodeOnlyAvailable
-                                onToggled: settings.setNodeOnly(checked) } }
-                        RowLayout { RowLabel { text: qsTr("增量更新") }
-                            ThemedSwitch { id: incSwitch; checked: settings.increment } }
-
-                        Divider {}
-                        GroupTitle { icon: "\uEF94"; text: qsTr("通知") }
-                        RowLayout { RowLabel { text: qsTr("切换通知") }
-                            ThemedSwitch { id: noteSwitch; checked: settings.nodeSwitchNote } }
-
-                        Divider {}
-                        GroupTitle { icon: "\uF096"; text: qsTr("增强") }
-                        RowLayout { RowLabel { text: qsTr("系统代理") }
-                            ThemedSwitch { id: webSwitch; checked: settings.webProxy } }
-                        RowLayout {
-                            spacing: 10
-                            RowLabel { text: qsTr("GeoIP 数据") }
-                            PillButton {
-                                text: settings.geoipUpdating ? settings.geoipStatus : qsTr("更新 GeoIP")
-                                enabled: !settings.geoipUpdating
-                                implicitWidth: 120
-                                onClicked: settings.updateGeoip()
-                            }
-                        }
-                        RowLayout {
-                            spacing: 10
-                            RowLabel { text: qsTr("mihomo 内核") }
-                            Label {
-                                text: qsTr("国内加速")
-                                color: Theme.textSecondary
-                                font.pixelSize: 13
-                            }
-                            ThemedSwitch {
-                                id: mirrorCheck
-                                checked: settings.mirror
-                                onToggled: settings.setMirror(checked)
-                            }
-                            Item { Layout.fillWidth: true }
-                            PillButton {
-                                text: settings.coreUpdating ? settings.coreUpdateStatus : qsTr("更新内核")
-                                enabled: !settings.coreUpdating
-                                implicitWidth: 120
-                                onClicked: settings.updateCore()
-                            }
+                            SettingRow { label: qsTr("开机自启")
+                                ThemedSwitch { id: autoStartSwitch; checked: settings.autoStart
+                                    onToggled: settings.setAutoStart(checked) } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("关闭到托盘")
+                                ThemedSwitch { id: traySwitch; checked: settings.closeToTray
+                                    onToggled: { settings.setCloseToTray(checked); bridge.setCloseToTray(checked) } } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("系统代理")
+                                ThemedSwitch { id: webSwitch; checked: settings.webProxy
+                                    onToggled: settings.setWebProxy(checked) } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("切换通知")
+                                ThemedSwitch { id: noteSwitch; checked: settings.nodeSwitchNote
+                                    onToggled: { settings.setNodeNote(checked); bridge.setNodeSwitchNote(checked) } } }
                         }
 
-                        // macOS 免密助手
-                        RowLayout {
-                            spacing: 10
-                            visible: settings.macHelperSupported
-                            RowLabel { text: qsTr("免密助手") }
-                            Text {
-                                text: settings.macHelperStatus
-                                color: Theme.textMuted
-                                font.pixelSize: 12
-                                Layout.preferredWidth: 220
-                                elide: Text.ElideRight
-                            }
-                            PillButton { text: qsTr("安装/启用"); onClicked: settings.installMacHelper() }
-                            PillButton { text: qsTr("卸载"); onClicked: settings.uninstallMacHelper() }
+                        SettingCard {
+                            icon: "\uF0E0"
+                            title: qsTr("节点与订阅")
+
+                            SettingRow { label: qsTr("仅可用节点")
+                                ThemedSwitch { id: nodeSwitch; checked: settings.nodeOnlyAvailable
+                                    onToggled: settings.setNodeOnly(checked) } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("增量更新")
+                                ThemedSwitch { id: incSwitch; checked: settings.increment
+                                    onToggled: settings.setIncrement(checked) } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("订阅自动更新周期")
+                                ThemedSpin { id: autoUpdateSpin; implicitWidth: 140
+                                    value: settings.autoUpdateMinutes
+                                    onValueModified: settings.setAutoUpdateMinutes(value) }
+                                Label { text: qsTr("分钟"); color: Theme.textMuted; font.pixelSize: 12 } }
                         }
 
-                        Divider {}
-                        GroupTitle { icon: "\uEFC5"; text: qsTr("界面") }
-                        RowLayout {
-                            RowLabel { text: qsTr("主题") }
-                            ThemedCombo {
-                                id: themeCombo
-                                model: [qsTr("黑色"), qsTr("白色")]
-                                currentIndex: Theme.dark ? 0 : 1
-                                onActivated: Theme.dark = (currentIndex === 0)
-                            }
-                        }
-                        RowLayout { RowLabel { text: qsTr("跟随系统深浅色") }
-                            ThemedSwitch { id: autoThemeSwitch; checked: settings.autoTheme } }
+                        SettingCard {
+                            icon: "\uEFC5"
+                            title: qsTr("界面与语言")
 
-                        Divider {}
-                        GroupTitle { icon: "\uEBF0"; text: qsTr("内核") }
-                        RowLayout {
-                            RowLabel { text: qsTr("Host") }
-                            ThemedEditCombo {
-                                id: hostCombo
-                                model: ["127.0.0.1", "localhost"]
-                                editText: settings.host
-                                implicitWidth: 200
-                            }
+                            SettingRow { label: qsTr("主题")
+                                ThemedCombo {
+                                    id: themeCombo
+                                    implicitWidth: 140
+                                    model: [qsTr("黑色"), qsTr("白色")]
+                                    currentIndex: Theme.dark ? 0 : 1
+                                    onActivated: {
+                                        Theme.dark = (currentIndex === 0)
+                                        settings.setThemeLight(currentIndex === 1)
+                                    }
+                                } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("跟随系统深浅色")
+                                ThemedSwitch { id: autoThemeSwitch; checked: settings.autoTheme
+                                    onToggled: { settings.setAutoTheme(checked); bridge.setAutoTheme(checked) } } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("跟随系统语言")
+                                ThemedSwitch { id: autoLangSwitch; checked: settings.autoLanguage
+                                    onToggled: settings.setAutoLanguage(checked) } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("语言")
+                                ThemedCombo {
+                                    id: langCombo
+                                    implicitWidth: 180
+                                    enabled: !autoLangSwitch.checked // 跟随系统时手选无效，置灰
+                                    // 显示各语言本名（不翻译），值存语言码；选中即时生效并落盘、
+                                    // 初值按 settings.language 反查。model 与 langCodes 一一对应、顺序一致。
+                                    readonly property var langCodes: ["zh-CN", "en-US", "zh-TW", "ja", "ko", "ru", "es", "fr", "de", "pt-BR", "it", "tr", "vi"]
+                                    model: ["简体中文", "English", "繁體中文", "日本語", "한국어", "Русский", "Español", "Français", "Deutsch", "Português", "Italiano", "Türkçe", "Tiếng Việt"]
+                                    currentIndex: Math.max(0, langCodes.indexOf(settings.language))
+                                    onActivated: settings.setLanguage(langCodes[currentIndex])
+                                } }
                         }
-                        RowLayout { RowLabel { text: qsTr("端口") }
-                            ThemedField { id: mixedField; text: String(settings.mixedPort)
-                                inputMethodHints: Qt.ImhDigitsOnly } }
-                        RowLayout {
-                            RowLabel { text: qsTr("API 端口") }
-                            ThemedField { id: uiField; text: String(settings.uiPort)
-                                inputMethodHints: Qt.ImhDigitsOnly
-                                ToolTip.visible: hovered
-                                ToolTip.text: qsTr("mihomo REST API 端口；默认 9191，改后会重启核心") }
-                        }
-                        RowLayout { RowLabel { text: qsTr("切换时清理连接") }
-                            ThemedSwitch { id: clearSwitch; checked: settings.clearConnections } }
 
-                        Divider {}
-                        GroupTitle { icon: "\uEF77"; text: qsTr("其他") }
-                        RowLayout { RowLabel { text: qsTr("跟随系统语言") }
-                            ThemedSwitch { id: autoLangSwitch; checked: settings.autoLanguage } }
-                        RowLayout {
-                            RowLabel { text: qsTr("语言") }
-                            ThemedCombo {
-                                id: langCombo
-                                enabled: !autoLangSwitch.checked // 跟随系统时手选无效，置灰
-                                // 显示各语言本名（不翻译），值存语言码；apply 传 langCodes[currentIndex]、
-                                // 初值按 settings.language 反查。model 与 langCodes 一一对应、顺序一致。
-                                readonly property var langCodes: ["zh-CN", "en-US", "zh-TW", "ja", "ko", "ru", "es", "fr", "de", "pt-BR", "it", "tr", "vi"]
-                                model: ["简体中文", "English", "繁體中文", "日本語", "한국어", "Русский", "Español", "Français", "Deutsch", "Português", "Italiano", "Türkçe", "Tiếng Việt"]
-                                currentIndex: Math.max(0, langCodes.indexOf(settings.language))
-                            }
+                        SettingCard {
+                            icon: "\uEBF0"
+                            title: qsTr("内核")
+
+                            SettingRow { label: qsTr("Host")
+                                ThemedEditCombo { id: hostCombo; implicitWidth: 180
+                                    model: ["127.0.0.1", "localhost"]
+                                    editText: settings.host } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("端口")
+                                ThemedField { id: mixedField; implicitWidth: 140
+                                    text: String(settings.mixedPort)
+                                    inputMethodHints: Qt.ImhDigitsOnly } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("API 端口")
+                                ThemedField { id: uiField; implicitWidth: 140
+                                    text: String(settings.uiPort)
+                                    inputMethodHints: Qt.ImhDigitsOnly
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: qsTr("mihomo REST API 端口；默认 9191，改后会重启核心") } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("切换时清理连接")
+                                ThemedSwitch { id: clearSwitch; checked: settings.clearConnections
+                                    onToggled: settings.setClearConnections(checked) } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("GeoIP 数据")
+                                PillButton {
+                                    text: settings.geoipUpdating ? settings.geoipStatus : qsTr("更新 GeoIP")
+                                    enabled: !settings.geoipUpdating
+                                    implicitWidth: 120
+                                    onClicked: settings.updateGeoip()
+                                } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("mihomo 内核")
+                                Label { text: qsTr("国内加速"); color: Theme.textSecondary; font.pixelSize: 13 }
+                                ThemedSwitch { id: mirrorCheck; checked: settings.mirror
+                                    onToggled: settings.setMirror(checked) }
+                                PillButton {
+                                    text: settings.coreUpdating ? settings.coreUpdateStatus : qsTr("更新内核")
+                                    enabled: !settings.coreUpdating
+                                    implicitWidth: 120
+                                    onClicked: settings.updateCore()
+                                } }
+                            CardDivider { visible: settings.macHelperSupported }
+                            SettingRow { visible: settings.macHelperSupported
+                                label: qsTr("免密助手")
+                                Text { text: settings.macHelperStatus; color: Theme.textMuted
+                                    font.pixelSize: 12; Layout.preferredWidth: 200; elide: Text.ElideRight }
+                                PillButton { text: qsTr("安装/启用"); onClicked: settings.installMacHelper() }
+                                PillButton { text: qsTr("卸载"); onClicked: settings.uninstallMacHelper() } }
                         }
-                        RowLayout {
-                            RowLabel { text: qsTr("订阅自动更新周期") }
-                            ThemedSpin { id: autoUpdateSpin; value: settings.autoUpdateMinutes }
-                            Label { text: qsTr("分钟"); color: Theme.textMuted; font.pixelSize: 12 }
-                        }
-                        Item { Layout.preferredHeight: 10 } // 末项距底 10
+
+                        Item { Layout.preferredHeight: 0 } // 占位：列 spacing 10 即为末卡距底距离
                     }
                 }
 
