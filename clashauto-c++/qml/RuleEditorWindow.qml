@@ -24,8 +24,12 @@ ApplicationWindow {
     // 进程候选：累积集合——每秒热更新合并当前系统进程，已结束的进程不移除（打开窗口时清空重新累积）。
     property var processNames: []
     property var processPaths: []
+    readonly property var ruleTypes: ["DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD", "DOMAIN-REGEX",
+                                      "IP-CIDR", "IP-CIDR6", "GEOIP", "GEOSITE", "IP-ASN",
+                                      "SRC-IP-CIDR", "SRC-PORT", "DST-PORT",
+                                      "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"]
     readonly property bool processType: {
-        var t = String(typeCombo.editText).toUpperCase()
+        var t = String(typeCombo.currentText).toUpperCase()
         return t === "PROCESS-NAME" || t === "PROCESS-PATH"
     }
 
@@ -33,11 +37,22 @@ ApplicationWindow {
         win.editIndex = index
         win.processNames = []
         win.processPaths = []
-        typeCombo.editText = (obj && obj.type) ? obj.type : "DOMAIN-SUFFIX"
+        // 类型：固定候选、只可选择；现值不在列表时前插，保证编辑旧规则也能显示。
+        var t = (obj && obj.type) ? String(obj.type).toUpperCase() : "DOMAIN-SUFFIX"
+        var types = win.ruleTypes.slice()
+        if (types.indexOf(t) === -1)
+            types.unshift(t)
+        typeCombo.model = types
+        typeCombo.currentIndex = types.indexOf(t)
+        // 节点：候选取当前策略组、只可选择；现值不在列表时前插。
+        var n = (obj && obj.node) ? obj.node : ""
+        var nodes = settings.proxyGroupNames()
+        if (n.length > 0 && nodes.indexOf(n) === -1)
+            nodes.unshift(n)
+        nodeCombo.model = nodes
+        nodeCombo.currentIndex = n.length > 0 ? nodes.indexOf(n) : 0
         valueInput.text = (obj && obj.value) ? obj.value : ""
-        nodeCombo.model = settings.proxyGroupNames()
-        nodeCombo.editText = (obj && obj.node) ? obj.node : ""
-        win.refreshValueChoices(typeCombo.editText)
+        win.refreshValueChoices(typeCombo.currentText)
         win.show()
         win.raise()
         win.requestActivate()
@@ -59,7 +74,7 @@ ApplicationWindow {
     // 取当前系统全部进程，合并进累积列表——只增不删（结束的进程保留可选）。
     // Windows 下 processChoices 是原生 Toolhelp32 快照（毫秒级），每秒轮询无压力。
     function refreshProcesses() {
-        var isPath = String(typeCombo.editText).toUpperCase() === "PROCESS-PATH"
+        var isPath = String(typeCombo.currentText).toUpperCase() === "PROCESS-PATH"
         var fresh = settings.processChoices(isPath)
         var cur = (isPath ? win.processPaths : win.processNames).slice()
         var seen = {}
@@ -86,29 +101,27 @@ ApplicationWindow {
         onTriggered: win.refreshProcesses()
     }
 
-    // ————————————————— 主题化可编辑下拉（类型/节点）—————————————————
-    component ThemedEditCombo: ComboBox {
+    // ————————————————— 主题化下拉（类型/节点：只可选择，不可输入）—————————————————
+    // 不用 editable+TextField：自定义 TextField 会吃掉整控件点击导致下拉打不开；
+    // 非编辑 ComboBox 整个控件点击即开合弹层，且值只能从列表选。
+    component ThemedCombo: ComboBox {
         id: ec
-        editable: true
         implicitHeight: 32
         font.pixelSize: 13
-        selectTextByMouse: true
         background: Rectangle {
             radius: 3
             color: Theme.inputBg
             border.width: 1
             border.color: ec.activeFocus ? Theme.accent : Theme.inputBorder
         }
-        contentItem: TextField {
-            text: ec.editText
-            onTextEdited: ec.editText = text
-            color: Theme.textPrimary
-            font: ec.font
-            selectByMouse: true
+        contentItem: Text {
             leftPadding: 8
             rightPadding: ec.indicator.width + 4
+            text: ec.displayText
+            font: ec.font
+            color: Theme.textPrimary
             verticalAlignment: Text.AlignVCenter
-            background: null
+            elide: Text.ElideRight
         }
         indicator: Text {
             x: ec.width - width - 8
@@ -300,14 +313,11 @@ ApplicationWindow {
         }
 
         FieldLabel { text: qsTr("类型") }
-        ThemedEditCombo {
+        ThemedCombo {
             id: typeCombo
             Layout.fillWidth: true
-            model: ["DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD", "DOMAIN-REGEX",
-                    "IP-CIDR", "IP-CIDR6", "GEOIP", "GEOSITE", "IP-ASN",
-                    "SRC-IP-CIDR", "SRC-PORT", "DST-PORT",
-                    "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"]
-            onEditTextChanged: win.refreshValueChoices(editText)
+            model: win.ruleTypes
+            onCurrentTextChanged: win.refreshValueChoices(currentText)
         }
 
         FieldLabel { text: qsTr("值（域名 / IP 段；进程规则从下拉搜索选择；MATCH 留空）") }
@@ -318,7 +328,7 @@ ApplicationWindow {
         }
 
         FieldLabel { text: qsTr("节点 / 策略组") }
-        ThemedEditCombo {
+        ThemedCombo {
             id: nodeCombo
             Layout.fillWidth: true
         }
@@ -333,8 +343,8 @@ ApplicationWindow {
                 text: qsTr("确定")
                 primary: true
                 onClicked: {
-                    settings.saveRule(win.editIndex, typeCombo.editText,
-                                      valueInput.text, nodeCombo.editText)
+                    settings.saveRule(win.editIndex, typeCombo.currentText,
+                                      valueInput.text, nodeCombo.currentText)
                     win.close()
                 }
             }

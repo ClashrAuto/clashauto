@@ -188,6 +188,9 @@ Item {
             text: "▾"
             color: Theme.textMuted
             font.pixelSize: 12
+            padding: 6 // 扩大点击热区
+            // 自定义 contentItem(TextField) 会吃掉整控件点击，箭头需自带开合
+            TapHandler { onTapped: ec.popup.opened ? ec.popup.close() : ec.popup.open() }
         }
         delegate: ItemDelegate {
             width: ec.width
