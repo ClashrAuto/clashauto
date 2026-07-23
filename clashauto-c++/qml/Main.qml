@@ -207,15 +207,71 @@ ApplicationWindow {
 
                 Item { Layout.fillHeight: true }
 
-                // 版本行：点击打开更新窗（复刻 Widgets 版侧栏「Ver:」——平时灰色，
-                // 发现新版本转红并加 ⬆；点击都走更新流程）。
-                Text {
+                // 版本行：点击打开更新窗。平时灰色；程序有新版 → 右上角 "new" 角标，
+                // 内核有新版 → "core" 角标（均全圆角、红底、白边、白字）；有更新时版本转红加粗。
+                Item {
+                    id: verRow
                     Layout.alignment: Qt.AlignHCenter
-                    text: about.updateAvailable ? ("Ver: " + bridge.version + " ⬆")
-                                                : ("Ver: " + bridge.version)
-                    font.pixelSize: 12
-                    font.bold: about.updateAvailable
-                    color: about.updateAvailable ? Theme.danger : Theme.versionColor
+                    readonly property bool anyUpdate: about.updateAvailable || about.coreUpdateAvailable
+                    implicitHeight: verText.implicitHeight + 6
+                    implicitWidth: verText.implicitWidth + (badgeRow.visible ? badgeRow.width + 4 : 0)
+
+                    Text {
+                        id: verText
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "Ver: " + bridge.version
+                        font.pixelSize: 12
+                        font.bold: verRow.anyUpdate
+                        color: verRow.anyUpdate ? Theme.danger : Theme.versionColor
+                    }
+
+                    // 角标组：贴在版本文字右上角（全圆角、红底、白边、白字）
+                    Row {
+                        id: badgeRow
+                        visible: about.updateAvailable || about.coreUpdateAvailable
+                        anchors.left: verText.right
+                        anchors.leftMargin: 3
+                        anchors.verticalCenter: verText.top
+                        spacing: 3
+
+                        // "new"：程序有新版
+                        Rectangle {
+                            visible: about.updateAvailable
+                            implicitWidth: newTxt.implicitWidth + 8
+                            implicitHeight: newTxt.implicitHeight + 3
+                            radius: height / 2
+                            color: "#f56c6c"
+                            border.width: 1
+                            border.color: "#ffffff"
+                            Text {
+                                id: newTxt
+                                anchors.centerIn: parent
+                                text: "new"
+                                font.pixelSize: 8
+                                font.bold: true
+                                color: "#ffffff"
+                            }
+                        }
+                        // "core"：内核有新版
+                        Rectangle {
+                            visible: about.coreUpdateAvailable
+                            implicitWidth: coreTxt.implicitWidth + 8
+                            implicitHeight: coreTxt.implicitHeight + 3
+                            radius: height / 2
+                            color: "#f56c6c"
+                            border.width: 1
+                            border.color: "#ffffff"
+                            Text {
+                                id: coreTxt
+                                anchors.centerIn: parent
+                                text: "core"
+                                font.pixelSize: 8
+                                font.bold: true
+                                color: "#ffffff"
+                            }
+                        }
+                    }
 
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: updateWindow.show() }
@@ -372,12 +428,12 @@ ApplicationWindow {
     // 更新窗（独立顶层窗口，默认隐藏；点击侧栏「Ver:」→ updateWindow.show()）。
     UpdateWindow { id: updateWindow }
 
-    // 启动 3 秒后静默检查一次（对齐 Widgets 版 checkForUpdate(true)）：有新版本时
-    // about.updateAvailable 置真，侧栏「Ver:」转红加 ⬆。
+    // 启动 3 秒后开启后台自动检查：立即查一次程序/内核/GeoIP，之后每小时一次。
+    // 程序有新版 → 侧栏版本右上角 "new" 角标；内核有新版 → "core" 角标；GeoIP 有新发布 → 静默下载。
     Timer {
         interval: 3000
         running: true
         repeat: false
-        onTriggered: about.check()
+        onTriggered: about.startAutoCheck()
     }
 }

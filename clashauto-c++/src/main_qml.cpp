@@ -79,7 +79,7 @@ int main(int argc, char *argv[])
     // 各页面适配器（薄胶水，复用后端；堆分配交给 app 清理，避免栈对象与 QObject 父子重复析构）。
     auto *subsController = new SubscriptionsController(subs, core, &app);
     auto *logModel = new LogModel(core, clash, &app);
-    auto *about = new AboutController(&app);
+    auto *about = new AboutController(config, &app);
     auto *settingsCtrl = new SettingsController(core, clash, &app);
     auto *updateCtrl = new UpdateController(config, core, &app);
 
