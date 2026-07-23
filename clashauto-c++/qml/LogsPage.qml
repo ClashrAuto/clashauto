@@ -45,7 +45,7 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 10
+        anchors.margins: 0 // 日志页内距 0
         spacing: 8
 
         // —————————————————— 标签栏 ——————————————————

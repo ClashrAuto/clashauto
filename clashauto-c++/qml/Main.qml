@@ -296,7 +296,7 @@ ApplicationWindow {
 
                 StackLayout {
                     anchors.fill: parent
-                    anchors.margins: 5 // 主内容区(卡片内)统一 padding 5px
+                    anchors.margins: 0 // 主内容区内距 0：各页面自管内距
                     currentIndex: window.currentPage
 
                     StatusPage {}

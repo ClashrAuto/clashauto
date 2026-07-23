@@ -331,11 +331,11 @@ Item {
 
     Card {
         anchors.fill: parent
-        anchors.margins: 10
+        anchors.margins: 0 // 设置页内距 0
 
         ColumnLayout {
             anchors.fill: parent
-            anchors.margins: 10
+            anchors.margins: 0
             spacing: 8
 
             // —— 顶栏：Tab + 应用 ——
@@ -358,7 +358,11 @@ Item {
                     text: qsTr("应用")
                     primary: true
                     implicitWidth: 82
-                    visible: tabs.currentIndex === 0 || tabs.currentIndex === 1
+                    // 区域/规则 tab 无「应用」：透明占位而非隐藏（visible:false 会被布局移除，
+                    // TabBar 随之变宽导致切 tab 时布局跳动）
+                    readonly property bool active: tabs.currentIndex === 0 || tabs.currentIndex === 1
+                    opacity: active ? 1 : 0
+                    enabled: active
                     onClicked: {
                         settings.apply(
                             hostCombo.editText,

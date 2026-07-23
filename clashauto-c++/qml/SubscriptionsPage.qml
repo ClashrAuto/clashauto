@@ -144,12 +144,15 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 10
+        anchors.margins: 0 // 页面内距 0：顶栏/列表各自设内距
         spacing: 8
 
-        // —————————— 顶部工具栏 ——————————
+        // —————————— 顶部工具栏（上左右内距 10）——————————
         RowLayout {
             Layout.fillWidth: true
+            Layout.topMargin: 10
+            Layout.leftMargin: 10
+            Layout.rightMargin: 10
             spacing: 6
 
             Text {
@@ -185,15 +188,17 @@ Item {
             }
         }
 
-        // —————————— 订阅卡列表 ——————————
+        // —————————— 订阅卡列表（左右内距 10）——————————
         ListView {
             id: cardList
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.leftMargin: 10
+            Layout.rightMargin: 10
             clip: true
             model: subs
             spacing: 10
-            rightMargin: 10
+            rightMargin: 0 // 左右内距由 Layout margins 提供，内部不再额外缩进
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
             // 空态：无订阅时提示
