@@ -314,7 +314,7 @@ ApplicationWindow {
 
                 RowLayout {
                     anchors.fill: parent
-                    anchors.leftMargin: 10
+                    anchors.leftMargin: 0 // 底部状态栏左侧内容左移 10px（原 10 → 0），贴左对齐
                     spacing: 5
 
                     Text {
