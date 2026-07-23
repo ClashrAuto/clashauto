@@ -255,7 +255,7 @@ Item {
                 Layout.fillHeight: true
                 clip: true
                 model: nodeModel
-                spacing: 5
+                spacing: 1 // 节点行间距紧凑为 1px
                 rightMargin: 4 // QML 滚动条是悬浮式、不占宽；这里只留 4px 小边距，行更靠右
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
