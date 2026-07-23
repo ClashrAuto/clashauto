@@ -255,12 +255,11 @@ Item {
                 Layout.fillHeight: true
                 clip: true
                 model: nodeModel
-                spacing: 1 // 节点行间距紧凑为 1px
-                rightMargin: 4 // QML 滚动条是悬浮式、不占宽；这里只留 4px 小边距，行更靠右
+                spacing: 1 // 节点行间距紧凑为 1px；右边不留边距，行占满列表宽（滚动条悬浮不占宽）
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                 delegate: NodeRow {
-                    width: ListView.view.width - ListView.view.rightMargin
+                    width: ListView.view.width
                     display: model.display
                     badgeText: model.badgeText
                     badgeColor: model.badgeColor
