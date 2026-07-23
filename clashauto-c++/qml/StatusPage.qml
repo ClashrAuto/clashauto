@@ -7,6 +7,9 @@ import ClashAuto
 Item {
     id: page
 
+    // 节点搜索框是否展开（对齐旧项目 searchBox.show：默认收起，点放大镜展开）
+    property bool searchShown: false
+
     RowLayout {
         anchors.fill: parent
         anchors.margins: 0 // 卡片内边距已由 StackLayout 提供 5px，这里不再叠加
@@ -139,6 +142,7 @@ Item {
             Layout.fillWidth: true
             spacing: 8
 
+            // 节点区顶栏（严格参考旧项目 status.vue：节点+数量 | 可展开搜索 | 测速 refresh/loading | 帮助 question→文档）
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 6
@@ -150,16 +154,29 @@ Item {
                 }
                 Text {
                     text: "(" + nodeModel.count + ")"
-                    font.pixelSize: 10
+                    font.pixelSize: 9
                     color: Theme.textMuted
                     Layout.alignment: Qt.AlignBottom
                     bottomPadding: 3
                 }
-                Item { Layout.fillWidth: true }
 
+                // 搜索：默认只显示放大镜，点击展开输入框（右侧 ✕ 清空并收起）
+                Text {
+                    visible: !page.searchShown
+                    text: "" // search-line
+                    font.family: Theme.riFont
+                    font.pixelSize: 16
+                    color: Theme.textMuted
+                    Layout.leftMargin: 4
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: { page.searchShown = true; search.forceActiveFocus() } }
+                }
                 TextField {
                     id: search
-                    Layout.preferredWidth: 160
+                    visible: page.searchShown
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 28
+                    rightPadding: 24
                     placeholderText: qsTr("搜索节点")
                     color: Theme.textPrimary
                     placeholderTextColor: Theme.textMuted
@@ -171,25 +188,58 @@ Item {
                         border.color: search.activeFocus ? Theme.accent : Theme.inputBorder
                     }
                     onTextChanged: bridge.setNodeFilter(text)
+                    Text {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 7
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: "" // close-line
+                        font.family: Theme.riFont
+                        font.pixelSize: 14
+                        color: Theme.textMuted
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        TapHandler {
+                            onTapped: {
+                                search.text = "";
+                                bridge.setNodeFilter("");
+                                page.searchShown = false;
+                            }
+                        }
+                    }
                 }
+                Item { Layout.fillWidth: true; visible: !page.searchShown }
 
+                // 测速：空闲 refresh-line、测速中 loader-4-line 旋转（对齐旧项目 refresh-right / loading）
                 Text {
                     id: spdIcon
                     property real spin: 0
-                    text: bridge.speedTesting ? "" : "" // loader-4-line / speed-up-line
+                    text: bridge.speedTesting ? "" : ""
                     font.family: Theme.riFont
-                    font.pixelSize: 20
+                    font.pixelSize: 19
                     color: Theme.accent
                     rotation: bridge.speedTesting ? spin : 0
                     NumberAnimation on spin {
                         running: bridge.speedTesting
                         from: 0; to: 360; duration: 900; loops: Animation.Infinite
                     }
+                    HoverHandler { id: spdHover; cursorShape: Qt.PointingHandCursor }
+                    ToolTip.visible: spdHover.hovered
                     ToolTip.text: qsTr("测速")
                     TapHandler {
                         enabled: !bridge.speedTesting
                         onTapped: bridge.runSpeedTest()
                     }
+                }
+
+                // 帮助：打开在线文档（对齐旧项目 question → gitbook）
+                Text {
+                    text: "" // question-line
+                    font.family: Theme.riFont
+                    font.pixelSize: 18
+                    color: Theme.textMuted
+                    HoverHandler { id: qHover; cursorShape: Qt.PointingHandCursor }
+                    ToolTip.visible: qHover.hovered
+                    ToolTip.text: qsTr("帮助")
+                    TapHandler { onTapped: Qt.openUrlExternally("https://clashr-auto.gitbook.io/") }
                 }
             }
 
