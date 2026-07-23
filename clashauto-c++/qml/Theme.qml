@@ -49,4 +49,8 @@ QtObject {
     // iconFont：图标字体（logo/流量卡图标）。全 UI 统一 MiSans，不再用等宽字体。
     readonly property string uiFont: "MiSans"
     readonly property string iconFont: "iconfont"
+    // 通用 UI 图标字体：Remix Icon（Apache-2.0，约 3200 图标）。用法：Text{ font.family: Theme.riFont; text: "" }。
+    // 图标码点见 assets/remixicon.css（.ri-<名>:before content 即 \uXXXX）；常用：check-line EB7B、eye-line ECB5、
+    // edit-line EC86、refresh-line F064、close-line EB99、add-line EA13、delete-bin-line EC2A。
+    readonly property string riFont: "remixicon"
 }

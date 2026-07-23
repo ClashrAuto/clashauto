@@ -2,6 +2,8 @@
     <qresource prefix="/">
         <file>assets/icon.ico</file>
         <file>assets/iconfont.ttf</file>
+        <!-- Remix Icon（Apache-2.0，约 3200 个线性/填充图标，family "remixicon"）：通用 UI 图标字体。 -->
+        <file>assets/remixicon.ttf</file>
         <file>assets/chevron-dark.svg</file>
         <file>assets/chevron-light.svg</file>
         <!-- 全 UI 字体：MiSans（Regular + Semibold 供 font.bold 映射）。 -->

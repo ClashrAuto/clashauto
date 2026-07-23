@@ -44,7 +44,8 @@ int main(int argc, char *argv[])
     // 关闭主窗口不再退出程序：✕ 只隐藏窗口（mac 恒隐藏、留 Dock；Win/Linux 按「关闭到托盘」决定，
     // 见 Main.qml onClosing）。真正退出走托盘/菜单栏「退出程序」或 mac 的 Cmd+Q。
     QApplication::setQuitOnLastWindowClosed(false);
-    QFontDatabase::addApplicationFont(":/assets/iconfont.ttf"); // family "iconfont"（logo/流量卡图标）
+    QFontDatabase::addApplicationFont(":/assets/iconfont.ttf");   // family "iconfont"（logo/流量卡图标）
+    QFontDatabase::addApplicationFont(":/assets/remixicon.ttf"); // family "remixicon"（Remix Icon 通用 UI 图标集，Apache-2.0）
 
     // —— 应用字体 ——
     // 全 UI 统一用 MiSans（不再用等宽字体）。装两档：Regular 作正文，Semibold 供 font.bold

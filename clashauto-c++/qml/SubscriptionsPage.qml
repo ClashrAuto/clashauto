@@ -9,68 +9,27 @@ import ClashAuto
 Item {
     id: page
 
-    // ————————————————— 简洁线性图标（Canvas 直绘，按设备像素比清晰，不受软件渲染/缩放模糊）—————————————————
-    // kind：check(启用)/eye(查看)/pencil(编辑)/refresh(更新)/close(删除)/plus(添加)。24 视框映射到 size。
-    component LineIcon: Canvas {
-        id: li
+    // ————————————————— 图标：Remix Icon 字体字形（文本渲染，清晰可换色，全 App 通用）—————————————————
+    // kind → 码点（见 assets/remixicon.css）：启用 check / 查看 eye / 编辑 edit / 更新 refresh / 删除 trash / 添加 add。
+    readonly property var ic: ({
+        "check":   "",
+        "eye":     "",
+        "pencil":  "",
+        "refresh": "",
+        "close":   "",
+        "trash":   "",
+        "plus":    ""
+    })
+    component LineIcon: Text {
         property string kind: ""
-        property color color: Theme.textSecondary
-        property real sw: 1.6
-        implicitWidth: 15
-        implicitHeight: 15
-        onColorChanged: requestPaint()
-        onKindChanged: requestPaint()
-        onWidthChanged: requestPaint()
-        onHeightChanged: requestPaint()
-        onPaint: {
-            var ctx = getContext("2d");
-            ctx.reset();
-            var W = width;
-            function P(x) { return x * W / 24; } // 24 视框 → 像素
-            ctx.strokeStyle = li.color;
-            ctx.lineWidth = li.sw;
-            ctx.lineCap = "round";
-            ctx.lineJoin = "round";
-            var k = li.kind;
-            ctx.beginPath();
-            if (k === "check") {
-                ctx.moveTo(P(20), P(6)); ctx.lineTo(P(9), P(17)); ctx.lineTo(P(4), P(12));
-            } else if (k === "plus") {
-                ctx.moveTo(P(12), P(5)); ctx.lineTo(P(12), P(19));
-                ctx.moveTo(P(5), P(12)); ctx.lineTo(P(19), P(12));
-            } else if (k === "close") {
-                ctx.moveTo(P(6), P(6)); ctx.lineTo(P(18), P(18));
-                ctx.moveTo(P(18), P(6)); ctx.lineTo(P(6), P(18));
-            } else if (k === "eye") {
-                ctx.moveTo(P(2), P(12));
-                ctx.bezierCurveTo(P(5.5), P(6.5), P(18.5), P(6.5), P(22), P(12));
-                ctx.bezierCurveTo(P(18.5), P(17.5), P(5.5), P(17.5), P(2), P(12));
-                ctx.stroke();
-                ctx.beginPath();
-                ctx.arc(P(12), P(12), P(3), 0, 2 * Math.PI);
-            } else if (k === "pencil") {
-                ctx.moveTo(P(17), P(3));
-                ctx.lineTo(P(21), P(7));
-                ctx.lineTo(P(7.5), P(20.5));
-                ctx.lineTo(P(2), P(22));
-                ctx.lineTo(P(3.5), P(16.5));
-                ctx.closePath();
-            } else if (k === "refresh") {
-                var cx = P(12), cy = P(12), r = P(7);
-                var a1 = Math.PI * 2.0;
-                ctx.arc(cx, cy, r, Math.PI * 0.5, a1, false); // 3/4 圈（顺时针，缺口在右下）
-                ctx.stroke();
-                var ex = cx + r * Math.cos(a1), ey = cy + r * Math.sin(a1);
-                ctx.beginPath(); // 箭头（在右侧指向下，示意顺时针刷新）
-                ctx.moveTo(ex - P(3.2), ey - P(3.2));
-                ctx.lineTo(ex, ey);
-                ctx.lineTo(ex + P(3.2), ey - P(3.2));
-            }
-            ctx.stroke();
-        }
+        property int size: 16
+        font.family: Theme.riFont
+        font.pixelSize: size
+        color: Theme.textSecondary
+        text: page.ic[kind] !== undefined ? page.ic[kind] : ""
+        horizontalAlignment: Text.AlignHCenter
+        verticalAlignment: Text.AlignVCenter
     }
-
-    // ————————————————— 小圆形动作按钮（内联组件）—————————————————
     component CircleBtn: Rectangle {
         id: cb
         property string kind: ""
@@ -90,8 +49,7 @@ Item {
         Behavior on color { ColorAnimation { duration: 120 } }
         LineIcon {
             anchors.centerIn: parent
-            width: 15
-            height: 15
+            size: 16
             kind: cb.kind
             color: cb.on ? "white" : (cb.danger ? Theme.danger : Theme.textSecondary)
         }
@@ -134,8 +92,7 @@ Item {
             spacing: 6
             LineIcon {
                 visible: tb.kind.length > 0
-                width: 14
-                height: 14
+                size: 15
                 anchors.verticalCenter: parent.verticalCenter
                 kind: tb.kind
                 color: tb.primary ? "white" : Theme.textSecondary
@@ -336,7 +293,7 @@ Item {
                         }
                         Item { Layout.fillWidth: true }
                         CircleBtn {
-                            kind: "close"
+                            kind: "trash"
                             tip: qsTr("删除")
                             danger: true
                             onAct: {
