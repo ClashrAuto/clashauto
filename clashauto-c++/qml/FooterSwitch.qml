@@ -30,8 +30,22 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             color: root.on ? Theme.accent : Theme.switchTrackOff
             border.width: 3
-            border.color: root.on ? Qt.rgba(72 / 255, 152 / 255, 248 / 255, 0.30)
-                                   : Qt.rgba(0.4, 0.4, 0.4, 0.15)
+
+            // 呼吸相位（0..1），仅启用时由动画驱动；停用时外环用静态灰。
+            property real pulse: 0
+            // 外环底色：启用时随 pulse 在「蓝 rgba(72,152,248,.5)」↔「灰 rgba(102,102,102,.15)」间脉动
+            // （对齐原项目 @keyframes color_black：blue→gray→blue，1s infinite），停用时静态灰。
+            border.color: root.on
+                ? Qt.rgba((72 + 30 * pulse) / 255, (152 - 50 * pulse) / 255,
+                          (248 - 146 * pulse) / 255, 0.5 - 0.35 * pulse)
+                : Qt.rgba(0.4, 0.4, 0.4, 0.15)
+
+            SequentialAnimation on pulse {
+                running: root.on
+                loops: Animation.Infinite
+                NumberAnimation { from: 0; to: 1; duration: 500; easing.type: Easing.InOutSine }
+                NumberAnimation { from: 1; to: 0; duration: 500; easing.type: Easing.InOutSine }
+            }
         }
         Text {
             id: labelText

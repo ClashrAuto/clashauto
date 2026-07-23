@@ -283,10 +283,10 @@ ApplicationWindow {
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            // 内容区 + 页脚距窗口 5px：mac 原本就有 top/right 内缩；Win/Linux 现补齐 top/right/bottom。
+            // 内容区距窗口 top/right 5px；底部状态栏贴到窗口底边（不再留 5px 缩进）。
             Layout.topMargin: Theme.inset
             Layout.rightMargin: Theme.inset
-            Layout.bottomMargin: window.isMac ? 0 : Theme.inset
+            Layout.bottomMargin: 0
             spacing: 0
 
             // 内容卡（不透明，浮在玻璃上）
