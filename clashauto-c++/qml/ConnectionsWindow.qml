@@ -10,6 +10,9 @@ import ClashAuto
 // 圆角只用整块 radius（避免 6.7+ 才有的 per-corner radius，本地 6.5/打包 6.8 一致）。
 ApplicationWindow {
     id: win
+    // 独立顶层窗（去掉隐式 transientParent）：Win/Linux 任务栏显示独立图标，方便切换窗口。
+    transientParent: null
+    flags: Qt.Window
     width: 720
     height: 480
     minimumWidth: 480

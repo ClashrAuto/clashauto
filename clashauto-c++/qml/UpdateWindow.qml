@@ -9,6 +9,9 @@ import ClashAuto
 // 关闭 / 一键更新。逻辑全部走 `update`（src/qml/UpdateController）。
 ApplicationWindow {
     id: win
+    // 独立顶层窗（去掉隐式 transientParent）：Win/Linux 任务栏显示独立图标，方便切换窗口。
+    transientParent: null
+    flags: Qt.Window
     width: 600
     height: 560
     minimumWidth: 460
