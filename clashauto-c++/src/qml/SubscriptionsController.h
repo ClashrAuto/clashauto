@@ -42,7 +42,7 @@ public:
     int rowCountProp() const { return rowCount(); }
 
     // —— UI 动作 ——（对齐 MainWindow::createSubscriptionCard / reloadSubscriptions / showSubscriptionNodes）
-    Q_INVOKABLE void reload();                    // 从 store 重新加载列表并重置 model
+    Q_INVOKABLE void reload();                    // 从 store 重载列表并增量刷新 model（热更新，不整表重置）
     Q_INVOKABLE bool add(const QString &name, const QString &url, const QString &type);
     Q_INVOKABLE bool edit(int index, const QString &name, const QString &url, const QString &type, int updateTime);
     Q_INVOKABLE bool remove(int index);

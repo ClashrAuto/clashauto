@@ -78,9 +78,30 @@ void SubscriptionsController::reload()
 {
     if (!m_store)
         return;
-    beginResetModel();
-    m_items = m_store->load();
-    endResetModel();
+    // 热更新：不再整表 beginResetModel（那会销毁重建所有委托 → 闪烁 + 滚动位置回到顶部，
+    // 自动更新周期到点也会周期性闪一下）。改为按行数增量：
+    //   行数不变 → 只 dataChanged（启用态/节点数/内容原地刷）
+    //   有新增   → insertRows（尾部追加，对齐 addSubscription）
+    //   有删除   → removeRows（尾部收缩）+ dataChanged 修正存活行数据
+    // remove(index) 删的可能是中间项：这里按尾部收缩后再 dataChanged 全量存活行，
+    // 委托实例虽被回收在尾部，但每行数据都会重读，最终显示正确且无整表重置的闪烁。
+    const QVector<SubscriptionSummary> next = m_store->load();
+    const int oldN = m_items.size();
+    const int newN = next.size();
+
+    if (newN > oldN) {
+        beginInsertRows(QModelIndex(), oldN, newN - 1);
+        m_items = next;
+        endInsertRows();
+    } else if (newN < oldN) {
+        beginRemoveRows(QModelIndex(), newN, oldN - 1);
+        m_items = next;
+        endRemoveRows();
+    } else {
+        m_items = next;
+    }
+    if (newN > 0)
+        emit dataChanged(index(0, 0), index(newN - 1, 0));
     emit countChanged();
 }
 
