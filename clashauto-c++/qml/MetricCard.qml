@@ -5,7 +5,7 @@ import ClashAuto
 // 角标（如进程卡的「清空连接」）由调用方在外层叠加，保持本组件简单。
 Rectangle {
     id: root
-    property string glyph: ""       // iconfont 码点
+    property string glyph: ""       // remixicon 码点（见 Theme.riFont）
     property string title: ""
     property string value: "0.00 B"
     property color accentColor: Theme.textSecondary
@@ -24,8 +24,8 @@ Rectangle {
             id: metricIcon
             anchors.verticalCenter: parent.verticalCenter
             text: root.glyph
-            font.family: Theme.iconFont
-            font.pixelSize: 26
+            font.family: Theme.riFont
+            font.pixelSize: 24
             color: Theme.dark ? "#aaaaaa" : "#888888"
         }
         Column {

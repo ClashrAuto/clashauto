@@ -30,7 +30,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 80
                     Layout.fillHeight: false
-                    glyph: ""
+                    glyph: "\uF24A"
                     title: qsTr("上传")
                     value: bridge.upText
                     accentColor: "#a84343"
@@ -39,7 +39,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 80
                     Layout.fillHeight: false
-                    glyph: ""
+                    glyph: "\uEC54"
                     title: qsTr("下载")
                     value: bridge.downText
                     accentColor: "#4da13e"
@@ -48,12 +48,12 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 80
                     Layout.fillHeight: false
-                    glyph: ""
+                    glyph: "\uEEB8"
                     title: qsTr("进程数")
                     value: bridge.connectionsCount
                     accentColor: "#466ea8"
 
-                    // 右上角按钮组：👁 查看全部连接（开独立窗口）| ✕ 清空全部连接
+                    // 右上角按钮组（Remix 图标）：eye 查看全部连接（开独立窗口）| delete-bin 清空全部连接
                     Rectangle {
                         anchors.top: parent.top
                         anchors.right: parent.right
@@ -70,8 +70,10 @@ Item {
                                 height: parent.height
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "👁"
-                                    font.pixelSize: 13
+                                    text: "" // eye-line
+                                    font.family: Theme.riFont
+                                    font.pixelSize: 14
+                                    color: "#ffffff"
                                 }
                                 TapHandler {
                                     onTapped: {
@@ -87,9 +89,10 @@ Item {
                                 height: parent.height
                                 Text {
                                     anchors.centerIn: parent
-                                    text: "✕"
+                                    text: "" // delete-bin-line
+                                    font.family: Theme.riFont
                                     color: "#ff6b6b"
-                                    font.pixelSize: 12
+                                    font.pixelSize: 14
                                 }
                                 TapHandler { onTapped: bridge.clearConnections() }
                             }
@@ -100,7 +103,7 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 80
                     Layout.fillHeight: false
-                    glyph: ""
+                    glyph: "\uEC56"
                     title: qsTr("总下载")
                     value: bridge.totalDownText
                     accentColor: "#48a5a7"
@@ -171,9 +174,17 @@ Item {
                 }
 
                 Text {
-                    text: bridge.speedTesting ? "⏳" : "↻"
-                    font.pixelSize: 18
+                    id: spdIcon
+                    property real spin: 0
+                    text: bridge.speedTesting ? "" : "" // loader-4-line / speed-up-line
+                    font.family: Theme.riFont
+                    font.pixelSize: 20
                     color: Theme.accent
+                    rotation: bridge.speedTesting ? spin : 0
+                    NumberAnimation on spin {
+                        running: bridge.speedTesting
+                        from: 0; to: 360; duration: 900; loops: Animation.Infinite
+                    }
                     ToolTip.text: qsTr("测速")
                     TapHandler {
                         enabled: !bridge.speedTesting
@@ -226,6 +237,6 @@ Item {
         }
     }
 
-    // 全部连接：独立窗口（对齐旧版 QDialog 的显示方式），由进程卡 👁 按钮打开。
+    // 全部连接：独立窗口（对齐旧版 QDialog 的显示方式），由进程卡「查看」按钮打开。
     ConnectionsWindow { id: connWindow }
 }
