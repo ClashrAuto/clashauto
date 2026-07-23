@@ -12,7 +12,7 @@ Item {
 
     RowLayout {
         anchors.fill: parent
-        anchors.margins: 0 // 卡片内边距已由 StackLayout 提供 5px，这里不再叠加
+        anchors.margins: 10 // 状态页主内容区内距 10（StackLayout 为 0，各页自管）
         spacing: 10
 
         // —————————————————— 左列 ——————————————————
