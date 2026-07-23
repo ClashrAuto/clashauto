@@ -710,28 +710,29 @@ Item {
         }
     }
 
-    // ————————————————————————— 规则编辑器 —————————————————————————
-    Popup {
+    // ———————————————— 规则编辑器（独立顶层窗口，任务栏可切换）————————————————
+    ApplicationWindow {
         id: ruleEditor
-        anchors.centerIn: Overlay.overlay
+        // 去掉隐式 transientParent → Win/Linux 任务栏显示独立图标，方便切换窗口。
+        transientParent: null
+        flags: Qt.Window
         width: 420
-        modal: true
-        padding: 16
+        height: 360
+        minimumWidth: 360
+        minimumHeight: 320
+        title: page.editRuleIndex >= 0 ? qsTr("编辑规则") : qsTr("新增规则")
+        color: Theme.card
         property var processNames: []
         property var processPaths: []
-        background: Rectangle {
-            radius: 6
-            color: Theme.card
-            border.width: 1
-            border.color: Theme.inputBorder
-        }
 
         function openWith(obj) {
             rTypeCombo.editText = obj.type ? obj.type : "DOMAIN-SUFFIX"
             rValueCombo.editText = obj.value ? obj.value : ""
             rNodeCombo.editText = obj.node ? obj.node : ""
             rNodeCombo.model = settings.proxyGroupNames()
-            open()
+            ruleEditor.show()
+            ruleEditor.raise()
+            ruleEditor.requestActivate()
         }
 
         function refreshValueChoices(type) {
@@ -749,6 +750,7 @@ Item {
 
         ColumnLayout {
             anchors.fill: parent
+            anchors.margins: 16
             spacing: 8
 
             Label { text: page.editRuleIndex >= 0 ? qsTr("编辑规则") : qsTr("新增规则")
@@ -788,19 +790,18 @@ Item {
         }
     }
 
-    // ————————————————————————— 区域编辑器 —————————————————————————
-    Popup {
+    // ———————————————— 区域编辑器（独立顶层窗口，任务栏可切换）————————————————
+    ApplicationWindow {
         id: areaEditor
-        anchors.centerIn: Overlay.overlay
+        // 去掉隐式 transientParent → Win/Linux 任务栏显示独立图标，方便切换窗口。
+        transientParent: null
+        flags: Qt.Window
         width: 440
-        modal: true
-        padding: 16
-        background: Rectangle {
-            radius: 6
-            color: Theme.card
-            border.width: 1
-            border.color: Theme.inputBorder
-        }
+        height: 470
+        minimumWidth: 380
+        minimumHeight: 430
+        title: page.editAreaIndex >= 0 ? qsTr("编辑区域分组") : qsTr("新增区域分组")
+        color: Theme.card
 
         function openWith(obj) {
             aNameField.text = obj.name ? obj.name : ""
@@ -810,11 +811,14 @@ Item {
             aProxiesArea.text = obj.proxiesText ? obj.proxiesText : ""
             aUrlField.text = obj.url ? obj.url : ""
             aIntervalField.text = obj.interval ? obj.interval : ""
-            open()
+            areaEditor.show()
+            areaEditor.raise()
+            areaEditor.requestActivate()
         }
 
         ColumnLayout {
             anchors.fill: parent
+            anchors.margins: 16
             spacing: 8
 
             Label { text: page.editAreaIndex >= 0 ? qsTr("编辑区域分组") : qsTr("新增区域分组")
