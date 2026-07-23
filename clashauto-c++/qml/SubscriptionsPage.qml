@@ -208,104 +208,112 @@ Item {
                 color: Theme.textMuted
             }
 
-            delegate: Card {
-                x: 10 // 项左右各距列表边 10（列表本身全宽）
-                width: ListView.view.width - 20
-                implicitHeight: 108
-                // 统一主题自适应底色（不再因启用而变蓝；启用态由左下「✓」按钮转蓝体现）
-                color: Theme.metricBg
+            // 委托根不能用 Card 直接定位：竖向 ListView 每次布局都会把委托根的 x 强制写回 0
+            //（FxListItemSG::setPosition），根上的 x:10 会丢失，表现为「左 0 右 20」。
+            // 改为透明 Item 撑满行宽，内层 Card 用 anchors 左右各内缩 10。
+            delegate: Item {
+                width: ListView.view.width
+                height: 108
 
-                ColumnLayout {
+                Card {
                     anchors.fill: parent
-                    anchors.leftMargin: 12
+                    anchors.leftMargin: 10
                     anchors.rightMargin: 10
-                    anchors.topMargin: 8
-                    anchors.bottomMargin: 8
-                    spacing: 3
+                    // 统一主题自适应底色（不再因启用而变蓝；启用态由左下「✓」按钮转蓝体现）
+                    color: Theme.metricBg
 
-                    // 标题：[type] name
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 6
-                        Rectangle {
-                            radius: 4
-                            color: Theme.metricBg
-                            implicitWidth: typeTxt.implicitWidth + 12
-                            implicitHeight: typeTxt.implicitHeight + 4
-                            Layout.alignment: Qt.AlignVCenter
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 10
+                        anchors.topMargin: 8
+                        anchors.bottomMargin: 8
+                        spacing: 3
+
+                        // 标题：[type] name
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Rectangle {
+                                radius: 4
+                                color: Theme.metricBg
+                                implicitWidth: typeTxt.implicitWidth + 12
+                                implicitHeight: typeTxt.implicitHeight + 4
+                                Layout.alignment: Qt.AlignVCenter
+                                Text {
+                                    id: typeTxt
+                                    anchors.centerIn: parent
+                                    text: model.type
+                                    font.pixelSize: 11
+                                    color: Theme.textMuted
+                                }
+                            }
                             Text {
-                                id: typeTxt
-                                anchors.centerIn: parent
-                                text: model.type
-                                font.pixelSize: 11
-                                color: Theme.textMuted
+                                Layout.fillWidth: true
+                                text: model.name
+                                elide: Text.ElideRight
+                                font.pixelSize: 14
+                                font.bold: true
+                                color: Theme.textPrimary
                             }
                         }
+
+                        // URL
                         Text {
                             Layout.fillWidth: true
-                            text: model.name
-                            elide: Text.ElideRight
-                            font.pixelSize: 14
-                            font.bold: true
-                            color: Theme.textPrimary
+                            text: model.url
+                            elide: Text.ElideMiddle
+                            font.pixelSize: 11
+                            color: Theme.textMuted
                         }
-                    }
 
-                    // URL
-                    Text {
-                        Layout.fillWidth: true
-                        text: model.url
-                        elide: Text.ElideMiddle
-                        font.pixelSize: 11
-                        color: Theme.textMuted
-                    }
-
-                    // 元信息：启用/总 节点 · 每 N 分钟
-                    Text {
-                        Layout.fillWidth: true
-                        text: model.enabledNodeCount + " / " + model.nodeCount + qsTr(" 节点")
-                              + (model.updateTime > 0 ? qsTr(" · 每 ") + model.updateTime + qsTr(" 分钟") : "")
-                        font.pixelSize: 11
-                        color: Theme.textSecondary
-                    }
-
-                    Item { Layout.fillHeight: true }
-
-                    // 动作按钮行
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        CircleBtn {
-                            kind: "check"
-                            tip: qsTr("启用/停用")
-                            on: model.use
-                            onAct: subs.setEnabled(index, !model.use)
+                        // 元信息：启用/总 节点 · 每 N 分钟
+                        Text {
+                            Layout.fillWidth: true
+                            text: model.enabledNodeCount + " / " + model.nodeCount + qsTr(" 节点")
+                                  + (model.updateTime > 0 ? qsTr(" · 每 ") + model.updateTime + qsTr(" 分钟") : "")
+                            font.pixelSize: 11
+                            color: Theme.textSecondary
                         }
-                        CircleBtn {
-                            kind: "eye"
-                            tip: qsTr("查看节点")
-                            onAct: page.openNodes(index)
-                        }
-                        CircleBtn {
-                            kind: "pencil"
-                            tip: qsTr("编辑")
-                            onAct: page.openEdit(index, model.name, model.url, model.type, model.updateTime)
-                        }
-                        CircleBtn {
-                            kind: "refresh"
-                            tip: qsTr("更新")
-                            onAct: subs.update(index)
-                        }
-                        Item { Layout.fillWidth: true }
-                        CircleBtn {
-                            kind: "trash"
-                            tip: qsTr("删除")
-                            danger: true
-                            onAct: {
-                                page.pendingDelete = index;
-                                page.pendingDeleteName = model.name;
-                                confirmDialog.open();
+
+                        Item { Layout.fillHeight: true }
+
+                        // 动作按钮行
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            CircleBtn {
+                                kind: "check"
+                                tip: qsTr("启用/停用")
+                                on: model.use
+                                onAct: subs.setEnabled(index, !model.use)
+                            }
+                            CircleBtn {
+                                kind: "eye"
+                                tip: qsTr("查看节点")
+                                onAct: page.openNodes(index)
+                            }
+                            CircleBtn {
+                                kind: "pencil"
+                                tip: qsTr("编辑")
+                                onAct: page.openEdit(index, model.name, model.url, model.type, model.updateTime)
+                            }
+                            CircleBtn {
+                                kind: "refresh"
+                                tip: qsTr("更新")
+                                onAct: subs.update(index)
+                            }
+                            Item { Layout.fillWidth: true }
+                            CircleBtn {
+                                kind: "trash"
+                                tip: qsTr("删除")
+                                danger: true
+                                onAct: {
+                                    page.pendingDelete = index;
+                                    page.pendingDeleteName = model.name;
+                                    confirmDialog.open();
+                                }
                             }
                         }
                     }
