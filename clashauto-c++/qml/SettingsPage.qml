@@ -322,8 +322,7 @@ Item {
 
     // ————————————————————————— 数据/状态 —————————————————————————
 
-    // 当前编辑对话框的目标索引（-1 = 新增）
-    property int editRuleIndex: -1
+    // 区域编辑对话框的目标索引（-1 = 新增）；规则编辑已移入 RuleEditorWindow 自管。
     property int editAreaIndex: -1
 
     Component.onCompleted: settings.refreshMacHelperStatus()
@@ -650,7 +649,7 @@ Item {
                             text: qsTr("＋ 添加")
                             primary: true
                             implicitWidth: 96
-                            onClicked: { page.editRuleIndex = -1; ruleEditor.openWith({}) }
+                            onClicked: ruleEditor.openWith(-1, {})
                         }
                         ThemedField {
                             id: ruleSearch
@@ -693,10 +692,7 @@ Item {
                                     font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
                                 PillButton {
                                     text: "✎"; implicitWidth: 30; implicitHeight: 24
-                                    onClicked: {
-                                        page.editRuleIndex = modelData.index
-                                        ruleEditor.openWith(settings.ruleAt(modelData.index))
-                                    }
+                                    onClicked: ruleEditor.openWith(modelData.index, settings.ruleAt(modelData.index))
                                 }
                                 PillButton {
                                     text: "✕"; implicitWidth: 30; implicitHeight: 24
@@ -710,85 +706,8 @@ Item {
         }
     }
 
-    // ———————————————— 规则编辑器（独立顶层窗口，任务栏可切换）————————————————
-    ApplicationWindow {
-        id: ruleEditor
-        // 去掉隐式 transientParent → Win/Linux 任务栏显示独立图标，方便切换窗口。
-        transientParent: null
-        flags: Qt.Window
-        width: 420
-        height: 360
-        minimumWidth: 360
-        minimumHeight: 320
-        title: page.editRuleIndex >= 0 ? qsTr("编辑规则") : qsTr("新增规则")
-        color: Theme.card
-        property var processNames: []
-        property var processPaths: []
-
-        function openWith(obj) {
-            rTypeCombo.editText = obj.type ? obj.type : "DOMAIN-SUFFIX"
-            rValueCombo.editText = obj.value ? obj.value : ""
-            rNodeCombo.editText = obj.node ? obj.node : ""
-            rNodeCombo.model = settings.proxyGroupNames()
-            ruleEditor.show()
-            ruleEditor.raise()
-            ruleEditor.requestActivate()
-        }
-
-        function refreshValueChoices(type) {
-            var t = String(type).toUpperCase()
-            if (t === "PROCESS-NAME") {
-                if (processNames.length === 0) processNames = settings.processChoices(false)
-                rValueCombo.model = processNames
-            } else if (t === "PROCESS-PATH") {
-                if (processPaths.length === 0) processPaths = settings.processChoices(true)
-                rValueCombo.model = processPaths
-            } else {
-                rValueCombo.model = []
-            }
-        }
-
-        ColumnLayout {
-            anchors.fill: parent
-            anchors.margins: 16
-            spacing: 8
-
-            Label { text: page.editRuleIndex >= 0 ? qsTr("编辑规则") : qsTr("新增规则")
-                color: Theme.textPrimary; font.pixelSize: 16; font.bold: true }
-
-            Label { text: qsTr("类型"); color: Theme.textSecondary; font.pixelSize: 12 }
-            ThemedEditCombo {
-                id: rTypeCombo
-                Layout.fillWidth: true
-                model: ["DOMAIN-SUFFIX", "DOMAIN", "DOMAIN-KEYWORD", "DOMAIN-REGEX",
-                        "IP-CIDR", "IP-CIDR6", "GEOIP", "GEOSITE", "IP-ASN",
-                        "SRC-IP-CIDR", "SRC-PORT", "DST-PORT",
-                        "PROCESS-NAME", "PROCESS-PATH", "RULE-SET", "MATCH"]
-                onEditTextChanged: ruleEditor.refreshValueChoices(editText)
-            }
-
-            Label { text: qsTr("值 (域名/IP段；进程规则从下拉选；MATCH 留空)")
-                color: Theme.textSecondary; font.pixelSize: 12 }
-            ThemedEditCombo { id: rValueCombo; Layout.fillWidth: true }
-
-            Label { text: qsTr("节点/策略组"); color: Theme.textSecondary; font.pixelSize: 12 }
-            ThemedEditCombo { id: rNodeCombo; Layout.fillWidth: true }
-
-            RowLayout {
-                Layout.fillWidth: true
-                Item { Layout.fillWidth: true }
-                PillButton { text: qsTr("取消"); onClicked: ruleEditor.close() }
-                PillButton {
-                    text: qsTr("确定"); primary: true
-                    onClicked: {
-                        settings.saveRule(page.editRuleIndex, rTypeCombo.editText,
-                                          rValueCombo.editText, rNodeCombo.editText)
-                        ruleEditor.close()
-                    }
-                }
-            }
-        }
-    }
+    // 规则编辑器——独立顶层窗口，抽成共享组件 RuleEditorWindow（设置页与连接窗右键复用同一实现）。
+    RuleEditorWindow { id: ruleEditor }
 
     // ———————————————— 区域编辑器（独立顶层窗口，任务栏可切换）————————————————
     ApplicationWindow {

@@ -89,6 +89,7 @@ qt_add_qml_module(clashauto-qml
         qml/LogTimeline.qml
         qml/ConnectionsWindow.qml
         qml/UpdateWindow.qml
+        qml/RuleEditorWindow.qml
 )
 
 # Windows：把 assets/icon.ico 作为 exe 图标嵌入。

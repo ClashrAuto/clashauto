@@ -89,12 +89,13 @@ ApplicationWindow {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 5
+        anchors.margins: 0 // 内容到窗口边 0
         spacing: 5
 
-        // —— 顶部工具栏：Online/Offline 切换 + Search ——
+        // —— 顶部工具栏：Online/Offline 切换 + Search（四周 padding 5）——
         RowLayout {
             Layout.fillWidth: true
+            Layout.topMargin: 5
             Layout.leftMargin: 5
             Layout.rightMargin: 5
             spacing: 10
@@ -177,17 +178,19 @@ ApplicationWindow {
             }
         }
 
-        // —— 可滚动卡片列表 ——
+        // —— 可滚动卡片列表（左右+底 padding 5，列间隔 1）——
         Item {
             Layout.fillWidth: true
             Layout.fillHeight: true
+            Layout.leftMargin: 5
+            Layout.rightMargin: 5
+            Layout.bottomMargin: 5
 
             ListView {
                 anchors.fill: parent
-                anchors.margins: 5
                 clip: true
                 model: bridge.connectionsModel
-                spacing: 8
+                spacing: 1
                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                 delegate: Rectangle {
@@ -195,6 +198,15 @@ ApplicationWindow {
                     height: 42
                     radius: 5
                     color: Theme.dark ? "#222222" : "#eeeeee"
+
+                    // 右键：弹出「添加规则」，用本行地址预填 value。
+                    TapHandler {
+                        acceptedButtons: Qt.RightButton
+                        onTapped: {
+                            ctxMenu.host = model.host
+                            ctxMenu.popup()
+                        }
+                    }
 
                     RowLayout {
                         anchors.fill: parent
@@ -246,4 +258,17 @@ ApplicationWindow {
             }
         }
     }
+
+    // 右键菜单：添加规则（用右键行的地址预填 value）。
+    Menu {
+        id: ctxMenu
+        property string host: ""
+        MenuItem {
+            text: qsTr("添加规则")
+            onTriggered: ruleEditor.openForValue(ctxMenu.host)
+        }
+    }
+
+    // 规则编辑器（共享组件）：右键「添加规则」→ openForValue 预填地址。
+    RuleEditorWindow { id: ruleEditor }
 }
