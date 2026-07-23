@@ -1,7 +1,6 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import QtQuick.Shapes
 import ClashAuto
 
 // 订阅页：可滚动的订阅卡列表（名称/类型/URL/节点数/启用态/更新周期）+ 动作
@@ -10,38 +9,71 @@ import ClashAuto
 Item {
     id: page
 
-    // ————————————————— 简洁线性图标（Feather 风格：描边 SVG 路径，24 视框缩放到 size）—————————————————
-    readonly property var ic: ({
-        "check":   "M20 6L9 17l-5-5",
-        "eye":     "M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z M12 9a3 3 0 1 0 0 6 3 3 0 1 0 0-6z",
-        "pencil":  "M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z",
-        "refresh": "M23 4v6h-6 M20.49 15a9 9 0 1 1-2.12-9.36L23 10",
-        "close":   "M18 6L6 18M6 6l12 12",
-        "plus":    "M12 5v14M5 12h14"
-    })
-    component LineIcon: Shape {
+    // ————————————————— 简洁线性图标（Canvas 直绘，按设备像素比清晰，不受软件渲染/缩放模糊）—————————————————
+    // kind：check(启用)/eye(查看)/pencil(编辑)/refresh(更新)/close(删除)/plus(添加)。24 视框映射到 size。
+    component LineIcon: Canvas {
         id: li
-        property string d: ""
+        property string kind: ""
         property color color: Theme.textSecondary
-        property real sw: 2.2
+        property real sw: 1.6
         implicitWidth: 15
         implicitHeight: 15
-        antialiasing: true
-        transform: Scale { xScale: li.width / 24; yScale: li.height / 24 }
-        ShapePath {
-            strokeColor: li.color
-            strokeWidth: li.sw
-            fillColor: "transparent"
-            capStyle: ShapePath.RoundCap
-            joinStyle: ShapePath.RoundJoin
-            PathSvg { path: li.d }
+        onColorChanged: requestPaint()
+        onKindChanged: requestPaint()
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        onPaint: {
+            var ctx = getContext("2d");
+            ctx.reset();
+            var W = width;
+            function P(x) { return x * W / 24; } // 24 视框 → 像素
+            ctx.strokeStyle = li.color;
+            ctx.lineWidth = li.sw;
+            ctx.lineCap = "round";
+            ctx.lineJoin = "round";
+            var k = li.kind;
+            ctx.beginPath();
+            if (k === "check") {
+                ctx.moveTo(P(20), P(6)); ctx.lineTo(P(9), P(17)); ctx.lineTo(P(4), P(12));
+            } else if (k === "plus") {
+                ctx.moveTo(P(12), P(5)); ctx.lineTo(P(12), P(19));
+                ctx.moveTo(P(5), P(12)); ctx.lineTo(P(19), P(12));
+            } else if (k === "close") {
+                ctx.moveTo(P(6), P(6)); ctx.lineTo(P(18), P(18));
+                ctx.moveTo(P(18), P(6)); ctx.lineTo(P(6), P(18));
+            } else if (k === "eye") {
+                ctx.moveTo(P(2), P(12));
+                ctx.bezierCurveTo(P(5.5), P(6.5), P(18.5), P(6.5), P(22), P(12));
+                ctx.bezierCurveTo(P(18.5), P(17.5), P(5.5), P(17.5), P(2), P(12));
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.arc(P(12), P(12), P(3), 0, 2 * Math.PI);
+            } else if (k === "pencil") {
+                ctx.moveTo(P(17), P(3));
+                ctx.lineTo(P(21), P(7));
+                ctx.lineTo(P(7.5), P(20.5));
+                ctx.lineTo(P(2), P(22));
+                ctx.lineTo(P(3.5), P(16.5));
+                ctx.closePath();
+            } else if (k === "refresh") {
+                var cx = P(12), cy = P(12), r = P(7);
+                var a1 = Math.PI * 2.0;
+                ctx.arc(cx, cy, r, Math.PI * 0.5, a1, false); // 3/4 圈（顺时针，缺口在右下）
+                ctx.stroke();
+                var ex = cx + r * Math.cos(a1), ey = cy + r * Math.sin(a1);
+                ctx.beginPath(); // 箭头（在右侧指向下，示意顺时针刷新）
+                ctx.moveTo(ex - P(3.2), ey - P(3.2));
+                ctx.lineTo(ex, ey);
+                ctx.lineTo(ex + P(3.2), ey - P(3.2));
+            }
+            ctx.stroke();
         }
     }
 
     // ————————————————— 小圆形动作按钮（内联组件）—————————————————
     component CircleBtn: Rectangle {
         id: cb
-        property string path: ""
+        property string kind: ""
         property string tip: ""
         property bool on: false
         property bool danger: false
@@ -60,7 +92,7 @@ Item {
             anchors.centerIn: parent
             width: 15
             height: 15
-            d: cb.path
+            kind: cb.kind
             color: cb.on ? "white" : (cb.danger ? Theme.danger : Theme.textSecondary)
         }
         HoverHandler { id: hover }
@@ -87,7 +119,7 @@ Item {
     component TextBtn: Rectangle {
         id: tb
         property string label: ""
-        property string path: "" // 可选前置图标（SVG 路径），空则纯文字
+        property string kind: "" // 可选前置图标名，空则纯文字
         property bool primary: true
         signal act()
         implicitWidth: Math.max(84, row.implicitWidth + 24)
@@ -101,11 +133,11 @@ Item {
             anchors.centerIn: parent
             spacing: 6
             LineIcon {
-                visible: tb.path.length > 0
+                visible: tb.kind.length > 0
                 width: 14
                 height: 14
                 anchors.verticalCenter: parent.verticalCenter
-                d: tb.path
+                kind: tb.kind
                 color: tb.primary ? "white" : Theme.textSecondary
             }
             Text {
@@ -179,19 +211,19 @@ Item {
 
             TextBtn {
                 label: qsTr("添加订阅")
-                path: page.ic.plus
+                kind: "plus"
                 primary: false
                 onAct: page.openAdd()
             }
             TextBtn {
                 label: qsTr("应用")
-                path: page.ic.check
+                kind: "check"
                 primary: false
                 onAct: subs.apply()
             }
             TextBtn {
                 label: qsTr("更新全部")
-                path: page.ic.refresh
+                kind: "refresh"
                 onAct: subs.updateAll()
             }
         }
@@ -282,29 +314,29 @@ Item {
                         spacing: 4
 
                         CircleBtn {
-                            path: page.ic.check
+                            kind: "check"
                             tip: qsTr("启用/停用")
                             on: model.use
                             onAct: subs.setEnabled(index, !model.use)
                         }
                         CircleBtn {
-                            path: page.ic.eye
+                            kind: "eye"
                             tip: qsTr("查看节点")
                             onAct: page.openNodes(index)
                         }
                         CircleBtn {
-                            path: page.ic.pencil
+                            kind: "pencil"
                             tip: qsTr("编辑")
                             onAct: page.openEdit(index, model.name, model.url, model.type, model.updateTime)
                         }
                         CircleBtn {
-                            path: page.ic.refresh
+                            kind: "refresh"
                             tip: qsTr("更新")
                             onAct: subs.update(index)
                         }
                         Item { Layout.fillWidth: true }
                         CircleBtn {
-                            path: page.ic.close
+                            kind: "close"
                             tip: qsTr("删除")
                             danger: true
                             onAct: {
