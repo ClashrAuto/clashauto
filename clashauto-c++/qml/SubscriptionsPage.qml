@@ -188,17 +188,15 @@ Item {
             }
         }
 
-        // —————————— 订阅卡列表（左右内距 10）——————————
+        // —————————— 订阅卡列表：列表全宽（滚动条贴页面右缘），项自身左右内缩 10，末项距底 10 ——————————
         ListView {
             id: cardList
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.leftMargin: 10
-            Layout.rightMargin: 10
             clip: true
             model: subs
             spacing: 10
-            rightMargin: 0 // 左右内距由 Layout margins 提供，内部不再额外缩进
+            bottomMargin: 10 // 滚到底时最后一项距底部 10
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
             // 空态：无订阅时提示
@@ -211,7 +209,8 @@ Item {
             }
 
             delegate: Card {
-                width: ListView.view.width - ListView.view.rightMargin
+                x: 10 // 项左右各距列表边 10（列表本身全宽）
+                width: ListView.view.width - 20
                 implicitHeight: 108
                 // 统一主题自适应底色（不再因启用而变蓝；启用态由左下「✓」按钮转蓝体现）
                 color: Theme.metricBg
