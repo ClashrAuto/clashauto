@@ -632,28 +632,33 @@ Item {
                         spacing: 4
                         bottomMargin: 10 // 末项距底 10
                         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                        delegate: Rectangle {
-                            x: 10 // 列表全宽，项左右各内缩 10
-                            width: ListView.view.width - 20
+                        // 委托根 x 会被 ListView 布局归零（同订阅页的坑），改为全宽 Item + 内层 anchors 内缩 10
+                        delegate: Item {
+                            width: ListView.view.width
                             height: 36
-                            radius: 3
-                            color: Theme.nodeRowBg
-                            RowLayout {
+                            Rectangle {
                                 anchors.fill: parent
                                 anchors.leftMargin: 10
-                                anchors.rightMargin: 6
-                                spacing: 8
-                                Label { text: modelData.name; color: Theme.textPrimary
-                                    font.pixelSize: 13; Layout.preferredWidth: 150; elide: Text.ElideRight }
-                                Label { text: modelData.type; color: Theme.textMuted
-                                    font.pixelSize: 12; Layout.preferredWidth: 90 }
-                                Label { text: modelData.rule; color: Theme.textSecondary
-                                    font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
-                                PillButton {
-                                    text: "✎"; implicitWidth: 30; implicitHeight: 24
-                                    onClicked: {
-                                        page.editAreaIndex = modelData.index
-                                        areaEditor.openWith(settings.areaAt(modelData.index))
+                                anchors.rightMargin: 10
+                                radius: 3
+                                color: Theme.nodeRowBg
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 6
+                                    spacing: 8
+                                    Label { text: modelData.name; color: Theme.textPrimary
+                                        font.pixelSize: 13; Layout.preferredWidth: 150; elide: Text.ElideRight }
+                                    Label { text: modelData.type; color: Theme.textMuted
+                                        font.pixelSize: 12; Layout.preferredWidth: 90 }
+                                    Label { text: modelData.rule; color: Theme.textSecondary
+                                        font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    PillButton {
+                                        text: "✎"; implicitWidth: 30; implicitHeight: 24
+                                        onClicked: {
+                                            page.editAreaIndex = modelData.index
+                                            areaEditor.openWith(settings.areaAt(modelData.index))
+                                        }
                                     }
                                 }
                             }
@@ -700,30 +705,35 @@ Item {
                         spacing: 4
                         bottomMargin: 10 // 末项距底 10
                         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-                        delegate: Rectangle {
-                            x: 10 // 列表全宽，项左右各内缩 10
-                            width: ListView.view.width - 20
+                        // 同上：委托根 x 会被 ListView 布局归零，改为全宽 Item + 内层 anchors 内缩 10
+                        delegate: Item {
+                            width: ListView.view.width
                             height: 36
-                            radius: 3
-                            color: Theme.nodeRowBg
-                            RowLayout {
+                            Rectangle {
                                 anchors.fill: parent
                                 anchors.leftMargin: 10
-                                anchors.rightMargin: 6
-                                spacing: 8
-                                Label { text: modelData.type; color: Theme.textPrimary
-                                    font.pixelSize: 13; Layout.preferredWidth: 150; elide: Text.ElideRight }
-                                Label { text: modelData.node; color: Theme.accentStrong
-                                    font.pixelSize: 12; Layout.preferredWidth: 130; elide: Text.ElideRight }
-                                Label { text: modelData.value; color: Theme.textSecondary
-                                    font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
-                                PillButton {
-                                    text: "✎"; implicitWidth: 30; implicitHeight: 24
-                                    onClicked: ruleEditor.openWith(modelData.index, settings.ruleAt(modelData.index))
-                                }
-                                PillButton {
-                                    text: "✕"; implicitWidth: 30; implicitHeight: 24
-                                    onClicked: settings.deleteRule(modelData.index)
+                                anchors.rightMargin: 10
+                                radius: 3
+                                color: Theme.nodeRowBg
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 6
+                                    spacing: 8
+                                    Label { text: modelData.type; color: Theme.textPrimary
+                                        font.pixelSize: 13; Layout.preferredWidth: 150; elide: Text.ElideRight }
+                                    Label { text: modelData.node; color: Theme.accentStrong
+                                        font.pixelSize: 12; Layout.preferredWidth: 130; elide: Text.ElideRight }
+                                    Label { text: modelData.value; color: Theme.textSecondary
+                                        font.pixelSize: 12; Layout.fillWidth: true; elide: Text.ElideRight }
+                                    PillButton {
+                                        text: "✎"; implicitWidth: 30; implicitHeight: 24
+                                        onClicked: ruleEditor.openWith(modelData.index, settings.ruleAt(modelData.index))
+                                    }
+                                    PillButton {
+                                        text: "✕"; implicitWidth: 30; implicitHeight: 24
+                                        onClicked: settings.deleteRule(modelData.index)
+                                    }
                                 }
                             }
                         }
