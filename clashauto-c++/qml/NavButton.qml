@@ -1,10 +1,11 @@
 import QtQuick
 import ClashAuto
 
-// 侧栏导航项：文字左对齐（距左 10px），hover / 选中高亮。无左侧强调竖条。
+// 侧栏导航项：前置 Remix 图标 + 文字，hover / 选中高亮。无左侧强调竖条。
 Item {
     id: root
     property string label: ""
+    property string icon: "" // Remix 码点（见 Theme.riFont）
     property bool current: false
     signal clicked()
 
@@ -18,9 +19,20 @@ Item {
         color: root.current ? Theme.card : (hover.hovered ? Theme.hover : "transparent")
     }
     Text {
+        id: navIcon
         anchors.verticalCenter: parent.verticalCenter
         anchors.left: parent.left
-        anchors.leftMargin: 10 // 文字距左 10px
+        anchors.leftMargin: 12
+        text: root.icon
+        font.family: Theme.riFont
+        font.pixelSize: 17
+        // 图标：黑色主题下浅灰、白色主题下深灰
+        color: Theme.dark ? "#aaaaaa" : "#666666"
+    }
+    Text {
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.left: navIcon.right
+        anchors.leftMargin: 9 // 图标与文字间距
         anchors.right: parent.right
         anchors.rightMargin: 8 // 右缘留白：长译文（如某些语言的「订阅/设置」）到此省略号，不溢出侧栏
         text: root.label
