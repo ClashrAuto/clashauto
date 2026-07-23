@@ -13,12 +13,14 @@
 //   - 校验用同名 <资源名>.sha256 边车（永远官方直连，不加镜像）
 #include "AppConfig.h"
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 class CoreController;
 
 class UpdateController final : public QObject
@@ -29,6 +31,10 @@ class UpdateController final : public QObject
     Q_PROPERTY(bool downloading READ downloading NOTIFY downloadingChanged)
     Q_PROPERTY(int progress READ progress NOTIFY progressChanged)
     Q_PROPERTY(QString status READ status NOTIFY statusChanged)
+    // 下载统计（进度条下方显示：速度 + 已下载/总量）
+    Q_PROPERTY(QString downloadSpeed READ downloadSpeed NOTIFY downloadStatsChanged)
+    Q_PROPERTY(QString downloadedText READ downloadedText NOTIFY downloadStatsChanged)
+    Q_PROPERTY(QString totalText READ totalText NOTIFY downloadStatsChanged)
     // 正式版 tab
     Q_PROPERTY(QString releaseVersion READ releaseVersion NOTIFY releaseChanged)
     Q_PROPERTY(QString releaseNotes READ releaseNotes NOTIFY releaseChanged)
@@ -49,6 +55,9 @@ public:
     bool downloading() const { return m_downloading; }
     int progress() const { return m_progress; }
     QString status() const { return m_status; }
+    QString downloadSpeed() const { return m_speedText; }
+    QString downloadedText() const { return m_downloadedText; }
+    QString totalText() const { return m_totalText; }
 
     QString releaseVersion() const { return m_releaseVersion; }
     QString releaseNotes() const { return m_releaseNotes; }
@@ -68,12 +77,15 @@ public:
     Q_INVOKABLE void oneClickUpdate(int tab, int index, bool useMirror);
     // 记住「不再提示」当前正式版版本号（对齐 update/skipTag）。
     Q_INVOKABLE void skipCurrentRelease();
+    // 取消当前下载：abort reply，finished 里按 m_cancelled 走「已取消」而非「失败」。
+    Q_INVOKABLE void cancelDownload();
 
 signals:
     void checkingChanged();
     void downloadingChanged();
     void progressChanged();
     void statusChanged();
+    void downloadStatsChanged();
     void releaseChanged();
     void betaChanged();
     void coreChanged();
@@ -109,6 +121,15 @@ private:
     bool m_downloading = false;
     int m_progress = 0;
     QString m_status;
+    // 下载统计 + 取消
+    QString m_speedText;
+    QString m_downloadedText;
+    QString m_totalText;
+    QNetworkReply *m_dlReply = nullptr; // 当前下载 reply（用于取消）
+    QElapsedTimer m_dlTimer;            // 计速用
+    qint64 m_lastBytes = 0;
+    qint64 m_lastMs = 0;
+    bool m_cancelled = false; // 用户主动取消标记（finished 里据此不弹失败）
 
     QString m_releaseVersion = QStringLiteral("-");
     QString m_releaseNotes;

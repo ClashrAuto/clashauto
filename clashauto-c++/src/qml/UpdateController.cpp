@@ -52,6 +52,19 @@ bool versionNewer(const QString &remote, const QString &local)
     }
     return false;
 }
+
+// 人类可读字节数（用于下载量/总量/速度显示）：1023 -> "1023 B"，1536 -> "1.5 KB"。
+QString fmtBytes(qint64 v)
+{
+    double n = v < 0 ? 0 : static_cast<double>(v);
+    static const char *u[] = {"B", "KB", "MB", "GB", "TB"};
+    int i = 0;
+    while (n >= 1024.0 && i < 4) {
+        n /= 1024.0;
+        ++i;
+    }
+    return QString::number(n, 'f', i == 0 ? 0 : 1) + QLatin1Char(' ') + QLatin1String(u[i]);
+}
 } // namespace
 
 UpdateController::UpdateController(AppConfig config, CoreController *core, QObject *parent)
@@ -392,6 +405,16 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
 #endif
 
     QNetworkReply *reply = dlNam->get(dreq);
+    // 记住当前下载 reply + 复位计速状态（供 cancelDownload / 速度计算用）。
+    m_dlReply = reply;
+    m_cancelled = false;
+    m_dlTimer.start();
+    m_lastMs = 0;
+    m_lastBytes = 0;
+    m_speedText.clear();
+    m_downloadedText.clear();
+    m_totalText.clear();
+    emit downloadStatsChanged();
     // 边下边写到磁盘：out 挂在 reply 名下，取消/关窗随 reply 一起销毁。
     auto *out = new QFile(savePath);
     out->setParent(reply);
@@ -410,6 +433,20 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
         if (total > 0) {
             setProgress(static_cast<int>(received * 100 / total));
         }
+        // 已下载 / 总量文本（总量未知时显示 "?"）。
+        m_downloadedText = fmtBytes(received);
+        m_totalText = total > 0 ? fmtBytes(total) : QString::fromUtf8("?");
+        // 速度：每 ≥500ms 采样一次，避免抖动。
+        const qint64 nowMs = m_dlTimer.elapsed();
+        const qint64 dt = nowMs - m_lastMs;
+        if (dt >= 500) {
+            const qint64 db = received - m_lastBytes;
+            const double bps = db * 1000.0 / static_cast<double>(dt);
+            m_speedText = fmtBytes(static_cast<qint64>(bps)) + QStringLiteral("/s");
+            m_lastMs = nowMs;
+            m_lastBytes = received;
+        }
+        emit downloadStatsChanged();
     });
     connect(reply, &QNetworkReply::readyRead, this, [reply, out] {
         out->write(reply->readAll());
@@ -420,7 +457,18 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
         out->close();
         const bool ok = reply->error() == QNetworkReply::NoError;
         const QString err = reply->errorString();
+        const bool cancelled = m_cancelled;
+        m_dlReply = nullptr; // reply 即将 deleteLater，清引用防悬空
         reply->deleteLater(); // 连带删除 out
+        // 用户主动取消：删临时文件、复位状态，不弹「失败」。
+        if (cancelled) {
+            QFile::remove(savePath);
+            m_cancelled = false;
+            setDownloading(false);
+            setProgress(0);
+            setStatus(QString::fromUtf8("已取消下载"));
+            return;
+        }
         if (!ok) {
             QFile::remove(savePath);
             setDownloading(false);
@@ -531,6 +579,16 @@ void UpdateController::skipCurrentRelease()
     if (!tag.isEmpty() && tag != QStringLiteral("-")) {
         QSettings().setValue(QStringLiteral("update/skipTag"), tag);
     }
+}
+
+void UpdateController::cancelDownload()
+{
+    if (!m_downloading || !m_dlReply) {
+        return;
+    }
+    // 标记为主动取消后 abort：finished 里据 m_cancelled 走「已取消」分支（删临时文件、不弹失败）。
+    m_cancelled = true;
+    m_dlReply->abort();
 }
 
 #if defined(Q_OS_WIN)

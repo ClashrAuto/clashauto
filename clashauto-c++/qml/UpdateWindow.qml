@@ -255,30 +255,63 @@ ApplicationWindow {
             }
         }
 
-        // —— 进度条 ——
-        Rectangle {
+        // —— 下载中：进度条 + 右侧 ✕ 取消（替换掉底部动作按钮）——
+        RowLayout {
             Layout.fillWidth: true
-            Layout.preferredHeight: 22
-            radius: 4
             visible: updater.downloading
-            color: Theme.dark ? "#0d0d0d" : "#eeeeee"
-            border.width: 1
-            border.color: Theme.divider
+            spacing: 8
+
             Rectangle {
-                anchors.left: parent.left
-                anchors.top: parent.top
-                anchors.bottom: parent.bottom
-                anchors.margins: 1
-                width: Math.max(0, (parent.width - 2) * updater.progress / 100)
+                Layout.fillWidth: true
+                Layout.preferredHeight: 22
                 radius: 4
-                color: Theme.accent
+                color: Theme.dark ? "#0d0d0d" : "#eeeeee"
+                border.width: 1
+                border.color: Theme.divider
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.margins: 1
+                    width: Math.max(0, (parent.width - 2) * updater.progress / 100)
+                    radius: 4
+                    color: Theme.accent
+                }
+                Text {
+                    anchors.centerIn: parent
+                    text: updater.progress + "%"
+                    font.pixelSize: 11
+                    color: Theme.textPrimary
+                }
             }
-            Text {
-                anchors.centerIn: parent
-                text: updater.progress + "%"
-                font.pixelSize: 11
-                color: Theme.textPrimary
+
+            // ✕ 取消下载：abort → UpdateController 走「已取消」分支（删临时文件、不弹失败）。
+            Rectangle {
+                Layout.preferredWidth: 24
+                Layout.preferredHeight: 24
+                radius: 12
+                color: cancelHover.hovered ? "#f56c6c" : (Theme.dark ? "#252525" : "#eeeeee")
+                border.width: 1
+                border.color: cancelHover.hovered ? "#f56c6c" : Theme.divider
+                Text {
+                    anchors.centerIn: parent
+                    text: "✕"
+                    font.pixelSize: 12
+                    color: cancelHover.hovered ? "#ffffff" : Theme.textSecondary
+                }
+                HoverHandler { id: cancelHover; cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: updater.cancelDownload() }
             }
+        }
+
+        // —— 下载统计：速度 · 已下载 / 总量 ——
+        Text {
+            Layout.fillWidth: true
+            visible: updater.downloading
+            text: (updater.downloadSpeed.length > 0 ? updater.downloadSpeed + "   ·   " : "")
+                  + updater.downloadedText + " / " + updater.totalText
+            font.pixelSize: 11
+            color: Theme.textSecondary
         }
 
         // —— 状态行（下载 / 校验 / 失败提示）——
@@ -291,9 +324,10 @@ ApplicationWindow {
             color: Theme.textMuted
         }
 
-        // —— 底部动作行 ——
+        // —— 底部动作行（下载中隐藏，让位给上面的进度条+取消）——
         RowLayout {
             Layout.fillWidth: true
+            visible: !updater.downloading
             spacing: 10
 
             // 不再提示（勾选并关闭后记住跳过当前正式版）
