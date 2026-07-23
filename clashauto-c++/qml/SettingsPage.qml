@@ -12,11 +12,27 @@ Item {
 
     // ————————————————————————— 复用样式组件（inline）—————————————————————————
 
-    component GroupTitle: Label {
-        color: Theme.accentStrong
-        font.pixelSize: 13
-        font.bold: true
-        topPadding: 6
+    component GroupTitle: RowLayout {
+        id: gtRoot
+        property alias text: gtLabel.text
+        property string icon: "" // Remix 码点，空则不显示图标
+        spacing: 6
+        Layout.topMargin: 6
+        Text {
+            visible: gtRoot.icon.length > 0
+            text: gtRoot.icon
+            font.family: Theme.riFont
+            font.pixelSize: 15
+            color: Theme.accentStrong
+            Layout.alignment: Qt.AlignVCenter
+        }
+        Label {
+            id: gtLabel
+            color: Theme.accentStrong
+            font.pixelSize: 13
+            font.bold: true
+            Layout.alignment: Qt.AlignVCenter
+        }
     }
 
     component Divider: Rectangle {
@@ -402,14 +418,14 @@ Item {
                         width: page.width - 60
                         spacing: 8
 
-                        GroupTitle { text: qsTr("系统") }
+                        GroupTitle { icon: "\uEBCA"; text: qsTr("系统") }
                         RowLayout { RowLabel { text: qsTr("开机自启") }
                             ThemedSwitch { id: autoStartSwitch; checked: settings.autoStart } }
                         RowLayout { RowLabel { text: qsTr("关闭到托盘") }
                             ThemedSwitch { id: traySwitch; checked: settings.closeToTray } }
 
                         Divider {}
-                        GroupTitle { text: qsTr("节点") }
+                        GroupTitle { icon: "\uF0E0"; text: qsTr("节点") }
                         RowLayout { RowLabel { text: qsTr("仅可用节点") }
                             ThemedSwitch { id: nodeSwitch; checked: settings.nodeOnlyAvailable
                                 onToggled: settings.setNodeOnly(checked) } }
@@ -417,12 +433,12 @@ Item {
                             ThemedSwitch { id: incSwitch; checked: settings.increment } }
 
                         Divider {}
-                        GroupTitle { text: qsTr("通知") }
+                        GroupTitle { icon: "\uEF94"; text: qsTr("通知") }
                         RowLayout { RowLabel { text: qsTr("切换通知") }
                             ThemedSwitch { id: noteSwitch; checked: settings.nodeSwitchNote } }
 
                         Divider {}
-                        GroupTitle { text: qsTr("增强") }
+                        GroupTitle { icon: "\uF096"; text: qsTr("增强") }
                         RowLayout { RowLabel { text: qsTr("系统代理") }
                             ThemedSwitch { id: webSwitch; checked: settings.webProxy } }
                         RowLayout {
@@ -438,27 +454,17 @@ Item {
                         RowLayout {
                             spacing: 10
                             RowLabel { text: qsTr("mihomo 内核") }
-                            CheckBox {
-                                id: mirrorCheck
+                            Label {
                                 text: qsTr("国内加速")
-                                checked: settings.mirror
+                                color: Theme.textSecondary
                                 font.pixelSize: 13
-                                onToggled: settings.setMirror(checked)
-                                indicator: Rectangle {
-                                    implicitWidth: 16; implicitHeight: 16; radius: 3
-                                    x: 0; anchors.verticalCenter: parent.verticalCenter
-                                    color: mirrorCheck.checked ? Theme.accent : Theme.inputBg
-                                    border.width: 1
-                                    border.color: mirrorCheck.checked ? Theme.accent : Theme.inputBorder
-                                    Text { anchors.centerIn: parent; text: "✓"; color: "white"
-                                        font.pixelSize: 11; visible: mirrorCheck.checked }
-                                }
-                                contentItem: Text {
-                                    text: mirrorCheck.text; color: Theme.textSecondary
-                                    font: mirrorCheck.font; leftPadding: 22
-                                    verticalAlignment: Text.AlignVCenter
-                                }
                             }
+                            ThemedSwitch {
+                                id: mirrorCheck
+                                checked: settings.mirror
+                                onToggled: settings.setMirror(checked)
+                            }
+                            Item { Layout.fillWidth: true }
                             PillButton {
                                 text: settings.coreUpdating ? settings.coreUpdateStatus : qsTr("更新内核")
                                 enabled: !settings.coreUpdating
@@ -484,7 +490,7 @@ Item {
                         }
 
                         Divider {}
-                        GroupTitle { text: qsTr("界面") }
+                        GroupTitle { icon: "\uEFC5"; text: qsTr("界面") }
                         RowLayout {
                             RowLabel { text: qsTr("主题") }
                             ThemedCombo {
@@ -498,7 +504,7 @@ Item {
                             ThemedSwitch { id: autoThemeSwitch; checked: settings.autoTheme } }
 
                         Divider {}
-                        GroupTitle { text: qsTr("内核") }
+                        GroupTitle { icon: "\uEBF0"; text: qsTr("内核") }
                         RowLayout {
                             RowLabel { text: qsTr("Host") }
                             ThemedEditCombo {
@@ -522,7 +528,7 @@ Item {
                             ThemedSwitch { id: clearSwitch; checked: settings.clearConnections } }
 
                         Divider {}
-                        GroupTitle { text: qsTr("其他") }
+                        GroupTitle { icon: "\uEF77"; text: qsTr("其他") }
                         RowLayout { RowLabel { text: qsTr("跟随系统语言") }
                             ThemedSwitch { id: autoLangSwitch; checked: settings.autoLanguage } }
                         RowLayout {
