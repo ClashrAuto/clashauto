@@ -154,10 +154,21 @@ int UpdateController::recommendedIndex(int tab) const
         return -1;
     };
 #if defined(Q_OS_WIN)
+    // 更新页改造：程序更新统一走「下载 portable zip → 解压覆盖到项目目录 → 重启」，故
+    // 优先便携版 zip（名含 portable 的 .zip）→ 任意 .zip → 退回 NSIS 安装器（setup.exe / .exe）。
     int idx = firstMatch([](const QString &n) {
-        return n.contains(QStringLiteral("setup"), Qt::CaseInsensitive)
-               && n.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive);
+        return n.contains(QStringLiteral("portable"), Qt::CaseInsensitive)
+               && n.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive);
     });
+    if (idx < 0) {
+        idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive); });
+    }
+    if (idx < 0) {
+        idx = firstMatch([](const QString &n) {
+            return n.contains(QStringLiteral("setup"), Qt::CaseInsensitive)
+                   && n.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive);
+        });
+    }
     if (idx < 0) {
         idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive); });
     }
@@ -532,7 +543,13 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
 void UpdateController::doExecute(const QString &savePath, const QString &name)
 {
 #if defined(Q_OS_WIN)
-    // 一键更新：NSIS 安装包支持 /S 静默安装——等本进程退出后原地升级并自动重启。
+    // 便携版 zip：解压覆盖到项目目录（保留已下载内核）→ 自动重启。
+    if (name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)) {
+        setStatus(QString::fromUtf8("下载完成，正在解压更新并自动重启: %1").arg(savePath));
+        launchZipUpdateAndRestart(savePath);
+        return;
+    }
+    // NSIS 安装包支持 /S 静默安装——等本进程退出后原地升级并自动重启。
     if (name.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive)) {
         setStatus(QString::fromUtf8("下载完成，正在静默安装并自动重启: %1").arg(savePath));
         launchSilentUpdateAndRestart(savePath);
@@ -642,6 +659,65 @@ void UpdateController::launchSilentUpdateAndRestart(const QString &installerPath
     } else {
         setStatus(QString::fromUtf8("自动安装启动失败（错误码 %1），已打开安装包请手动安装").arg(GetLastError()));
         QDesktopServices::openUrl(QUrl::fromLocalFile(installerPath));
+        qApp->quit();
+    }
+}
+
+void UpdateController::launchZipUpdateAndRestart(const QString &zipPath)
+{
+    // 便携版 zip 更新：隐藏的 PowerShell 守护进程等本进程退出 → 解压 zip →
+    // robocopy 覆盖到项目根目录（/E 合并、不带 /PURGE，故保留 command\clash 下已下载的内核）→ 重启。
+    // 目录布局与安装器一致：<root>\clashauto-c++\<exe> + <root>\Clashr-Auto\...，而 zip 根内即这两个目录。
+    QDir exeDir(QCoreApplication::applicationDirPath());
+    QString installRoot;
+    if (exeDir.dirName() == QStringLiteral("clashauto-c++")) {
+        QDir root = exeDir;
+        root.cdUp();
+        installRoot = root.absolutePath();
+    } else {
+        installRoot = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath(QStringLiteral("ClashAuto"));
+    }
+    const QString exeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
+    const QString newExe = QDir(installRoot).filePath(QStringLiteral("clashauto-c++/") + exeName);
+    const QString extractDir = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                   .filePath(QStringLiteral("clashauto-zip-update"));
+    const auto psq = [](const QString &s) {
+        QString r = QDir::toNativeSeparators(s);
+        r.replace(QLatin1Char('\''), QStringLiteral("''"));
+        return r;
+    };
+    const QString script = QStringLiteral(
+        "Wait-Process -Id %1 -Timeout 60 -ErrorAction SilentlyContinue\n"
+        "$zip = '%2'\n"
+        "$extract = '%3'\n"
+        "$root = '%4'\n"
+        "if (Test-Path $extract) { Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue }\n"
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem\n"
+        "[System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $extract)\n"
+        "robocopy $extract $root /E /NFL /NDL /NJH /NJS /NP | Out-Null\n"
+        "Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue\n"
+        "Remove-Item -Force $zip -ErrorAction SilentlyContinue\n"
+        "Start-Process -FilePath '%5'\n")
+        .arg(QString::number(QCoreApplication::applicationPid()),
+             psq(zipPath), psq(extractDir), psq(installRoot), psq(newExe));
+    const QByteArray utf16(reinterpret_cast<const char *>(script.utf16()),
+                           static_cast<qsizetype>(script.size()) * 2);
+    const QString params = QStringLiteral("-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ")
+        + QString::fromLatin1(utf16.toBase64());
+    const std::wstring fileW = L"powershell.exe";
+    const std::wstring paramsW = params.toStdWString();
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOASYNC;
+    sei.lpFile = fileW.c_str();
+    sei.lpParameters = paramsW.c_str();
+    sei.nShow = SW_HIDE;
+    if (ShellExecuteExW(&sei)) {
+        qApp->quit(); // aboutToQuit 停核心并还原系统代理，脚本随后解压覆盖并重启
+    } else {
+        setStatus(QString::fromUtf8("自动更新启动失败（错误码 %1），已打开压缩包请手动解压覆盖").arg(GetLastError()));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(zipPath));
         qApp->quit();
     }
 }

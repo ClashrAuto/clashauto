@@ -109,6 +109,8 @@ private:
     void setStatus(const QString &s);
 #if defined(Q_OS_WIN)
     void launchSilentUpdateAndRestart(const QString &installerPath);
+    // 便携版 zip 更新：等本进程退出 → 解压覆盖到项目目录（保留已下载内核）→ 重启。
+    void launchZipUpdateAndRestart(const QString &zipPath);
 #elif defined(Q_OS_MACOS)
     void launchSilentUpdateAndRestartMac(const QString &dmgPath);
 #endif
