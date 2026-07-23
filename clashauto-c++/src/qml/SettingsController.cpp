@@ -2,6 +2,7 @@
 
 #include "AppConfig.h"
 #include "ClashService.h"
+#include "ConfigBuilder.h"
 #include "CoreController.h"
 #include "I18n.h"
 
@@ -777,7 +778,19 @@ void SettingsController::saveArea(int editIndex, const QString &name, const QStr
 
 QStringList SettingsController::proxyGroupNames() const
 {
+    // 规则「节点」下拉候选 = 全部可选策略，不只设置里的自定义区域组：
+    // 内置 DIRECT/REJECT + full.yaml 的全部策略组（基础组/自动区域组/自定义组）+ 全部订阅节点。
+    // full.yaml 尚未生成时退回 default.yaml 的自定义区域组（旧行为）。
     QStringList names;
+    names << QStringLiteral("DIRECT") << QStringLiteral("REJECT");
+
+    QFile full(QDir(m_userDir).filePath(QStringLiteral("full.yaml")));
+    if (full.open(QIODevice::ReadOnly)) {
+        const QString yaml = QString::fromUtf8(full.readAll());
+        names << ConfigBuilder::existingGroupNames(yaml);
+        names << ConfigBuilder::proxyNames(yaml);
+    }
+
     const QJsonArray groups = loadRuleSection(QStringLiteral("area"));
     for (const QJsonValue &v : groups) {
         const QString n = v.toObject().value("name").toString();
@@ -785,6 +798,7 @@ QStringList SettingsController::proxyGroupNames() const
             names << n;
         }
     }
+    names.removeDuplicates();
     return names;
 }
 

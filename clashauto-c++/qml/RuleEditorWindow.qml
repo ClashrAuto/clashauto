@@ -44,7 +44,7 @@ ApplicationWindow {
             types.unshift(t)
         typeCombo.model = types
         typeCombo.currentIndex = types.indexOf(t)
-        // 节点：候选取当前策略组、只可选择；现值不在列表时前插。
+        // 节点：候选取全部可选策略（DIRECT/REJECT + 全部策略组 + 全部订阅节点）、只可选择；现值不在列表时前插。
         var n = (obj && obj.node) ? obj.node : ""
         var nodes = settings.proxyGroupNames()
         if (n.length > 0 && nodes.indexOf(n) === -1)

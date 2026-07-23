@@ -406,7 +406,7 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
     return yaml;
 }
 
-QStringList ConfigBuilder::proxyNames(const QString &yaml) const
+QStringList ConfigBuilder::proxyNames(const QString &yaml)
 {
     QStringList names;
     const qsizetype start = yaml.indexOf(QRegularExpression("(?m)^proxies:"));
@@ -429,7 +429,7 @@ QStringList ConfigBuilder::proxyNames(const QString &yaml) const
     return names;
 }
 
-QStringList ConfigBuilder::existingGroupNames(const QString &yaml) const
+QStringList ConfigBuilder::existingGroupNames(const QString &yaml)
 {
     QStringList names;
     const qsizetype start = yaml.indexOf("\nproxy-groups:");
@@ -652,7 +652,7 @@ QString ConfigBuilder::yamlQuote(const QString &value) const
     return QString("'%1'").arg(escaped);
 }
 
-QString ConfigBuilder::yamlScalar(const QString &line) const
+QString ConfigBuilder::yamlScalar(const QString &line)
 {
     QString value = line.trimmed();
     const qsizetype comment = value.indexOf(" #");
