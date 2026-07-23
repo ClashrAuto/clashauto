@@ -451,9 +451,20 @@ void QmlBridge::refreshConnections()
 {
     if (!m_clash)
         return;
-    // 异步拉取（复用 ClashService::fetchConnections）；映射成 QML 友好的 {type,host,chain,下载,上传,id,offline}。
+    // 异步拉当前活动连接，与「已见连接」m_seenConns 增量合并（对齐旧项目 connections.vue::loadConnections）：
+    //   1) 先把已见连接全部标 offline=true；
+    //   2) poll 里出现的：按 id 原地更新流量并复活 offline=false；未见过的：追加（offline=false）；
+    //   3) poll 里没有的：保留且保持 offline=true——连接断了不丢弃，Offline 过滤才有内容。
+    // 合并后整表交给 m_connModel.setRaw()，其 recompute 再按 id 增量增删改（保 ListView 滚动位置）。
+    // 注意：Clash /connections 只返回活动连接、且无 offline 字段，故 offline 必须由本层维护。
     m_clash->fetchConnections([this](QJsonArray arr) {
-        QVariantList list;
+        QHash<QString, int> idx;
+        idx.reserve(m_seenConns.size());
+        for (int i = 0; i < m_seenConns.size(); ++i)
+            idx.insert(m_seenConns.at(i).value(QStringLiteral("id")).toString(), i);
+        for (QVariantMap &m : m_seenConns)
+            m[QStringLiteral("offline")] = true;
+
         for (const QJsonValue &v : arr) {
             const QJsonObject c = v.toObject();
             const QJsonObject meta = c.value("metadata").toObject();
@@ -465,18 +476,45 @@ void QmlBridge::refreshConnections()
                 type = meta.value("network").toString();
             const QJsonArray chains = c.value("chains").toArray();
             const QString chain0 = chains.isEmpty() ? QStringLiteral("-") : chains.first().toString();
-            QVariantMap m;
-            m["type"] = type;
-            m["host"] = host;
-            m["chain"] = chain0;
-            m["download"] = static_cast<qlonglong>(c.value("download").toInteger()); // 原始字节，QML 按旧格式(无空格)自行格式化
-            m["upload"] = static_cast<qlonglong>(c.value("upload").toInteger());
-            m["id"] = c.value("id").toString();
-            m["offline"] = c.value("offline").toBool();
-            list.append(m);
+            const QString id = c.value("id").toString();
+            const qlonglong dl = static_cast<qlonglong>(c.value("download").toInteger());
+            const qlonglong ul = static_cast<qlonglong>(c.value("upload").toInteger());
+
+            const int at = idx.value(id, -1);
+            if (at >= 0) {
+                QVariantMap &m = m_seenConns[at];
+                m[QStringLiteral("type")] = type;
+                m[QStringLiteral("host")] = host;
+                m[QStringLiteral("chain")] = chain0;
+                m[QStringLiteral("download")] = dl;
+                m[QStringLiteral("upload")] = ul;
+                m[QStringLiteral("offline")] = false;
+            } else {
+                QVariantMap m;
+                m[QStringLiteral("type")] = type;
+                m[QStringLiteral("host")] = host;
+                m[QStringLiteral("chain")] = chain0;
+                m[QStringLiteral("download")] = dl; // 原始字节，QML 按旧格式(无空格)自行格式化
+                m[QStringLiteral("upload")] = ul;
+                m[QStringLiteral("id")] = id;
+                m[QStringLiteral("offline")] = false;
+                m_seenConns.append(m);
+                idx.insert(id, m_seenConns.size() - 1);
+            }
         }
-        m_connModel.setRaw(list); // 增量套用（保 ListView 滚动位置）
+
+        QVariantList list;
+        list.reserve(m_seenConns.size());
+        for (const QVariantMap &m : m_seenConns)
+            list.append(m);
+        m_connModel.setRaw(list);
     });
+}
+
+void QmlBridge::resetConnections()
+{
+    m_seenConns.clear();
+    m_connModel.setRaw({}); // 同步清空模型，连接窗打开即从干净状态开始
 }
 
 void QmlBridge::closeConnectionById(const QString &id)

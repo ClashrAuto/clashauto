@@ -43,6 +43,7 @@ ApplicationWindow {
     onVisibleChanged: {
         if (visible) {
             win.applyFilter();
+            bridge.resetConnections(); // 每次打开清空历史，避免上次会话的离线连接残留
             bridge.refreshConnections();
             refresh.start();
         } else {

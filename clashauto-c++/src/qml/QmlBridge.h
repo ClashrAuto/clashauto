@@ -104,7 +104,8 @@ public:
     Q_INVOKABLE void runSpeedTest();
     Q_INVOKABLE void setNodeFilter(const QString &filter);
     Q_INVOKABLE void clearConnections();
-    Q_INVOKABLE void refreshConnections();               // 拉取当前连接列表（异步，完成后 m_connModel.setRaw）
+    Q_INVOKABLE void refreshConnections();               // 拉取当前连接并与「已见连接」增量合并（断开的标 offline 保留）
+    Q_INVOKABLE void resetConnections();                 // 清空「已见连接」历史（连接窗每次打开时调用，避免上次会话残留）
     Q_INVOKABLE void closeConnectionById(const QString &id); // 断开单个连接，随后刷新列表
 
     // macOS 毛玻璃：把 QML 窗口交给原生层做「透明标题栏 + 整窗 NSVisualEffectView」。
@@ -190,6 +191,9 @@ private:
     int m_connectionsCount = 0;
     QString m_totalDownText = QStringLiteral("0.00 B");
     ConnectionsModel m_connModel;
+    // 连接管理页：累积「见过的连接」（按 id）。每次 poll 里没出现的不丢弃，而是标 offline 保留，
+    // 这样 Offline 过滤才有内容（对齐旧项目 connections.vue 的 loadConnections）。连接窗打开时清空。
+    QList<QVariantMap> m_seenConns;
     QString m_selectedNode;
     bool m_nodeInitialized = false; // 首次节点填充跳过切换通知，避免启动即误报（对齐 MainWindow m_nodeInitialized）
     QStringList m_groups;
