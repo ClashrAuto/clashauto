@@ -145,9 +145,11 @@ Item {
             // 节点区顶栏（严格参考旧项目 status.vue：节点+数量 | 可展开搜索 | 测速 refresh/loading | 帮助 question→文档）
             RowLayout {
                 Layout.fillWidth: true
+                Layout.preferredHeight: 30 // 固定高度：搜索框(28)展开时不再撑高整行
                 spacing: 6
 
                 Text {
+                    Layout.alignment: Qt.AlignVCenter
                     text: qsTr("节点")
                     font.pixelSize: 18
                     color: Theme.textPrimary
@@ -156,8 +158,7 @@ Item {
                     text: "(" + nodeModel.count + ")"
                     font.pixelSize: 9
                     color: Theme.textMuted
-                    Layout.alignment: Qt.AlignBottom
-                    bottomPadding: 3
+                    Layout.alignment: Qt.AlignVCenter
                 }
 
                 // 搜索：默认只显示放大镜，点击展开输入框（右侧 ✕ 清空并收起）
@@ -168,6 +169,7 @@ Item {
                     font.pixelSize: 16
                     color: Theme.textMuted
                     Layout.leftMargin: 4
+                    Layout.alignment: Qt.AlignVCenter
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
                     TapHandler { onTapped: { page.searchShown = true; search.forceActiveFocus() } }
                 }
@@ -175,6 +177,7 @@ Item {
                     id: search
                     visible: page.searchShown
                     Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignVCenter
                     Layout.preferredHeight: 28
                     rightPadding: 24
                     placeholderText: qsTr("搜索节点")
@@ -211,6 +214,7 @@ Item {
                 // 测速：空闲 refresh-line、测速中 loader-4-line 旋转（对齐旧项目 refresh-right / loading）
                 Text {
                     id: spdIcon
+                    Layout.alignment: Qt.AlignVCenter
                     property real spin: 0
                     text: bridge.speedTesting ? "" : ""
                     font.family: Theme.riFont
@@ -232,7 +236,9 @@ Item {
 
                 // 帮助：打开在线文档（对齐旧项目 question → gitbook）
                 Text {
-                    text: "" // question-line
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.rightMargin: 5
+                    text: "" // question-fill
                     font.family: Theme.riFont
                     font.pixelSize: 18
                     color: Theme.textMuted

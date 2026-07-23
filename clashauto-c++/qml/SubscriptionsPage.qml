@@ -208,6 +208,8 @@ Item {
             delegate: Card {
                 width: ListView.view.width - ListView.view.rightMargin
                 implicitHeight: 108
+                // 选中(启用)=蓝底 #4898F8；未选=主题自适应底色
+                color: model.use ? "#4898f8" : Theme.metricBg
 
                 ColumnLayout {
                     anchors.fill: parent

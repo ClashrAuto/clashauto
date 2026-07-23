@@ -39,7 +39,7 @@ QtObject {
 
     // —— 度量（对齐 Widgets 版常量）——
     readonly property int radius: 5
-    readonly property int sidebarWidth: 120
+    readonly property int sidebarWidth: 170
     readonly property int footerHeight: 38
     readonly property int inset: 5 // mac 上主内容离窗顶/右 5px，透出玻璃
 

@@ -227,8 +227,10 @@ ApplicationWindow {
         ColumnLayout {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.topMargin: window.isMac ? Theme.inset : 0
-            Layout.rightMargin: window.isMac ? Theme.inset : 0
+            // 内容区 + 页脚距窗口 5px：mac 原本就有 top/right 内缩；Win/Linux 现补齐 top/right/bottom。
+            Layout.topMargin: Theme.inset
+            Layout.rightMargin: Theme.inset
+            Layout.bottomMargin: window.isMac ? 0 : Theme.inset
             spacing: 0
 
             // 内容卡（不透明，浮在玻璃上）
