@@ -27,11 +27,8 @@ Card {
         id: view
         anchors.fill: parent
         anchors.topMargin: 6
-        anchors.leftMargin: 10  // 时间线全宽，行左右各内缩 10
-        anchors.rightMargin: 10
         clip: true
         spacing: 0
-        rightMargin: 0
         bottomMargin: 10 // 滚到底时末行距底 10
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
@@ -39,12 +36,16 @@ Card {
         // 新日志插到第 0 行 → 自动把视图滚到顶部（对齐 Widgets：滚动条置最小值）。
         onCountChanged: positionViewAtBeginning()
 
+        // 内缩方式对齐设置页：列表全宽（滚动条贴页面右缘），行内容左右各内缩 10。
+        // 注意不能在委托根上定位（ListView 布局会把根 x 归零），内缩由行内 anchors 实现。
         delegate: Item {
-            width: ListView.view.width - ListView.view.rightMargin
+            width: ListView.view.width
             implicitHeight: Math.max(rail.implicitHeight, texts.implicitHeight)
 
             RowLayout {
                 anchors.fill: parent
+                anchors.leftMargin: 10
+                anchors.rightMargin: 10
                 spacing: 8
 
                 // —— 圆点（severity 颜色）——去掉了旧的左侧竖轴 ——
