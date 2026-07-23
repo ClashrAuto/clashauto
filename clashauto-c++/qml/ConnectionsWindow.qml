@@ -23,6 +23,7 @@ ApplicationWindow {
     property string query: ""
     property bool showOnline: true
     property bool showOffline: true
+    readonly property int toolbarH: 26 // 顶栏统一高度：Online/Offline 按钮与搜索框一致
 
     function spd(v) {
         var n = v < 0 ? 0 : v;
@@ -103,12 +104,12 @@ ApplicationWindow {
             // 分段按钮组：离线段左端塞到在线段底下 3px（重叠），中间无缝、只外侧圆角。
             Item {
                 Layout.preferredWidth: onSeg.width + offSeg.width - 3
-                Layout.preferredHeight: 26
+                Layout.preferredHeight: win.toolbarH
                 Rectangle {
                     id: offSeg
                     x: onSeg.width - 3
                     width: offLbl.implicitWidth + 27
-                    height: 26
+                    height: win.toolbarH
                     radius: 3
                     z: 0 // 在下：左端圆角被在线段盖住
                     color: win.showOffline ? "#4898f8" : "#909399"
@@ -126,7 +127,7 @@ ApplicationWindow {
                     id: onSeg
                     x: 0
                     width: onLbl.implicitWidth + 24
-                    height: 26
+                    height: win.toolbarH
                     radius: 3
                     z: 1 // 在上：盖住离线段左端
                     color: win.showOnline ? "#4898f8" : "#909399"
@@ -141,10 +142,10 @@ ApplicationWindow {
                 }
             }
 
-            // Search：整块 radius 圆角，前缀标签 + 输入框（均透明，露外框底）
+            // Search：整块 radius 圆角，前缀标签 + 输入框（均透明，露外框底）；高度与左侧按钮一致
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 26
+                Layout.preferredHeight: win.toolbarH
                 radius: 3
                 color: Theme.dark ? "#444444" : "#eaeaea"
                 border.width: 1

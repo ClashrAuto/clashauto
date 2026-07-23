@@ -21,8 +21,13 @@ ApplicationWindow {
     color: Theme.card
 
     property int editIndex: -1          // -1 = 新增
-    property var processNames: []       // 缓存（每次打开清空以取当前系统进程）
+    // 进程候选：累积集合——每秒热更新合并当前系统进程，已结束的进程不移除（打开窗口时清空重新累积）。
+    property var processNames: []
     property var processPaths: []
+    readonly property bool processType: {
+        var t = String(typeCombo.editText).toUpperCase()
+        return t === "PROCESS-NAME" || t === "PROCESS-PATH"
+    }
 
     function openWith(index, obj) {
         win.editIndex = index
@@ -45,17 +50,40 @@ ApplicationWindow {
     // 类型是进程时，value 变成系统进程可搜索下拉；否则纯文本输入。
     function refreshValueChoices(type) {
         var t = String(type).toUpperCase()
-        if (t === "PROCESS-NAME") {
-            if (win.processNames.length === 0)
-                win.processNames = settings.processChoices(false)
-            valueInput.choices = win.processNames
-        } else if (t === "PROCESS-PATH") {
-            if (win.processPaths.length === 0)
-                win.processPaths = settings.processChoices(true)
-            valueInput.choices = win.processPaths
-        } else {
+        if (t === "PROCESS-NAME" || t === "PROCESS-PATH")
+            win.refreshProcesses()
+        else
             valueInput.choices = []
+    }
+
+    // 取当前系统全部进程，合并进累积列表——只增不删（结束的进程保留可选）。
+    // Windows 下 processChoices 是原生 Toolhelp32 快照（毫秒级），每秒轮询无压力。
+    function refreshProcesses() {
+        var isPath = String(typeCombo.editText).toUpperCase() === "PROCESS-PATH"
+        var fresh = settings.processChoices(isPath)
+        var cur = (isPath ? win.processPaths : win.processNames).slice()
+        var seen = {}
+        for (var i = 0; i < cur.length; ++i)
+            seen[cur[i]] = true
+        for (var j = 0; j < fresh.length; ++j) {
+            if (!seen[fresh[j]]) {
+                seen[fresh[j]] = true
+                cur.push(fresh[j])
+            }
         }
+        if (isPath)
+            win.processPaths = cur
+        else
+            win.processNames = cur
+        valueInput.choices = cur // 重新赋值（新数组引用）触发下拉过滤刷新
+    }
+
+    // 进程候选每秒热更新：仅窗口可见且类型为进程时轮询。
+    Timer {
+        interval: 1000
+        repeat: true
+        running: win.visible && win.processType
+        onTriggered: win.refreshProcesses()
     }
 
     // ————————————————— 主题化可编辑下拉（类型/节点）—————————————————
