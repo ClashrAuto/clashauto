@@ -131,7 +131,7 @@ set_target_properties(clashauto-qml PROPERTIES WIN32_EXECUTABLE ON)
 if(WIN32)
     set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME "Coast")   # Windows 产物 Coast.exe（扁平自包含）
 elseif(NOT APPLE)
-    set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME clashauto) # Linux 暂留旧名（发布层未随 Windows 扁平化）
+    set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME "Coast")   # Linux 产物 Coast（扁平自包含，随 Windows 扁平化）
 endif()
 
 # macOS：打成「Coast.app」bundle；Clashr-Auto 运行时资源由 CI 放进 Contents/Clashr-Auto。

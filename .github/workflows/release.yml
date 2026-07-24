@@ -605,12 +605,12 @@ jobs:
         run: |
           set -euo pipefail
           stage="$STAGE_DIR"
-          app_dir="$stage/clashauto-c++"
+          app_dir="$stage"
           rm -rf "$stage"
           mkdir -p "$app_dir"
 
-          cp "$BUILD_DIR/clashauto" "$app_dir/"
-          chmod +x "$app_dir/clashauto"
+          cp "$BUILD_DIR/Coast" "$app_dir/"
+          chmod +x "$app_dir/Coast"
 
           # —— 打包 Qt 6.8.3 运行时（用户系统已无匹配 Qt，必须随包自带库+插件+QML 模块）——
           # 保持 Qt 的「prefix 相对布局」：app_dir 作 prefix，lib/ plugins/ qml/ 维持与其原始相同的
@@ -637,9 +637,9 @@ jobs:
           EOF
 
           # 主程序 RPATH 指向自带 lib（$ORIGIN 相对二进制真实路径，经 /usr/bin 符号链接调用也成立）
-          patchelf --set-rpath '$ORIGIN/lib' "$app_dir/clashauto"
+          patchelf --set-rpath '$ORIGIN/lib' "$app_dir/Coast"
 
-          test -x "$app_dir/clashauto"
+          test -x "$app_dir/Coast"
           # 关键运行时校验：平台插件 + Qt Quick 库必须已入包（缺则包必崩，就地失败）
           test -e "$app_dir/plugins/platforms/libqxcb.so"
           test -e "$app_dir/lib/libQt6Quick.so.6"
@@ -659,17 +659,18 @@ jobs:
         run: |
           set -euo pipefail
           pkg_root="dist/deb/ClashAuto"
-          install_root="$pkg_root/opt/ClashAuto"
+          install_root="$pkg_root/opt/Coast"
           mkdir -p "$install_root" "$pkg_root/usr/share/applications" "$pkg_root/usr/bin" "$pkg_root/DEBIAN"
 
+          # 扁平安装：暂存目录根即 Coast + Qt 运行时（无 clashauto-c++ 子目录），整体落到 /opt/Coast/
           cp -a "$STAGE_DIR/." "$install_root/"
-          ln -s /opt/ClashAuto/clashauto-c++/clashauto "$pkg_root/usr/bin/clashauto"
+          ln -s /opt/Coast/Coast "$pkg_root/usr/bin/coast"
 
-          cat > "$pkg_root/usr/share/applications/clashauto.desktop" <<'EOF'
+          cat > "$pkg_root/usr/share/applications/coast.desktop" <<'EOF'
           [Desktop Entry]
           Type=Application
-          Name=Clash Auto
-          Exec=/opt/ClashAuto/clashauto-c++/clashauto
+          Name=Coast
+          Exec=/opt/Coast/Coast
           Terminal=false
           Categories=Network;
           EOF
