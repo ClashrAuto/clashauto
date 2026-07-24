@@ -5,7 +5,7 @@
 #import "../helper/HelperProtocol.h"
 
 // daemon 的 launchd plist 文件名（位于 .app/Contents/Library/LaunchDaemons/ 下）
-static NSString *const kPlistName = @"com.yuehongsun.auto.helper.plist";
+static NSString *const kPlistName = @"com.yuehongsun.coast.helper.plist";
 
 namespace MacHelper {
 

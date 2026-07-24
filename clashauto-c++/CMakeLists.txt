@@ -127,20 +127,20 @@ set_target_properties(clashauto-qml PROPERTIES WIN32_EXECUTABLE ON)
 
 # 产物文件名统一为 clashauto（去掉历史上的 -qml/-cpp 后缀）：Windows→clashauto.exe，
 # Linux→clashauto。CMake 目标名仍叫 clashauto-qml（内部标识，不影响产物名）。
-# macOS 例外——见下方 if(APPLE)，输出「Clash Auto.app」bundle。
+# macOS 例外——见下方 if(APPLE)，输出「Coast.app」bundle。
 if(WIN32)
     set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME "Coast")   # Windows 产物 Coast.exe（扁平自包含）
 elseif(NOT APPLE)
     set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME clashauto) # Linux 暂留旧名（发布层未随 Windows 扁平化）
 endif()
 
-# macOS：打成「Clash Auto.app」bundle；Clashr-Auto 运行时资源由 CI 放进 Contents/Clashr-Auto。
+# macOS：打成「Coast.app」bundle；Clashr-Auto 运行时资源由 CI 放进 Contents/Clashr-Auto。
 if(APPLE)
     set_target_properties(clashauto-qml PROPERTIES
-        OUTPUT_NAME "Clash Auto"
+        OUTPUT_NAME "Coast"
         MACOSX_BUNDLE ON
         MACOSX_BUNDLE_BUNDLE_NAME "Coast"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "com.yuehongsun.auto"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "com.yuehongsun.coast"
         MACOSX_BUNDLE_BUNDLE_VERSION "${APP_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${APP_VERSION}")
     set(APP_ICNS "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.icns")
@@ -175,7 +175,7 @@ if(APPLE)
 
     # 特权 helper（以 root 运行的 launchd daemon）：独立可执行，只依赖 Foundation（NSXPC）。
     add_executable(clashauto-helper helper/helper_main.mm)
-    set_target_properties(clashauto-helper PROPERTIES OUTPUT_NAME "com.yuehongsun.auto.helper")
+    set_target_properties(clashauto-helper PROPERTIES OUTPUT_NAME "com.yuehongsun.coast.helper")
     target_include_directories(clashauto-helper PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/helper"
         "${CMAKE_CURRENT_BINARY_DIR}/generated")
@@ -190,10 +190,10 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E make_directory
             "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-qml>/Library/LaunchDaemons"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:clashauto-helper>"
-            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-qml>/MacOS/com.yuehongsun.auto.helper"
+            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-qml>/MacOS/com.yuehongsun.coast.helper"
         COMMAND ${CMAKE_COMMAND} -E copy
-            "${CMAKE_CURRENT_SOURCE_DIR}/helper/com.yuehongsun.auto.helper.plist"
-            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-qml>/Library/LaunchDaemons/com.yuehongsun.auto.helper.plist"
+            "${CMAKE_CURRENT_SOURCE_DIR}/helper/com.yuehongsun.coast.helper.plist"
+            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-qml>/Library/LaunchDaemons/com.yuehongsun.coast.helper.plist"
         VERBATIM)
 endif()
 
