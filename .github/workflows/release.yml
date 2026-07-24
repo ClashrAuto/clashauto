@@ -65,61 +65,6 @@ jobs:
           "RELEASE_TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Release version: $version (build number = commit count)"
 
-      - name: Download runtime resources
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $url = "https://github.com/ClashrAuto/Clashr-Auto-Desktop/releases/download/$env:RUNTIME_RELEASE_TAG/$env:RUNTIME_ASSET"
-          $zip = Join-Path $env:RUNNER_TEMP $env:RUNTIME_ASSET
-          Invoke-WebRequest -Uri $url -OutFile $zip
-
-          New-Item -ItemType Directory -Force "Clashr-Auto" | Out-Null
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
-          try {
-            foreach ($entry in $archive.Entries) {
-              $name = $entry.FullName.Replace('\', '/')
-              # language/ 不打包：C++ 版 i18n 走内嵌 qrc(:/assets/i18n/*.json)，原 Electron 语言包用不到。
-              if (-not ($name -eq "version" -or $name.StartsWith("command/") -or $name.StartsWith("config/"))) {
-                continue
-              }
-              # 不再预装内核：跳过 command/clash/ 下的核心二进制（用户在设置里按需下载）
-              if ($name.StartsWith("command/clash/")) {
-                continue
-              }
-              # 系统代理已改用 WinINET 原生 API：不再打包 sysproxy 二进制
-              if ($name.StartsWith("command/sysproxy/")) {
-                continue
-              }
-              # EnableLoopback 是 UWP 回环豁免工具，C++ 版未引用：不打包
-              if ($name -eq "command/EnableLoopback.exe") {
-                continue
-              }
-
-              $target = Join-Path "Clashr-Auto" $name
-              if ($name.EndsWith("/")) {
-                New-Item -ItemType Directory -Force $target | Out-Null
-                continue
-              }
-
-              New-Item -ItemType Directory -Force (Split-Path $target) | Out-Null
-              [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $target, $true)
-            }
-          } finally {
-            $archive.Dispose()
-          }
-
-          if (-not (Test-Path "Clashr-Auto\config\config.yaml")) {
-            throw "Runtime resources did not contain config/config.yaml"
-          }
-
-      - name: Prepare runtime core dir (no pre-bundled core)
-        shell: pwsh
-        run: |
-          # 不再预装内核：不下载、不校验核心，仅保留空的 clash 目录占位。
-          # 用户首次运行时由应用引导到「设置 → 系统」按需下载 mihomo（amd64 取兼容版）。
-          New-Item -ItemType Directory -Force "Clashr-Auto\command\clash" | Out-Null
-
       - name: Install Qt
         shell: pwsh
         run: |
@@ -184,11 +129,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $stage = Join-Path $pwd $env:STAGE_DIR
-          $appDir = Join-Path $stage "clashauto-c++"
-          $resourceDir = Join-Path $stage "Clashr-Auto"
-
-          New-Item -ItemType Directory -Force $appDir, $resourceDir | Out-Null
-          Copy-Item "$env:BUILD_DIR\Release\clashauto.exe" $appDir -Force
+          # 扁平自包含：Coast.exe 直接放包根，无 clashauto-c++/Clashr-Auto 子目录（资源已内嵌 exe）。
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "$env:BUILD_DIR\Release\Coast.exe" $stage -Force
 
           $deployTool = Join-Path $env:QT_ROOT "bin\windeployqt.exe"
           if (-not (Test-Path $deployTool)) {
@@ -205,7 +148,7 @@ jobs:
           $qmlSrcDir = Join-Path $pwd "clashauto-c++\qml"
           # --no-opengl-sw：不打包 opengl32sw.dll(~20MB 软件 OpenGL)；--no-system-d3d-compiler：不打包 d3dcompiler_47.dll(~4MB)。
           # 二者本 app 都用不到——已在 main_qml.cpp 强制 Qt Quick 软件后端(QSGRendererInterface::Software)。
-          & $deployTool --release --no-translations --no-opengl-sw --no-system-d3d-compiler --qmldir "$qmlSrcDir" "$appDir\clashauto.exe"
+          & $deployTool --release --no-translations --no-opengl-sw --no-system-d3d-compiler --qmldir "$qmlSrcDir" "$stage\Coast.exe"
 
           # 显式打包 MSVC 运行库：--compiler-runtime 实测不落 msvcp140_1/_2.dll，
           # 未装 VC++ redist 的机器启动即 0xC0000135（真机验证）。从 VC Tools Redist 目录直接复制。
@@ -220,42 +163,14 @@ jobs:
           }
           if ($crtDir) {
             Write-Host "Copying MSVC runtime from $crtDir"
-            Copy-Item (Join-Path $crtDir "*.dll") $appDir -Force
+            Copy-Item (Join-Path $crtDir "*.dll") $stage -Force
           } else {
             Write-Host "WARNING: MSVC runtime CRT dir not found; package may need VC++ redist"
           }
 
-          # 只打包运行时真正用到的：command(wintun + 内核占位) + config(yaml/mmdb) + version 标记。
-          # 去掉 language(内嵌 i18n)、mihomo/static(Electron 遗留，本就未下载)。
-          $resourceItems = @("command", "config", "version")
-          foreach ($item in $resourceItems) {
-            $source = Join-Path "Clashr-Auto" $item
-            if (-not (Test-Path $source)) {
-              Write-Host "Skipping missing resource: $source"
-              continue
-            }
-
-            $target = Join-Path $resourceDir $item
-            if (Test-Path $source -PathType Container) {
-              robocopy $source $target /E /NFL /NDL /NJH /NJS /NP
-              if ($LASTEXITCODE -le 7) {
-                $global:LASTEXITCODE = 0
-              } else {
-                exit $LASTEXITCODE
-              }
-            } else {
-              New-Item -ItemType Directory -Force (Split-Path $target) | Out-Null
-              Copy-Item $source $target -Force
-            }
-          }
-
-          if (-not (Test-Path "$appDir\clashauto.exe")) {
+          if (-not (Test-Path "$stage\Coast.exe")) {
             throw "Missing staged executable"
           }
-          if (-not (Test-Path "$resourceDir\config\config.yaml")) {
-            throw "Missing staged Clashr-Auto config resources"
-          }
-          # 内核不再随包分发：不校验 command\clash 下的核心是否存在
 
       - name: Create portable zip
         shell: pwsh
@@ -269,9 +184,9 @@ jobs:
           $ErrorActionPreference = "Stop"
           $nsi = @'
           Unicode true
-          Name "Clash Auto"
+          Name "Coast"
           OutFile "dist\ClashAuto-$%APP_VERSION%-windows-$%APP_ARCH%-setup.exe"
-          InstallDir "$LOCALAPPDATA\ClashAuto"
+          InstallDir "$LOCALAPPDATA\Coast"
           RequestExecutionLevel user
           AutoCloseWindow true
 
@@ -283,21 +198,21 @@ jobs:
           Section "Install"
             SetOutPath "$INSTDIR"
             File /r "dist\package\ClashAuto\*"
-            CreateDirectory "$SMPROGRAMS\Clash Auto"
-            CreateShortcut "$SMPROGRAMS\Clash Auto\Clash Auto.lnk" "$INSTDIR\clashauto-c++\clashauto.exe"
-            CreateShortcut "$DESKTOP\Clash Auto.lnk" "$INSTDIR\clashauto-c++\clashauto.exe"
+            CreateDirectory "$SMPROGRAMS\Coast"
+            CreateShortcut "$SMPROGRAMS\Coast\Coast.lnk" "$INSTDIR\Coast.exe"
+            CreateShortcut "$DESKTOP\Coast.lnk" "$INSTDIR\Coast.exe"
             WriteUninstaller "$INSTDIR\Uninstall.exe"
             ; 交互安装装完自动打开程序（0.1.110 之前的一键更新走「打开安装包」老路径，
             ; 装完不会回到应用——由安装器补上）；静默(/S)不启，launchSilentUpdateAndRestart
             ; 的守护进程负责重启，避免双开
             IfSilent +2
-            Exec '"$INSTDIR\clashauto-c++\clashauto.exe"'
+            Exec '"$INSTDIR\Coast.exe"'
           SectionEnd
 
           Section "Uninstall"
-            Delete "$DESKTOP\Clash Auto.lnk"
-            Delete "$SMPROGRAMS\Clash Auto\Clash Auto.lnk"
-            RMDir "$SMPROGRAMS\Clash Auto"
+            Delete "$DESKTOP\Coast.lnk"
+            Delete "$SMPROGRAMS\Coast\Coast.lnk"
+            RMDir "$SMPROGRAMS\Coast"
             RMDir /r "$INSTDIR"
           SectionEnd
           '@

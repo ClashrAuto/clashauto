@@ -128,8 +128,10 @@ set_target_properties(clashauto-qml PROPERTIES WIN32_EXECUTABLE ON)
 # 产物文件名统一为 clashauto（去掉历史上的 -qml/-cpp 后缀）：Windows→clashauto.exe，
 # Linux→clashauto。CMake 目标名仍叫 clashauto-qml（内部标识，不影响产物名）。
 # macOS 例外——见下方 if(APPLE)，输出「Clash Auto.app」bundle。
-if(NOT APPLE)
-    set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME clashauto)
+if(WIN32)
+    set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME "Coast")   # Windows 产物 Coast.exe（扁平自包含）
+elseif(NOT APPLE)
+    set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME clashauto) # Linux 暂留旧名（发布层未随 Windows 扁平化）
 endif()
 
 # macOS：打成「Clash Auto.app」bundle；Clashr-Auto 运行时资源由 CI 放进 Contents/Clashr-Auto。

@@ -612,20 +612,11 @@ void UpdateController::cancelDownload()
 void UpdateController::launchSilentUpdateAndRestart(const QString &installerPath)
 {
     // 交给隐藏的 PowerShell 守护进程：等本进程退出 → NSIS 静默安装（/S，/D= 装回当前目录）→ 重启。
-    QDir exeDir(QCoreApplication::applicationDirPath());
-    QString installRoot;
-    if (exeDir.dirName() == QStringLiteral("clashauto-c++")) {
-        QDir root = exeDir;
-        root.cdUp();
-        installRoot = root.absolutePath();
-    } else {
-        installRoot = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath(QStringLiteral("ClashAuto"));
-    }
-    // 重启新装的应用：产物统一名为 clashauto.exe（去掉历史 -qml/-cpp 后缀）。用当前进程的
-    // 可执行名动态取，避免再因二进制改名而重启到不存在的 exe（旧代码写死 clashauto-cpp.exe，
-    // QML 版产物却是 clashauto-qml.exe → 更新后无法自动重启，即 Windows「更新错乱」的根因）。
+    // 扁平自包含布局：exe 直接在安装根，安装根即当前 exe 所在目录（NSIS 装到 %LOCALAPPDATA%\Coast）。
+    const QString installRoot = QCoreApplication::applicationDirPath();
+    // 用当前进程可执行名动态取，避免二进制改名后重启到不存在的 exe。
     const QString exeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
-    const QString newExe = QDir(installRoot).filePath(QStringLiteral("clashauto-c++/") + exeName);
+    const QString newExe = QDir(installRoot).filePath(exeName);
     const auto psq = [](const QString &s) {
         QString r = QDir::toNativeSeparators(s);
         r.replace(QLatin1Char('\''), QStringLiteral("''"));
@@ -667,18 +658,10 @@ void UpdateController::launchZipUpdateAndRestart(const QString &zipPath)
 {
     // 便携版 zip 更新：隐藏的 PowerShell 守护进程等本进程退出 → 解压 zip →
     // robocopy 覆盖到项目根目录（/E 合并、不带 /PURGE，故保留 command\clash 下已下载的内核）→ 重启。
-    // 目录布局与安装器一致：<root>\clashauto-c++\<exe> + <root>\Clashr-Auto\...，而 zip 根内即这两个目录。
-    QDir exeDir(QCoreApplication::applicationDirPath());
-    QString installRoot;
-    if (exeDir.dirName() == QStringLiteral("clashauto-c++")) {
-        QDir root = exeDir;
-        root.cdUp();
-        installRoot = root.absolutePath();
-    } else {
-        installRoot = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath(QStringLiteral("ClashAuto"));
-    }
+    // 扁平自包含布局：安装根内即 exe + Qt 运行时；zip 根内也是这些，robocopy /E 合并覆盖到安装根。
+    const QString installRoot = QCoreApplication::applicationDirPath();
     const QString exeName = QFileInfo(QCoreApplication::applicationFilePath()).fileName();
-    const QString newExe = QDir(installRoot).filePath(QStringLiteral("clashauto-c++/") + exeName);
+    const QString newExe = QDir(installRoot).filePath(exeName);
     const QString extractDir = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
                                    .filePath(QStringLiteral("clashauto-zip-update"));
     const auto psq = [](const QString &s) {
