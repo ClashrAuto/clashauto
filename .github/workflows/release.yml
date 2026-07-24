@@ -20,10 +20,6 @@ env:
   QT_ARCH: win64_msvc2022_64
   BUILD_DIR: build-release
   STAGE_DIR: dist/package/ClashAuto
-  RUNTIME_RELEASE_TAG: v2.5.7
-  RUNTIME_ASSET: Clash.Auto-amd64-2.5.7-win.zip
-  RUNTIME_LINUX_ASSET: clash-auto-amd64-2.5.7.zip
-  MIHOMO_REPO: MetaCubeX/mihomo
 
 jobs:
   windows:
@@ -294,47 +290,6 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Release version: $version (build number = commit count)"
 
-      - name: Download runtime resources
-        shell: bash
-        run: |
-          set -euo pipefail
-          # v2.5.7 没有 mac 资源包：用 linux 包里的平台无关资源（config/、language/、version）。
-          # command/ 下的 sysproxy/wintun 都是别的平台的二进制，mac 不拷；核心由用户在
-          # 「设置 → 系统」按需下载 mihomo-darwin（更新内核已支持 darwin 资产）。
-          url="https://github.com/ClashrAuto/Clashr-Auto-Desktop/releases/download/${RUNTIME_RELEASE_TAG}/${RUNTIME_LINUX_ASSET}"
-          zip_path="${RUNNER_TEMP}/${RUNTIME_LINUX_ASSET}"
-          curl -L --fail --retry 3 -o "$zip_path" "$url"
-          rm -rf Clashr-Auto
-          mkdir -p Clashr-Auto
-
-          python3 - "$zip_path" <<'PY'
-          import pathlib
-          import sys
-          import zipfile
-
-          zip_path = pathlib.Path(sys.argv[1])
-          target_root = pathlib.Path("Clashr-Auto")
-          prefixes = ("config/", "language/")
-          with zipfile.ZipFile(zip_path) as archive:
-              for entry in archive.infolist():
-                  name = entry.filename.replace("\\", "/")
-                  if not (name == "version" or name.startswith(prefixes)):
-                      continue
-                  target = target_root / name
-                  if entry.is_dir():
-                      target.mkdir(parents=True, exist_ok=True)
-                      continue
-                  target.parent.mkdir(parents=True, exist_ok=True)
-                  with archive.open(entry) as src, target.open("wb") as dst:
-                      dst.write(src.read())
-          PY
-
-          mkdir -p Clashr-Auto/command/clash
-          if [ ! -f Clashr-Auto/config/config.yaml ]; then
-            echo "Runtime resources did not contain config/config.yaml" >&2
-            exit 1
-          fi
-
       - name: Install build dependencies
         shell: bash
         run: |
@@ -440,15 +395,7 @@ jobs:
           cp "clashauto-c++/helper/com.yuehongsun.auto.helper.plist" "$APP/Contents/Library/LaunchDaemons/"
           lipo -archs "$APP/Contents/MacOS/com.yuehongsun.auto.helper"
 
-          # 运行时资源进 bundle：Contents/Clashr-Auto。AppConfigLoader 从 exe 目录
-          # (Contents/MacOS) 向上探测 ../Clashr-Auto 第一跳即命中，拖进 /Applications 也不丢
-          mkdir -p "$APP/Contents/Clashr-Auto"
-          for item in command config version; do
-            if [ -e "Clashr-Auto/$item" ]; then
-              cp -a "Clashr-Auto/$item" "$APP/Contents/Clashr-Auto/"
-            fi
-          done
-          test -f "$APP/Contents/Clashr-Auto/config/config.yaml"
+          # 资源已内嵌 exe(qrc)，不再往 bundle 塞 Contents/Clashr-Auto —— app 自包含。
 
           # 签名（公证必需硬化运行时 + 安全时间戳）。macdeployqt 之后再签：install_name_tool 改写会破坏更早签名。
           # 关键：helper 必须用显式 -i 指定 identifier = com.yuehongsun.auto.helper（= launchd Label）。
@@ -580,60 +527,6 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Release version: $version (build number = commit count)"
 
-      - name: Download runtime resources
-        shell: bash
-        run: |
-          set -euo pipefail
-          url="https://github.com/ClashrAuto/Clashr-Auto-Desktop/releases/download/${RUNTIME_RELEASE_TAG}/${RUNTIME_LINUX_ASSET}"
-          zip_path="${RUNNER_TEMP}/${RUNTIME_LINUX_ASSET}"
-          curl -L --fail --retry 3 -o "$zip_path" "$url"
-          rm -rf Clashr-Auto
-          mkdir -p Clashr-Auto
-
-          python3 - "$zip_path" <<'PY'
-          import pathlib
-          import sys
-          import zipfile
-
-          zip_path = pathlib.Path(sys.argv[1])
-          target_root = pathlib.Path("Clashr-Auto")
-          prefixes = ("command/", "config/")
-          with zipfile.ZipFile(zip_path) as archive:
-              for entry in archive.infolist():
-                  name = entry.filename.replace("\\", "/")
-                  if not (name == "version" or name.startswith(prefixes)):
-                      continue
-                  # 不再预装内核：跳过 command/clash/ 下的核心二进制（用户在设置里按需下载）
-                  if name.startswith("command/clash/"):
-                      continue
-                  # 系统代理已改用 gsettings：不再打包 sysproxy 二进制
-                  if name.startswith("command/sysproxy/"):
-                      continue
-                  # EnableLoopback 是 UWP 回环豁免工具，C++ 版未引用：不打包
-                  if name == "command/EnableLoopback.exe":
-                      continue
-                  target = target_root / name
-                  if entry.is_dir():
-                      target.mkdir(parents=True, exist_ok=True)
-                      continue
-                  target.parent.mkdir(parents=True, exist_ok=True)
-                  with archive.open(entry) as src, target.open("wb") as dst:
-                      dst.write(src.read())
-          PY
-
-          if [ ! -f Clashr-Auto/config/config.yaml ]; then
-            echo "Runtime resources did not contain config/config.yaml" >&2
-            exit 1
-          fi
-
-      - name: Prepare runtime core dir (no pre-bundled core)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # 不再预装内核：不下载、不校验核心，仅保留空的 clash 目录占位。
-          # 用户首次运行时由应用引导到「设置 → 系统」按需下载 mihomo。
-          mkdir -p Clashr-Auto/command/clash
-
       - name: Install build dependencies
         shell: bash
         run: |
@@ -713,9 +606,8 @@ jobs:
           set -euo pipefail
           stage="$STAGE_DIR"
           app_dir="$stage/clashauto-c++"
-          resource_dir="$stage/Clashr-Auto"
           rm -rf "$stage"
-          mkdir -p "$app_dir" "$resource_dir"
+          mkdir -p "$app_dir"
 
           cp "$BUILD_DIR/clashauto" "$app_dir/"
           chmod +x "$app_dir/clashauto"
@@ -747,16 +639,7 @@ jobs:
           # 主程序 RPATH 指向自带 lib（$ORIGIN 相对二进制真实路径，经 /usr/bin 符号链接调用也成立）
           patchelf --set-rpath '$ORIGIN/lib' "$app_dir/clashauto"
 
-          for item in command config language mihomo static version; do
-            if [ -e "Clashr-Auto/$item" ]; then
-              cp -a "Clashr-Auto/$item" "$resource_dir/"
-            else
-              echo "Skipping missing resource: Clashr-Auto/$item"
-            fi
-          done
-
           test -x "$app_dir/clashauto"
-          test -f "$resource_dir/config/config.yaml"
           # 关键运行时校验：平台插件 + Qt Quick 库必须已入包（缺则包必崩，就地失败）
           test -e "$app_dir/plugins/platforms/libqxcb.so"
           test -e "$app_dir/lib/libQt6Quick.so.6"
