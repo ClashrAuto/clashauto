@@ -202,7 +202,7 @@ private:
     int m_downloadMixedPort = 7890;
 
     // 初始/当前值
-    QString m_userDir;
+    QString m_configDir;
     QString m_host = QStringLiteral("127.0.0.1");
     int m_uiPort = 9191;
     int m_mixedPort = 7890;

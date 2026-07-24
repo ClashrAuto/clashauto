@@ -39,7 +39,7 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
     : QObject(parent), m_core(core), m_clash(clash), m_subs(subs)
 {
     if (config) {
-        m_userDir = config->userDir; // persistConfigBool 落盘 config.yaml 用
+        m_userDir = config->configDir; // persistConfigBool 落盘 config.yaml 用（configDir = userDir/config）
         m_autoTheme = config->autoTheme;
         m_closeToTray = config->closeToTray;
         m_nodeSwitchNote = config->nodeSwitchNote;

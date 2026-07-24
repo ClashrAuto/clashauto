@@ -16,13 +16,13 @@ ConfigBuilder::ConfigBuilder(AppConfig config) : m_config(std::move(config))
 
 QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
 {
-    const QString defaultPath = QDir(m_config.userDir).filePath("default.yaml");
+    const QString defaultPath = QDir(m_config.configDir).filePath("default.yaml");
     const QString bundledDefault = QDir(m_config.sourceRoot).filePath("config/default.yaml");
     if (!QFile::exists(defaultPath) && QFile::exists(bundledDefault)) {
         QFile::copy(bundledDefault, defaultPath);
     }
 
-    const QString pluginPath = QDir(m_config.userDir).filePath("plugin.yaml");
+    const QString pluginPath = QDir(m_config.configDir).filePath("plugin.yaml");
     const QString bundledPlugin = QDir(m_config.sourceRoot).filePath("config/plugin.yaml");
     if (!QFile::exists(pluginPath) && QFile::exists(bundledPlugin)) {
         QFile::copy(bundledPlugin, pluginPath);
@@ -46,7 +46,7 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = applySubscriptions(yaml, readSubscriptions());
     yaml = applyCustomRules(yaml);
 
-    const QString fullPath = QDir(m_config.userDir).filePath("full.yaml");
+    const QString fullPath = QDir(m_config.configDir).filePath("full.yaml");
     writeText(fullPath, yaml);
     return fullPath;
 }
@@ -111,7 +111,7 @@ QString ConfigBuilder::mergePlugin(const QString &base, const QString &plugin) c
 
 QVector<ConfigBuilder::Subscription> ConfigBuilder::readSubscriptions() const
 {
-    const QString userPath = QDir(m_config.userDir).filePath("subscribe.yaml");
+    const QString userPath = QDir(m_config.configDir).filePath("subscribe.yaml");
     const QString bundledPath = QDir(m_config.sourceRoot).filePath("config/subscribe.yaml");
     if (!QFile::exists(userPath) && QFile::exists(bundledPath)) {
         QFile::copy(bundledPath, userPath);
@@ -305,7 +305,7 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
     // 消费设置页写入的 userDir/rules.json：
     //   area: [{name, type, rule}]  -> 生成按正则匹配节点名的自定义 proxy-group（对应旧项目 def['proxy-groups'] 中带 rule 的项）
     //   rule: [{type, node, value}] -> 前插到 rules: 顶部（对应旧项目 def.rules.unshift）
-    const QString rulesPath = QDir(m_config.userDir).filePath("rules.json");
+    const QString rulesPath = QDir(m_config.configDir).filePath("rules.json");
     QFile file(rulesPath);
     if (!file.open(QIODevice::ReadOnly)) {
         return yaml;

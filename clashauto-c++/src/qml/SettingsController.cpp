@@ -150,7 +150,7 @@ SettingsController::SettingsController(CoreController *core, ClashService *clash
 void SettingsController::loadInitialValues()
 {
     const AppConfig c = AppConfigLoader::load();
-    m_userDir = c.userDir;
+    m_configDir = c.configDir;
     m_host = c.host;
     m_uiPort = c.uiPort;
     m_mixedPort = c.mixedPort;
@@ -190,7 +190,7 @@ QStringList SettingsController::noAllowRulePresets() const
 
 QString SettingsController::userConfigPath() const
 {
-    return QDir(m_userDir).filePath("config.yaml");
+    return QDir(m_configDir).filePath("config.yaml");
 }
 
 void SettingsController::setMessage(const QString &msg)
@@ -470,12 +470,12 @@ void SettingsController::apply(const QString &host, int uiPort, int mixedPort, b
 
 QString SettingsController::defaultConfigPath() const
 {
-    const QString userDef = QDir(m_userDir).filePath("default.yaml");
+    const QString userDef = QDir(m_configDir).filePath("default.yaml");
     if (!QFile::exists(userDef)) {
         const AppConfig cfg = AppConfigLoader::load();
         const QString bundled = QDir(cfg.sourceRoot).filePath("config/default.yaml");
         if (QFile::exists(bundled)) {
-            QDir().mkpath(m_userDir);
+            QDir().mkpath(m_configDir);
             QFile::copy(bundled, userDef);
         }
     }
@@ -876,7 +876,7 @@ QStringList SettingsController::proxyGroupNames() const
     QStringList names;
     names << QStringLiteral("DIRECT") << QStringLiteral("REJECT");
 
-    QFile full(QDir(m_userDir).filePath(QStringLiteral("full.yaml")));
+    QFile full(QDir(m_configDir).filePath(QStringLiteral("full.yaml")));
     if (full.open(QIODevice::ReadOnly)) {
         const QString yaml = QString::fromUtf8(full.readAll());
         names << ConfigBuilder::existingGroupNames(yaml);

@@ -18,7 +18,7 @@ SubscriptionStore::SubscriptionStore(AppConfig config, QObject *parent)
 
 QString SubscriptionStore::path() const
 {
-    return QDir(m_config.userDir).filePath("subscribe.yaml");
+    return QDir(m_config.configDir).filePath("subscribe.yaml");
 }
 
 QVector<SubscriptionSummary> SubscriptionStore::load()
