@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Layouts
 import ClashAuto
 
-// 关于页：居中 logo + 「Clash Auto」标题 + 版本行(点击查更新，发现新版本转红) + 简介 + 链接行。
+// 关于页：居中 logo + 「Coast」标题 + 版本行(点击查更新，发现新版本转红) + 简介 + 链接行。
 // 版本来自 bridge.version；检查更新走 about 适配器（src/qml/AboutController）。
 Item {
     id: page
@@ -39,7 +39,7 @@ Item {
             // —— 标题 ——
             Text {
                 Layout.alignment: Qt.AlignHCenter
-                text: "Clash Auto"
+                text: "Coast"
                 font.pixelSize: 30
                 font.bold: true
                 color: Theme.textPrimary

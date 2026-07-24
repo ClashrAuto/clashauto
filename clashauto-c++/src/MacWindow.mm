@@ -5,7 +5,7 @@
 namespace {
 
 // 幂等标记：毛玻璃层在窗框视图子树中的标识，重复调用只查找复用、不重复插入。
-NSString *const kBlurViewId = @"ClashAutoBlurEffectView";
+NSString *const kBlurViewId = @"CoastBlurEffectView";
 
 // winId() 在 macOS 上是 NSView*；由它取到承载它的 NSWindow。
 // ARC 下禁止整数直接转 Obj-C 指针，先转 void* 再 __bridge（不转移所有权）。

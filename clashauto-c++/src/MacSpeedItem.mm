@@ -133,7 +133,7 @@ void macTrayInstall(const MacTrayHandlers &handlers)
     // visible=NO（核心未起先藏着），这个 NO 已被系统记进 defaults；本实现若从不碰 visible，
     // 创建瞬间就被恢复成「隐藏」→ 菜单栏里整项完全不出现（连兜底灰块都轮不到画）。
     // 换固定 autosaveName 绕开陈旧的 "Item-0" 记录，再强制 YES 让系统把 YES 持久化回去。
-    g_item.autosaveName = @"ClashAutoTray";
+    g_item.autosaveName = @"CoastTray";
     g_item.visible = YES;
 
     NSMenu *menu = [[NSMenu alloc] init];

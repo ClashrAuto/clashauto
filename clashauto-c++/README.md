@@ -81,13 +81,13 @@ $env:Path='C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.8.3\mingw_64\bin;' + $env:Path
 生成的 Clash 配置默认位于：
 
 ```text
-C:\Users\Administrator\AppData\Roaming\ClashAuto\Clash Auto\clash-auto\full.yaml
+C:\Users\Administrator\AppData\Roaming\Coast\Coast\coast\full.yaml
 ```
 
 可用原项目内置 Clash 核心验证：
 
 ```powershell
-G:\clashauto\Clashr-Auto\command\clash\clash-windows-amd64.exe -t -f "C:\Users\Administrator\AppData\Roaming\ClashAuto\Clash Auto\clash-auto\full.yaml"
+G:\clashauto\Clashr-Auto\command\clash\clash-windows-amd64.exe -t -f "C:\Users\Administrator\AppData\Roaming\Coast\Coast\coast\full.yaml"
 ```
 
 ## 当前验证

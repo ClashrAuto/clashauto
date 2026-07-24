@@ -135,7 +135,7 @@ if(APPLE)
     set_target_properties(clashauto-qml PROPERTIES
         OUTPUT_NAME "Clash Auto"
         MACOSX_BUNDLE ON
-        MACOSX_BUNDLE_BUNDLE_NAME "Clash Auto"
+        MACOSX_BUNDLE_BUNDLE_NAME "Coast"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.yuehongsun.auto"
         MACOSX_BUNDLE_BUNDLE_VERSION "${APP_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${APP_VERSION}")

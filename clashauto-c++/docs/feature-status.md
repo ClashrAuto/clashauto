@@ -98,7 +98,7 @@
 ```powershell
 # 1) 生成配置并用真核心校验（真机上核心可运行时）
 .\clashauto-cpp.exe --build-config
-<核心路径>\clash-windows-amd64.exe -t -f "%AppData%\ClashAuto\Clash Auto\clash-auto\full.yaml"
+<核心路径>\clash-windows-amd64.exe -t -f "%AppData%\Coast\Coast\coast\full.yaml"
 
 # 2) 协议导入（真机 Windows，应用已至少启动过一次完成注册）
 start "clash-auto://import?url=<URL编码的订阅地址>&name=测试&type=sub"

@@ -17,7 +17,7 @@ ApplicationWindow {
     height: 510
     minimumWidth: 640
     minimumHeight: 430
-    title: "Clash Auto"
+    title: "Coast"
 
     readonly property bool isMac: Qt.platform.os === "osx"
     readonly property bool isWin: Qt.platform.os === "windows"

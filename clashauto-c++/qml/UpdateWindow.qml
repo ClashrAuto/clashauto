@@ -18,7 +18,7 @@ ApplicationWindow {
     height: 560
     minimumWidth: 460
     minimumHeight: 420
-    title: qsTr("Clash Auto 更新")
+    title: qsTr("Coast 更新")
     color: Theme.card
 
     property int currentTab: 0   // 0 程序 / 1 内核 / 2 GeoIP
@@ -113,7 +113,7 @@ ApplicationWindow {
 
         // —— 标题 ——
         Text {
-            text: qsTr("Clash Auto 更新")
+            text: qsTr("Coast 更新")
             font.pixelSize: 16
             font.bold: true
             color: Theme.textPrimary

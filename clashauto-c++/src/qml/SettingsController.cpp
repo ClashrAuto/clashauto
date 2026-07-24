@@ -360,9 +360,9 @@ void SettingsController::applyAutoStart(bool enabled)
                   QSettings::NativeFormat);
     if (enabled) {
         const QString path = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
-        reg.setValue("ClashAuto", QString("\"%1\"").arg(path));
+        reg.setValue("Coast", QString("\"%1\"").arg(path));
     } else {
-        reg.remove("ClashAuto");
+        reg.remove("Coast");
     }
 #else
     Q_UNUSED(enabled);
@@ -1216,7 +1216,7 @@ void SettingsController::installMacHelper()
         setMessage(QStringLiteral("免密助手已启用"));
     } else if (st == MacHelper::RegStatus::RequiresApproval) {
         MacHelper::openLoginItemsSettings();
-        setMessage(QStringLiteral("免密助手需在「系统设置 → 登录项」允许 Clash Auto 的后台项，批准后自动生效"));
+        setMessage(QStringLiteral("免密助手需在「系统设置 → 登录项」允许 Coast 的后台项，批准后自动生效"));
         startMacHelperApprovalWatch();
     } else {
         setMessage(QStringLiteral("免密助手安装失败：%1").arg(err));

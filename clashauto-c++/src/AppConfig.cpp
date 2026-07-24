@@ -53,7 +53,7 @@ AppConfig AppConfigLoader::load()
     }
 
     const QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    config.userDir = QDir(appData).filePath("clash-auto");
+    config.userDir = QDir(appData).filePath("coast");
     QDir().mkpath(config.userDir);
 
     const QString bundledConfig = QDir(config.sourceRoot).filePath("config/config.yaml");

@@ -3,7 +3,7 @@
 // 用 QApplication（而非 QGuiApplication）：TrayController/QSystemTrayIcon 依赖 QtWidgets。
 //
 // 启动行为：正式版**默认自动拉起核心**（对齐旧 Widgets 版 MainWindow 的 startCore-on-launch）。
-// 本地测 UI 时设环境变量 CLASHAUTO_NO_AUTOSTART=1 可跳过自动起核心——本机常已有一个实例在跑，
+// 本地测 UI 时设环境变量 COAST_NO_AUTOSTART=1 可跳过自动起核心——本机常已有一个实例在跑，
 // 避免端口(9090)/系统代理/TUN 冲突。ClashService::start() 只是只读轮询 REST API，始终安全。
 #include "AppConfig.h"
 #include "ClashService.h"
@@ -34,8 +34,8 @@ int main(int argc, char *argv[])
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报
     // "current style does not support customization"），本 app 全是自绘控件，必须 Basic。
     QQuickStyle::setStyle("Basic");
-    QApplication::setApplicationName("Clash Auto");
-    QApplication::setOrganizationName("ClashAuto");
+    QApplication::setApplicationName("Coast");
+    QApplication::setOrganizationName("Coast");
 #ifndef Q_OS_MACOS
     // mac 的 Dock/程序坞图标由 .app 包内的 icon.icns 提供（含 macOS 规范留白，尺寸与其它 App 一致）；
     // 若在此 setWindowIcon(全出血的 icon.ico) 会覆盖 Dock 图标、显得比别的图标大一圈，故 mac 不设。
@@ -155,10 +155,10 @@ int main(int argc, char *argv[])
                 core->startCore();
             }
         });
-    } else if (qEnvironmentVariableIsEmpty("CLASHAUTO_NO_AUTOSTART")) {
+    } else if (qEnvironmentVariableIsEmpty("COAST_NO_AUTOSTART")) {
         // 正式版：启动即自动拉起核心（复刻旧版 MainWindow：有内核就起）。延时 600ms 让 UI 先就绪。
         // Windows 上若上次开着增强(TUN)而当前非提权，autoStartCore 会先按需提权重启（见 QmlBridge）。
-        // 本地测 UI 时 CLASHAUTO_NO_AUTOSTART=1 跳过（本机已有实例，避免端口/代理/TUN 冲突）。
+        // 本地测 UI 时 COAST_NO_AUTOSTART=1 跳过（本机已有实例，避免端口/代理/TUN 冲突）。
         QTimer::singleShot(600, &bridge, &QmlBridge::autoStartCore);
     }
     return app.exec();

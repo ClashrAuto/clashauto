@@ -119,7 +119,7 @@ bool macApplyProxies(AuthorizationRef auth, bool enable, const QString &host, in
                      const QStringList &bypass, QString *err)
 {
     SCPreferencesRef prefs = SCPreferencesCreateWithAuthorization(
-        kCFAllocatorDefault, CFSTR("ClashAuto"), nullptr, auth);
+        kCFAllocatorDefault, CFSTR("Coast"), nullptr, auth);
     if (!prefs) {
         if (err) *err = QObject::tr("SCPreferencesCreateWithAuthorization 返回空");
         return false;

@@ -82,7 +82,7 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
     });
 #else
     refreshIcon(); // 初始（核心未起）用原色图标
-    m_tray.setToolTip("Clash Auto");
+    m_tray.setToolTip("Coast");
     connect(&m_tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger) {
             emit openWindowRequested(); // QML 版：main_qml 连到 QQuickWindow 重开
@@ -156,7 +156,7 @@ void TrayController::setStatus(bool tun, bool proxy, bool core)
     macTraySetStatus(tun, proxy, core); // 原生托盘：更新菜单项文字 + 核心在跑才显示速率
     updateMacTrayIcon();                 // 状态变了重画白色地球 + 角标（T/W/C/N）
 #else
-    m_tray.setToolTip(QString("Clash Auto - %1").arg(core ? tr("运行中") : tr("已停止")));
+    m_tray.setToolTip(QString("Coast - %1").arg(core ? tr("运行中") : tr("已停止")));
     refreshIcon(); // 状态变了刷新图标颜色（增强=红、核心在跑=黄）
     m_coreAction->setText(core ? tr("停止核心") : tr("启动核心"));
     m_proxyAction->setText(proxy ? tr("关闭网页代理") : tr("打开网页代理"));
@@ -176,7 +176,7 @@ void TrayController::retranslate()
     if (m_coreAction) m_coreAction->setText(m_core ? tr("停止核心") : tr("启动核心"));
     if (m_proxyAction) m_proxyAction->setText(m_proxy ? tr("关闭网页代理") : tr("打开网页代理"));
     if (m_tunAction) m_tunAction->setText(m_tun ? tr("关闭增强模式") : tr("打开增强模式"));
-    m_tray.setToolTip(QString("Clash Auto - %1").arg(m_core ? tr("运行中") : tr("已停止")));
+    m_tray.setToolTip(QString("Coast - %1").arg(m_core ? tr("运行中") : tr("已停止")));
 #endif
 }
 

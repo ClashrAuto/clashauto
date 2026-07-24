@@ -31,7 +31,7 @@ static CFMutableDictionaryRef copyProxiesDict(SCPreferencesRef prefs, CFStringRe
 
 static BOOL applyProxies(BOOL enable, NSString *host, int port, NSArray<NSString *> *bypass, NSString **errOut)
 {
-    SCPreferencesRef prefs = SCPreferencesCreate(kCFAllocatorDefault, CFSTR("ClashAutoHelper"), nullptr);
+    SCPreferencesRef prefs = SCPreferencesCreate(kCFAllocatorDefault, CFSTR("CoastHelper"), nullptr);
     if (!prefs) { if (errOut) *errOut = @"SCPreferencesCreate 返回空"; return NO; }
     if (!SCPreferencesLock(prefs, true)) {
         if (errOut) *errOut = @"SCPreferencesLock 失败";
