@@ -79,7 +79,8 @@ jobs:
           try {
             foreach ($entry in $archive.Entries) {
               $name = $entry.FullName.Replace('\', '/')
-              if (-not ($name -eq "version" -or $name.StartsWith("command/") -or $name.StartsWith("config/") -or $name.StartsWith("language/"))) {
+              # language/ 不打包：C++ 版 i18n 走内嵌 qrc(:/assets/i18n/*.json)，原 Electron 语言包用不到。
+              if (-not ($name -eq "version" -or $name.StartsWith("command/") -or $name.StartsWith("config/"))) {
                 continue
               }
               # 不再预装内核：跳过 command/clash/ 下的核心二进制（用户在设置里按需下载）
@@ -88,6 +89,10 @@ jobs:
               }
               # 系统代理已改用 WinINET 原生 API：不再打包 sysproxy 二进制
               if ($name.StartsWith("command/sysproxy/")) {
+                continue
+              }
+              # EnableLoopback 是 UWP 回环豁免工具，C++ 版未引用：不打包
+              if ($name -eq "command/EnableLoopback.exe") {
                 continue
               }
 
@@ -198,7 +203,9 @@ jobs:
           # QML 应用：--qmldir 让 windeployqt 扫描本 app 的 .qml 源并部署所需 Qt Quick 运行时
           # + QML 模块插件（Qt6Quick、QtQuick.Controls[Basic]、QtQuick.Layouts、QtQuick.Templates、QtQuick.Window）。
           $qmlSrcDir = Join-Path $pwd "clashauto-c++\qml"
-          & $deployTool --release --no-translations --qmldir "$qmlSrcDir" "$appDir\clashauto.exe"
+          # --no-opengl-sw：不打包 opengl32sw.dll(~20MB 软件 OpenGL)；--no-system-d3d-compiler：不打包 d3dcompiler_47.dll(~4MB)。
+          # 二者本 app 都用不到——已在 main_qml.cpp 强制 Qt Quick 软件后端(QSGRendererInterface::Software)。
+          & $deployTool --release --no-translations --no-opengl-sw --no-system-d3d-compiler --qmldir "$qmlSrcDir" "$appDir\clashauto.exe"
 
           # 显式打包 MSVC 运行库：--compiler-runtime 实测不落 msvcp140_1/_2.dll，
           # 未装 VC++ redist 的机器启动即 0xC0000135（真机验证）。从 VC Tools Redist 目录直接复制。
@@ -218,7 +225,9 @@ jobs:
             Write-Host "WARNING: MSVC runtime CRT dir not found; package may need VC++ redist"
           }
 
-          $resourceItems = @("command", "config", "language", "mihomo", "static", "version")
+          # 只打包运行时真正用到的：command(wintun + 内核占位) + config(yaml/mmdb) + version 标记。
+          # 去掉 language(内嵌 i18n)、mihomo/static(Electron 遗留，本就未下载)。
+          $resourceItems = @("command", "config", "version")
           foreach ($item in $resourceItems) {
             $source = Join-Path "Clashr-Auto" $item
             if (-not (Test-Path $source)) {
@@ -519,7 +528,7 @@ jobs:
           # 运行时资源进 bundle：Contents/Clashr-Auto。AppConfigLoader 从 exe 目录
           # (Contents/MacOS) 向上探测 ../Clashr-Auto 第一跳即命中，拖进 /Applications 也不丢
           mkdir -p "$APP/Contents/Clashr-Auto"
-          for item in command config language version; do
+          for item in command config version; do
             if [ -e "Clashr-Auto/$item" ]; then
               cp -a "Clashr-Auto/$item" "$APP/Contents/Clashr-Auto/"
             fi
@@ -673,7 +682,7 @@ jobs:
 
           zip_path = pathlib.Path(sys.argv[1])
           target_root = pathlib.Path("Clashr-Auto")
-          prefixes = ("command/", "config/", "language/")
+          prefixes = ("command/", "config/")
           with zipfile.ZipFile(zip_path) as archive:
               for entry in archive.infolist():
                   name = entry.filename.replace("\\", "/")
@@ -684,6 +693,9 @@ jobs:
                       continue
                   # 系统代理已改用 gsettings：不再打包 sysproxy 二进制
                   if name.startswith("command/sysproxy/"):
+                      continue
+                  # EnableLoopback 是 UWP 回环豁免工具，C++ 版未引用：不打包
+                  if name == "command/EnableLoopback.exe":
                       continue
                   target = target_root / name
                   if entry.is_dir():
