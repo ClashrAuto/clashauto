@@ -11,63 +11,44 @@
 
 QString AppConfig::clashExecutable() const
 {
-    // 新（扁平）布局优先：command/core[.exe]（Coast\command\core.exe）。不存在时回退旧布局
-    // command/clash/clash-<os>-<arch>（Clashr-Auto 资源包 / 开发树），保证过渡期两种发布包都能跑。
+    // 核心按需下载到「用户可写目录」userDir/command：优先 command/core[.exe]，回退旧
+    // command/clash/clash-<os>-<arch>（兼容早期下载到该路径的用户）。app 自包含后不再依赖 Clashr-Auto。
+    // mac 尤其必须放 .app 外：签名+公证的 .app 只读封存，往包内写核心会破坏封存，
+    // 使 SMAppService 特权 helper 被 Launch Constraint Violation SIGKILL（TUN/增强失效）。
     const bool arm = QSysInfo::currentCpuArchitecture().contains("arm");
 #if defined(Q_OS_WIN)
-    const QString flat = QDir(sourceRoot).filePath("command/core.exe");
+    const QString flat = QDir(userDir).filePath("command/core.exe");
     if (QFile::exists(flat)) return flat;
-    return QDir(sourceRoot).filePath(arm ? "command/clash/clash-windows-arm64.exe" : "command/clash/clash-windows-amd64.exe");
+    return QDir(userDir).filePath(arm ? "command/clash/clash-windows-arm64.exe" : "command/clash/clash-windows-amd64.exe");
 #elif defined(Q_OS_MACOS)
-    // core 必须放在「.app 包外、且用户可写」的位置：签名+公证后的 .app 是只读封存的，往包内
-    // （Contents/Clashr-Auto/command/clash）下载 core 会破坏 app 的代码签名封存（codesign --verify
-    // 报 "a sealed resource is missing or invalid / file added"）。而 SMAppService 特权 helper 启动时
-    // 系统会校验其宿主 app 的签名——app 封存一破，daemon 即被 Launch Constraint Violation 用 SIGKILL 杀掉，
-    // 核心永远无法以 root 运行（TUN/增强失效）。故 core 落到用户目录 userDir，与包内只读资源分离。
     const QString flat = QDir(userDir).filePath("command/core");
     if (QFile::exists(flat)) return flat;
     return QDir(userDir).filePath(arm ? "command/clash/clash-darwin-arm64" : "command/clash/clash-darwin-amd64");
 #else
-    const QString flat = QDir(sourceRoot).filePath("command/core");
+    const QString flat = QDir(userDir).filePath("command/core");
     if (QFile::exists(flat)) return flat;
-    return QDir(sourceRoot).filePath(arm ? "command/clash/clash-linux-arm64" : "command/clash/clash-linux-amd64");
+    return QDir(userDir).filePath(arm ? "command/clash/clash-linux-arm64" : "command/clash/clash-linux-amd64");
 #endif
 }
 
 QString AppConfig::clashConfig() const
 {
-    const QString userFull = QDir(configDir).filePath("full.yaml");
-    if (QFile::exists(userFull)) {
-        return userFull;
-    }
-    return QDir(sourceRoot).filePath("config/full.yaml");
+    // full.yaml 由 ConfigBuilder 生成到 configDir；核心启动前必先 ensureFullConfig，故总在此。
+    return QDir(configDir).filePath("full.yaml");
+}
+
+void AppConfig::makeWritable(const QString &path)
+{
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                    | QFileDevice::ReadUser | QFileDevice::WriteUser
+                                    | QFileDevice::ReadGroup | QFileDevice::ReadOther);
 }
 
 AppConfig AppConfigLoader::load()
 {
     AppConfig config;
-    QDir probe(QCoreApplication::applicationDirPath());
-    // 扁平布局（Coast\ 内 exe 与 config/command 同级；Win 发布包 / 未来主布局）：资源就在 exe 目录旁。
-    if (QFile::exists(probe.filePath("config/config.yaml"))) {
-        config.sourceRoot = probe.canonicalPath();
-    } else {
-        // 回退旧布局：向上最多 8 层找同级 Clashr-Auto/config/config.yaml
-        //（开发树 / 旧发布包 / mac .app 内 Contents/Clashr-Auto）。
-        for (int i = 0; i < 8; ++i) {
-            const QString candidate = probe.filePath("../Clashr-Auto");
-            if (QFile::exists(QDir(candidate).filePath("config/config.yaml"))) {
-                config.sourceRoot = QDir(candidate).canonicalPath();
-                break;
-            }
-            if (!probe.cdUp()) {
-                break;
-            }
-        }
-    }
-    if (config.sourceRoot.isEmpty()) {
-        config.sourceRoot = QDir(QCoreApplication::applicationDirPath()).filePath("../Clashr-Auto");
-    }
-
+    // 资源已内嵌(qrc :/assets/bundle/*)：config 种子从 qrc 落地，核心/wintun/mmdb 运行时写到 userDir。
+    // 不再探测同级 Clashr-Auto 目录 —— app 完全自包含。
     const QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     // 数据根 userDir = <AppData 根>/Coast（Win: %AppData%\Coast）：核心家目录(-d)，放 logs\、Country.mmdb、cache。
     // AppDataLocation 因 org==app=="Coast" 得 <根>/Coast/Coast，上跳一级回到品牌根 <根>/Coast。
@@ -76,10 +57,11 @@ AppConfig AppConfigLoader::load()
     config.configDir = QDir(config.userDir).filePath(QStringLiteral("config"));
     QDir().mkpath(config.configDir); // 一并创建父级 userDir
 
-    const QString bundledConfig = QDir(config.sourceRoot).filePath("config/config.yaml");
+    const QString bundledConfig = QStringLiteral(":/assets/bundle/config/config.yaml"); // 内嵌种子，不再依赖 Clashr-Auto
     const QString userConfig = QDir(config.configDir).filePath("config.yaml");
     if (!QFile::exists(userConfig) && QFile::exists(bundledConfig)) {
         QFile::copy(bundledConfig, userConfig);
+        AppConfig::makeWritable(userConfig); // qrc 种子默认只读，先补写权限（下方 mini 归一化需写回）
         // 首次落地用户配置时把「关闭到托盘」(mini) 归一到本 App 默认「关」。bundle 配置源自 Electron 版
         // 发布（固定写 mini: true），但 C++ 版默认关闭到托盘为关（新用户默认正常显示窗口 + ✕ 退出，
         // 与设置页开关的未勾选态一致）。仅首次 seed 时处理，用户之后在设置里的改动照常保存、不再被覆盖。

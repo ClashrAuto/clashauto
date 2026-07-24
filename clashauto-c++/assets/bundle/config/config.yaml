@@ -1,0 +1,38 @@
+port: 7890
+sys: true
+use: false
+root: true
+route: false
+power: true
+experimental:
+  interface-name: ''
+tapinstall: false
+gateway: ''
+timer: '300'
+use_rule:
+  allow: ''
+  noallow: ''
+  allowUse: false
+  noallowUse: false
+  allows:
+    - \[0\.[0-9]+\]
+  noallows:
+    - \[[0-9]+\]
+    - '[0-9\[\]]+'
+    - '[\[0-9\]]+$'
+    - '[0-9]{1}\]$'
+    - CN
+    - ^CN
+    - CN_
+    - ' '
+mini: true
+theme: black
+language: zh-CN
+clearConnections: true
+increment: false
+socket:
+  address: ws://155.248.201.2:3000
+node: true
+delay: true
+note: true
+autoTheme: true

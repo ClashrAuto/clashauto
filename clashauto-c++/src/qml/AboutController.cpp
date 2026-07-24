@@ -252,8 +252,7 @@ void AboutController::checkGeoip()
             if (dl->error() != QNetworkReply::NoError || data.isEmpty()) {
                 return; // 后台静默：失败就下次再试，不打扰用户
             }
-            const QStringList targets = {QDir(m_config.userDir).filePath(QStringLiteral("Country.mmdb")),
-                                         QDir(m_config.sourceRoot).filePath(QStringLiteral("config/Country.mmdb"))};
+            const QStringList targets = {QDir(m_config.userDir).filePath(QStringLiteral("Country.mmdb"))};
             bool anySaved = false;
             for (const QString &path : targets) {
                 QDir().mkpath(QFileInfo(path).absolutePath());

@@ -922,10 +922,11 @@ bool SubscriptionStore::replaceSubscriptionList(int index, const QString &nodeLi
 void SubscriptionStore::ensureFile() const
 {
     QDir().mkpath(m_config.userDir);
-    const QString bundled = QDir(m_config.sourceRoot).filePath("config/subscribe.yaml");
+    const QString bundled = QStringLiteral(":/assets/bundle/config/subscribe.yaml");
     if (!QFile::exists(path())) {
         if (QFile::exists(bundled)) {
             QFile::copy(bundled, path());
+            AppConfig::makeWritable(path());
         } else {
             QFile file(path());
             if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {

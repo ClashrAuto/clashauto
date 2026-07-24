@@ -322,9 +322,10 @@ void CoreController::startCore()
     // 固定核心家目录为 userDir（-d）：Country.mmdb/cache 等都从这里读，
     // 与设置页「更新 GeoIP」的落盘路径一致（否则老核心默认 ~/.config/clash）。
     const QString mmdb = QDir(m_config.userDir).filePath("Country.mmdb");
-    const QString bundledMmdb = QDir(m_config.sourceRoot).filePath("config/Country.mmdb");
+    const QString bundledMmdb = QStringLiteral(":/assets/bundle/config/Country.mmdb"); // 内嵌种子
     if (!QFileInfo::exists(mmdb) && QFileInfo::exists(bundledMmdb)) {
         QFile::copy(bundledMmdb, mmdb);
+        AppConfig::makeWritable(mmdb); // qrc 种子只读；「更新 GeoIP」要覆盖它
         emit logUpdated(tr("Country.mmdb 已就位: %1").arg(mmdb));
     }
 
@@ -335,7 +336,7 @@ void CoreController::startCore()
         const QString cpu = QSysInfo::currentCpuArchitecture();
         const QString archDir = cpu.contains("arm") ? (cpu.contains("64") ? "arm64" : "arm")
                                                     : (cpu.contains("64") ? "x64" : "x86");
-        const QString wintunFrom = QDir(m_config.sourceRoot).filePath(QString("command/wintun/bin/%1/wintun.dll").arg(archDir));
+        const QString wintunFrom = QStringLiteral(":/assets/bundle/wintun/%1/wintun.dll").arg(archDir);
         if (QFileInfo::exists(wintunFrom) && QFile::copy(wintunFrom, wintunTo)) {
             emit logUpdated(tr("wintun.dll 已部署: %1").arg(wintunTo));
         }

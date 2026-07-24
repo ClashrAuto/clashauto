@@ -17,15 +17,17 @@ ConfigBuilder::ConfigBuilder(AppConfig config) : m_config(std::move(config))
 QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
 {
     const QString defaultPath = QDir(m_config.configDir).filePath("default.yaml");
-    const QString bundledDefault = QDir(m_config.sourceRoot).filePath("config/default.yaml");
+    const QString bundledDefault = QStringLiteral(":/assets/bundle/config/default.yaml"); // 内嵌种子
     if (!QFile::exists(defaultPath) && QFile::exists(bundledDefault)) {
         QFile::copy(bundledDefault, defaultPath);
+        AppConfig::makeWritable(defaultPath); // qrc 种子只读；区域/规则编辑器要写回
     }
 
     const QString pluginPath = QDir(m_config.configDir).filePath("plugin.yaml");
-    const QString bundledPlugin = QDir(m_config.sourceRoot).filePath("config/plugin.yaml");
+    const QString bundledPlugin = QStringLiteral(":/assets/bundle/config/plugin.yaml"); // 内嵌种子
     if (!QFile::exists(pluginPath) && QFile::exists(bundledPlugin)) {
         QFile::copy(bundledPlugin, pluginPath);
+        AppConfig::makeWritable(pluginPath);
     }
 
     QString yaml = readText(QFile::exists(defaultPath) ? defaultPath : bundledDefault);
@@ -112,9 +114,10 @@ QString ConfigBuilder::mergePlugin(const QString &base, const QString &plugin) c
 QVector<ConfigBuilder::Subscription> ConfigBuilder::readSubscriptions() const
 {
     const QString userPath = QDir(m_config.configDir).filePath("subscribe.yaml");
-    const QString bundledPath = QDir(m_config.sourceRoot).filePath("config/subscribe.yaml");
+    const QString bundledPath = QStringLiteral(":/assets/bundle/config/subscribe.yaml"); // 内嵌种子
     if (!QFile::exists(userPath) && QFile::exists(bundledPath)) {
         QFile::copy(bundledPath, userPath);
+        AppConfig::makeWritable(userPath);
     }
 
     const QString text = readText(QFile::exists(userPath) ? userPath : bundledPath);

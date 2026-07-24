@@ -473,10 +473,11 @@ QString SettingsController::defaultConfigPath() const
     const QString userDef = QDir(m_configDir).filePath("default.yaml");
     if (!QFile::exists(userDef)) {
         const AppConfig cfg = AppConfigLoader::load();
-        const QString bundled = QDir(cfg.sourceRoot).filePath("config/default.yaml");
+        const QString bundled = QStringLiteral(":/assets/bundle/config/default.yaml");
         if (QFile::exists(bundled)) {
             QDir().mkpath(m_configDir);
             QFile::copy(bundled, userDef);
+            AppConfig::makeWritable(userDef); // qrc 种子只读，补写权限
         }
     }
     return userDef;
@@ -988,8 +989,7 @@ void SettingsController::updateGeoip()
             return;
         }
         int saved = 0;
-        const QStringList targets = {QDir(cfg.userDir).filePath("Country.mmdb"),
-                                     QDir(cfg.sourceRoot).filePath("config/Country.mmdb")};
+        const QStringList targets = {QDir(cfg.userDir).filePath("Country.mmdb")};
         for (const QString &path : targets) {
             QDir().mkpath(QFileInfo(path).absolutePath());
             QFile out(path);

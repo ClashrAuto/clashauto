@@ -22,5 +22,12 @@
         <file>assets/i18n/it.json</file>
         <file>assets/i18n/tr.json</file>
         <file>assets/i18n/vi.json</file>
+        <!-- 内嵌运行时种子：首次运行落地到用户目录 config.yaml/default.yaml/plugin.yaml/subscribe.yaml
+             + Country.mmdb(GeoIP)。app 自包含，不再依赖同级 Clashr-Auto 目录。 -->
+        <file>assets/bundle/config/config.yaml</file>
+        <file>assets/bundle/config/default.yaml</file>
+        <file>assets/bundle/config/plugin.yaml</file>
+        <file>assets/bundle/config/subscribe.yaml</file>
+        <file>assets/bundle/config/Country.mmdb</file>
     </qresource>
 </RCC>

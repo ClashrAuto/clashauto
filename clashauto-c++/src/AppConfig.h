@@ -5,7 +5,6 @@
 #include <QStringList>
 
 struct AppConfig {
-    QString sourceRoot;
     QString userDir;
     QString configDir; // userDir/config：放 config.yaml/full.yaml 等配置 yaml；logs\、Country.mmdb、cache 仍在 userDir 根
     QString host = "127.0.0.1";
@@ -33,6 +32,9 @@ struct AppConfig {
 
     QString clashExecutable() const;
     QString clashConfig() const;
+
+    // qrc(:/…) 复制出来的文件默认只读，补上属主读写权限，供 config.yaml/default.yaml 等种子后续编辑保存。
+    static void makeWritable(const QString &path);
 };
 
 class AppConfigLoader

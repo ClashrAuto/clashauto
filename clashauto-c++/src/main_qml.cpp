@@ -66,7 +66,7 @@ int main(int argc, char *argv[])
         app.setFont(uiFont);
     }
 
-    // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 负责 sibling Clashr-Auto 发现）。
+    // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 载入配置；资源已内嵌 qrc，不再找 Clashr-Auto）。
     AppConfig config = AppConfigLoader::load();
     auto *core = new CoreController(config, &app);
     auto *clash = new ClashService(&app);
