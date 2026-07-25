@@ -127,70 +127,8 @@ Item {
         }
     }
 
-    // 主题化下拉（不可编辑）
-    component ThemedCombo: ComboBox {
-        id: cb
-        implicitWidth: 200
-        implicitHeight: 30
-        font.pixelSize: 13
-        background: Rectangle {
-            radius: 3
-            color: Theme.inputBg
-            border.width: 1
-            border.color: cb.activeFocus ? Theme.accent : Theme.inputBorder
-        }
-        contentItem: Text {
-            leftPadding: 8
-            rightPadding: cb.indicator.width + 4
-            text: cb.displayText
-            color: Theme.textPrimary
-            font: cb.font
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
-        }
-        indicator: Text {
-            x: cb.width - width - 8
-            y: (cb.height - height) / 2
-            text: "▾"
-            color: Theme.textMuted
-            font.pixelSize: 12
-        }
-        delegate: ItemDelegate {
-            width: cb.width
-            height: 28
-            contentItem: Text {
-                text: modelData
-                color: Theme.textPrimary
-                font.pixelSize: 13
-                verticalAlignment: Text.AlignVCenter
-                leftPadding: 6
-                elide: Text.ElideRight
-            }
-            background: Rectangle {
-                color: highlighted ? Theme.hover : "transparent"
-            }
-            highlighted: cb.highlightedIndex === index
-        }
-        popup: Popup {
-            y: cb.height
-            width: cb.width
-            implicitHeight: Math.min(contentItem.implicitHeight + 2, 240)
-            padding: 1
-            background: Rectangle {
-                radius: 3
-                color: Theme.card
-                border.width: 1
-                border.color: Theme.inputBorder
-            }
-            contentItem: ListView {
-                clip: true
-                implicitHeight: contentHeight
-                model: cb.delegateModel
-                currentIndex: cb.highlightedIndex
-                ScrollBar.vertical: ScrollBar {}
-            }
-        }
-    }
+    // 不可编辑的主题化下拉已抽成公共组件 qml/ThemedCombo.qml（设备页/规则编辑器共用同一份，
+    // 以前各处内联一份、设备页还是裸 ComboBox，样式就此对不上）。这里直接用 ThemedCombo。
 
     // 主题化可编辑下拉（Host / 允许规则 / 排除规则）——带预置项且允许手输
     component ThemedEditCombo: ComboBox {

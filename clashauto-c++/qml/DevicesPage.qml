@@ -411,11 +411,9 @@ Item {
                             spacing: 8
                             Text { text: qsTr("类型"); font.pixelSize: 12; color: Theme.textMuted
                                    Layout.preferredWidth: 64 }
-                            ComboBox {
+                            ThemedCombo { // 与设置页/规则编辑器同一个下拉组件（别退回裸 ComboBox）
                                 id: typeCombo
                                 Layout.preferredWidth: 150
-                                Layout.preferredHeight: 28
-                                font.pixelSize: 12
                                 model: page.typeKeys.map(function (k) { return page.typeOverrideName(k); })
                                 currentIndex: Math.max(0, page.typeKeys.indexOf(detailCol.dev.typeOverride || "unknown"))
                                 onActivated: devices.setTypeOverride(devices.selectedMac, page.typeKeys[currentIndex])
@@ -483,11 +481,9 @@ Item {
                             spacing: 8
                             Text { text: qsTr("策略"); font.pixelSize: 12; color: Theme.textMuted
                                    Layout.preferredWidth: 64 }
-                            ComboBox {
+                            ThemedCombo {
                                 id: modeCombo
                                 Layout.preferredWidth: 130
-                                Layout.preferredHeight: 28
-                                font.pixelSize: 12
                                 model: page.modeKeys.map(function (k) { return page.modeName(k); })
                                 currentIndex: page.modeKeys.indexOf(detailCol.dev.policyMode || "follow")
                                 onActivated: devices.setPolicy(devices.selectedMac,
@@ -495,12 +491,10 @@ Item {
                                                                page.modeKeys[currentIndex] === "global"
                                                                ? targetCombo.currentText : "")
                             }
-                            ComboBox {
+                            ThemedCombo {
                                 id: targetCombo
                                 visible: page.modeKeys[modeCombo.currentIndex] === "global"
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 28
-                                font.pixelSize: 12
                                 model: bridge.groups
                                 onActivated: devices.setPolicy(devices.selectedMac, "global", currentText)
                             }

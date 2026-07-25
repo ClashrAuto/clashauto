@@ -101,69 +101,8 @@ ApplicationWindow {
         onTriggered: win.refreshProcesses()
     }
 
-    // ————————————————— 主题化下拉（类型/节点：只可选择，不可输入）—————————————————
-    // 不用 editable+TextField：自定义 TextField 会吃掉整控件点击导致下拉打不开；
-    // 非编辑 ComboBox 整个控件点击即开合弹层，且值只能从列表选。
-    component ThemedCombo: ComboBox {
-        id: ec
-        implicitHeight: 32
-        font.pixelSize: 13
-        background: Rectangle {
-            radius: 3
-            color: Theme.inputBg
-            border.width: 1
-            border.color: ec.activeFocus ? Theme.accent : Theme.inputBorder
-        }
-        contentItem: Text {
-            leftPadding: 8
-            rightPadding: ec.indicator.width + 4
-            text: ec.displayText
-            font: ec.font
-            color: Theme.textPrimary
-            verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideRight
-        }
-        indicator: Text {
-            x: ec.width - width - 8
-            y: (ec.height - height) / 2
-            text: "▾"
-            color: Theme.textMuted
-            font.pixelSize: 12
-        }
-        delegate: ItemDelegate {
-            width: ec.width
-            height: 28
-            contentItem: Text {
-                text: modelData
-                color: Theme.textPrimary
-                font.pixelSize: 13
-                verticalAlignment: Text.AlignVCenter
-                leftPadding: 6
-                elide: Text.ElideRight
-            }
-            background: Rectangle { color: highlighted ? Theme.hover : "transparent" }
-            highlighted: ec.highlightedIndex === index
-        }
-        popup: Popup {
-            y: ec.height
-            width: ec.width
-            implicitHeight: Math.min(contentItem.implicitHeight + 2, 240)
-            padding: 1
-            background: Rectangle {
-                radius: 3
-                color: Theme.card
-                border.width: 1
-                border.color: Theme.inputBorder
-            }
-            contentItem: ListView {
-                clip: true
-                implicitHeight: contentHeight
-                model: ec.delegateModel
-                currentIndex: ec.highlightedIndex
-                ScrollBar.vertical: ScrollBar {}
-            }
-        }
-    }
+    // 主题化下拉（类型/节点：只可选择，不可输入）已抽成公共组件 qml/ThemedCombo.qml，
+    // 与设置页/设备页共用一份。本窗口的输入框是 32px 高，故调用处补一句 implicitHeight: 32。
 
     // ————————————————— 可搜索的值输入（进程类型=系统进程下拉；否则纯文本）—————————————————
     component ValueInput: Rectangle {
@@ -315,6 +254,7 @@ ApplicationWindow {
         ThemedCombo {
             id: typeCombo
             Layout.fillWidth: true
+            implicitHeight: 32 // 对齐本窗口输入框的高度
             model: win.ruleTypes
             onCurrentTextChanged: win.refreshValueChoices(currentText)
         }
@@ -330,6 +270,7 @@ ApplicationWindow {
         ThemedCombo {
             id: nodeCombo
             Layout.fillWidth: true
+            implicitHeight: 32 // 对齐本窗口输入框的高度
         }
 
         Item { Layout.fillHeight: true }

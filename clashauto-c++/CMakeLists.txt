@@ -100,6 +100,7 @@ qt_add_qml_module(clashauto-qml
         qml/LogsPage.qml
         qml/AboutPage.qml
         qml/Card.qml
+        qml/ThemedCombo.qml
         qml/NavButton.qml
         qml/FooterSwitch.qml
         qml/MetricCard.qml
