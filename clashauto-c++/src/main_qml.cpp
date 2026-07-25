@@ -32,16 +32,23 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
-#include <QSGRendererInterface>
 #include <QTimer>
 
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
-    // 强制 Qt Quick 软件渲染后端(QPainter)：本 UI 纯 2D、无 ShaderEffect。
-    //  (1) 无 GPU 的机器/虚拟机上比 llvmpipe 软件 OpenGL 更轻、更流畅；
-    //  (2) 不再依赖 opengl32sw.dll / d3dcompiler_47.dll → 打包 -24MB(配合 windeployqt --no-opengl-sw)。
-    // 必须在首个 QQuickWindow 创建前调用。
+    // 渲染后端：走 Qt 默认的 RHI（Windows=D3D11 / macOS=Metal / Linux=OpenGL），**不再强制软件后端**。
+    //
+    // 曾经强制 QSGRendererInterface::Software（理由：UI 纯 2D 无 ShaderEffect、无 GPU 机器更轻、
+    // 打包能省 opengl32sw/d3dcompiler ~24MB）。但软件后端只能走 QPainter 光栅化，代价是：
+    //  - 圆角/圆点/开关这类小圆弧边缘只有 1 像素硬跳变（实测覆盖率 4→实心），肉眼就是毛边/锯齿；
+    //    RHI 下同一个圆点是 2 像素渐变（2→7→实心）。且 antialiasing/layer.smooth/layer.textureSize
+    //    超采样在软件后端全部无效（实测逐像素完全相同），QML 层面无解。
+    //  - 文字只能走原生渲染，拿不到距离场渲染那种平滑字形。
+    // 无 GPU 的机器不用担心：Windows 的 D3D11 有系统自带 WARP 兜底（本项目的无显卡 QEMU 虚机实测
+    // 可跑），Linux 侧 .deb 已 Depends libgl1/libopengl0/libegl1（Mesa llvmpipe 软件 GL）。
+    // 真遇到起不来的环境，仍可用环境变量退回：QT_QUICK_BACKEND=software（不再被代码覆盖）。
+    //
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
     // 后退出（配合 validate/gateway_selftest.sh）。用 offscreen 平台即可（无显示环境）。
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
@@ -49,7 +56,6 @@ int main(int argc, char *argv[])
         return runGatewaySelfTest();
 #endif
 
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报
     // "current style does not support customization"），本 app 全是自绘控件，必须 Basic。
     QQuickStyle::setStyle("Basic");
@@ -75,10 +81,10 @@ int main(int argc, char *argv[])
     // 全局默认字体设为 MiSans：所有未显式指定的属性都由 QML Text 通过 QFont resolve 继承下来
     // （family / 字重 / hinting / styleStrategy 都算），字号仍由各 QML 的 font.pixelSize 决定。
     //
-    // hinting = PreferNoHinting：**别把字形吸附到像素网格**。软件后端（QQuickWindow 强制
-    // Software，见上方）只能走原生文字渲染，Windows 默认是全 hinting——笔画被阈值化成硬边、
-    // 中文尤其显得又锐又硬（实测边缘中间调占比仅 78%）。关掉 hinting 后是 94%，笔画回到字体
-    // 设计的形状、边缘有正常的灰阶过渡。
+    // hinting = PreferNoHinting：**别把字形吸附到像素网格**。Windows 默认是全 hinting——笔画被
+    // 阈值化成硬边、中文尤其显得又锐又硬（实测边缘中间调占比仅 78%）。关掉 hinting 后是 94%，
+    // 笔画回到字体设计的形状、边缘有正常的灰阶过渡。（原生文字渲染下尤其明显；换 RHI 后端后
+    // 文字走距离场渲染，这两项设置一并保留，退回软件后端时依然生效。）
     // styleStrategy = PreferAntialias：补上 NoHinting 单用时笔画偏淡的问题（实心像素 352→766），
     // 小字号也强制抗锯齿，不会在某些字号退化成锯齿硬边。
     {

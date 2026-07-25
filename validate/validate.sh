@@ -101,17 +101,26 @@ if [ -n "$DEB" ]; then
     export COAST_NO_AUTOSTART=1   # 跳过「自动下载并启动内核」，只验 UI 起 + 配置种子落地
     export HOME=/root
     rm -rf /root/.local/share/Coast
-    echo "  跑 25s（COAST_NO_AUTOSTART=1，软件后端，Xvfb）…"
-    timeout 25 xvfb-run -a -s "-screen 0 1280x800x24" /opt/coast/coast >app.log 2>&1
-    rc=$?
-    echo "  退出码=$rc（124=超时仍在运行=没崩=好）"
-    [ "$rc" = "124" ] && ok "启动后存活 25s 未退出（Qt 软件后端渲染成功、未崩溃）" \
-                      || bad "提前退出（rc=$rc）——疑似启动即崩溃，见下方日志"
-    if grep -Eiq 'Segmentation fault|core dumped|is not installed|Failed to create|Could not load|Could not find the Qt platform|cannot open shared object|symbol lookup error' app.log; then
-      bad "日志出现致命错误："; grep -Ei 'Segmentation|is not installed|Failed to create|Could not (load|find)|shared object|symbol lookup' app.log | head -6 | sed 's/^/       /'
-    else
-      ok "日志无致命 Qt/加载错误"
-    fi
+    # 跑两遍渲染后端：
+    #  default  = 现在的默认路径（app 不再强制软件后端 → Linux 走 OpenGL RHI/llvmpipe）。
+    #             无 GPU 的 Xvfb 里必须能起来，否则就是这次改动带来的回归。
+    #  software = 应急退回路径（QT_QUICK_BACKEND=software 仍然有效，不再被代码覆盖）。
+    for backend in default software; do
+      if [ "$backend" = software ]; then export QT_QUICK_BACKEND=software; else unset QT_QUICK_BACKEND; fi
+      echo "  跑 25s（COAST_NO_AUTOSTART=1，渲染后端=$backend，Xvfb）…"
+      timeout 25 xvfb-run -a -s "-screen 0 1280x800x24" /opt/coast/coast >"app-$backend.log" 2>&1
+      rc=$?
+      echo "  退出码=$rc（124=超时仍在运行=没崩=好）"
+      [ "$rc" = "124" ] && ok "[$backend] 启动后存活 25s 未退出（渲染成功、未崩溃）" \
+                        || bad "[$backend] 提前退出（rc=$rc）——疑似启动即崩溃，见下方日志"
+      if grep -Eiq 'Segmentation fault|core dumped|is not installed|Failed to create|Could not load|Could not find the Qt platform|cannot open shared object|symbol lookup error' "app-$backend.log"; then
+        bad "[$backend] 日志出现致命错误："; grep -Ei 'Segmentation|is not installed|Failed to create|Could not (load|find)|shared object|symbol lookup' "app-$backend.log" | head -6 | sed 's/^/       /'
+      else
+        ok "[$backend] 日志无致命 Qt/加载错误"
+      fi
+    done
+    unset QT_QUICK_BACKEND
+    cp -f app-default.log app.log 2>/dev/null || true
     if [ -f /root/.local/share/Coast/config/config.yaml ]; then
       ok "内嵌配置已落地：~/.local/share/Coast/config/config.yaml（自包含 qrc 种子 + 可写权限 OK）"
       [ -f /root/.local/share/Coast/config/full.yaml ] && ok "full.yaml 也已生成（ConfigBuilder 跑通）" || skip "full.yaml 未生成（可能因未起内核，正常）"
