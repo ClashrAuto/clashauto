@@ -194,8 +194,9 @@
 // 多一次 u16 自增和一次 max 比较——相对每包的校验和/拷贝完全是噪声。
 // 注意 LWIP_STATS_LARGE=0 → 计数器是 u16_t：err 只当「有没有发生过」的信号用；
 // max 的量程 65535 也覆盖得住当前所有池的条目数（最大 2048）。
-// TODO(未做，需改 NetStack.cpp)：目前只有「数据存在」，还没人读它。要真正可诊断，
-//       需要在 NetStack 里定期把 memp[*]->err/->max 打到 LogModel 或状态栏。
+// 读取方：NetStack.cpp 的 pollLwipPoolStats()，搭已有的 200ms lwIP 定时器泵（不另开定时器）。
+// 常态只做十来次 u16 比较；某个池的 err 相对上次上报变了才 qWarning 一条，且两次上报至少隔
+// 30s（池子见底时每 200ms 都有新失败，不节流会刷屏）；被节流吃掉的那次不推进基线，下个窗口补报。
 #define LWIP_STATS                      1
 #define MEM_STATS                       1
 #define MEMP_STATS                      1

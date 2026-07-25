@@ -34,11 +34,27 @@ public:
     void closeTunnel();                 // 主动关闭
     bool isEstablished() const;
 
+    // —————————————————— 背压（流控）接口 ——————————————————
+    // 上层（NetStack）两个方向都要限流，否则慢的一头会让快的一头把内存吃光。
+    //
+    // 上行水位：还没真正交给内核的字节数 = established 前的缓冲 + QTcpSocket 的写队列。
+    // NetStack 用它决定「要不要延后归还 lwIP 的接收窗口」。
+    qint64 bytesToWrite() const;
+    // 下行闸门：暂停后不再从 socket 读，字节先积在 Qt 读缓冲（已设上限）再积在内核缓冲里，
+    // 填满后本端 TCP 窗口自然关闭 —— 背压就这样传回远端，而不是在我们进程里堆成无界队列。
+    // 恢复时若缓冲里还有存货，会**排队(queued)**补发一次 dataReceived：本函数常常是从
+    // lwIP 的回调里被调到的，同步重入会在调用方脚下把连接对象析构掉。
+    void setReadPaused(bool paused);
+    bool isReadPaused() const;
+
 signals:
     void established();                    // CONNECT 成功，双向管道就绪
     void dataReceived(const QByteArray &data); // 下行字节
     void failed(const QString &reason);    // 握手/连接失败
     void closed();                         // 隧道关闭（对端 FIN / 出错）
+    // 上行字节真正被交给内核（转发自 QTcpSocket::bytesWritten）。
+    // 这是「上行排空了多少」的唯一可靠信号，NetStack 据此按量归还 lwIP 接收窗口。
+    void upstreamBytesWritten(qint64 n);
 
 private:
     class Priv;

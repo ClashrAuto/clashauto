@@ -121,6 +121,7 @@ public:
     QByteArray pending; // established 前缓冲的上行字节
     bool established = false;
     bool closedEmitted = false;
+    bool readPaused = false; // 下行背压：上层排不动了，暂时不从 socket 读
 
     void onConnected()
     {
@@ -131,6 +132,12 @@ public:
     void onReadyRead()
     {
         if (!sock) {
+            return;
+        }
+        // 背压中：**一个字节都不读**。数据留在 Qt 读缓冲（setReadBufferSize 已限死）里，
+        // 满了之后 Qt 就不再从内核取，内核收窗关闭 → 远端被压住。恢复时由 setReadPaused
+        // 排队补读，所以「不读」不会把数据永久卡住。
+        if (readPaused) {
             return;
         }
         // 建立后就是纯字节管道：读到什么直接上抛为下行数据。
@@ -279,13 +286,23 @@ void Socks5Tcp::connectTo(quint16 socksPort, const QString &dstHost, quint16 dst
     d->dstPort = dstPort;
     d->established = false;
     d->closedEmitted = false;
+    d->readPaused = false;
     d->inbuf.clear();
     d->pending.clear();
 
     d->sock = new QTcpSocket(this);
+    // 读缓冲设上限（默认是 0 = 无上限，Qt 会一直往上读，暂停也就无从谈起）。
+    // 取 64 KiB 是照着 lwIP 的单连接预算来的（TCP_WND = 60 KiB）：非暂停态下每次 readyRead
+    // 我们都当场读干净，64 KiB 远够一个事件循环周期内的回环吞吐；暂停态下它就是每条连接
+    // 在本进程里额外滞留的上限。
+    d->sock->setReadBufferSize(64 * 1024);
     // 用 this 作 context：本对象析构时自动断开这些连接，回调里安全访问 d。
     connect(d->sock, &QTcpSocket::connected, this, [this] { d->onConnected(); });
     connect(d->sock, &QTcpSocket::readyRead, this, [this] { d->onReadyRead(); });
+    // 上行排空进度：转发出去给上层做「按量归还 lwIP 接收窗口」。握手包(greeting/auth/connect)
+    // 也会触发一次，上层只是重新评估一下水位，无副作用。
+    connect(d->sock, &QTcpSocket::bytesWritten, this,
+            [this](qint64 n) { emit upstreamBytesWritten(n); });
     connect(d->sock, &QAbstractSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
         // 建立后出错（如对端 RST/关闭）视为正常关闭；建立前出错为握手/连接失败。
         if (d->established) {
@@ -320,6 +337,42 @@ void Socks5Tcp::closeTunnel()
 bool Socks5Tcp::isEstablished() const
 {
     return d->established;
+}
+
+qint64 Socks5Tcp::bytesToWrite() const
+{
+    // pending 也要算进来：established 之前 write() 进来的字节还没交给 socket，
+    // 漏算的话上层会误以为「上行已排空」而把接收窗口开满，正是要避免的那种无闸状态。
+    return qint64(d->pending.size()) + (d->sock ? d->sock->bytesToWrite() : 0);
+}
+
+void Socks5Tcp::setReadPaused(bool paused)
+{
+    if (d->readPaused == paused) {
+        return;
+    }
+    d->readPaused = paused;
+    if (paused || !d->sock || d->sock->bytesAvailable() <= 0) {
+        return;
+    }
+    // 恢复且缓冲里有存货：**必须**主动补读一次 —— readyRead 只在「有新数据到达」时才发，
+    // 若远端此刻正好不再发（例如响应已发完），不补读就永远卡在这里（真死锁）。
+    // 但补读会同步 emit dataReceived，而本函数的调用点在 lwIP 的 tcp_sent 回调里，
+    // 上层的槽有可能当场把整条连接（含本对象）拆掉 → 排队到事件循环里做。
+    // 本对象被 deleteLater 后，投递给它的排队事件会随析构一并丢弃，不会打到野指针上。
+    QMetaObject::invokeMethod(
+        this,
+        [this] {
+            if (!d->readPaused) {
+                d->onReadyRead();
+            }
+        },
+        Qt::QueuedConnection);
+}
+
+bool Socks5Tcp::isReadPaused() const
+{
+    return d->readPaused;
 }
 
 // ============================ Socks5Udp ============================

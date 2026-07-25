@@ -2,6 +2,7 @@
 #include "IL2Endpoint.h"
 #include "Socks5Client.h"
 
+#include <QDebug>
 #include <QHash>
 #include <QHostAddress>
 #include <QList>
@@ -16,7 +17,9 @@
 extern "C" {
 #include "lwip/etharp.h"
 #include "lwip/init.h"
+#include "lwip/memp.h"
 #include "lwip/netif.h"
+#include "lwip/stats.h"
 #include "lwip/tcp.h"
 #include "lwip/timeouts.h"
 #include "netif/ethernet.h"
@@ -43,6 +46,12 @@ struct TcpConn {
     struct tcp_pcb *pcb = nullptr;
     Socks5Tcp *socks = nullptr;
     QByteArray toLwip;    // socks→设备 方向待写入 lwIP 的字节（受 tcp_sndbuf 限流）
+    // 上行背压：已经交给 socks、但**还没**用 tcp_recved 归还给 lwIP 的接收窗口字节数。
+    // 上限天然是 TCP_WND(60 KiB)——lwIP 不会送来超过已通告窗口的数据。
+    quint32 pendingRecved = 0;
+    bool upThrottled = false;  // 上行处于「等排空」状态（高/低水位的迟滞标志）
+    bool downPaused = false;   // 下行已让 socks 停止读取（toLwip 顶到高水位）
+    bool socksClosed = false;  // socks 侧已关闭：等 toLwip 排空后再优雅关 lwIP 侧
     bool established = false;
     bool lwipClosed = false;
 };
@@ -338,11 +347,154 @@ err_t lwipNetifInit(struct netif *netif)
 
 void closeConn(TcpConn *c, bool abort);
 
-// 把 socks→设备方向的待写字节尽量写进 lwIP（受发送窗口限流），tcp_sent 回调后再续。
-void pumpToLwip(TcpConn *c)
+// ————————————————————— 背压：两个方向都必须有闸 —————————————————————
+//
+// 这条链路是「设备 ⇄ lwIP ⇄ Socks5Tcp(QTcpSocket) ⇄ mihomo」，两头的速率毫不相干。谁慢谁就是
+// 瓶颈，而中间的队列如果没有闸，就会替瓶颈**无界地**缓冲——内存一路涨到 OOM。
+//
+// 【上行 设备→mihomo】lwIP 的接收窗口本来就是现成的闸门：收到设备数据后**先不**调 tcp_recved，
+//   窗口就一直关小着，设备的 TCP 自己会减速。等 QTcpSocket 真把字节交给内核
+//   （upstreamBytesWritten）、待发队列降下来了，再一次性把窗口还回去。
+//   老代码是无条件立刻 tcp_recved(全开)：等于不停对设备喊「随便发」，而字节全堆在
+//   QTcpSocket 的写缓冲里（Qt 的写缓冲没有上限）。
+//
+// 【下行 mihomo→设备】toLwip 是队列：只能按 tcp_sndbuf 往 lwIP 灌，灌不进去的留着。老代码任由
+//   它涨，且 QTcpSocket 没设 setReadBufferSize，Qt 会一直往上读 → 设备慢（WiFi 信号差）时同样
+//   无界。现在超过高水位就让 Socks5Tcp 停止读 socket（读缓冲填满 → 收窗关闭 → 压回远端），
+//   降到低水位再恢复。
+//
+// —— 为什么不会死锁（改这块最容易写出「双方互等」）——
+//  上行：只要 pendingRecved>0 且窗口没还，就必然存在「QTcpSocket 里没发完的字节」。目的地是
+//    本机回环的 mihomo，内核迟早排空 → upstreamBytesWritten 必然到来 → flushRecvWindow 必然
+//    把窗口还上。唯一的例外是 socket 出错，而那条路走 failed/closed → closeConn 把整条连接
+//    拆掉，不存在「等一个永远不来的事件」的稳态。另外 c->socks 已经为空时**无条件**归还：
+//    没有排空者了，扣着窗口只会让连接永久僵住。
+//  下行：恢复读取的触发点是 pumpToLwip，而 pumpToLwip 挂在 tcp_sent 上 —— 只要设备还在 ACK，
+//    tcp_sent 就会来；设备彻底不响应时 lwIP 自己重传超时 → tcp_err → 拆连接。而且恢复是
+//    **排队**执行的（Socks5Tcp::setReadPaused），绝不在 lwIP 回调里同步重入。
+//
+// —— 水位取值 —— 都拿 lwIP 的单连接预算当尺子：TCP_SND_BUF = TCP_WND = 60 KiB。
+//  高水位 64 KiB ≈ 一个满 sndbuf：lwIP 一腾出空间就能被立刻填满，管道不会空转；
+//  低水位 16 KiB（¼）：足够的迟滞，免得在水位线上反复 暂停/恢复 抖动（每次恢复都要过一趟
+//  事件循环，抖起来纯属浪费）。上行同理：queued 掉到 16 KiB 才还窗口，一次还一大块，
+//  tcp_recved 内部的 TCP_WND_UPDATE_THRESHOLD(TCP_WND/4) 判据也才会真的触发一次窗口通告。
+constexpr int kUpQueueHighWater = 64 * 1024;
+constexpr int kUpQueueLowWater = 16 * 1024;
+constexpr int kToLwipHighWater = 64 * 1024;
+constexpr int kToLwipLowWater = 16 * 1024;
+
+// ——————————————— 「c 是不是在这次调用里被拆掉了」的通用判据 ———————————————
+//
+// 本文件里有一类调用**可能同步销毁 TcpConn**——不只是 lwIP 回调，Qt 的直连信号一样能做到。
+// 清单（调用之后必须先查判据，才可以再碰 c）：
+//   ★ Socks5Tcp::write()      established 之后落到 QTcpSocket::write；Qt 在写入途中发现对端
+//                             已 RST 会 setErrorAndEmit **同步**发 errorOccurred →
+//                             Socks5Tcp emit failed → 我们的 failed 槽是直连(context 同线程)
+//                             → closeConn → delete c。
+//   ★ Socks5Tcp::closeTunnel() 同步 emit closed() → closed 槽 → pumpToLwip → 可能 closeConn。
+//   ★ pumpToLwip()            内部 tcp_write 出错会 abort；socksClosed 排空后会优雅关闭。
+//   ★ closeConn()             本体。
+//
+// 反过来，**确认安全、不需要保护**的调用（别为它们加噪音）：
+//   · tcp_recved / tcp_write / tcp_output / tcp_sndbuf —— 纯 lwIP，只会往下走到 netif
+//     linkoutput → IL2Endpoint::send()，而后者是裸的 pcap_sendpacket / ::sendto，不发任何
+//     Qt 信号、也不嵌套事件循环，回不到 TcpConn 上。
+//   · Socks5Tcp::bytesToWrite() / isEstablished() —— 纯 getter。
+//   · Socks5Tcp::setReadPaused() —— 暂停只置个标志；恢复走 Qt::QueuedConnection 补读，
+//     故意**不**同步 emit dataReceived（见 Socks5Client.cpp 里的理由）。
+//   · deleteLater() —— 定义上就是延后。
+//
+// 判据用两个全局量（NO_SYS + 全程主事件循环，单线程，够用）：
+//   g_destroyedConn    最近一次被 delete 的 TcpConn 地址。只做**指针比较，绝不解引用**。
+//   g_destroyedByAbort 那次销毁走的是不是 tcp_abort。这是**另一件事**，不能和「c 还在不在」
+//                      混用一个标志：lwIP 要求回调里 tcp_abort 过就必须返回 ERR_ABRT
+//                      （tcp_in.c 的 `aborted:` 标签只有这条路能到），而 tcp_close 不需要
+//                      （lwIP 自己有 tcp_trigger_input_pcb_close 延迟释放）。优雅关闭同样
+//                      会 delete c，却**不该**回 ERR_ABRT。
+TcpConn *g_destroyedConn = nullptr;
+bool g_destroyedByAbort = false;
+
+// 每个 delete c 的地方都必须先过这里。
+void markConnDestroyed(TcpConn *c, bool byAbort)
+{
+    g_destroyedConn = c;
+    g_destroyedByAbort = byAbort;
+}
+
+// 把「可能销毁 c」的一段调用夹住：构造时清账，之后 alive() 判断能不能继续碰 c，
+// needsAbortReturn() 判断 lwIP 回调该不该回 ERR_ABRT。
+// 嵌套是安全的：清账只发生在销毁之前；真被销毁了就不会再有后续代码拿着同一个 c 去新建 watch。
+class ConnWatch
+{
+public:
+    explicit ConnWatch(TcpConn *c) : m_c(c)
+    {
+        g_destroyedConn = nullptr;
+        g_destroyedByAbort = false;
+    }
+    bool alive() const { return g_destroyedConn != m_c; }
+    bool needsAbortReturn() const { return g_destroyedConn == m_c && g_destroyedByAbort; }
+
+private:
+    TcpConn *m_c;
+};
+
+// 无条件把攒着的接收窗口还给 lwIP。
+void giveBackRecvWindow(TcpConn *c)
 {
     if (!c || !c->pcb || c->lwipClosed)
         return;
+    // 先扣账再调用：tcp_recved 内部可能立刻 tcp_output → linkoutput，保持状态自洽。
+    // 循环+钳位只是防御：pendingRecved 实际不可能超过 TCP_WND(60 KiB)。
+    while (c->pendingRecved > 0) {
+        const u16_t give = static_cast<u16_t>(qMin<quint32>(c->pendingRecved, 0xFFFFu));
+        c->pendingRecved -= give;
+        tcp_recved(c->pcb, give);
+    }
+    c->upThrottled = false;
+}
+
+// 按 SOCKS 侧的排空进度决定要不要归还接收窗口（高/低水位迟滞）。
+void flushRecvWindow(TcpConn *c)
+{
+    if (!c || !c->pcb || c->lwipClosed || c->pendingRecved == 0)
+        return;
+    if (c->socks) {
+        const qint64 queued = c->socks->bytesToWrite();
+        const qint64 mark = c->upThrottled ? kUpQueueLowWater : kUpQueueHighWater;
+        if (queued > mark) {
+            c->upThrottled = true; // 继续扣着窗口，等 upstreamBytesWritten 再来评估
+            return;
+        }
+    }
+    // socks 为空（失败/已拆）时落到这里：无条件归还，见上文死锁分析。
+    giveBackRecvWindow(c);
+}
+
+// 下行水位：toLwip 堆过高就让 Socks5Tcp 停止读 socket，降下来再恢复。
+void updateDownstreamPause(TcpConn *c)
+{
+    if (!c || !c->socks)
+        return;
+    const int queued = c->toLwip.size();
+    if (!c->downPaused && queued >= kToLwipHighWater) {
+        c->downPaused = true;
+        c->socks->setReadPaused(true);
+    } else if (c->downPaused && queued <= kToLwipLowWater) {
+        c->downPaused = false;
+        c->socks->setReadPaused(false); // 补读是排队执行的，不会在这里重入
+    }
+}
+
+// 把 socks→设备方向的待写字节尽量写进 lwIP（受发送窗口限流），tcp_sent 回调后再续。
+// **返回 true 表示连接已在本函数里被销毁**（等价于外层 ConnWatch 的 !alive()）：调用方不得
+// 再碰 c；调用方若是 lwIP 回调，还要照 ConnWatch::needsAbortReturn() 决定是否回 ERR_ABRT。
+// 本函数内部除 closeConn 外没有别的「可能销毁 c」的调用：updateDownstreamPause 只会置标志或
+// 排队补读，tcp_* 全是纯 lwIP（理由见 ConnWatch 上方清单），所以不需要再夹一层 watch。
+bool pumpToLwip(TcpConn *c)
+{
+    if (!c || !c->pcb || c->lwipClosed)
+        return false;
     while (!c->toLwip.isEmpty()) {
         const u16_t space = tcp_sndbuf(c->pcb);
         if (space == 0)
@@ -353,60 +505,98 @@ void pumpToLwip(TcpConn *c)
             break;        // 缓冲不足，等 tcp_sent 再来
         if (e != ERR_OK) {
             closeConn(c, true);
-            return;
+            return true;
         }
         c->toLwip.remove(0, n);
     }
     tcp_output(c->pcb);
+    // 排空到低水位 → 恢复从 socks 读。放在这里是因为 tcp_sent 是下行唯一的「有进展」信号。
+    updateDownstreamPause(c);
+    // socks 早已关闭、下行残余也全交给 lwIP 了 → 现在才轮到优雅关闭本端。
+    // 老代码只在「closed 到达那一刻 toLwip 恰好为空」时才关，否则 pcb 就一直挂着等设备自己超时；
+    // 加了下行水位之后 toLwip 非空的概率更高，这个洞必须一起补。
+    if (c->socksClosed && c->toLwip.isEmpty()) {
+        closeConn(c, false);
+        return true;
+    }
+    return false;
 }
 
 void closeConn(TcpConn *c, bool abort)
 {
     if (!c)
         return;
+    // 先断开 socks 的全部信号：本函数经常正是从 socks 自己的槽里进来的，而下面就要 delete c。
+    // 不断开的话，closeTunnel() 同步 emit 的 closed()、以及 setReadPaused 排进事件队列的补读，
+    // 都会带着一个悬垂的 c 再进来一次。（UDP 侧的 destroyUdpFlow 早就是这个套路。）
+    if (c->socks)
+        QObject::disconnect(c->socks, nullptr, nullptr, nullptr);
+    bool aborted = false;
     if (c->pcb && !c->lwipClosed) {
         tcp_arg(c->pcb, nullptr);
         tcp_recv(c->pcb, nullptr);
         tcp_sent(c->pcb, nullptr);
         tcp_err(c->pcb, nullptr);
-        if (abort)
+        if (abort) {
             tcp_abort(c->pcb);
-        else if (tcp_close(c->pcb) != ERR_OK)
-            tcp_abort(c->pcb);
+            aborted = true; // 若身处 lwIP 回调，调用方要据此回 ERR_ABRT
+        } else {
+            // 优雅关闭前**必须**把扣着的接收窗口还回去：tcp_close 一看到 rcv_wnd != TCP_WND_MAX
+            // 就认定「上层没把对端的数据收完」，改发 RST 而不是 FIN（tcp_close_shutdown 里的
+            // rst_on_unacked_data 分支）——设备侧会连带丢掉已经收到的下行数据。
+            // 这是引入上行背压之后新出现的坑，不还窗口就会变成「下载到一半被 RST」。
+            giveBackRecvWindow(c);
+            if (tcp_close(c->pcb) != ERR_OK) {
+                tcp_abort(c->pcb);
+                aborted = true;
+            }
+        }
         c->lwipClosed = true;
     }
     c->pcb = nullptr;
     if (c->socks) {
+        // 此刻 socks 的信号已全部断开，closeTunnel() 同步 emit 的 closed() 回不到我们身上，
+        // 所以这里不会递归回 closeConn。
         c->socks->closeTunnel();
         c->socks->deleteLater();
         c->socks = nullptr;
     }
+    markConnDestroyed(c, aborted); // 必须在 delete 之前登记，外层 ConnWatch 靠它判存活
     delete c;
 }
 
 // 设备→服务器 方向（lwIP 收到设备数据）→ 写给 socks。
 err_t lwipTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
 {
+    Q_UNUSED(pcb);
     auto *c = static_cast<TcpConn *>(arg);
     if (!c)
         return ERR_OK;
+    // 本回调里有三处「可能当场把 c 拆掉」的调用（closeConn / closeTunnel / write），全程夹住。
+    ConnWatch watch(c);
     if (err != ERR_OK) {
         if (p)
             pbuf_free(p);
-        closeConn(c, true);
-        return ERR_OK;
+        closeConn(c, true);       // 之后不得再碰 c
+        // 老代码这里固定回 ERR_OK，而上面刚 tcp_abort 过 → tcp_input 会继续用已释放的 pcb。
+        return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
     }
     if (p == nullptr) {           // 设备侧关闭 → 关 socks 上行
         if (c->socks)
-            c->socks->closeTunnel();
-        return ERR_OK;
+            c->socks->closeTunnel(); // 同步 emit closed() → 我们的槽可能当场收掉 c
+        return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK; // 之后不得再碰 c
     }
     const QByteArray data = pbufToBytes(p);
     const u16_t len = p->tot_len;
+    pbuf_free(p);                 // 内容已拷进 data；提前归还，免得下面 c 没了还要惦记它
+    // 窗口先记账、**不**立刻归还：归还与否交给 flushRecvWindow 按 SOCKS 侧排空进度判断。
+    c->pendingRecved += len;
     if (c->socks)
-        c->socks->write(data);    // Socks5Tcp 内部会缓冲直到 established
-    tcp_recved(pcb, len);
-    pbuf_free(p);
+        c->socks->write(data);    // ★ 可能同步 delete c：对端已 RST 时 Qt 在 write 里就把
+                                  //   errorOccurred 发出来了 → failed 槽 → closeConn
+    if (!watch.alive())
+        return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
+    flushRecvWindow(c);
     return ERR_OK;
 }
 
@@ -414,8 +604,12 @@ err_t lwipTcpSent(void *arg, struct tcp_pcb *pcb, u16_t len)
 {
     Q_UNUSED(pcb);
     Q_UNUSED(len);
-    pumpToLwip(static_cast<TcpConn *>(arg));
-    return ERR_OK;
+    auto *c = static_cast<TcpConn *>(arg);
+    if (!c)
+        return ERR_OK;
+    ConnWatch watch(c);
+    pumpToLwip(c); // 可能当场把连接收掉（tcp_write 失败 abort / socksClosed 排空后优雅关闭）
+    return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
 }
 
 void lwipTcpErr(void *arg, err_t err)
@@ -427,10 +621,14 @@ void lwipTcpErr(void *arg, err_t err)
     c->pcb = nullptr;          // lwIP 已释放 pcb
     c->lwipClosed = true;
     if (c->socks) {
+        // 同 closeConn：先断信号，否则 closeTunnel/排队补读会带着悬垂的 c 回来。
+        QObject::disconnect(c->socks, nullptr, nullptr, nullptr);
         c->socks->closeTunnel();
         c->socks->deleteLater();
         c->socks = nullptr;
     }
+    // byAbort=false：pcb 是 lwIP 自己释放的，不是我们 tcp_abort 的；tcp_err 也没有返回值可回。
+    markConnDestroyed(c, false);
     delete c;
 }
 
@@ -463,24 +661,115 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
     tcp_err(newpcb, lwipTcpErr);
     tcp_nagle_disable(newpcb);
 
+    // 下面这些槽都是**直连**（context 是 NetStack，同一个线程），所以它们跑在信号发射者的栈上。
+    // 凡是会销毁 c 的调用（pumpToLwip / closeConn）一律放在**最后一句**，槽返回后就没人再碰 c
+    // 了——这样才不必在每个槽里再夹一层 ConnWatch。改这几个 lambda 时务必保持这个形状。
     QObject::connect(c->socks, &Socks5Tcp::established, g_impl->owner, [c]() {
         c->established = true;
+        // 握手期扣下的窗口在这里重新评估一次：pending 刚被冲进 socket，水位变了。
+        // flushRecvWindow 不会销毁 c（只有 getter + 纯 lwIP 调用），故无需保护。
+        flushRecvWindow(c);
+    });
+    QObject::connect(c->socks, &Socks5Tcp::upstreamBytesWritten, g_impl->owner, [c](qint64) {
+        // 上行真的排空了一点 → 按量把 lwIP 的接收窗口还回去。这是上行唯一的推进点，
+        // 也正是「不会死锁」的依据：只要还扣着窗口，就一定还有没发完的字节在等这个信号。
+        flushRecvWindow(c);
     });
     QObject::connect(c->socks, &Socks5Tcp::dataReceived, g_impl->owner, [c](const QByteArray &d) {
         c->toLwip.append(d);
-        pumpToLwip(c);
+        pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
     });
     QObject::connect(c->socks, &Socks5Tcp::failed, g_impl->owner, [c](const QString &) {
-        closeConn(c, true);
+        closeConn(c, true); // ★ 必然销毁 c —— 必须是最后一句
     });
     QObject::connect(c->socks, &Socks5Tcp::closed, g_impl->owner, [c]() {
-        // socks 关闭：把剩余下行写完后优雅关闭 lwIP 侧。
-        if (c->pcb && !c->lwipClosed && c->toLwip.isEmpty())
-            closeConn(c, false);
+        // socks 关闭：先记账，把剩余下行写完之后再优雅关闭 lwIP 侧（收口在 pumpToLwip 里，
+        // 排空后自己会 closeConn）。
+        c->socksClosed = true;
+        pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
     });
 
     c->socks->connectTo(g_impl->socksPort, serverIp, serverPort, user);
     return ERR_OK;
+}
+
+// ————————————— lwIP 内存池诊断：把 LWIP_STATS 真正读出来 —————————————
+//
+// lwipopts.h 打开了 MEM_STATS/MEMP_STATS，但统计只是被「存下来」——池子耗尽时 lwIP 既不打日志
+// 也不向上层报错（tcp_alloc 甚至会悄悄杀掉一条活着的连接），所以必须有人主动去读，否则等于没开。
+//
+// 成本控制（这条路挂在 200ms 的 lwIP 定时器上，绝不能给 GUI 线程添负担）：
+//  · 常态 = 对下面这张表（9 项）各做一次 u16 比较，没变化立刻 return，零字符串分配；
+//  · 只有 err 计数**相对上次上报**发生变化才考虑打日志，且两次上报至少隔 30s ——
+//    池子一旦见底会每 200ms 都有新失败，不节流就是刷屏；
+//  · 被节流吃掉的那一次**不更新基线**，攒着的失败会在下一个窗口一并报出来，不会被吞。
+// 注意 LWIP_STATS_LARGE=0 → 计数器是 u16_t 会回绕，所以判据是「与上次不相等」而非「变大了」。
+struct MempWatch {
+    memp_t pool;
+    const char *name;
+};
+constexpr MempWatch kMempWatch[] = {
+    {MEMP_TCP_PCB, "TCP_PCB(并发连接)"},
+    {MEMP_TCP_PCB_LISTEN, "TCP_PCB_LISTEN"},
+    {MEMP_TCP_SEG, "TCP_SEG(发送/乱序段)"},
+    {MEMP_PBUF, "PBUF(壳)"},
+    {MEMP_PBUF_POOL, "PBUF_POOL(入站帧)"},
+    {MEMP_UDP_PCB, "UDP_PCB"},
+    {MEMP_REASSDATA, "REASSDATA(分片重组)"},
+#if ARP_QUEUEING
+    // 注意：lwIP 2.x 里 ARP_QUEUEING 默认是 0，此时 memp_std.h 根本不会生成 MEMP_ARP_QUEUE
+    //（lwipopts.h 里的 MEMP_NUM_ARP_QUEUE 也就是个死配置）。跟着开关走，别硬写。
+    {MEMP_ARP_QUEUE, "ARP_QUEUE"},
+#endif
+    {MEMP_SYS_TIMEOUT, "SYS_TIMEOUT"},
+};
+constexpr int kMempWatchCount = int(sizeof(kMempWatch) / sizeof(kMempWatch[0]));
+constexpr qint64 kPoolReportMinIntervalMs = 30000;
+
+void pollLwipPoolStats()
+{
+    static u16_t lastErr[kMempWatchCount] = {};
+    static u16_t lastHeapErr = 0;
+    static qint64 lastReportMs = -kPoolReportMinIntervalMs;
+
+    bool changed = (lwip_stats.mem.err != lastHeapErr);
+    for (int i = 0; !changed && i < kMempWatchCount; ++i) {
+        const struct stats_mem *m = lwip_stats.memp[kMempWatch[i].pool];
+        if (m && m->err != lastErr[i])
+            changed = true;
+    }
+    if (!changed)
+        return; // 绝大多数 tick 在这里就结束了
+    const qint64 now = monoMs();
+    if (now - lastReportMs < kPoolReportMinIntervalMs)
+        return; // 节流：基线不动，攒到下个窗口一起报
+    lastReportMs = now;
+
+    QString detail;
+    for (int i = 0; i < kMempWatchCount; ++i) {
+        const struct stats_mem *m = lwip_stats.memp[kMempWatch[i].pool];
+        if (!m)
+            continue;
+        if (m->err != lastErr[i]) {
+            detail += QStringLiteral("%1 分配失败(err=%2 用量=%3 高水位=%4); ")
+                          .arg(QLatin1String(kMempWatch[i].name))
+                          .arg(uint(m->err))
+                          .arg(uint(m->used))
+                          .arg(uint(m->max));
+            lastErr[i] = m->err;
+        }
+    }
+    if (lwip_stats.mem.err != lastHeapErr) {
+        detail += QStringLiteral("堆(mem.c) 分配失败(err=%1 用量=%2 高水位=%3 容量=%4); ")
+                      .arg(uint(lwip_stats.mem.err))
+                      .arg(uint(lwip_stats.mem.used))
+                      .arg(uint(lwip_stats.mem.max))
+                      .arg(uint(lwip_stats.mem.avail));
+        lastHeapErr = lwip_stats.mem.err;
+    }
+    qWarning().noquote() << "NetStack: lwIP 内存吃紧 ——" << detail
+                         << "(TCP_PCB 耗尽会静默丢 SYN、甚至挤掉活连接；其余多为降速。"
+                            "上限见 lwipopts.h)";
 }
 
 // —— UDP 手工封包辅助 ——
@@ -556,14 +845,16 @@ bool NetStack::init(QString *err)
     d->listener->local_port = 0; // 通配任意目的端口
     tcp_accept(d->listener, lwipTcpAccept);
 
-    // lwIP 定时器泵（TCP 重传/超时/ARP 老化）+ UDP 流老化。
-    // 老化搭这趟车而不是自己再开一个定时器：reapUdpFlows 只看两条 LRU 链的链尾，没到期就是两次
-    // 整数比较，200ms 一次的代价可以忽略；绝不能在这里扫全表——GUI 线程刚治完卡顿。
+    // lwIP 定时器泵（TCP 重传/超时/ARP 老化）+ UDP 流老化 + 内存池诊断。
+    // 老化和诊断都搭这趟车而不是各自再开定时器：reapUdpFlows 只看两条 LRU 链的链尾，
+    // pollLwipPoolStats 只做十来次 u16 比较，200ms 一次的代价可以忽略；
+    // 绝不能在这里扫全表——GUI 线程刚治完卡顿。
     d->timer = new QTimer(this);
     d->timer->setInterval(200);
     connect(d->timer, &QTimer::timeout, this, [this] {
         sys_check_timeouts();
         reapUdpFlows(d);
+        pollLwipPoolStats();
     });
     d->timer->start();
 
