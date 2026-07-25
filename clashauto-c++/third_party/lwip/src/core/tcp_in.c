@@ -682,7 +682,13 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
     /* Set up the new PCB. */
     ip_addr_copy(npcb->local_ip, *ip_current_dest_addr());
     ip_addr_copy(npcb->remote_ip, *ip_current_src_addr());
+#if LWIP_ACCEPT_ALL_UNICAST
+    /* Coast 透明网关补丁：catch-all 监听器 local_port==0，若照抄给新连接会使 SYN-ACK 的源端口=0，
+       被劫持设备(内核)因端口不匹配而 RST。改用本 SYN 的真实目的端口，令回包源端口正确。 */
+    npcb->local_port = (pcb->local_port == 0) ? tcphdr->dest : pcb->local_port;
+#else
     npcb->local_port = pcb->local_port;
+#endif
     npcb->remote_port = tcphdr->src;
     npcb->state = SYN_RCVD;
     npcb->rcv_nxt = seqno + 1;
