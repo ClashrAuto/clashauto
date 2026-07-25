@@ -31,6 +31,14 @@ public:
     void connectTo(quint16 socksPort, const QString &dstHost, quint16 dstPort,
                    const QString &user);
     void write(const QByteArray &data); // 隧道建立后写入上行字节
+    // 同上，但直接吃裸缓冲 —— 给「字节本来就不在 QByteArray 里」的调用方（NetStack 的 lwIP
+    // 收包回调，字节在 pbuf 里）用，省掉一次 QByteArray 堆分配 + 全量拷贝。
+    //
+    // ★ 生命周期契约（NetStack.cpp 的零拷贝上行路径依赖它，改本函数前先看那边的注释）：
+    //   data 只需在**本次调用期间**有效。实现必须保证返回前字节已被完整复制走
+    //   （已建立时靠 QIODevice::write 同步拷进 QTcpSocket 写缓冲；未建立时深拷贝进 pending）。
+    //   绝不允许把 data 指针存起来晚点再用（例如 QByteArray::fromRawData 存进队列）。
+    void write(const char *data, qsizetype size);
     void closeTunnel();                 // 主动关闭
     bool isEstablished() const;
 

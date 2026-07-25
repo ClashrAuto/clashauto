@@ -325,6 +325,30 @@ void Socks5Tcp::write(const QByteArray &data)
     } else {
         d->pending += data; // 建立前先缓冲，established 时统一补发
     }
+    // 注意：**故意不**转发给下面的裸指针重载。QByteArray += QByteArray 在 pending 为空时
+    // 会退化成一次隐式共享赋值（零拷贝），转发过去反而会变成实打实的 memcpy。
+}
+
+// 裸缓冲版本。两条分支的性质完全不同，改动时必须分清（头文件里的生命周期契约就靠这个成立）：
+//  · established：落到 QIODevice::write(const char*, qint64) —— QAbstractSocket::writeData
+//    当场 memcpy 进自己的写缓冲（或直接交给 socket engine），**同步**消费完才返回。
+//    所以调用方的缓冲只需活到本次调用返回，可以零拷贝。
+//    注意它同样可能在写入途中同步 emit errorOccurred（对端已 RST）→ failed → 上层可能当场
+//    把整条连接拆掉；但那与 data 指针无关，data 的所有权始终在调用方手上。
+//  · 未 established：字节要**留到**握手完成后才发，指针必然悬垂 → 只能深拷贝。
+//    这里用 QByteArray::append(const char*, qsizetype)，它是真拷贝；绝不能写成
+//    `pending += QByteArray::fromRawData(data, size)` —— pending 为空时 append(QByteArray)
+//    的快路径是隐式共享赋值，pending 会直接指向调用方的缓冲，返回后立刻变野指针。
+void Socks5Tcp::write(const char *data, qsizetype size)
+{
+    if (!data || size <= 0) {
+        return;
+    }
+    if (d->established && d->sock) {
+        d->sock->write(data, size);
+    } else {
+        d->pending.append(data, size); // 深拷贝，见上
+    }
 }
 
 void Socks5Tcp::closeTunnel()

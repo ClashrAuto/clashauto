@@ -308,7 +308,8 @@ NetStack::Nic *nicOf(struct netif *netif)
     return netif ? static_cast<NetStack::Nic *>(netif->state) : nullptr;
 }
 
-// pbuf 链 → QByteArray
+// pbuf 链 → QByteArray。仍有两个调用点：linkoutput（要一整帧连续字节交给二层端点）和
+// lwipTcpRecv 的**多段链**慢路径。上行单段 pbuf 的快路径已经绕开它（零拷贝），别顺手删。
 QByteArray pbufToBytes(struct pbuf *p)
 {
     QByteArray out;
@@ -401,7 +402,8 @@ constexpr int kToLwipLowWater = 16 * 1024;
 //   ★ Socks5Tcp::write()      established 之后落到 QTcpSocket::write；Qt 在写入途中发现对端
 //                             已 RST 会 setErrorAndEmit **同步**发 errorOccurred →
 //                             Socks5Tcp emit failed → 我们的 failed 槽是直连(context 同线程)
-//                             → closeConn → delete c。
+//                             → closeConn → delete c。两个重载（QByteArray / 裸指针）都算，
+//                             所以上行热路径上**一个包只调一次** write（见 lwipTcpRecv）。
 //   ★ Socks5Tcp::closeTunnel() 同步 emit closed() → closed 槽 → pumpToLwip → 可能 closeConn。
 //   ★ pumpToLwip()            内部 tcp_write 出错会 abort；socksClosed 排空后会优雅关闭。
 //   ★ closeConn()             本体。
@@ -603,14 +605,41 @@ err_t lwipTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
             c->socks->closeTunnel(); // 同步 emit closed() → 我们的槽可能当场收掉 c
         return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK; // 之后不得再碰 c
     }
-    const QByteArray data = pbufToBytes(p);
     const u16_t len = p->tot_len;
-    pbuf_free(p);                 // 内容已拷进 data；提前归还，免得下面 c 没了还要惦记它
     // 窗口先记账、**不**立刻归还：归还与否交给 flushRecvWindow 按 SOCKS 侧排空进度判断。
     c->pendingRecved += len;
-    if (c->socks)
-        c->socks->write(data);    // ★ 可能同步 delete c：对端已 RST 时 Qt 在 write 里就把
-                                  //   errorOccurred 发出来了 → failed 槽 → closeConn
+    if (c->socks) {
+        // 设备上行的**每个**数据包都走这里，所以这条路上一次多余的堆分配+全量拷贝都不能有。
+        //
+        // 快路径（绝大多数）：单段 pbuf —— 一帧 ≤1514 < PBUF_POOL_BUFSIZE(1600)，收上来就是
+        // 一整块连续内存。直接把 payload 指针交给 socks，省掉 pbufToBytes 的 QByteArray。
+        // 判据用 tot_len==len 而不是 next==nullptr：pbuf 的 next 也可能挂着「下一个包」
+        // （队列语义），只有 tot_len==len 才真的保证载荷全在这一段里。
+        //
+        // 慢路径：多段链（lwIP 把补齐的乱序段 pbuf_cat 起来一起上交，打开 SACK 之后更常见）
+        // —— 先拼成连续字节再写。这条路保持原样，宁可多一次拷贝。
+        //
+        // ★★ 为什么这里**只调一次** write，而不是「对 pbuf 链逐段循环 write」：
+        //    write() 是那张「可能同步 delete c」清单上的第一条（对端已 RST 时 Qt 在 write
+        //    内部就把 errorOccurred 发出来 → failed 槽 → closeConn → delete c）。逐段循环的话，
+        //    第一段写完 c 就可能已经析构，第二次迭代 c->socks 就是 use-after-free。
+        //    维持「一次调用 + 紧跟一次 watch.alive() 判断」这个形状，重入面才只有一个点。
+        //    要改成多次 write，必须每次之后都 watch.alive() 并跳出——收益远不抵风险。
+        //
+        // ★★ 零拷贝依赖的前提（见 Socks5Client.h 里 write(const char*, qsizetype) 的契约）：
+        //    payload 指针只需在 write 调用期间有效。established 后 write 落到 QIODevice::write，
+        //    字节当场被拷进 QTcpSocket 写缓冲；握手未完成时 Socks5Tcp 会深拷贝进 pending。
+        //    那边一旦改成「把指针存进队列晚点再发」，这里立刻变成悬垂指针。
+        if (p->tot_len == p->len)
+            c->socks->write(static_cast<const char *>(p->payload), qsizetype(p->len));
+        else
+            c->socks->write(pbufToBytes(p));
+    }
+    // pbuf 必须在 write **之后**才归还：零拷贝路径上 socks 拿的就是 p->payload 里的字节。
+    // 这里放在 alive() 判断之前，是因为 p 的所有权自始至终在本回调手上，与 c 死没死无关
+    //（lwIP 把 pbuf 交给 recv 回调后就不再引用它，tcp_abort 也不会碰它）——
+    // c 就算刚在 write 里被拆掉，这一次 pbuf_free 依然要、且只要执行一次。
+    pbuf_free(p);
     if (!watch.alive())
         return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
     flushRecvWindow(c);
