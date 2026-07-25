@@ -20,6 +20,9 @@
 #include "qml/UpdateController.h"
 #include "qml/DevicesController.h"
 #include "net/LanGateway.h"
+#if defined(Q_OS_LINUX)
+#include "net/GatewaySelfTest.h"
+#endif
 
 #include <QApplication>
 #include <QFont>
@@ -39,6 +42,13 @@ int main(int argc, char *argv[])
     //  (1) 无 GPU 的机器/虚拟机上比 llvmpipe 软件 OpenGL 更轻、更流畅；
     //  (2) 不再依赖 opengl32sw.dll / d3dcompiler_47.dll → 打包 -24MB(配合 windeployqt --no-opengl-sw)。
     // 必须在首个 QQuickWindow 创建前调用。
+    // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
+    // 后退出（配合 validate/gateway_selftest.sh）。用 offscreen 平台即可（无显示环境）。
+#if defined(Q_OS_LINUX)
+    if (qEnvironmentVariableIsSet("COAST_GATEWAY_SELFTEST"))
+        return runGatewaySelfTest();
+#endif
+
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报
     // "current style does not support customization"），本 app 全是自绘控件，必须 Basic。

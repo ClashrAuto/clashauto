@@ -117,6 +117,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(clashauto-qml PRIVATE
         src/net/NetStack.cpp src/net/NetStack.h
         src/net/LanGateway_linux.cpp
+        src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h
         ${LWIP_DIR}/core/init.c        ${LWIP_DIR}/core/def.c
         ${LWIP_DIR}/core/dns.c         ${LWIP_DIR}/core/inet_chksum.c
         ${LWIP_DIR}/core/ip.c          ${LWIP_DIR}/core/mem.c

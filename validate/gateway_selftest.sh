@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# 透明网关 headless 自测（Linux）——验证「用户态栈 + SOCKS 桥接」的转发逻辑，**不需要真实 ARP、不需要真机**。
+#
+# 原理：建一个 TAP 设备当「被劫持设备」的链路，用**真实内核 TCP**（curl）发起连接：
+#   curl → 内核经 TAP 发帧 → Coast(COAST_GATEWAY_SELFTEST) 的 NetStack 终结 → 拨内置假 SOCKS5。
+#   静态邻居(ip neigh)代替 ARP，故「不验证真实 ARP，只验证栈/转发逻辑」。
+#   因为 lwIP 的 accept 只在三次握手完成后触发，假 SOCKS 收到带正确用户名的 CONNECT 即证明整条链路通。
+#
+# 用法:  sudo bash validate/gateway_selftest.sh /path/to/coast
+# 依赖:  root、/dev/net/tun、iproute2、curl。返回 0=通过。
+set -u
+
+BIN="${1:-./coast}"
+TAP="cst0"
+LOCALMAC="02:00:00:00:00:01"     # Coast 用户态栈 netif 的 MAC（= 静态邻居目标）
+VICTIM_IP="10.9.9.1"             # TAP 侧内核 IP（= 被劫持设备 IP）
+SERVER_IP="192.0.2.10"           # 目标服务器（TEST-NET-1，不可路由；经 /32 路由进 TAP）
+SOCKS_PORT="7899"
+
+fail() { echo "SELFTEST-HARNESS: FAIL — $*" >&2; exit 1; }
+[ "$(id -u)" = "0" ] || fail "需要 root"
+[ -e /dev/net/tun ] || fail "无 /dev/net/tun"
+[ -x "$BIN" ] || fail "找不到可执行文件: $BIN"
+
+cleanup() {
+  [ -n "${COAST_PID:-}" ] && kill "$COAST_PID" 2>/dev/null
+  ip link del "$TAP" 2>/dev/null
+}
+trap cleanup EXIT
+
+# 建 TAP + 配 IP/路由/静态邻居（无 ARP）
+ip tuntap add dev "$TAP" mode tap || fail "建 TAP 失败"
+ip addr add "$VICTIM_IP/24" dev "$TAP"
+ip link set "$TAP" up
+sysctl -q -w "net.ipv4.conf.$TAP.rp_filter=0" 2>/dev/null || true
+VICTIM_MAC="$(cat /sys/class/net/$TAP/address)"
+ip route add "$SERVER_IP/32" dev "$TAP"
+ip neigh replace "$SERVER_IP" lladdr "$LOCALMAC" dev "$TAP" nud permanent
+
+echo "SELFTEST-HARNESS: tap=$TAP victimMac=$VICTIM_MAC server=$SERVER_IP"
+
+# 起 Coast 自测（headless / offscreen）
+COAST_LOG="$(mktemp)"
+QT_QPA_PLATFORM=offscreen \
+COAST_GATEWAY_SELFTEST=1 \
+COAST_SELFTEST_TAP="$TAP" \
+COAST_SELFTEST_LOCALMAC="$LOCALMAC" \
+COAST_SELFTEST_VICTIM_IP="$VICTIM_IP" \
+COAST_SELFTEST_VICTIM_MAC="$VICTIM_MAC" \
+COAST_SELFTEST_SOCKSPORT="$SOCKS_PORT" \
+  "$BIN" >"$COAST_LOG" 2>&1 &
+COAST_PID=$!
+
+# 等假 SOCKS 就绪
+for i in $(seq 1 20); do
+  grep -q "假 SOCKS 就绪" "$COAST_LOG" && break
+  kill -0 "$COAST_PID" 2>/dev/null || { cat "$COAST_LOG"; fail "Coast 提前退出"; }
+  sleep 0.3
+done
+
+# 真实内核 curl → SERVER_IP（经 TAP → NetStack → 假 SOCKS）
+CURL_OUT="$(curl -s -m 8 "http://$SERVER_IP/" 2>/dev/null || true)"
+echo "SELFTEST-HARNESS: curl 返回 = '$CURL_OUT'"
+
+# 等 Coast 自测退出并取其返回码（0=收到带正确用户名的 CONNECT）
+wait "$COAST_PID"; COAST_RC=$?
+COAST_PID=""
+echo "----- coast selftest log -----"; cat "$COAST_LOG"; echo "------------------------------"
+rm -f "$COAST_LOG"
+
+# 判定：Coast 侧证明「帧→握手→catch-all→SOCKS+身份」通；curl 侧证明回程通。
+if [ "$COAST_RC" = "0" ] && echo "$CURL_OUT" | grep -q "COAST_SELFTEST_OK"; then
+  echo "SELFTEST-HARNESS: PASS ✅ 用户态栈转发 + 每设备身份 + 双向通"
+  exit 0
+fi
+fail "coast_rc=$COAST_RC curl='$CURL_OUT'（未同时满足：CONNECT 带正确用户名 + 回程 HTTP 标记）"
