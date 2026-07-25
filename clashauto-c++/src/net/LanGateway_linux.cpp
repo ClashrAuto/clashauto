@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QFile>
 #include <QHash>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -31,6 +32,15 @@ QByteArray macBytes(const QString &mac)
     }
     return out;
 }
+// 点分 IPv4 → 主机序 quint32（非法/空/非 IPv4 返回 0）。
+quint32 ipToU32(const QString &ip)
+{
+    if (ip.isEmpty())
+        return 0;
+    bool ok = false;
+    const quint32 v = QHostAddress(ip).toIPv4Address(&ok);
+    return ok ? v : 0;
+}
 } // namespace
 
 struct LanGateway::Impl {
@@ -42,6 +52,9 @@ struct LanGateway::Impl {
     QString ifname, localIp, localMac, gatewayIp, gatewayMac;
     quint16 socksPort = 0;
     bool stackReady = false; // ep 打开 + net 初始化成功
+
+    // 同网段直连旁路用（主机序 quint32；netMask4==0 表示掩码未知 → 不旁路）。
+    quint32 localIp4 = 0, netMask4 = 0, gatewayIp4 = 0;
 
     // 被劫持设备：src MAC(6 字节) → ip（帧过滤 + 记账）。
     QHash<QByteArray, QString> victimByMac;
@@ -90,7 +103,8 @@ LanGateway::~LanGateway()
 }
 
 void LanGateway::configure(const QString &ifname, const QString &localIp, const QString &localMac,
-                           const QString &gatewayIp, const QString &gatewayMac, quint16 socksPort)
+                           const QString &gatewayIp, const QString &gatewayMac, quint16 socksPort,
+                           const QString &netmask)
 {
     d->ifname = ifname;
     d->localIp = localIp;
@@ -98,6 +112,10 @@ void LanGateway::configure(const QString &ifname, const QString &localIp, const 
     d->gatewayIp = gatewayIp;
     d->gatewayMac = gatewayMac;
     d->socksPort = socksPort;
+    // 供过滤 lambda 做同网段旁路（每次配置都刷新，跟随网段/网关变化）。
+    d->localIp4 = ipToU32(localIp);
+    d->gatewayIp4 = ipToU32(gatewayIp);
+    d->netMask4 = ipToU32(netmask);
 
     // 首次或换网卡：建立/重建协议栈。有活动劫持时不贸然重建（避免断流）。
     if (d->stackReady && !d->victimByMac.isEmpty())
@@ -128,8 +146,24 @@ void LanGateway::configure(const QString &ifname, const QString &localIp, const 
             if (frame.size() < 12)
                 return;
             const QByteArray src = frame.mid(6, 6);
-            if (d->victimByMac.contains(src))
-                d->net->inputFrame(frame);
+            if (!d->victimByMac.contains(src))
+                return;
+            // 同网段直连旁路：被劫持设备发往「本网段内（且非网关本身）」的 IPv4 帧不喂用户态栈，
+            // 让它照常二层直达——设备回给本机 LAN IP 的包若被 lwIP 终结会触发 RST，导致本机无法
+            // 直连该设备（SSH/网页/共享）；同理 LAN 内设备互访也不该被代理绕行。只有真正出网
+            // （目的在子网外）或发往网关 IP（DNS/路由器后台等，其 ARP 被投毒必须由我们接管）的帧进栈。
+            if (d->netMask4 != 0 && frame.size() >= 34) {
+                const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+                const quint16 ethType = (quint16(f[12]) << 8) | f[13];
+                if (ethType == 0x0800) { // IPv4
+                    const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
+                                        | (quint32(f[32]) << 8) | quint32(f[33]);
+                    const bool sameSubnet = (dst & d->netMask4) == (d->localIp4 & d->netMask4);
+                    if (sameSubnet && dst != d->gatewayIp4)
+                        return; // LAN 内直连，放行给系统
+                }
+            }
+            d->net->inputFrame(frame);
         });
     }
     if (!d->arp)

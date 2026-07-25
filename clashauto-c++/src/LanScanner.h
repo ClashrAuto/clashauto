@@ -46,6 +46,8 @@ public:
     QString gatewayIp() const { return m_gatewayIp; }
     QString gatewayMac() const { return m_arp.value(m_gatewayIp); } // 网关 MAC（本轮 ARP 表里）
     QString interfaceName() const { return m_ifaceName; }
+    // 主网卡子网掩码（点分，如 "255.255.255.0"）；未知返回空。供网关做「同网段直连旁路」。
+    QString localNetmask() const;
     // 本机所有网卡 MAC（含虚拟网卡）——用来判定「这台设备就是本机」，不受主网卡选择影响。
     const QSet<QString> &localMacs() const { return m_localMacs; }
     // 所有默认路由的网关 IP（多网卡各一个）——用来判定「这台设备是某个网络的路由器」。

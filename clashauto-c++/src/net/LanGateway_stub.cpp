@@ -9,7 +9,7 @@ LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl) {}
 LanGateway::~LanGateway() { delete d; }
 
 void LanGateway::configure(const QString &, const QString &, const QString &, const QString &,
-                           const QString &, quint16)
+                           const QString &, quint16, const QString &)
 {
 }
 bool LanGateway::isAvailable() const { return false; }

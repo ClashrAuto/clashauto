@@ -71,7 +71,8 @@ void DevicesController::ensureGatewayConfigured()
     // 用当前扫描到的拓扑配置网关（网卡/本机 IP+MAC/网关 IP+MAC + mihomo 专用网关端口）。
     // 网关 MAC 需从 ARP 表拿到；扫描过至少一轮后才有值。
     m_gateway->configure(m_scanner->interfaceName(), m_scanner->localIp(), m_scanner->localMac(),
-                         m_scanner->gatewayIp(), m_scanner->gatewayMac(), DeviceStore::kGatewayPort);
+                         m_scanner->gatewayIp(), m_scanner->gatewayMac(), DeviceStore::kGatewayPort,
+                         m_scanner->localNetmask());
 }
 
 void DevicesController::onDeviceAdded(const QString &mac)

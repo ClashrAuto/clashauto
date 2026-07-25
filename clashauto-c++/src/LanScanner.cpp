@@ -295,6 +295,12 @@ QSet<QString> LanScanner::gatewayMacs() const
     return macs;
 }
 
+QString LanScanner::localNetmask() const
+{
+    // m_netMask 为主机序 quint32（0=未知）；QHostAddress(quint32) 按主机序解读 → 点分掩码。
+    return m_netMask ? QHostAddress(m_netMask).toString() : QString();
+}
+
 bool LanScanner::inPrimarySubnet(const QString &ip) const
 {
     if (ip.isEmpty() || !m_netBase || !m_netMask)
