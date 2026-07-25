@@ -90,7 +90,14 @@
 // —— 统计/调试 ——（关，省体积）
 #define LWIP_STATS                      0
 #define LWIP_STATS_DISPLAY              0
-#define LWIP_DEBUG                      0
+// 临时开 lwIP 调试：让 lwIP 自己打印为何丢包（ip4_input/tcp_input 决策）。经 cc.h 的 printf 输出，
+// 由自测脚本捕获。定位到问题后应关掉（体积/噪音）。
+#define LWIP_DEBUG                      1
+#define LWIP_DBG_MIN_LEVEL              LWIP_DBG_LEVEL_ALL
+#define LWIP_DBG_TYPES_ON               LWIP_DBG_ON
+#define IP_DEBUG                        LWIP_DBG_ON
+#define TCP_INPUT_DEBUG                 LWIP_DBG_ON
+#define ETHARP_DEBUG                    LWIP_DBG_ON
 
 // —— 杂项 ——
 #define LWIP_NETIF_API                  0
