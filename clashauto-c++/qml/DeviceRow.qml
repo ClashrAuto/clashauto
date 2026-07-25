@@ -25,11 +25,20 @@ Rectangle {
     height: 52
     radius: 5
     color: selected ? Qt.rgba(72 / 255, 151 / 255, 248 / 255, 0.22)
-                    : (rowHover.hovered ? Theme.hover : Theme.nodeRowBg)
+                    : (rowMouse.containsMouse ? Theme.hover : Theme.nodeRowBg)
     opacity: online ? 1.0 : 0.5
 
-    HoverHandler { id: rowHover }
-    TapHandler { onTapped: root.clicked() }
+    // 整行用 MouseArea 而不是 TapHandler：TapHandler 只拿「被动 grab」，按下的一瞬间 Main.qml
+    // 那个铺满窗口的背景 DragHandler 就能接管 → 按住列表往下拖会把**整个窗口**拖走（实测：拖一次
+    // 窗口位移 58px、列表只滚了 2px）。MouseArea 在按下时拿独占 grab，而那个 DragHandler 的
+    // grabPermissions 只有 Approves* 位、没有 CanTakeOverFrom*，抢不走 → 窗口不动；
+    // ListView(Flickable) 仍可从 MouseArea 手里抢 grab（preventStealing 默认 false）→ 列表照常滚。
+    MouseArea {
+        id: rowMouse
+        anchors.fill: parent
+        hoverEnabled: true
+        onClicked: root.clicked()
+    }
 
     RowLayout {
         anchors.fill: parent
@@ -147,10 +156,14 @@ Rectangle {
                 color: "#ffffff"
                 Behavior on x { NumberAnimation { duration: 120 } }
             }
-            HoverHandler {
+            // 同样用 MouseArea：它压在整行 MouseArea 之上，按下即独占 grab —— 既保证点开关不会
+            // 连带选中整行，也保证在开关上按住拖动不会去拖窗口。
+            MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
                 cursorShape: proxySwitch.canToggle ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                onClicked: if (proxySwitch.canToggle) root.toggleProxy()
             }
-            TapHandler { enabled: proxySwitch.canToggle; onTapped: root.toggleProxy() }
         }
     }
 }

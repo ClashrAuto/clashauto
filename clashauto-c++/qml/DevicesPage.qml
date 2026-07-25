@@ -550,6 +550,9 @@ Item {
                                 height: 34
                                 radius: 4
                                 color: Theme.nodeRowBg
+                                // 同 DeviceRow：按下即抢独占 grab，否则在这个列表上按住拖动会把
+                                // 整个窗口拖走（Main.qml 的背景 DragHandler 会接管）。
+                                MouseArea { anchors.fill: parent }
                                 RowLayout {
                                     anchors.fill: parent
                                     anchors.leftMargin: 8
@@ -573,8 +576,12 @@ Item {
                                         text: "" // close-fill
                                         font.family: Theme.riFont
                                         font.pixelSize: 12; color: Theme.textMuted
-                                        HoverHandler { cursorShape: Qt.PointingHandCursor }
-                                        TapHandler { onTapped: bridge.closeConnectionById(model.connId) }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: bridge.closeConnectionById(model.connId)
+                                        }
                                     }
                                 }
                             }
