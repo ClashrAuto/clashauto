@@ -5,7 +5,28 @@
 // 我们再决定终结/转发；发帧则由调用方自填 dst/src MAC + ethertype，内核不改。
 //
 // 为什么用 QSocketNotifier 而非线程轮询：契约要求 frameReceived() 在 Qt 事件循环线程发出，
-// 且不得阻塞。把 fd 设成非阻塞 + Notifier(Read) 就绪回调里 recv 到 EAGAIN 为止——零轮询、零线程。
+// 且不得阻塞。把 fd 设成非阻塞 + Notifier(Read)，就绪回调里一次把内核那边攒下的帧全吃掉——
+// 零轮询、零额外线程。
+//
+// ——————————————————— 收方：TPACKET_v3 mmap 环形缓冲（本文件的性能核心）———————————————————
+//
+// 老写法是「每帧一次 recvfrom + 每帧一个 QByteArray」。83k pps 量级下，两笔开销都和整个用户态
+// 协议栈处理同量级：
+//   · syscall：每帧一次 recvfrom ≈ 一次进出内核（现在还叠着 spectre/meltdown 的缓解代价）；
+//   · 堆分配：每帧一个引用计数块 + memcpy。
+// 换成 AF_PACKET 的 TPACKET_v3 收环之后：
+//   · 内核把帧直接码进一块和我们共享的 mmap 区，按「块(block)」为单位成批交付。一次 poll 唤醒
+//     处理一整块里的所有帧 → **每块一次 syscall**（其实连 syscall 都没有：读环是纯内存访问，
+//     唯一的系统调用是 Qt 事件循环那次 poll），而不是每帧一次。
+//   · 帧内容就在环里，用 QByteArray::fromRawData 指过去，**入站方向零堆分配、零拷贝**。
+//     这依赖 IL2Endpoint::frameReceived 的零拷贝契约（帧仅在槽内有效）+ 必须是**直连**，
+//     见 IL2Endpoint.h 的信号注释；跨线程队列连接会让指针在投递后失效。
+//
+// **回退路径**：TPACKET_v3 要内核 ≥ 3.2，建环还要一大块连续内核内存。setsockopt(PACKET_VERSION)
+// / setsockopt(PACKET_RX_RING) / mmap 任何一步失败，都原样退回逐帧 recvfrom（drainSocket），
+// 功能完全不变、只是少了这层优化。老到连头文件都不认识 TPACKET_v3 的构建环境，则整段代码被
+// COAST_HAVE_TPACKET_V3 编译期摘掉。CI 要出 x64 和 arm64 两个 Linux 包、用户内核版本不可控，
+// 这条回退不能省。
 //
 // 权限：需要 CAP_NET_RAW / root，否则 socket() 直接 EPERM。open() 失败时置 *err 并清理半开 fd。
 //
@@ -16,20 +37,41 @@
 
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>     // mmap/munmap（RX 环）
 #include <net/if.h>
-#include <netpacket/packet.h>
 #include <net/ethernet.h> // ETH_P_ALL / ETH_ALEN（内部再引 <linux/if_ether.h>，有 UAPI 守卫防冲突）
+// ★ 内核 UAPI 头放在 glibc 网络头之后引，且用 <linux/if_packet.h> 而**不是** glibc 的
+//   <netpacket/packet.h>：两者都定义 struct sockaddr_ll / struct packet_mreq，彼此没有 UAPI 守卫，
+//   同时包含会直接「redefinition of struct sockaddr_ll」。TPACKET_v3 的那套结构
+//   （tpacket_req3 / tpacket_block_desc / tpacket3_hdr）只有内核头里有，所以只能选它——
+//   sockaddr_ll 与 PACKET_* 常量它同样提供，是 netpacket/packet.h 的超集。
+//   （libpcap 的 Linux 后端同样只包含 <linux/if_packet.h>。）
+#include <linux/if_packet.h>
 #include <linux/filter.h> // sock_filter/sock_fprog + BPF_STMT/BPF_JUMP（SO_ATTACH_FILTER 的 cBPF）
 #include <arpa/inet.h>    // htons
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 
 #include <QByteArray>
 #include <QSocketNotifier>
 #include <QVector>
+
+// SOL_PACKET 正常由 glibc 的 <sys/socket.h>(bits/socket.h) 提供；个别精简 libc 没有，兜一个。
+#ifndef SOL_PACKET
+#define SOL_PACKET 263
+#endif
+
+// TPACKET_v3 的编译期可用性探针。
+// TPACKET_V3 本身是 enum 常量（无法 #ifdef），而 TP_STATUS_BLK_TMO 这个宏是和 TPACKET_v3 同一个
+// 内核提交（3.2, "af-packet: TPACKET_V3 flexible buffer implementation"）引入、且是 V3 专用语义的，
+// 拿它当「这套内核头懂 V3」的探针最贴切。PACKET_VERSION/PACKET_RX_RING 再兜一层。
+#if defined(TP_STATUS_BLK_TMO) && defined(PACKET_VERSION) && defined(PACKET_RX_RING)
+#define COAST_HAVE_TPACKET_V3 1
+#endif
 
 namespace {
 
@@ -41,6 +83,74 @@ void setSysError(QString *err, const char *what)
         *err = QString::fromLatin1(what) + QStringLiteral(": ")
              + QString::fromLocal8Bit(std::strerror(errno));
 }
+
+// 挂一段「全丢」cBPF（单条 ret #0）。
+// 用途是堵住一个经典竞态窗口：socket(AF_PACKET, …, ETH_P_ALL) **返回的那一刻**这条 socket 就已经
+// 挂进内核的 ptype_all 了，而此时还没 bind——也就是说**全机所有网卡**的每一帧都在往它上面灌，
+// 一直灌到我们把 ring 建好、调用方再调 setSourceMacFilter() 装上真正的源 MAC 过滤为止。
+// 先在 socket() 之后立刻挂 ret #0，等 bind + ring 都就位再 SO_DETACH_FILTER 放开，于是：
+//   · 窗口期压根没有帧进来 ⇒ 不需要「装过滤器前先 drain 掉旧帧」那一步；
+//   · open() 的对外语义一个字没变（返回后仍是「什么都收」，直到调用方设过滤）。
+void attachDropAllFilter(int fd)
+{
+    sock_filter code[] = { BPF_STMT(BPF_RET | BPF_K, 0) };
+    struct sock_fprog prog;
+    prog.len = 1;
+    prog.filter = code;
+    ::setsockopt(fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)); // 失败也无妨，纯优化
+}
+
+void detachFilter(int fd)
+{
+    int dummy = 0; // SO_DETACH_FILTER 忽略 optval，但内核要求给一个合法的指针/长度
+    ::setsockopt(fd, SOL_SOCKET, SO_DETACH_FILTER, &dummy, sizeof(dummy));
+}
+
+#ifdef COAST_HAVE_TPACKET_V3
+// ——————————————————— RX 环参数（每张网卡一份；内存账见下）———————————————————
+//
+// tp_block_size = 64 KiB
+//   硬约束：内核要求它页对齐（PAGE_ALIGNED）。取「PAGE_SIZE 的 2 的幂倍」是因为内核用
+//   __get_free_pages(order) 分配每个块，order = get_order(block_size)——不是 2 的幂就会向上取到
+//   整个 order，尾巴白扔。64 KiB = 16 × 4K 页 = order-4，是「够大」和「连续页好凑」的折中
+//   （order 越大越容易因内存碎片分配失败；内核有 vzalloc 兜底但没必要去踩）。
+//   它同时也是单帧长度上限：内核的 max_frame_len = 块大小 − 块头，64 KiB 远大于巨帧 9018，
+//   所以抓包不会被截断——和原来 recvfrom 到 64 KiB 缓冲的行为一致。
+// tp_block_nr = 16 → 每张网卡 64 KiB × 16 = **1 MiB**
+//   账：1 Gbps 满线速 ≈ 125 MB/s，1 MiB 环 ≈ 8 ms 的缓冲深度；我们每次 notifier 唤醒就把所有
+//   就绪块吃干净，8 ms 足够盖住一次事件循环抖动。参考：老路径靠的是默认 SO_RCVBUF（约 208 KB），
+//   所以这已经是 5 倍的余量。
+//   为什么不敢再大：这块是内核**预分配并常驻**的物理页（建环时就全部分配好、mmap 进本进程），
+//   不像 lwIP 那些 BSS 池是惰性提交的。家用场景最多同时代理 2~3 张卡 ⇒ 常驻 2~3 MiB 封顶，
+//   这个量级可以接受；取 8 MiB/卡 就变成几十兆常驻，对一个桌面客户端不合适。
+// tp_frame_size = 2048
+//   V3 里帧是**变长紧凑排布**的，这个值运行期不限制实际抓包长度，只参与 setsockopt 的入参校验：
+//   必须 ≥ TPACKET3_HDRLEN(=68)、必须 TPACKET_ALIGNMENT(16) 对齐、且要能整除 block_size。
+//   取 2048 → 每块 32 个「名义槽」。
+// tp_frame_nr 必须**精确**等于 (block_size / frame_size) × block_nr，差一个内核就直接 EINVAL。
+constexpr unsigned kRingBlockSize = 64u * 1024u;
+constexpr unsigned kRingBlockNr = 16u;
+constexpr unsigned kRingFrameSize = 2048u;
+constexpr unsigned kRingFrameNr = (kRingBlockSize / kRingFrameSize) * kRingBlockNr; // = 512
+constexpr std::size_t kRingBytes = std::size_t(kRingBlockSize) * kRingBlockNr;      // = 1 MiB
+
+// tp_retire_blk_tov（毫秒）—— **这是延迟旋钮，必须取小**。
+//
+// V3 的交付语义：帧先码进「当前块」，只有块**填满**、或者块开启后超过 tp_retire_blk_tov，内核才
+// 把整块标成 TP_STATUS_USER 并唤醒 poll。也就是说块没填满时，帧就静静躺在内核里不通知我们——
+// 这个超时直接变成轻载时每个包的额外延迟（计时从块开启算起，随机到达的包平均摊到 tov/2）。
+// 取 1：这是能取到的最小非零值（0 = 让内核按块大小/链路速率自己算，那会算出几十毫秒，不能要）。
+// 注意内核用 msecs_to_jiffies 换算，CONFIG_HZ=250 的发行版内核会取整到 1 个 jiffy = 4 ms。
+//
+// 权衡说清楚：
+//   · 重载（正是我们要优化的场景）下块几秒钟填满好多个，走的是「满」而不是超时，这点延迟根本
+//     不出现，拿到的是「每块一次唤醒」的全部收益；
+//   · 轻载下多出 0~4 ms。对交互流量（TCP ACK / SSH / 游戏）是可感知的，但相对于这条链路本身
+//     的代价（用户态 lwIP 终结 + SOCKS 出网，RTT 本来就是几十毫秒）属于可接受的量级。
+//   · 如果将来实测这点延迟不可接受，替代方案是退回 TPACKET_V2：它逐帧就绪、没有 tov 这回事，
+//     同样能拿到 mmap 零拷贝 + 批处理，代价是槽位定长（每帧固定占 tp_frame_size）内存利用率差。
+constexpr unsigned kRingRetireTovMs = 1u;
+#endif // COAST_HAVE_TPACKET_V3
 
 // Linux 二层端点：一张网卡一个 AF_PACKET 原始套接字。
 // 注意：本类不加 Q_OBJECT——它不声明新信号/槽，只重写基类虚函数并 emit 基类的 frameReceived，
@@ -64,6 +174,8 @@ public:
             setSysError(err, "socket(AF_PACKET)");
             return false;
         }
+        // ★ 第一件事就是堵住「未 bind 期间收全机所有网卡」的窗口，见 attachDropAllFilter 注释。
+        attachDropAllFilter(fd);
 
         struct ifreq ifr;
         std::memset(&ifr, 0, sizeof(ifr));
@@ -103,7 +215,7 @@ public:
             return false;
         }
 
-        // 非阻塞：就绪回调里循环 recv 到 EAGAIN，绝不在无数据时阻塞事件循环。
+        // 非阻塞：回退路径（drainSocket）靠它循环 recv 到 EAGAIN，绝不在无数据时阻塞事件循环。
         int flags = ::fcntl(fd, F_GETFL, 0);
         if (flags < 0)
             flags = 0;
@@ -114,19 +226,35 @@ public:
         m_localMac = mac;
         m_mtu = mtu;
 
-        m_notifier = new QSocketNotifier(fd, QSocketNotifier::Read, this);
+        // 建 RX 环。失败不是错误——静默回退到逐帧 recvfrom（m_ring 保持 nullptr）。
+        setupRxRing();
+
+        // 环（或回退路径）已就位，放开临时的「全丢」过滤器，恢复 open() 的对外语义。
+        detachFilter(m_fd);
+
+        m_notifier = new QSocketNotifier(m_fd, QSocketNotifier::Read, this);
         // Qt6 的 activated 只剩 (QSocketDescriptor, Type) 一个重载，取地址无歧义；
         // 用零参 lambda 转发（尾随实参可丢弃）。
-        connect(m_notifier, &QSocketNotifier::activated, this, [this]() { drainSocket(); });
+        connect(m_notifier, &QSocketNotifier::activated, this, [this]() { onReadable(); });
         return true;
     }
 
     void close() override
     {
         if (m_notifier) {
-            delete m_notifier; // 先删 Notifier，停止对 fd 的监听，再关 fd
+            delete m_notifier; // 先删 Notifier，停止对 fd 的监听，再拆环、关 fd
             m_notifier = nullptr;
         }
+#ifdef COAST_HAVE_TPACKET_V3
+        if (m_ring) {
+            // 先 munmap 再 close：环页由内核持有，socket 关闭时才真正释放；反过来做会在
+            // 已释放的映射上留一个悬空 VMA 的窗口。不需要显式发「销毁环」的 setsockopt——
+            // ::close(fd) 会把 rx_ring 一并拆掉。
+            ::munmap(m_ring, kRingBytes);
+            m_ring = nullptr;
+            m_blockIdx = 0;
+        }
+#endif
         if (m_fd >= 0) {
             ::close(m_fd);
             m_fd = -1;
@@ -144,6 +272,7 @@ public:
             return false;
 
         // 发送地址结构：内核按 sll_ifindex 选口，sll_halen/sll_addr 给目的 MAC（= 帧头前 6 字节）。
+        // 注意发方**不走环**（我们只装了 RX_RING，没装 TX_RING）——sendto 语义一如既往。
         struct sockaddr_ll sll;
         std::memset(&sll, 0, sizeof(sll));
         sll.sll_family = AF_PACKET;
@@ -163,6 +292,13 @@ public:
     // 内核态源 MAC 过滤：SO_ATTACH_FILTER 给这条 AF_PACKET socket 挂一段手写 cBPF。裸 socket 不带
     // libpcap，故自己生成指令（结构很简单：比对以太头 offset 6..11 的 6 字节源 MAC）。
     // 过滤只作用于本 socket 的**收**，不影响 sendto；也不影响内核给本机正常协议栈的投递。契约见头文件。
+    //
+    // 与 RX 环共存：SO_ATTACH_FILTER 是在 packet_rcv/tpacket_rcv **之前**由 sk_filter 执行的
+    // （run_filter() 在 tpacket_rcv 入口，早于「往环里码字节」这一步），所以过滤器和环是正交的两层，
+    // 装环前装、装环后装都行，被过滤掉的帧根本不会占环里的空间。本类的装载顺序是：
+    //   socket() → 挂 ret #0（堵住未 bind 窗口）→ bind → 建环 → 解开 ret #0 → 之后由调用方
+    //   随时重设真正的源 MAC 过滤。
+    // 因此不存在「过滤器装上之前 socket 已经收了一堆包、需要 drain」的经典坑（那个窗口里是全丢的）。
     //
     // cBPF 布局（N 个 MAC 的「或」）：每个 MAC 4 条指令块，末尾两条 ret：
     //   [base+0] ld  [8]                 ; A = 以太头 offset 8 的 4 字节 = src[2..5]（大端）
@@ -220,14 +356,35 @@ public:
         prog.len = static_cast<unsigned short>(code.size());
         prog.filter = code.data();
         // SO_ATTACH_FILTER 会**替换**已有过滤器（内核 rcu 换指针），故动态重设直接再调一次即可。
-        // 注意：换过滤器前已排进 socket 缓冲的旧帧不会被追溯过滤——那几帧仍由用户态过滤丢掉，无害。
+        // 注意：换过滤器前已排进环/接收队列的旧帧不会被追溯过滤——那几帧仍由用户态过滤丢掉，无害。
         if (::setsockopt(m_fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)) < 0)
             return false;
         return true;
     }
 
 private:
-    // fd 可读：把内核缓冲里所有帧一次性抽干（每帧 emit 一次），直到 EAGAIN。
+    // Notifier 就绪回调的统一入口：走环或走回退路径，并做一层重入保护。
+    // 为什么要防重入：槽里会一路跑到 lwIP / SOCKS，理论上不该转事件循环，但万一某天有人在下游
+    // 引入了嵌套事件循环，level-triggered 的 QSocketNotifier 会在同一个 fd 上再次触发，
+    // 于是同一个块被走两遍、还给内核两次——那是内存被内核就地覆写却仍在读的悬垂场景。一个 bool 的代价。
+    void onReadable()
+    {
+        if (m_inDrain)
+            return;
+        m_inDrain = true;
+#ifdef COAST_HAVE_TPACKET_V3
+        if (m_ring)
+            drainRing();
+        else
+            drainSocket();
+#else
+        drainSocket();
+#endif
+        m_inDrain = false;
+    }
+
+    // 回退路径：fd 可读时把内核缓冲里所有帧一次性抽干（每帧一次 recv、一次 QByteArray）。
+    // 只在 RX 环没建起来时才会被用到。
     void drainSocket()
     {
         char buf[65536]; // 单帧上限，容得下巨帧
@@ -245,11 +402,130 @@ private:
         }
     }
 
+#ifdef COAST_HAVE_TPACKET_V3
+    // 建 TPACKET_v3 RX 环。任何一步失败都返回 false ⇒ 调用方保持 m_ring == nullptr ⇒ 走 drainSocket。
+    bool setupRxRing()
+    {
+        int ver = TPACKET_V3;
+        if (::setsockopt(m_fd, SOL_PACKET, PACKET_VERSION, &ver, sizeof(ver)) < 0)
+            return false; // 内核 < 3.2 / 不支持 V3 → 回退
+
+        struct tpacket_req3 req;
+        std::memset(&req, 0, sizeof(req)); // tp_sizeof_priv / tp_feature_req_word 保持 0
+        req.tp_block_size = kRingBlockSize;
+        req.tp_block_nr = kRingBlockNr;
+        req.tp_frame_size = kRingFrameSize;
+        req.tp_frame_nr = kRingFrameNr;
+        req.tp_retire_blk_tov = kRingRetireTovMs;
+        if (::setsockopt(m_fd, SOL_PACKET, PACKET_RX_RING, &req, sizeof(req)) < 0)
+            return false; // 参数被拒 / 连续内存不足（ENOMEM）→ 回退
+
+        void *p = ::mmap(nullptr, kRingBytes, PROT_READ | PROT_WRITE, MAP_SHARED, m_fd, 0);
+        if (p == MAP_FAILED) {
+            // ★ 必须把已经建好的环拆掉再回退。装了 RX_RING 的 socket，收方**只往环里投**
+            //   （内核把 prot_hook.func 从 packet_rcv 换成了 tpacket_rcv），普通接收队列永远是空的
+            //   —— 留着一个没人 mmap 的环，drainSocket 会一帧都读不到，网关直接哑掉。
+            //   传全 0 的 req3 即为「销毁环」（内核在 tp_block_nr==0 分支要求 tp_frame_nr 也是 0）；
+            //   此时 po->mapped 为 0，不会 EBUSY。
+            struct tpacket_req3 zero;
+            std::memset(&zero, 0, sizeof(zero));
+            ::setsockopt(m_fd, SOL_PACKET, PACKET_RX_RING, &zero, sizeof(zero));
+            return false;
+        }
+
+        m_ring = static_cast<unsigned char *>(p);
+        m_blockIdx = 0;
+        return true;
+    }
+
+    // 收方主路径：一次唤醒把所有「已就绪」的块处理干净，每块内部顺着 tp_next_offset 链表走帧。
+    //
+    // 索引同步（写错就要么丢包、要么空转烧 CPU，务必看懂）：
+    //   内核和我们各自维护一个块游标，都从 0 开始、都严格 +1 取模 kRingBlockNr 地推进。内核的
+    //   poll 就绪条件正是「队首块的 block_status != TP_STATUS_KERNEL」——和这里 break 的判据是
+    //   同一个字段同一个块。所以只要我们「每消费一块就恰好推进一格、且绝不跳过」，
+    //   level-triggered 的 QSocketNotifier 就不会出现「说就绪但我们什么都没吃到」的空转。
+    void drainRing()
+    {
+        unsigned consumed = 0;
+        for (;;) {
+            if (!m_ring)
+                return; // 上一块的槽里发生了 close()（重配/摘卡）：环已 munmap，立刻停手
+            unsigned char *blkStart = m_ring + std::size_t(m_blockIdx) * kRingBlockSize;
+            const unsigned char *blkEnd = blkStart + kRingBlockSize;
+            auto *bd = reinterpret_cast<struct tpacket_block_desc *>(blkStart);
+
+            // acquire：内核是「先写满帧内容，再置 block_status」；我们必须反过来「先读到状态，
+            // 再读内容」，中间隔一次 acquire 屏障。arm64 这类弱序架构上少了它就可能读到还没写完的帧
+            // （x86 上是空操作，但 CI 要出 arm64 包，不能省）。
+            const __u32 status = __atomic_load_n(&bd->hdr.bh1.block_status, __ATOMIC_ACQUIRE);
+            if ((status & TP_STATUS_USER) == 0)
+                break; // 队首块还归内核 → 本轮结束
+
+            const __u32 num = bd->hdr.bh1.num_pkts;
+            const unsigned char *p = blkStart + bd->hdr.bh1.offset_to_first_pkt;
+            for (__u32 i = 0; i < num; ++i) {
+                if (!m_ring)
+                    return; // 槽里发生了 close()：环已 munmap，连下面还块的写都不能做
+                // 越界自保：正常情况下内核给的偏移一定落在块内，这几步比较是防「块被写坏」时
+                // 我们拿着野指针去 emit（那可是直接读内核给的共享内存）。都写成「差值 vs 长度」
+                // 而不是「指针 + 长度」，免得 caplen/next 是垃圾值时指针加法先溢出。
+                if (p < blkStart || p >= blkEnd
+                    || std::size_t(blkEnd - p) < sizeof(struct tpacket3_hdr))
+                    break;
+                const auto *th = reinterpret_cast<const struct tpacket3_hdr *>(p);
+                const unsigned char *data = p + th->tp_mac; // tp_mac = 相对本帧头的以太头偏移
+                const __u32 caplen = th->tp_snaplen;        // 实际抓到的字节数（不是原始 tp_len）
+                if (data < blkStart || data >= blkEnd)
+                    break;
+                if (caplen > 0 && caplen <= std::size_t(blkEnd - data)) {
+                    // ★ 零拷贝：QByteArray 直接指向环内存，不分配、不 memcpy。
+                    //   合法性依赖两条契约（见 IL2Endpoint.h）：帧仅在槽内有效；连接必须是直连。
+                    //   本块要到下面 __atomic_store_n 把它还给内核之后才可能被覆写，而那一步在
+                    //   本循环结束之后——所以槽执行期间指针一定有效。
+                    emit frameReceived(QByteArray::fromRawData(
+                        reinterpret_cast<const char *>(data), static_cast<qsizetype>(caplen)));
+                }
+                const __u32 next = th->tp_next_offset;
+                if (next == 0)
+                    break; // 链表尾（正常由 num 终止；这里防 next==0 导致原地死循环）
+                p += next;
+            }
+
+            // release：保证上面对帧内容的读全部完成之后，才把块还给内核——内核拿到 TP_STATUS_KERNEL
+            // 会立刻开始往这块里写新帧。写错时机 = 一边读一边被覆写。
+            __atomic_store_n(&bd->hdr.bh1.block_status, TP_STATUS_KERNEL, __ATOMIC_RELEASE);
+            m_blockIdx = (m_blockIdx + 1) % kRingBlockNr;
+            ++consumed;
+        }
+
+        if (consumed == 0) {
+            // 说「可读」却一个块都没吃到。理论上不该发生（判据同源，见上），但有一个现实来源：
+            // packet_poll 里 OR 了 datagram_poll，socket 上挂着未取走的 sk_err（比如网卡被拔 →
+            // ENETDOWN）会让 poll 一直返回 POLLERR，而 Qt 的 Read 通知器把它也当就绪。
+            // 老的 recvfrom 路径每次读会顺手 sock_error() 把它取走清零，改成环之后就没人清了 ——
+            // 那正好会变成事件循环空转烧 CPU（这个仓库刚为「GUI 线程空转」做过一次优化，不能再引入一个）。
+            // getsockopt(SO_ERROR) 的内核实现就是 sock_error()（读并清零），是不碰接收队列的清错法：
+            // 装了 RX_RING 的 socket 收方只走环，不该再 recv/read。
+            int soErr = 0;
+            socklen_t len = sizeof(soErr);
+            ::getsockopt(m_fd, SOL_SOCKET, SO_ERROR, &soErr, &len);
+        }
+    }
+#else
+    bool setupRxRing() { return false; } // 头文件不认识 TPACKET_v3：永远走 drainSocket
+#endif // COAST_HAVE_TPACKET_V3
+
     int m_fd = -1;
     int m_ifIndex = -1;
     int m_mtu = 1500;
     QByteArray m_localMac;
     QSocketNotifier *m_notifier = nullptr;
+    bool m_inDrain = false;
+#ifdef COAST_HAVE_TPACKET_V3
+    unsigned char *m_ring = nullptr; // mmap 起点（= 第 0 块）；nullptr = 没建成环，走回退路径
+    unsigned m_blockIdx = 0;         // 下一个要消费的块号，必须和内核队首严格同步
+#endif
 };
 
 } // namespace

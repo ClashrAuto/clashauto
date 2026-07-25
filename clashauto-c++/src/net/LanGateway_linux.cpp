@@ -316,6 +316,11 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         }
         // 二层帧过滤：只把被劫持设备发来的帧喂进用户态栈（按这张卡的网段做旁路判断）。
         // context = this(worker)，sender = n->ep 也在工作线程 → 直连，lambda 在工作线程上跑。
+        // ★ 这条「必须直连」不只是性能取向，是**正确性硬约束**：Linux 端点用 TPACKET_v3 收环，
+        //   frame 是 QByteArray::fromRawData 指向 mmap 环内存的视图，槽一返回块就还给内核。
+        //   一旦这里变成队列连接（改 connect 类型、或把端点/worker 拆到两个线程），Qt 会把这个
+        //   「视图」拷进事件队列，等真正派发时那块内存早被新帧覆写 ⇒ 悬垂读。详见
+        //   IL2Endpoint::frameReceived 的注释。下面这个 lambda 本身也只在槽内读 frame，不留存。
         connect(n->ep, &IL2Endpoint::frameReceived, this, [this, n](const QByteArray &frame) {
             if (frame.size() < 12)
                 return;

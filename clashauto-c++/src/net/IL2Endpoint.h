@@ -58,6 +58,20 @@ public:
 
 signals:
     // 收到一个完整以太帧（含以太头）。接收方零拷贝语义：帧内容仅在槽内有效，需要保留请拷贝。
+    //
+    // 「零拷贝」在 Linux 后端是字面意思：TPACKET_v3 收环里的帧由 QByteArray::fromRawData 直接指过去，
+    // 底层就是那块和内核共享的 mmap 内存，槽一返回、整块还给内核，内核立刻会往里写新帧。由此有三条
+    // **硬约束**，改动这个信号的连接方式前务必先看：
+    //  1. **必须是直连（Qt::DirectConnection / 同线程的 AutoConnection）**。绝不能用 Queued /
+    //     BlockingQueued，也不能把 sender 和 receiver 放在不同线程上——队列连接会把 QByteArray
+    //     拷进事件队列，而「拷贝一个 fromRawData 的 QByteArray」拷的只是那个指向环内存的视图，
+    //     等事件真正被派发时那块内存早已被内核覆写 ⇒ 悬垂读。
+    //     （现状：LanGateway 的帧过滤 lambda 以 worker 自身为 context，端点也 parent 在 worker 上，
+    //      二者同线程 ⇒ 直连；GatewaySelfTest 同理在主线程内直连。）
+    //  2. 想把帧留到槽之外，必须**深拷贝**：QByteArray(f.constData(), f.size())，或取严格子串
+    //     f.mid(pos, len)（pos>0 时 Qt6 走 sliced() = 深拷贝）。注意 f.mid(0, f.size()) 在 Qt6 里
+    //     命中「Full」分支返回的是浅拷贝，那样存下来照样悬垂。
+    //  3. 数据**不保证以 '\0' 结尾**，别把 constData() 当 C 字符串用。
     void frameReceived(const QByteArray &frame);
 };
 

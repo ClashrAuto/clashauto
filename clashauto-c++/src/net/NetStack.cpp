@@ -1037,6 +1037,11 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
     const int ulen = (quint16(udp[4]) << 8) | udp[5];
     if (ulen < 8 || 14 + ihl + ulen > frame.size())
         return;
+    // ★ 这里必须是**深拷贝**：payload 会被塞进 flow->pending 存到 SOCKS 握手完成之后，活得比本次
+    //   调用久；而 frame 在 Linux 后端是 QByteArray::fromRawData 指向 TPACKET_v3 收环的视图，
+    //   本函数一返回那块 mmap 内存就还给内核、随时被新帧覆写（契约见 IL2Endpoint::frameReceived）。
+    //   mid() 在 Qt6 里只有 pos==0 && len==size 的「Full」分支才返回浅拷贝，这里起点恒 ≥ 14+20+8=42，
+    //   走的是 sliced() 深拷贝分支 —— 成立，但别把起点改成 0。
     const QByteArray payload = frame.mid(14 + ihl + 8, ulen - 8);
 
     const DeviceInfo dev = d->devices.value(srcIp);
