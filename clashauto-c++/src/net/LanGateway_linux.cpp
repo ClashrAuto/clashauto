@@ -34,6 +34,19 @@ QByteArray macBytes(const QString &mac)
     }
     return out;
 }
+// 6 字节 MAC → quint64 键（大端拼装，高 16 位恒为 0）。
+// 为什么不用 QByteArray 当键：这是每帧都要做一次的查表，用 QByteArray 就得先
+// frame.mid(6, 6) 深拷贝出 6 个字节（一次堆分配 + 引用计数块），高吞吐时纯浪费；
+// MAC 只有 48 位，塞进 quint64 是无损的，可以直接从帧缓冲原地读出来，零分配。
+inline quint64 macKey(const uchar *p)
+{
+    return (quint64(p[0]) << 40) | (quint64(p[1]) << 32) | (quint64(p[2]) << 24)
+           | (quint64(p[3]) << 16) | (quint64(p[4]) << 8) | quint64(p[5]);
+}
+inline quint64 macKey(const QByteArray &mac)
+{
+    return mac.size() == 6 ? macKey(reinterpret_cast<const uchar *>(mac.constData())) : 0;
+}
 // 点分 IPv4 → 主机序 quint32（非法/空/非 IPv4 返回 0）。
 quint32 ipToU32(const QString &ip)
 {
@@ -61,22 +74,27 @@ struct LanGateway::Impl {
     QHash<QString, GwNic *> nics;    // ifname → 套件
     quint16 socksPort = 0;
 
-    // 被劫持设备：src MAC(6 字节) → ip（帧过滤 + 记账）。
-    QHash<QByteArray, QString> victimByMac;
+    // 被劫持设备：src MAC 打包成的 quint64 键 → ip（帧过滤 + 记账，见 macKey 注释）。
+    QHash<quint64, QString> victimByMac;
     QHash<QString, QString> victimMacStr; // ip → mac 串（disable 用）
     QHash<QString, QString> victimNic;    // ip → ifname（disable/持久化要找回对应那张卡）
 
     // 把「属于这张卡的」被劫持设备源 MAC 集合推给它的二层端点，装成内核态源 MAC 过滤（收方优化）。
     // 多网卡：只推 victimNic 记为这张卡的设备。集合为空 → 端点装「全丢」过滤（这张卡当前没有劫持）。
     // 装不上（平台不支持/失败）无所谓——frameReceived 的 lambda 仍按 victimByMac 在用户态兜底过滤。
+    // 这里要的是真正的 6 字节 MAC，而 victimByMac 的键已经是打包过的整数，所以改从 victimMacStr
+    // （ip → mac 串）走一遍 macBytes()——冷路径（只在 configure/enable/disable 时跑），无所谓开销。
     void pushMacFilter(GwNic *n) const
     {
         if (!n || !n->ep)
             return;
         QVector<QByteArray> macs;
-        for (auto it = victimByMac.constBegin(); it != victimByMac.constEnd(); ++it) {
-            if (victimNic.value(it.value()) == n->spec.ifname)
-                macs.append(it.key());
+        for (auto it = victimMacStr.constBegin(); it != victimMacStr.constEnd(); ++it) {
+            if (victimNic.value(it.key()) != n->spec.ifname)
+                continue;
+            const QByteArray mb = macBytes(it.value());
+            if (mb.size() == 6)
+                macs.append(mb);
         }
         n->ep->setSourceMacFilter(macs);
     }
@@ -202,15 +220,15 @@ void LanGateway::configure(const QVector<NicSpec> &specs, quint16 socksPort)
         connect(n->ep, &IL2Endpoint::frameReceived, this, [this, n](const QByteArray &frame) {
             if (frame.size() < 12)
                 return;
-            const QByteArray src = frame.mid(6, 6);
-            if (!d->victimByMac.contains(src))
+            const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+            // 源 MAC 原地打包成 quint64 查表：不做 frame.mid(6, 6)，省掉每帧一次堆分配。
+            if (!d->victimByMac.contains(macKey(f + 6)))
                 return;
             // 同网段直连旁路：被劫持设备发往「本网段内（且非网关本身）」的 IPv4 帧不喂用户态栈，
             // 让它照常二层直达——设备回给本机 LAN IP 的包若被 lwIP 终结会触发 RST，导致本机无法
             // 直连该设备（SSH/网页/共享）；同理 LAN 内设备互访也不该被代理绕行。只有真正出网
             // （目的在子网外）或发往网关 IP（DNS/路由器后台等，其 ARP 被投毒必须由我们接管）的帧进栈。
             if (n->netMask4 != 0 && frame.size() >= 34) {
-                const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
                 const quint16 ethType = (quint16(f[12]) << 8) | f[13];
                 if (ethType == 0x0800) { // IPv4
                     const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
@@ -299,7 +317,7 @@ bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QStri
     d->net->addDevice(ip, mb, socksUser);
     n->arp->startSpoof(mac, ip);
     ++n->victims;
-    d->victimByMac.insert(mb, ip);
+    d->victimByMac.insert(macKey(mb), ip);
     d->victimMacStr.insert(ip, mac);
     d->victimNic.insert(ip, n->spec.ifname);
     d->pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
@@ -311,7 +329,10 @@ bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QStri
 void LanGateway::disableDevice(const QString &mac)
 {
     const QByteArray mb = macBytes(mac);
-    const QString ip = d->victimByMac.value(mb);
+    if (mb.isEmpty())
+        return; // 非法 MAC：macKey 会得到 0，和「全零 MAC」撞键，干脆挡在这里
+    const quint64 key = macKey(mb);
+    const QString ip = d->victimByMac.value(key);
     if (ip.isEmpty())
         return;
     GwNic *n = d->nics.value(d->victimNic.value(ip));
@@ -323,7 +344,7 @@ void LanGateway::disableDevice(const QString &mac)
     }
     if (d->net)
         d->net->removeDevice(ip);
-    d->victimByMac.remove(mb);
+    d->victimByMac.remove(key);
     d->victimMacStr.remove(ip);
     d->victimNic.remove(ip);
     if (n)
