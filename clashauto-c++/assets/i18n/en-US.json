@@ -223,5 +223,6 @@
   "自动识别": "Auto-detect",
   "发现新设备": "New device found",
   "已导出到 ": "Exported to ",
-  "导出设备列表": "Export device list"
+  "导出设备列表": "Export device list",
+  "启动到托盘": "Start to tray"
 }

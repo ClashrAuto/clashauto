@@ -63,16 +63,14 @@ ApplicationWindow {
     onXChanged: if (geometryReady) { winPos.posX = x; winPos.saved = true; }
     onYChanged: if (geometryReady) { winPos.posY = y; winPos.saved = true; }
 
-    // 点 ✕ 关闭主窗口不退出程序：只隐藏窗口（核心/托盘继续在跑），之后可经托盘/菜单栏「控制面板」
-    // 或 mac 点 Dock 图标重新打开。mac 恒隐藏（留 Dock，符合 mac 习惯）；Win/Linux 按「关闭到托盘」
-    // (config.mini) 决定——关则真正退出。真正退出统一走 Qt.quit()（aboutToQuit 停核心、还原系统代理）。
+    // 点 ✕ 关闭主窗口**一律不退出程序**：只隐藏窗口（核心/系统代理/托盘继续在跑），之后经托盘/菜单栏
+    // 「控制面板」或 mac 点 Dock 图标重新打开。真正退出请用托盘菜单「退出程序」或 mac 的 Cmd+Q
+    // （统一走 Qt.quit()，aboutToQuit 停核心、还原系统代理、还原被劫持设备 ARP）。
+    // 说明：本代理客户端常驻托盘，✕ 直接退会连带停掉核心/系统代理，体验差，故 ✕ 恒收进托盘。
+    // 「关闭到托盘」设置项现只影响「启动时是否静默到托盘」（见 Component.onCompleted）。
     onClosing: (close) => {
-        if (isMac || bridge.closeToTray) {
-            close.accepted = false; // 不销毁窗口，仅隐藏，供后续重开
-            window.hide();
-        } else {
-            Qt.quit();
-        }
+        close.accepted = false; // 不销毁窗口，仅隐藏，供后续重开
+        window.hide();
     }
 
     // 所有平台都用系统原生窗（带标题栏）。mac 由 applyMacGlass 把标题栏变透明+整窗毛玻璃；
@@ -93,7 +91,7 @@ ApplicationWindow {
     Component.onCompleted: {
         restoreWindowPos(); // 先定位（此时窗口尚未真正显示，恢复到上次位置/右下角不会闪一下）
         Theme.dark = bridge.initialDark;
-        // 「关闭到托盘」(config.mini)：开 → 静默启动，不显示窗口只留托盘（之后经托盘/菜单栏「控制面板」
+        // 「启动到托盘」(config.mini)：开 → 静默启动，不显示窗口只留托盘（之后经托盘/菜单栏「控制面板」
         // 或 mac Dock 重开）；关 → 正常显示窗口。设 visible=true 会触发 onVisibleChanged → applyChrome，
         // 故显示分支无需再手动 applyChrome；隐藏分支等首次显示（重开）时再上标题栏/毛玻璃。
         window.visible = !bridge.closeToTray;
