@@ -233,6 +233,9 @@ int runGatewaySelfTest()
         std::fprintf(stderr, "SELFTEST: NetStack.init 失败: %s\n", err.toLatin1().constData());
         return 3;
     }
+    // 关键：把二层收到的帧接进用户态栈。真实路径由 LanGateway 做此连接（并按 victim MAC 过滤）；
+    // 自测直连 NetStack，必须在这里手动接线，否则读到的帧无人消费（= 之前 0 条 NETSTACK IN 的原因）。
+    QObject::connect(ep, &IL2Endpoint::frameReceived, net, &NetStack::inputFrame);
     net->addDevice(victimIp, victimMac, expectUser);
     std::fprintf(stderr, "SELFTEST: 就绪 tap=%s victim=%s user=%s，等待 curl…\n",
                  tap.toLatin1().constData(), victimIp.toLatin1().constData(),

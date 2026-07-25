@@ -62,9 +62,25 @@ for i in $(seq 1 20); do
   sleep 0.3
 done
 
-# 真实内核 curl → SERVER_IP（经 TAP → NetStack → 假 SOCKS）
-CURL_OUT="$(curl -s -m 8 "http://$SERVER_IP/" 2>/dev/null || true)"
+# —— 诊断：路由/链路/邻居/是否有帧真的到 TAP ——
+echo "----- diag: link -----";      ip -br link show "$TAP" || true
+echo "----- diag: addr -----";      ip -br addr show "$TAP" || true
+echo "----- diag: route get -----"; ip route get "$SERVER_IP" || true
+echo "----- diag: neigh -----";     ip neigh show dev "$TAP" || true
+# 抓 TAP 上前几帧（看内核有没有把 SYN 发到 tap）
+TCPD_OUT="$(mktemp)"
+( timeout 10 tcpdump -i "$TAP" -c 5 -nne 2>/dev/null >"$TCPD_OUT" ) &
+TCPD_PID=$!
+sleep 0.5
+
+# 真实内核 curl → SERVER_IP（经 TAP → NetStack → 假 SOCKS），-v 存 stderr
+CURL_ERR="$(mktemp)"
+CURL_OUT="$(curl -sv -m 8 "http://$SERVER_IP/" 2>"$CURL_ERR" || true)"
 echo "SELFTEST-HARNESS: curl 返回 = '$CURL_OUT'"
+wait "$TCPD_PID" 2>/dev/null || true
+echo "----- diag: tcpdump on $TAP -----"; cat "$TCPD_OUT"; echo "(end)"
+echo "----- diag: curl -v -----";        tail -15 "$CURL_ERR"
+rm -f "$TCPD_OUT" "$CURL_ERR"
 
 # 等 Coast 自测退出并取其返回码（0=收到带正确用户名的 CONNECT）
 wait "$COAST_PID"; COAST_RC=$?
