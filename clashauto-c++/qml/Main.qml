@@ -192,8 +192,8 @@ ApplicationWindow {
                 // 状态 dashboard / 订阅 rss / 设置 settings-3 / 日志 file-list-3 / 关于 information。
                 Repeater {
                     id: navRepeater
-                    readonly property var navIcons: ["\uEC14", "\uF09F", "\uF0E6", "\uECEF", "\uEE59"]
-                    model: [qsTr("状态"), qsTr("订阅"), qsTr("设置"), qsTr("日志"), qsTr("关于")]
+                    readonly property var navIcons: ["\uEC14", "\uEC2E", "\uF09F", "\uF0E6", "\uECEF", "\uEE59"]
+                    model: [qsTr("状态"), qsTr("设备"), qsTr("订阅"), qsTr("设置"), qsTr("日志"), qsTr("关于")]
                     delegate: NavButton {
                         Layout.fillWidth: true // 铺满侧栏宽、右缘紧贴内容卡
                         Layout.leftMargin: 20  // 按钮左侧留 20px 间距
@@ -300,6 +300,7 @@ ApplicationWindow {
                     currentIndex: window.currentPage
 
                     StatusPage {}
+                    DevicesPage {}
                     SubscriptionsPage {}
                     SettingsPage {}
                     LogsPage {}

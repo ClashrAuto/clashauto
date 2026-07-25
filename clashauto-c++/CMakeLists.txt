@@ -43,6 +43,9 @@ set(BACKEND_SOURCES
     src/ClashService.cpp     src/ClashService.h
     src/SubParser.cpp        src/SubParser.h
     src/TrayController.cpp   src/TrayController.h
+    # 设备页后端（局域网发现 + 台账；框架无关）
+    src/LanScanner.cpp       src/LanScanner.h
+    src/DeviceStore.cpp      src/DeviceStore.h
 )
 
 # QML 绑定胶水（新增的薄适配层）
@@ -56,6 +59,10 @@ set(QML_GLUE_SOURCES
     src/qml/SettingsController.cpp      src/qml/SettingsController.h
     src/qml/UpdateController.cpp         src/qml/UpdateController.h
     src/qml/I18n.cpp                     src/qml/I18n.h
+    # 设备页 QML 胶水（薄适配层）
+    src/qml/DevicesController.cpp        src/qml/DevicesController.h
+    src/qml/DeviceListModel.cpp          src/qml/DeviceListModel.h
+    src/qml/DeviceConnectionsModel.cpp   src/qml/DeviceConnectionsModel.h
 )
 
 qt_add_executable(clashauto-qml
@@ -76,6 +83,8 @@ qt_add_qml_module(clashauto-qml
         qml/Main.qml
         qml/Theme.qml
         qml/StatusPage.qml
+        qml/DevicesPage.qml
+        qml/DeviceRow.qml
         qml/SubscriptionsPage.qml
         qml/SettingsPage.qml
         qml/LogsPage.qml

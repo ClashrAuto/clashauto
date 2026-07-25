@@ -8,6 +8,7 @@
 #include "AppConfig.h"
 #include "ClashService.h"
 #include "CoreController.h"
+#include "DeviceStore.h"
 #include "SubscriptionStore.h"
 #include "TrayController.h"
 #include "qml/QmlBridge.h"
@@ -17,6 +18,7 @@
 #include "qml/AboutController.h"
 #include "qml/SettingsController.h"
 #include "qml/UpdateController.h"
+#include "qml/DevicesController.h"
 
 #include <QApplication>
 #include <QFont>
@@ -88,6 +90,10 @@ int main(int argc, char *argv[])
     auto *about = new AboutController(config, &app);
     auto *settingsCtrl = new SettingsController(core, clash, &app);
     auto *updateCtrl = new UpdateController(config, core, &app);
+    // 设备页：局域网发现台账 + 控制器（自持连接轮询/热更新；页面显隐时开停）。
+    auto *deviceStore = new DeviceStore(config.configDir, &app);
+    auto *devicesCtrl = new DevicesController(deviceStore, clash, &app);
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, deviceStore, &DeviceStore::save);
 
     // 托盘 toggle → 后端（与 Widgets 版契约一致）。核心生命周期仍由用户显式触发。
     // 增强(TUN) 走 bridge.toggleTun（而非直连 core）：Windows 上开启且非提权时先弹 UAC 提权重启，
@@ -115,6 +121,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("about", about);
     engine.rootContext()->setContextProperty("settings", settingsCtrl);
     engine.rootContext()->setContextProperty("updater", updateCtrl);
+    engine.rootContext()->setContextProperty("devices", devicesCtrl);
 
     // 界面语言（i18n）：按 config.language 在「加载 QML 前」装好翻译器，首帧即是目标语言（zh-CN 为默认，
     // 不装翻译器 → 用中文源串；en-US 装英文表）。设置页切语言经 languageChangeRequested → 运行时 retranslate。

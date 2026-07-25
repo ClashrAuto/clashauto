@@ -53,4 +53,52 @@ QtObject {
     // 图标码点见 assets/remixicon.css（.ri-<名>:before content 即 \uXXXX）；常用：check-line EB7B、eye-line ECB5、
     // edit-line EC86、refresh-line F064、close-line EB99、add-line EA13、delete-bin-line EC2A。
     readonly property string riFont: "remixicon"
+
+    // —— 工具函数（供各页复用，避免每处重复实现字节格式化）——
+    // 人类可读字节：B / KB / MB / GB / TB（保留两位）。
+    function fmtBytes(v) {
+        var n = Number(v) || 0;
+        if (n < 1024) return n.toFixed(0) + " B";
+        var u = ["KB", "MB", "GB", "TB", "PB"];
+        var i = -1;
+        do { n /= 1024; ++i; } while (n >= 1024 && i < u.length - 1);
+        return n.toFixed(2) + " " + u[i];
+    }
+    // 速率：字节/秒 → "1.20 MB/s"。
+    function fmtRate(v) { return fmtBytes(v) + "/s"; }
+
+    // 设备类型 → 头像底色（无图标字体依赖，纯色区分类型）。
+    function deviceColor(typeKey) {
+        switch (typeKey) {
+        case "phone":    return "#4da13e";
+        case "tablet":   return "#3e8fa1";
+        case "computer": return "#466ea8";
+        case "router":   return "#a86e43";
+        case "tvbox":    return "#8a54c6";
+        case "speaker":  return "#c65492";
+        case "printer":  return "#5a6470";
+        case "camera":   return "#a84343";
+        case "game":     return "#43a897";
+        case "nas":      return "#7a7a3e";
+        case "iot":      return "#c69a54";
+        default:         return "#888888";
+        }
+    }
+    // 设备类型 → 头像单字（CJK 恒可用 MiSans 渲染，避免图标字体码点不确定）。
+    function deviceGlyph(typeKey) {
+        switch (typeKey) {
+        case "phone":    return "机";
+        case "tablet":   return "板";
+        case "computer": return "脑";
+        case "router":   return "由";
+        case "tvbox":    return "视";
+        case "speaker":  return "箱";
+        case "printer":  return "印";
+        case "camera":   return "摄";
+        case "game":     return "戏";
+        case "nas":      return "储";
+        case "iot":      return "智";
+        default:         return "?";
+        }
+    }
 }
