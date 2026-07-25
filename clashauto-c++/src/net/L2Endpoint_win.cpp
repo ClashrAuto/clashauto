@@ -61,6 +61,19 @@ public:
 
     bool open(const QString &ifname, QString *err) override
     {
+        // Npcap 的 wpcap.dll/Packet.dll 装在 %SystemRoot%\System32\Npcap\，且本程序对它们**延迟加载**
+        // (/DELAYLOAD)，故普通用户没装 Npcap 时 app 照常运行、仅网关不可用。这里先把 Npcap 目录加入
+        // DLL 搜索路径并试加载 wpcap.dll：加载不到 = 没装 Npcap → 返回 false（gatewayReady=false）。
+        char sysdir[MAX_PATH] = {0};
+        if (GetSystemDirectoryA(sysdir, MAX_PATH)) {
+            QByteArray npcapDir = QByteArray(sysdir) + "\\Npcap";
+            SetDllDirectoryA(npcapDir.constData());
+        }
+        if (!LoadLibraryA("wpcap.dll")) {
+            if (err) *err = QStringLiteral("未检测到 Npcap（请安装 Npcap 驱动后重试）");
+            return false;
+        }
+
         // ifname = 接口 GUID（QNetworkInterface::name()）；Npcap 设备名为 \Device\NPF_{GUID}。
         const QByteArray dev = QByteArray("\\Device\\NPF_") + ifname.toLatin1();
         char errbuf[PCAP_ERRBUF_SIZE] = {0};

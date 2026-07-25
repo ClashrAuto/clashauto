@@ -156,6 +156,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         target_include_directories(clashauto-qml PRIVATE "${NPCAP_SDK}/Include")
         target_link_directories(clashauto-qml PRIVATE "${_npcap_lib}")
         target_link_libraries(clashauto-qml PRIVATE wpcap Packet iphlpapi ws2_32)
+        # 延迟加载 Npcap DLL：没装 Npcap 的机器上 Coast 仍能启动（否则缺 wpcap.dll 直接起不来），
+        # 仅在真正用网关时按需加载；加载不到则优雅失败（见 L2Endpoint_win 的 LoadLibrary 检查）。
+        if(MSVC)
+            target_link_options(clashauto-qml PRIVATE /DELAYLOAD:wpcap.dll /DELAYLOAD:Packet.dll)
+            target_link_libraries(clashauto-qml PRIVATE delayimp)
+        endif()
     endif()
 else()
     target_sources(clashauto-qml PRIVATE src/net/LanGateway_stub.cpp)
