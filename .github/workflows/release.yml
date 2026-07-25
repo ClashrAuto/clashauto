@@ -100,6 +100,16 @@ jobs:
           choco install nsis -y --no-progress
           "C:\Program Files (x86)\NSIS" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Install Npcap SDK
+        shell: pwsh
+        # 透明网关 Windows 二层用 Npcap；编译需其 SDK（头 + 导入库）。运行时另需目标机装 Npcap 驱动。
+        run: |
+          $zip = "$env:RUNNER_TEMP\npcap-sdk.zip"
+          Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile $zip
+          $dst = "$env:RUNNER_TEMP\npcap-sdk"
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          "NPCAP_SDK=$dst" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Configure
         shell: pwsh
         run: |

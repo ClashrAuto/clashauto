@@ -91,7 +91,9 @@ void LanScanner::detectLocalTopology()
                 continue;
             m_localIp = ip.toString();
             m_localMac = DeviceStore::normalizeMac(iface.hardwareAddress());
-            m_ifaceName = iface.humanReadableName();
+            // 用 OS 级接口名 name()（Linux eth0 / mac en0 / Windows {GUID}）：二层层要用它绑定网卡
+            // （AF_PACKET SIOCGIFINDEX / BPF BIOCSETIF / Npcap \Device\NPF_{GUID}）。
+            m_ifaceName = iface.name();
             m_netMask = mask;
             m_netBase = ip32 & mask;
             break;

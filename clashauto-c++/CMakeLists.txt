@@ -116,8 +116,9 @@ qt_add_qml_module(clashauto-qml
 #   lwIP 走 NO_SYS raw API，移植配置在 src/net/lwip_port/，ip4.c/tcp_in.c 有 accept-all/any-port 补丁。
 #   LanGateway_linux.cpp 实为 POSIX 通用（无平台系统调用；二层差异全在 createL2Endpoint：
 #   Linux AF_PACKET / mac BPF）。netns 自测钩子(GatewaySelfTest, 用 TAP)仅 Linux。
-# Windows：M4(Npcap) 待做——现只编 LanGateway 桩（isAvailable()=false），保证链接。
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
+# Windows：也编真实现——二层用 Npcap（需 Npcap SDK，CI 里下载，见 release.yml），lwIP 用 MSVC
+#          结构体打包(cc.h 有 _MSC_VER 分支)。链 wpcap/Packet/iphlpapi/ws2_32。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     set(LWIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lwip/src")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_sources(clashauto-qml PRIVATE
@@ -143,6 +144,18 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
     target_include_directories(clashauto-qml PRIVATE
         "${LWIP_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/net/lwip_port")
+    # Windows：Npcap SDK（env NPCAP_SDK 指向解压目录）+ 链接。按目标架构选 Lib 子目录。
+    if(WIN32)
+        set(NPCAP_SDK "$ENV{NPCAP_SDK}")
+        if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
+            set(_npcap_lib "${NPCAP_SDK}/Lib/ARM64")
+        else()
+            set(_npcap_lib "${NPCAP_SDK}/Lib/x64")
+        endif()
+        target_include_directories(clashauto-qml PRIVATE "${NPCAP_SDK}/Include")
+        target_link_directories(clashauto-qml PRIVATE "${_npcap_lib}")
+        target_link_libraries(clashauto-qml PRIVATE wpcap Packet iphlpapi ws2_32)
+    endif()
 else()
     target_sources(clashauto-qml PRIVATE src/net/LanGateway_stub.cpp)
 endif()

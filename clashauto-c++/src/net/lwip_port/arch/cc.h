@@ -21,11 +21,20 @@
 #endif
 #endif
 
-// —— 结构体打包（GCC/Clang attribute 方式）——
+// —— 结构体打包 ——
+#ifdef _MSC_VER
+// MSVC：用 #pragma pack 包住结构体（PACK_STRUCT_BEGIN/END 分别 push/pop），STRUCT 后缀留空。
+#define PACK_STRUCT_BEGIN __pragma(pack(push, 1))
+#define PACK_STRUCT_END __pragma(pack(pop))
+#define PACK_STRUCT_STRUCT
+#define PACK_STRUCT_FIELD(x) x
+#else
+// GCC/Clang：attribute((packed))。
 #define PACK_STRUCT_BEGIN
 #define PACK_STRUCT_END
 #define PACK_STRUCT_STRUCT __attribute__((packed))
 #define PACK_STRUCT_FIELD(x) x
+#endif
 
 // —— 诊断 / 断言 ——
 #define LWIP_PLATFORM_DIAG(x)   do { printf x; } while (0)
