@@ -12,9 +12,11 @@
 
 #include <QByteArray>
 #include <QSocketNotifier>
+#include <QVector>
 
 #include <cerrno>
 #include <cstring>
+#include <vector>
 
 #include <fcntl.h>
 #include <ifaddrs.h>
@@ -104,6 +106,62 @@ public:
     QByteArray localMac() const override { return m_localMac; }
     int ifIndex() const override { return 0; }
     int mtu() const override { return 1500; } // NetStack 固定用 1500，端点 mtu 仅接口占位
+
+    // 内核态源 MAC 过滤：BIOCSETF 给 bpf 设备下发一段 BPF 程序。只影响**读**（BPF 抓包），::write
+    // 发帧不受影响；也和内核给本机正常协议栈的投递互不相干。契约与「该收哪些帧」见 IL2Endpoint.h。
+    // 指令布局与 Linux 端完全一致（cBPF 通用）：每 MAC 一个 4 条块比对以太头 offset 6..11，末尾 ret。
+    bool setSourceMacFilter(const QVector<QByteArray> &macs) override
+    {
+        if (m_fd < 0)
+            return false;
+
+        QVector<QByteArray> valid;
+        valid.reserve(macs.size());
+        for (const QByteArray &m : macs)
+            if (m.size() == 6)
+                valid.append(m);
+
+        std::vector<struct bpf_insn> code;
+        if (valid.isEmpty()) {
+            // 没有被劫持设备：整段全丢（ret 0），越早在内核丢越省 CPU。
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));
+        } else {
+            if (valid.size() > 60) // 8bit 跳转偏移保护；真实场景远达不到
+                return false;
+            const int n = valid.size();
+            const int accept = 4 * n;
+            const int reject = 4 * n + 1;
+            for (int i = 0; i < n; ++i) {
+                const auto *b = reinterpret_cast<const unsigned char *>(valid[i].constData());
+                const quint16 first2 = (quint16(b[0]) << 8) | b[1];
+                const quint32 last4 = (quint32(b[2]) << 24) | (quint32(b[3]) << 16)
+                                    | (quint32(b[4]) << 8) | quint32(b[5]);
+                const int base = 4 * i;
+                const int failIdx = (i < n - 1) ? (4 * (i + 1)) : reject;
+                // [base+0] A = offset 8 的 4 字节 = src[2..5]
+                code.push_back(BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 8));
+                // [base+1] 比 last4；不等跳失败目标
+                code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, last4, 0,
+                                        static_cast<u_char>(failIdx - (base + 1) - 1)));
+                // [base+2] A = offset 6 的 2 字节 = src[0..1]
+                code.push_back(BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 6));
+                // [base+3] 比 first2；等跳 accept，不等跳失败目标
+                code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, first2,
+                                        static_cast<u_char>(accept - (base + 3) - 1),
+                                        static_cast<u_char>(failIdx - (base + 3) - 1)));
+            }
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFFu)); // accept：整帧
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));           // reject
+        }
+
+        struct bpf_program prog;
+        prog.bf_len = static_cast<u_int>(code.size());
+        prog.bf_insns = code.data();
+        // BIOCSETF 会替换旧过滤器并冲掉缓冲——动态重设直接再调即可。装不上则返回 false，用户态兜底。
+        if (::ioctl(m_fd, BIOCSETF, &prog) < 0)
+            return false;
+        return true;
+    }
 
 private:
     void drain()

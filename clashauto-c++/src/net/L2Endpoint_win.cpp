@@ -124,7 +124,48 @@ public:
     int ifIndex() const override { return 0; }
     int mtu() const override { return 1500; }
 
+    // 内核态源 MAC 过滤：pcap_compile 一条 "ether src A or ether src B ..." 的 BPF，pcap_setfilter
+    // 下发给 Npcap 驱动。过滤只影响捕获（收），pcap_sendpacket 不受影响。契约见 IL2Endpoint.h。
+    bool setSourceMacFilter(const QVector<QByteArray> &macs) override
+    {
+        if (!m_pcap)
+            return false;
+
+        QByteArray expr;
+        if (macs.isEmpty()) {
+            // 没有被劫持设备：装一个「恒不命中」的过滤把整段流量挡在内核里。源 MAC 不可能是广播地址，
+            // 拿它当恒假条件——比 "len < 0" 之类更稳的合法 pcap 语法。
+            expr = "ether src ff:ff:ff:ff:ff:ff";
+        } else {
+            for (const QByteArray &m : macs) {
+                if (m.size() != 6)
+                    continue;
+                if (!expr.isEmpty())
+                    expr += " or ";
+                expr += "ether src " + macToText(m);
+            }
+            if (expr.isEmpty())
+                return false; // 一个合法 MAC 都没有：不装，交用户态兜底
+        }
+
+        struct bpf_program prog;
+        // optimize=1；netmask 用 PCAP_NETMASK_UNKNOWN（表达式里不含 ip broadcast，用不到掩码）。
+        if (pcap_compile(m_pcap, &prog, expr.constData(), 1, PCAP_NETMASK_UNKNOWN) < 0)
+            return false; // 编译失败：不装内核过滤，用户态照旧兜底
+        const int rc = pcap_setfilter(m_pcap, &prog);
+        pcap_freecode(&prog);
+        return rc == 0;
+    }
+
 private:
+    // 6 字节 MAC → "aa:bb:cc:dd:ee:ff"（拼进 pcap 过滤表达式）。
+    static QByteArray macToText(const QByteArray &m)
+    {
+        const auto *b = reinterpret_cast<const unsigned char *>(m.constData());
+        return QString::asprintf("%02x:%02x:%02x:%02x:%02x:%02x", b[0], b[1], b[2], b[3], b[4], b[5])
+            .toLatin1();
+    }
+
     void drain()
     {
         struct pcap_pkthdr *hdr = nullptr;

@@ -13,6 +13,7 @@
 #include <QByteArray>
 #include <QObject>
 #include <QString>
+#include <QVector>
 
 class IL2Endpoint : public QObject
 {
@@ -29,6 +30,31 @@ public:
     virtual QByteArray localMac() const = 0;         // 6 字节
     virtual int ifIndex() const = 0;
     virtual int mtu() const = 0;                      // 接口 MTU（不含以太头），失败回 1500
+
+    // 设置「感兴趣的源 MAC 集合」——内核态源 MAC 过滤，纯属**收方**优化，不影响 send()。
+    //
+    // 为什么需要：抓包是混杂模式，默认整个网段的每一帧都被复制进用户态、分配 QByteArray、发一次
+    //   frameReceived 信号，再在 LanGateway 的槽里按 src MAC 丢弃——别人在局域网里传个文件，本进程
+    //   就在 GUI 线程上空转烧 CPU。把「只要这几台被劫持设备发出的帧」这条判断下沉到内核，绝大多数
+    //   无关帧根本不会进用户态。
+    //
+    // 到底该收哪些帧（关键，别搞反）：透明网关是**完整终结式代理**——被劫持设备的连接在 lwIP 里
+    //   终结、再经 SOCKS 由本机正常协议栈重新拨出去；ARP 投毒只发不收（网关 MAC 由设备发现流程另行
+    //   解析）。所以这条抓包链路真正需要的**只有「源 MAC = 被劫持设备」的帧**，网关/其它主机发来的
+    //   帧一律用不到。
+    //   尤其注意：过滤只作用在这条**独立的抓包 socket**（AF_PACKET / pcap / BPF）上，和内核给本机
+    //   正常 TCP/IP 栈的投递是两条路——所以「网关发给本机的回程帧」照样由正常协议栈收到，不会被这里
+    //   挡掉；我们也压根不需要在抓包链路上收它。
+    //
+    // 语义：sourceMacs 每项为 6 字节 MAC，过滤条件是它们的「或」，且可随时重设（设备开/关代理时集合
+    //   会变）。传空 = 没有任何被劫持设备 → 装一个「全丢」的内核过滤，最大化省 CPU。
+    //   返回 false = 未能装上内核过滤（平台不支持 / 编译或装载失败），此时**完全依赖用户态过滤兜底**，
+    //   功能不受影响——内核过滤是优化不是替代，调用方无需因 false 而改变行为。
+    virtual bool setSourceMacFilter(const QVector<QByteArray> &sourceMacs)
+    {
+        Q_UNUSED(sourceMacs);
+        return false; // 默认：不支持内核过滤，交用户态兜底
+    }
 
 signals:
     // 收到一个完整以太帧（含以太头）。接收方零拷贝语义：帧内容仅在槽内有效，需要保留请拷贝。

@@ -66,6 +66,21 @@ struct LanGateway::Impl {
     QHash<QString, QString> victimMacStr; // ip → mac 串（disable 用）
     QHash<QString, QString> victimNic;    // ip → ifname（disable/持久化要找回对应那张卡）
 
+    // 把「属于这张卡的」被劫持设备源 MAC 集合推给它的二层端点，装成内核态源 MAC 过滤（收方优化）。
+    // 多网卡：只推 victimNic 记为这张卡的设备。集合为空 → 端点装「全丢」过滤（这张卡当前没有劫持）。
+    // 装不上（平台不支持/失败）无所谓——frameReceived 的 lambda 仍按 victimByMac 在用户态兜底过滤。
+    void pushMacFilter(GwNic *n) const
+    {
+        if (!n || !n->ep)
+            return;
+        QVector<QByteArray> macs;
+        for (auto it = victimByMac.constBegin(); it != victimByMac.constEnd(); ++it) {
+            if (victimNic.value(it.value()) == n->spec.ifname)
+                macs.append(it.key());
+        }
+        n->ep->setSourceMacFilter(macs);
+    }
+
     // 按 IP 找它属于哪张已就绪网卡（同网段判定）。找不到返回 nullptr。
     GwNic *nicForIp(const QString &ip) const
     {
@@ -212,6 +227,9 @@ void LanGateway::configure(const QVector<NicSpec> &specs, quint16 socksPort)
             n->arp->configure(spec.localMac, spec.gatewayIp, spec.gatewayMac);
         }
         n->ready = true;
+        // 刚就绪、还没劫持任何设备：先装「全丢」内核过滤，避免混杂模式下整段流量白白进用户态。
+        // （后续 enable/disable 会按这张卡的最新 victim 集合重推。）
+        d->pushMacFilter(n);
     }
 
     // 消失的网卡（拔网线/断 WiFi）：没有活动劫持的直接摘掉，有的先留着等 disable 收尾。
@@ -284,6 +302,7 @@ bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QStri
     d->victimByMac.insert(mb, ip);
     d->victimMacStr.insert(ip, mac);
     d->victimNic.insert(ip, n->spec.ifname);
+    d->pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
     d->persist();
     emit statusChanged();
     return true;
@@ -295,7 +314,8 @@ void LanGateway::disableDevice(const QString &mac)
     const QString ip = d->victimByMac.value(mb);
     if (ip.isEmpty())
         return;
-    if (GwNic *n = d->nics.value(d->victimNic.value(ip))) {
+    GwNic *n = d->nics.value(d->victimNic.value(ip));
+    if (n) {
         if (n->arp)
             n->arp->stopSpoof(mac); // 内部会 heal（还原 ARP）
         if (n->victims > 0)
@@ -306,6 +326,8 @@ void LanGateway::disableDevice(const QString &mac)
     d->victimByMac.remove(mb);
     d->victimMacStr.remove(ip);
     d->victimNic.remove(ip);
+    if (n)
+        d->pushMacFilter(n); // 该卡移除一台设备：重推内核过滤（可能变回「全丢」）
     if (d->victimMacStr.isEmpty())
         d->clearState();
     else
@@ -329,6 +351,9 @@ void LanGateway::disableAll()
     d->victimByMac.clear();
     d->victimMacStr.clear();
     d->victimNic.clear();
+    // 所有设备清空后，每张卡都重推（现在集合都空了 → 全部装「全丢」，收方彻底静默）。
+    for (GwNic *n : d->nics)
+        d->pushMacFilter(n);
     d->clearState();
     emit statusChanged();
 }

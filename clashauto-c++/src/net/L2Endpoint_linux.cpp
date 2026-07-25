@@ -19,14 +19,17 @@
 #include <net/if.h>
 #include <netpacket/packet.h>
 #include <net/ethernet.h> // ETH_P_ALL / ETH_ALEN（内部再引 <linux/if_ether.h>，有 UAPI 守卫防冲突）
+#include <linux/filter.h> // sock_filter/sock_fprog + BPF_STMT/BPF_JUMP（SO_ATTACH_FILTER 的 cBPF）
 #include <arpa/inet.h>    // htons
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
 #include <cstring>
+#include <vector>
 
 #include <QByteArray>
 #include <QSocketNotifier>
+#include <QVector>
 
 namespace {
 
@@ -156,6 +159,72 @@ public:
     QByteArray localMac() const override { return m_localMac; }
     int ifIndex() const override { return m_ifIndex; }
     int mtu() const override { return m_mtu; }
+
+    // 内核态源 MAC 过滤：SO_ATTACH_FILTER 给这条 AF_PACKET socket 挂一段手写 cBPF。裸 socket 不带
+    // libpcap，故自己生成指令（结构很简单：比对以太头 offset 6..11 的 6 字节源 MAC）。
+    // 过滤只作用于本 socket 的**收**，不影响 sendto；也不影响内核给本机正常协议栈的投递。契约见头文件。
+    //
+    // cBPF 布局（N 个 MAC 的「或」）：每个 MAC 4 条指令块，末尾两条 ret：
+    //   [base+0] ld  [8]                 ; A = 以太头 offset 8 的 4 字节 = src[2..5]（大端）
+    //   [base+1] jeq #last4, jt0, jf→失败 ; 不等 → 跳下一个 MAC 块（或 reject）
+    //   [base+2] ldh [6]                 ; A = offset 6 的 2 字节 = src[0..1]
+    //   [base+3] jeq #first2, jt→accept, jf→失败
+    //   ...
+    //   [4N]     ret #0xffffffff          ; accept：整帧收上来
+    //   [4N+1]   ret #0                   ; reject：丢弃
+    // 拆成 [8] 的 word + [6] 的 half 是 tcpdump "ether src" 的经典写法（一次比 4 字节 + 一次比 2 字节）。
+    bool setSourceMacFilter(const QVector<QByteArray> &macs) override
+    {
+        if (m_fd < 0)
+            return false;
+
+        QVector<QByteArray> valid;
+        valid.reserve(macs.size());
+        for (const QByteArray &m : macs)
+            if (m.size() == 6)
+                valid.append(m);
+
+        std::vector<sock_filter> code;
+        if (valid.isEmpty()) {
+            // 没有被劫持设备：直接全丢（ret 0）。收方无它用，越早在内核丢越省 CPU。
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));
+        } else {
+            // cBPF 跳转偏移是 8bit——设备极多会越界。真实场景不会有这么多被劫持设备；超限就不装内核
+            // 过滤（返回 false），交用户态兜底。
+            if (valid.size() > 60)
+                return false;
+            const int n = valid.size();
+            const int accept = 4 * n;
+            const int reject = 4 * n + 1;
+            for (int i = 0; i < n; ++i) {
+                const auto *b = reinterpret_cast<const unsigned char *>(valid[i].constData());
+                const quint16 first2 = (quint16(b[0]) << 8) | b[1];
+                const quint32 last4 = (quint32(b[2]) << 24) | (quint32(b[3]) << 16)
+                                    | (quint32(b[4]) << 8) | quint32(b[5]);
+                const int base = 4 * i;
+                // 本块失配后的去处：不是最后一个 MAC → 下一块；最后一个 → reject。
+                const int failIdx = (i < n - 1) ? (4 * (i + 1)) : reject;
+                code.push_back(BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 8));
+                code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, last4, 0,
+                                        static_cast<__u8>(failIdx - (base + 1) - 1)));
+                code.push_back(BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 6));
+                code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, first2,
+                                        static_cast<__u8>(accept - (base + 3) - 1),
+                                        static_cast<__u8>(failIdx - (base + 3) - 1)));
+            }
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFFu)); // accept：整帧
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));           // reject
+        }
+
+        struct sock_fprog prog;
+        prog.len = static_cast<unsigned short>(code.size());
+        prog.filter = code.data();
+        // SO_ATTACH_FILTER 会**替换**已有过滤器（内核 rcu 换指针），故动态重设直接再调一次即可。
+        // 注意：换过滤器前已排进 socket 缓冲的旧帧不会被追溯过滤——那几帧仍由用户态过滤丢掉，无害。
+        if (::setsockopt(m_fd, SOL_SOCKET, SO_ATTACH_FILTER, &prog, sizeof(prog)) < 0)
+            return false;
+        return true;
+    }
 
 private:
     // fd 可读：把内核缓冲里所有帧一次性抽干（每帧 emit 一次），直到 EAGAIN。
