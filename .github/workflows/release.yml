@@ -735,6 +735,34 @@ jobs:
           files: |
             dist/ClashAuto-*-linux-*
 
+  # 透明网关 headless 自测：下载打好的 linux-x64 包（自带 Qt，offscreen 可独立跑），用 TAP 把真实
+  # 内核 TCP 当被劫持设备，经 NetStack 拨内置假 SOCKS，验证「用户态栈转发 + 每设备身份」——不需真机/真实 ARP。
+  # 独立 job：不阻塞 release（release 已由 linux/windows job 发布），失败只作可见告警。
+  gateway-selftest:
+    name: Gateway self-test (Linux netstack)
+    needs: [linux]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download linux x64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ClashAuto-linux-x64
+          path: dl
+      - name: Run headless gateway self-test
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo modprobe tun 2>/dev/null || true
+          mkdir -p app
+          tar -C app -xzf dl/ClashAuto-*-linux-x64-portable.tar.gz
+          BIN="$(find app -type f -name coast | head -1)"
+          test -n "$BIN" || { echo "找不到 coast 二进制"; exit 1; }
+          chmod +x "$BIN"
+          sudo bash validate/gateway_selftest.sh "$BIN"
+
   # macOS 正式包不在本 CI 打（无签名/公证证书）——由外部构建仓库的「专用分支」承载
   # （该分支已配 Developer ID 签名+公证，workflow 用 on:push 监听本分支）。push 到
   # master/main 时，本 job 用 PAT 向那个专用分支推一个空提交来触发 mac 打包；对方
