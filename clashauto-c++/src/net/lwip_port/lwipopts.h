@@ -26,7 +26,7 @@
 #define MEMP_NUM_TCP_PCB_LISTEN         8
 #define MEMP_NUM_TCP_SEG                512
 #define MEMP_NUM_UDP_PCB                256
-#define MEMP_NUM_REASSDATA              16
+#define MEMP_NUM_REASSDATA              5   // 必须 <= IP_REASS_MAX_PBUFS(默认10)，否则 lwIP #error
 #define MEMP_NUM_ARP_QUEUE              64
 #define MEMP_NUM_SYS_TIMEOUT            16
 
@@ -57,8 +57,9 @@
 // —— TCP 调参 ——（桌面高吞吐）
 #define LWIP_TCP                        1
 #define TCP_MSS                         1460
-#define TCP_WND                         (64 * 1024)
-#define TCP_SND_BUF                     (64 * 1024)
+// TCP_WND/TCP_SND_BUF 必须 <= u16_t(65535)（未开窗口缩放）；取 60KB 兼顾吞吐与该约束。
+#define TCP_WND                         (60 * 1024)
+#define TCP_SND_BUF                     (60 * 1024)
 #define TCP_SND_QUEUELEN                ((4 * TCP_SND_BUF) / TCP_MSS)
 #define TCP_QUEUE_OOSEQ                 1
 #define LWIP_TCP_SACK_OUT               0
