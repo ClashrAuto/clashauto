@@ -6,6 +6,13 @@
 #include <stdlib.h>
 
 // —— 字节序 ——（由编译器内建宏推导，x86_64/arm64 均小端）
+// 先保证 LITTLE_ENDIAN/BIG_ENDIAN 常量存在（mac/Windows 处理 cc.h 时可能尚未定义），再定 BYTE_ORDER。
+#ifndef LITTLE_ENDIAN
+#define LITTLE_ENDIAN 1234
+#endif
+#ifndef BIG_ENDIAN
+#define BIG_ENDIAN 4321
+#endif
 #ifndef BYTE_ORDER
 #if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
 #define BYTE_ORDER BIG_ENDIAN

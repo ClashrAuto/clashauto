@@ -190,11 +190,4 @@ IL2Endpoint *createL2Endpoint(QObject *parent)
     return new LinuxL2Endpoint(parent);
 }
 
-#else // 非 Linux：M1 不实现二层，工厂返回 nullptr（LanGateway.isAvailable() 据此为 false）。
-
-IL2Endpoint *createL2Endpoint(QObject * /*parent*/)
-{
-    return nullptr;
-}
-
-#endif
+#endif // Q_OS_LINUX（非 Linux：本 TU 为空，工厂由 L2Endpoint_mac.cpp / L2Endpoint_win.cpp 提供）

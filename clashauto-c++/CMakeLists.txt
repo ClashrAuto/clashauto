@@ -47,9 +47,12 @@ set(BACKEND_SOURCES
     # 设备页后端（局域网发现 + 台账；框架无关）
     src/LanScanner.cpp       src/LanScanner.h
     src/DeviceStore.cpp      src/DeviceStore.h
-    # M1 透明网关——跨平台可编译层（L2 工厂在非 Linux 返回 nullptr；ARP/SOCKS5 纯 Qt；网关公共头）
+    # 透明网关——跨平台可编译层。L2 工厂按平台各一份实现（Linux=AF_PACKET / mac=BPF /
+    # Windows=Npcap待做，现桩 nullptr）；每个 .cpp 用 #if <os> 守卫，同一平台只有一个定义。
     src/net/IL2Endpoint.h
     src/net/L2Endpoint_linux.cpp
+    src/net/L2Endpoint_mac.cpp
+    src/net/L2Endpoint_win.cpp
     src/net/ArpSpoofer.cpp   src/net/ArpSpoofer.h
     src/net/Socks5Client.cpp src/net/Socks5Client.h
     src/net/LanGateway.h
@@ -108,16 +111,21 @@ qt_add_qml_module(clashauto-qml
         qml/RuleEditorWindow.qml
 )
 
-# —— M1 透明网关：平台相关部分 ——
-# Linux：编入用户态栈(vendored lwIP 子集 + NetStack) 与 LanGateway 真实现；lwIP 走 NO_SYS raw API，
-#        移植配置在 src/net/lwip_port/（lwipopts.h + arch/cc.h），ip4.c/tcp_in.c 有 accept-all 补丁。
-# 其它平台：只编 LanGateway 桩（isAvailable()=false），保证跨平台链接。
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# —— 透明网关：平台相关部分 ——
+# Linux/macOS（POSIX，gcc/clang）：编入用户态栈(vendored lwIP 子集 + NetStack) 与 LanGateway 真实现。
+#   lwIP 走 NO_SYS raw API，移植配置在 src/net/lwip_port/，ip4.c/tcp_in.c 有 accept-all/any-port 补丁。
+#   LanGateway_linux.cpp 实为 POSIX 通用（无平台系统调用；二层差异全在 createL2Endpoint：
+#   Linux AF_PACKET / mac BPF）。netns 自测钩子(GatewaySelfTest, 用 TAP)仅 Linux。
+# Windows：M4(Npcap) 待做——现只编 LanGateway 桩（isAvailable()=false），保证链接。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
     set(LWIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lwip/src")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(clashauto-qml PRIVATE
+            src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
+    endif()
     target_sources(clashauto-qml PRIVATE
         src/net/NetStack.cpp src/net/NetStack.h
         src/net/LanGateway_linux.cpp
-        src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h
         ${LWIP_DIR}/core/init.c        ${LWIP_DIR}/core/def.c
         ${LWIP_DIR}/core/dns.c         ${LWIP_DIR}/core/inet_chksum.c
         ${LWIP_DIR}/core/ip.c          ${LWIP_DIR}/core/mem.c
