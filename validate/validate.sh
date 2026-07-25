@@ -80,7 +80,7 @@ sec "Linux .deb — 扁平安装布局"
 DEB=$(pick 'ClashAuto-*-linux-x64.deb')
 if [ -n "$DEB" ]; then
   dpkg-deb -c "$DEB" > deb-contents.txt 2>/dev/null
-  grep -q '/opt/Coast/Coast'                    deb-contents.txt && ok "装到 /opt/Coast/Coast（扁平）"        || bad "deb 布局不是 /opt/Coast/Coast"
+  grep -q '/opt/coast/coast'                    deb-contents.txt && ok "装到 /opt/coast/coast（扁平）"        || bad "deb 布局不是 /opt/coast/coast"
   grep -q '/usr/bin/coast'                       deb-contents.txt && ok "/usr/bin/coast 符号链接"              || bad "缺 /usr/bin/coast"
   grep -q '/usr/share/applications/coast.desktop' deb-contents.txt && ok "coast.desktop 桌面项"               || bad "缺 coast.desktop"
   grep -q 'clashauto-c++' deb-contents.txt && bad "deb 仍含 clashauto-c++ 子目录" || ok "无 clashauto-c++ 子目录"
@@ -94,12 +94,12 @@ if [ -n "$DEB" ]; then
   else
     bad "deb 安装失败（依赖问题？）"
   fi
-  if [ -x /opt/Coast/Coast ]; then
+  if [ -x /opt/coast/coast ]; then
     export COAST_NO_AUTOSTART=1   # 跳过「自动下载并启动内核」，只验 UI 起 + 配置种子落地
     export HOME=/root
     rm -rf /root/.local/share/Coast
     echo "  跑 25s（COAST_NO_AUTOSTART=1，软件后端，Xvfb）…"
-    timeout 25 xvfb-run -a -s "-screen 0 1280x800x24" /opt/Coast/Coast >app.log 2>&1
+    timeout 25 xvfb-run -a -s "-screen 0 1280x800x24" /opt/coast/coast >app.log 2>&1
     rc=$?
     echo "  退出码=$rc（124=超时仍在运行=没崩=好）"
     [ "$rc" = "124" ] && ok "启动后存活 25s 未退出（Qt 软件后端渲染成功、未崩溃）" \
@@ -117,7 +117,7 @@ if [ -n "$DEB" ]; then
     fi
     echo "  ── app.log 末尾 15 行 ──"; tail -15 app.log 2>/dev/null | sed 's/^/       /'
   else
-    bad "/opt/Coast/Coast 不存在或不可执行"
+    bad "/opt/coast/coast 不存在或不可执行"
   fi
 fi
 
@@ -125,7 +125,7 @@ sec "Linux 便携 tar.gz — 扁平"
 TG=$(pick 'ClashAuto-*-linux-x64-portable.tar.gz')
 if [ -n "$TG" ]; then
   tar tzf "$TG" > tar-list.txt 2>/dev/null
-  grep -q '^ClashAuto/Coast$' tar-list.txt && ok "tar 内 ClashAuto/Coast（扁平，二进制在包根）" || bad "tar 布局不对（期望 ClashAuto/Coast）"
+  grep -q '^ClashAuto/coast$' tar-list.txt && ok "tar 内 ClashAuto/coast（扁平，二进制在包根）" || bad "tar 布局不对（期望 ClashAuto/coast）"
   grep -q 'clashauto-c++' tar-list.txt && bad "tar 仍含 clashauto-c++" || ok "tar 无 clashauto-c++ 子目录"
 else skip "没找到 linux x86_64 便携 tar.gz"; fi
 
