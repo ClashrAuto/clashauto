@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(clashauto_cpp VERSION 0.2.1 LANGUAGES CXX)
+# C 语言用于 vendored lwIP(.c)：不启用则 CMake 会静默忽略 .c 源，链接时报一堆 lwIP 未定义符号。
+project(clashauto_cpp VERSION 0.2.1 LANGUAGES C CXX)
 
 # Version string shown in the app UI. Defaults to the project version for
 # local builds; CI overrides it with -DAPP_VERSION=<major.minor.commitcount>.
