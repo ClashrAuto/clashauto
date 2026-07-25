@@ -20,7 +20,7 @@
 #include "qml/UpdateController.h"
 #include "qml/DevicesController.h"
 #include "net/LanGateway.h"
-#if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 #include "net/GatewaySelfTest.h"
 #endif
 
@@ -44,7 +44,7 @@ int main(int argc, char *argv[])
     // 必须在首个 QQuickWindow 创建前调用。
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
     // 后退出（配合 validate/gateway_selftest.sh）。用 offscreen 平台即可（无显示环境）。
-#if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
     if (qEnvironmentVariableIsSet("COAST_GATEWAY_SELFTEST"))
         return runGatewaySelfTest();
 #endif

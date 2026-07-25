@@ -361,6 +361,12 @@ jobs:
           lipo -archs "$bin" | grep -q x86_64
           lipo -archs "$bin" | grep -q arm64
 
+      - name: Gateway self-test (feth)
+        shell: bash
+        # 用 feth 对 + 真实 BPF 端点跑一遍网关 headless 自测（不阻塞发布；失败作可见告警）。
+        continue-on-error: true
+        run: sudo bash validate/gateway_selftest_mac.sh "$BUILD_DIR/Coast.app/Contents/MacOS/Coast"
+
       # 导入 Developer ID 证书到临时 keychain（仅当设置了 secret；否则回退 ad-hoc，fork 仍能编）。
       # 复用 schat.build/qt-desktop.yml 的做法，凭据同名 secret（Team 6AXTRT5TV4）。
       - name: Import Developer ID signing cert

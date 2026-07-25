@@ -120,7 +120,8 @@ qt_add_qml_module(clashauto-qml
 #          结构体打包(cc.h 有 _MSC_VER 分支)。链 wpcap/Packet/iphlpapi/ws2_32。
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     set(LWIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lwip/src")
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
+        # 网关 headless 自测钩子：Linux 用 TAP、mac 用 feth+真实 BPF 端点（Windows Npcap 暂不做 CI 自测）。
         target_sources(clashauto-qml PRIVATE
             src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
     endif()

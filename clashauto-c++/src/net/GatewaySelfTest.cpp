@@ -2,7 +2,7 @@
 
 #include <QtGlobal> // 必须先引入才有 Q_OS_LINUX 宏，否则下面的 #if 恒假→整个实现被跳过→链接未定义
 
-#if defined(Q_OS_LINUX)
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 
 #include "../DeviceStore.h"
 #include "IL2Endpoint.h"
@@ -21,11 +21,13 @@
 #include <cstdio>
 #include <cstring>
 
+#if defined(Q_OS_LINUX)
 #include <fcntl.h>
 #include <linux/if_tun.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -44,8 +46,10 @@ QByteArray parseMac(const QString &mac)
     return out;
 }
 
-// 自测用 TAP 二层端点：打开已存在的 TAP（脚本 `ip tuntap add` 建好），读写完整以太帧。
+#if defined(Q_OS_LINUX)
+// Linux 自测用 TAP 二层端点：打开已存在的 TAP（脚本 `ip tuntap add` 建好），读写完整以太帧。
 // 不声明新信号 → 无需 Q_OBJECT（复用基类 frameReceived，functor connect）。
+// mac 不用它：mac 自测直接用真实 BPF 端点(createL2Endpoint)绑到 feth 接口。
 class TapEndpoint final : public IL2Endpoint
 {
 public:
@@ -105,6 +109,7 @@ private:
     QSocketNotifier *m_notifier = nullptr;
     QByteArray m_mac;
 };
+#endif // Q_OS_LINUX（TapEndpoint）
 
 // 极简假 SOCKS5 服务器：完成 greeting/(可选)用户名认证/CONNECT，记录用户名，回一段 HTTP 标记响应。
 // 收到「带期望用户名的 CONNECT」即判定核心链路通过 → 退出码 0。
@@ -222,12 +227,25 @@ int runGatewaySelfTest()
     auto *socks = new FakeSocks(socksPort, expectUser, qApp);
     Q_UNUSED(socks);
 
-    auto *ep = new TapEndpoint(localMac, qApp);
     QString err;
-    if (!ep->openTap(tap, &err)) {
+    IL2Endpoint *ep = nullptr;
+#if defined(Q_OS_LINUX)
+    // Linux：自建 TAP 端点（拥有 /dev/net/tun 的 fd，脚本已 `ip tuntap add` 建好 cst0）。
+    auto *tapEp = new TapEndpoint(localMac, qApp);
+    if (!tapEp->openTap(tap, &err)) {
         std::fprintf(stderr, "SELFTEST: %s\n", err.toLatin1().constData());
         return 3;
     }
+    ep = tapEp;
+#else
+    // mac：直接用真实 BPF 端点（createL2Endpoint），绑到脚本建好的 feth 接口——顺带真跑一遍 MacL2Endpoint。
+    ep = createL2Endpoint(qApp);
+    if (!ep || !ep->open(tap, &err)) {
+        std::fprintf(stderr, "SELFTEST: 打开二层端点(%s)失败: %s\n",
+                     tap.toLatin1().constData(), err.toLatin1().constData());
+        return 3;
+    }
+#endif
     auto *net = new NetStack(ep, socksPort, qApp);
     if (!net->init(localMac, &err)) {
         std::fprintf(stderr, "SELFTEST: NetStack.init 失败: %s\n", err.toLatin1().constData());
