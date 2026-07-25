@@ -8,6 +8,7 @@
 #include <QTimer>
 
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <utility>
 
@@ -77,6 +78,7 @@ struct NetStack::Impl {
 namespace {
 
 NetStack::Impl *g_impl = nullptr; // 单实例（一台机器一个网关）——lwIP 回调用它取上下文
+bool g_debug = false;             // COAST_GATEWAY_DEBUG=1 时打诊断日志（自测/联调用）
 
 // pbuf 链 → QByteArray
 QByteArray pbufToBytes(struct pbuf *p)
@@ -95,8 +97,12 @@ QByteArray pbufToBytes(struct pbuf *p)
 err_t lwipLinkOutput(struct netif *netif, struct pbuf *p)
 {
     Q_UNUSED(netif);
-    if (g_impl && g_impl->ep)
-        g_impl->ep->send(pbufToBytes(p));
+    if (g_impl && g_impl->ep) {
+        const QByteArray f = pbufToBytes(p);
+        if (g_debug)
+            std::fprintf(stderr, "NETSTACK OUT len=%d\n", int(f.size()));
+        g_impl->ep->send(f);
+    }
     return ERR_OK;
 }
 
@@ -226,6 +232,10 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
     const quint16 serverPort = newpcb->local_port;
     const QString victimIp = QString::fromLatin1(ipaddr_ntoa(&newpcb->remote_ip));
     const QString user = g_impl ? g_impl->userForIp(victimIp) : QString();
+    if (g_debug)
+        std::fprintf(stderr, "NETSTACK ACCEPT server=%s:%u victim=%s user=%s\n",
+                     serverIp.toLatin1().constData(), serverPort,
+                     victimIp.toLatin1().constData(), user.toLatin1().constData());
 
     auto *c = new TcpConn;
     c->impl = g_impl;
@@ -308,6 +318,7 @@ bool NetStack::init(const QByteArray &localMac6, QString *err)
     }
     d->localMac6 = localMac6;
     g_impl = d;
+    g_debug = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
 
     lwip_init();
 
@@ -392,6 +403,11 @@ void NetStack::inputFrame(const QByteArray &frame)
         return;
     const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
     const quint16 ethType = (quint16(f[12]) << 8) | f[13];
+    if (g_debug) {
+        const int proto = (frame.size() >= 24) ? f[14 + 9] : -1;
+        std::fprintf(stderr, "NETSTACK IN len=%d eth=%04x proto=%d\n",
+                     int(frame.size()), ethType, proto);
+    }
 
     // 仅处理 IPv4；ARP 等不喂 lwIP（ARP 投毒由 ArpSpoofer 负责，避免 lwIP 误答）。
     if (ethType != 0x0800)

@@ -80,10 +80,12 @@
 #define CHECKSUM_GEN_TCP                1
 #define CHECKSUM_GEN_UDP                1
 #define CHECKSUM_GEN_ICMP               1
-#define CHECKSUM_CHECK_IP               1
-#define CHECKSUM_CHECK_TCP              1
-#define CHECKSUM_CHECK_UDP              1
-#define CHECKSUM_CHECK_ICMP             1
+// 只「生成」不「校验」入站校验和：TAP/虚拟链路常因 checksum offload 使入站帧校验和不完整（会被
+// 误丢弃）；真实 NIC 上入站帧的校验和由对端硬件已算好，此处信任之（TCP 层另有端到端校验）。
+#define CHECKSUM_CHECK_IP               0
+#define CHECKSUM_CHECK_TCP              0
+#define CHECKSUM_CHECK_UDP              0
+#define CHECKSUM_CHECK_ICMP             0
 
 // —— 统计/调试 ——（关，省体积）
 #define LWIP_STATS                      0

@@ -33,6 +33,9 @@ ip tuntap add dev "$TAP" mode tap || fail "建 TAP 失败"
 ip addr add "$VICTIM_IP/24" dev "$TAP"
 ip link set "$TAP" up
 sysctl -q -w "net.ipv4.conf.$TAP.rp_filter=0" 2>/dev/null || true
+# 关掉 TAP 的校验和/分段卸载：否则内核写入 TAP 的帧校验和不完整，会被下游误判（双保险，
+# lwipopts 已把入站校验和校验关掉）。
+ethtool -K "$TAP" tx off rx off tso off gso off gro off 2>/dev/null || true
 VICTIM_MAC="$(cat /sys/class/net/$TAP/address)"
 ip route add "$SERVER_IP/32" dev "$TAP"
 ip neigh replace "$SERVER_IP" lladdr "$LOCALMAC" dev "$TAP" nud permanent
@@ -43,6 +46,7 @@ echo "SELFTEST-HARNESS: tap=$TAP victimMac=$VICTIM_MAC server=$SERVER_IP"
 COAST_LOG="$(mktemp)"
 QT_QPA_PLATFORM=offscreen \
 COAST_GATEWAY_SELFTEST=1 \
+COAST_GATEWAY_DEBUG=1 \
 COAST_SELFTEST_TAP="$TAP" \
 COAST_SELFTEST_LOCALMAC="$LOCALMAC" \
 COAST_SELFTEST_VICTIM_IP="$VICTIM_IP" \
