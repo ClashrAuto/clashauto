@@ -177,6 +177,7 @@ ApplicationWindow {
                                     : bridge.proxyEnabled ? "W"
                                     : bridge.coreRunning ? "C" : "N"
                                 font.pixelSize: 15
+                                font.bold: true // 图标内的字母例外：不加粗在 26px 角标里看不清
                                 color: "#4898f8"
                             }
                         }

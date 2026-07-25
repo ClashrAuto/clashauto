@@ -8,7 +8,7 @@
         <file>assets/oui.txt</file>
         <file>assets/chevron-dark.svg</file>
         <file>assets/chevron-light.svg</file>
-        <!-- 全 UI 字体：MiSans。UI 一律不加粗，Semibold 只作控件内部粗体的兜底面。 -->
+        <!-- 全 UI 字体：MiSans。正文/标题不加粗，Semibold 供图标内字母等少数加粗处（真实半粗体）。 -->
         <file>assets/fonts/MiSans-Regular.ttf</file>
         <file>assets/fonts/MiSans-Semibold.ttf</file>
         <!-- i18n：各语言翻译表（中文源串 → 目标语言）。zh-CN 为默认(源串)，无需翻译表。 -->
