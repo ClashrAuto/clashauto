@@ -2,18 +2,25 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Repository layout — two projects, one tracked
+## What this is
 
-This workspace contains two distinct projects. **Only `clashauto-c++/` is tracked by this git repo** and is where active development happens.
+**Coast** (formerly "Clash Auto") — a frameless **Qt 6 / QML (Qt Quick)** desktop client that drives an external Clash/**mihomo** core process and talks to its REST API. Cross-platform: Windows, macOS, Linux.
 
-- **`clashauto-c++/`** — a C++ / Qt Widgets rewrite of the original client. All commits, CI, and releases target this. This is what you edit.
-- **`Clashr-Auto/`** — the *original* Electron + Vue app (electron-vue, Node/npm). It is **untracked here** (has its own `.git`) and functions purely as a **runtime resource bundle** for the C++ app: it supplies the Clash/mihomo core dir (`command/clash/*`, core itself downloaded in-app since v0.1.74), the base `config/config.yaml`, and `language/`. (The `sysproxy` binaries it also contains are **no longer used** — system proxy is set natively: WinINET `InternetSetOption` on Windows, `networksetup` on macOS, `gsettings` on Linux.) Do not treat it as part of the C++ build; do not modify it to fix C++ behavior.
+The git repo root tracks:
+- **`clashauto-c++/`** — the app source (the only thing you edit). *Historical dir name — the product is **Coast**; the folder is left named `clashauto-c++` on purpose (renaming it would churn CI paths).*
+- **`validate/`** — a Docker "download latest release + validate all platforms" harness (below).
+- **`.github/workflows/release.yml`** — CI / release.
 
-The C++ app **finds `Clashr-Auto/` at runtime as a sibling directory**: `AppConfigLoader::load()` walks up to 8 parent directories from the executable looking for `../Clashr-Auto/config/config.yaml` (`src/AppConfig.cpp`). If you run the built exe somewhere without a sibling `Clashr-Auto/`, config loading, core startup, and system proxy will all fail. In CI these resources are downloaded from the `ClashrAuto/Clashr-Auto-Desktop` GitHub releases, not built.
+> **The app is self-contained.** It used to depend on a sibling `Clashr-Auto/` directory (the original Electron app, used as a runtime resource bundle). That dependency is **gone** — all seed resources (base `config/*.yaml`, `Country.mmdb`, Windows `wintun.dll`) are **embedded in the binary via qrc** (`clashauto-c++/assets/bundle/`, listed in `resources.qrc` + a Windows-only `resources_win.qrc`), and the mihomo core is downloaded in-app on first use. `AppConfigLoader::load()` no longer searches for any sibling directory and `AppConfig::sourceRoot` was removed. **Do not reintroduce a Clashr-Auto dependency.**
 
-## Build & run (clashauto-c++)
+### Two UI layers — QML is shipped, Widgets is dead code
 
-Locally verified toolchain: Qt 6.8.3, MinGW 13.1.0, Ninja. CMake finds Qt6 or Qt5 (`Widgets`, `Network`).
+- **Shipped:** the **QML** app — `src/main_qml.cpp` + `qml/*.qml` + the `src/qml/*` C++ glue (`QmlBridge`, the `*Controller`s, the `*Model`s, `I18n`). CMake target `clashauto-qml`.
+- **Dead/legacy:** the older **Qt Widgets** version — `src/MainWindow.cpp`, `src/main.cpp`, `src/TrafficChart.*`. **Not compiled** (not in the target). `MainWindow.h` is still `#include`d by `TrayController.cpp` for QWidget base methods, but `MainWindow.cpp`/`main.cpp` don't build; they're **stale** (old "Clash Auto" names, old paths). The CLI test subcommands (`--build-config`, …) lived in the dead `main.cpp` — they are **not** in the shipped build.
+
+## Build & run
+
+**You usually can't build locally** (dev box is a GPU-less QEMU VM without the full toolchain) — verify via **CI** + the **`validate/`** Docker tool instead. When a local build *is* possible: Qt 6.8.3 + MinGW/MSVC + Ninja.
 
 ```powershell
 # From clashauto-c++/. Put Qt + MinGW on PATH first.
@@ -22,63 +29,69 @@ cmake -S . -B build-ninja -G Ninja `
   -DCMAKE_PREFIX_PATH=C:\Qt\6.8.3\mingw_64 `
   -DCMAKE_CXX_COMPILER=C:\Qt\Tools\mingw1310_64\bin\g++.exe
 cmake --build build-ninja
-.\build-ninja\clashauto-cpp.exe
+.\build-ninja\Coast.exe          # OUTPUT_NAME is "Coast" on Windows (was clashauto.exe)
 ```
 
-CMake has `AUTOMOC`/`AUTORCC`/`AUTOUIC` on, so new `Q_OBJECT` classes and `.qrc`/`.ui` changes are picked up automatically — but **new `.cpp` files must be added to the `add_executable(...)` list in `CMakeLists.txt`** by hand. Build dirs (`build-ninja`, `build-release`) are gitignored.
+`find_package(Qt6 … Widgets Network Qml Quick QuickControls2)`. `AUTOMOC`/`AUTORCC`/`AUTOUIC` are on, so new `Q_OBJECT` classes and `.qrc`/`.qml` changes are picked up — but **new `.cpp` files must be added by hand** to `CMakeLists.txt` (`BACKEND_SOURCES` / `QML_GLUE_SOURCES`), and new `.qml` files to the `qt_add_qml_module(... QML_FILES ...)` list. Build dirs (`build-*`) are gitignored.
 
-## Testing — there is no unit-test framework
+## Verifying a release — `validate/`
 
-Verification is done through **CLI subcommands in `src/main.cpp`** that short-circuit before the GUI opens. These are the "tests" — use them to exercise config/subscription logic headlessly:
+There is **no unit-test framework**. Verification = CI builds+packages green, then `validate/` checks the packaged artifacts:
 
-```powershell
-.\build-ninja\clashauto-cpp.exe --build-config                 # generate full.yaml, print its path
-.\build-ninja\clashauto-cpp.exe --print-subscription-path
-.\build-ninja\clashauto-cpp.exe --list-subscriptions
-.\build-ninja\clashauto-cpp.exe --print-effective-url 0
-.\build-ninja\clashauto-cpp.exe --list-nodes 0
-.\build-ninja\clashauto-cpp.exe --set-node-use 0 1 false        # <subIdx> <nodeIdx> <true|false>
-.\build-ninja\clashauto-cpp.exe --update-subscription 0 C:\path\to\subscription.yaml
+```bash
+bash validate/run.sh      # Docker: pull latest release's Coast artifacts + verify all platforms
 ```
 
-Validate a generated config against the real core (its `-t -f` is the source of truth for correctness):
-
-```powershell
-G:\clashauto\Clashr-Auto\command\clash\clash-windows-amd64.exe -t -f "C:\Users\Administrator\AppData\Roaming\ClashAuto\Clash Auto\clash-auto\full.yaml"
-```
+It downloads every platform's Coast artifact from the latest `ClashrAuto/clashauto` release, checks sha256, runs **structural** checks (Windows flat / slimmed / self-contained, macOS `Coast.app` + `com.yuehongsun.coast` bundle id + helper, Linux flat `/opt/coast/coast`), and **actually runs the Linux build headless** under Xvfb (software backend) to confirm it launches and seeds its embedded config to `~/.local/share/Coast/config/`. Windows/macOS binaries can't execute in Linux Docker → structural only (real-machine run is the final word). See `validate/README.md`.
 
 ## Architecture (clashauto-c++/src)
 
-The app is a frameless Qt Widgets client that drives an external Clash/mihomo core process and talks to that core's REST API.
+**Backend** (shared, framework-agnostic C++):
 
-- **`AppConfig` / `AppConfigLoader`** — the config model plus the sibling-`Clashr-Auto` discovery described above. Resolves per-OS/per-arch core binary paths. Parses `config.yaml` with regex helpers (see YAML note below).
-- **`ConfigBuilder`** — generates `full.yaml`: merges the base config, plugin DNS/TUN blocks, subscription proxies, proxy groups, and auto-generated region groups. `ensureFullConfig(tunEnabled)` is the entry point. `applyCustomRules()` then consumes the settings page's `userDir/rules.json`: `area` entries become regex-matched custom proxy-groups (wired into the first selector), and `rule` entries are prepended to the `rules:` block. MainWindow triggers `CoreController::rebuildConfig()` (regenerate + hot-reload) whenever settings or a rule/area row change.
-- **`SubscriptionStore`** — owns the subscriptions YAML: add/enable/disable subscriptions and individual nodes, remote/local fetch + `sub`-format conversion, incremental update, and allow/no-allow rule filtering (`nodeAllowed`).
-- **`CoreController`** — lifecycle glue: launches/stops the core via `QProcess`, toggles system proxy natively (WinINET `InternetSetOption` / macOS `networksetup` / Linux `gsettings`, no bundled binary) and TUN, rebuilds config, and hot-reloads by PUTing to the core's `/configs` endpoint. Emits `statusChanged` / `logUpdated`.
-- **`ClashService`** — polls the running core's REST API on `host:uiPort` (default `127.0.0.1:9090`): `/traffic`, `/connections`, `/proxies`, sets mode via `/configs`, selects nodes/groups via `/proxies/<group>`, clears via `DELETE /connections`, closes one via `DELETE /connections/<id>` (`closeConnection`), and one-shot fetches the full connection list via `fetchConnections` (used by the status page's connections dialog). All async via `QNetworkAccessManager` + callbacks. Emits Qt signals consumed by the UI.
-- **`MainWindow`** — the whole UI (frameless titlebar with custom drag handling, sidebar, status/subscriptions/settings/logs/about pages, footer with TUN/proxy/core switches). The sidebar `menu` list is index-aligned 1:1 with the `m_pages` stack (`createMenuButton(menu[i], i)`), so adding/removing a page means editing both lists together. (The VIP/会员 page was intentionally removed.) Owns a `ClashService` and pointers to `CoreController`, `TrayController`, `SubscriptionStore`. All styling is inline via `appStyle()`. `closeEvent` honours the `mini`/`closeToTray` config: when on, ✕ hides to tray instead of quitting. On real quit (incl. tray "退出程序"), a `QCoreApplication::aboutToQuit` handler calls `CoreController::stopCore()` to kill the core and restore the system proxy. The `sys`/`autoStart` setting writes the Windows `HKCU\...\Run` key via `QSettings` (applied on settings save).
-- **`TrayController`** — system tray menu, traffic display, quick core/proxy/TUN toggles, plus `notify()` for balloon messages.
-- **`TrafficChart`** — custom-painted realtime line chart widget.
+- **`AppConfig` / `AppConfigLoader`** — config model + paths. `clashExecutable()` → the mihomo core under `userDir/command` (downloaded in-app; prefers `command/core[.exe]`, falls back to legacy `command/clash/clash-<os>-<arch>`). Seed resources come from qrc (`:/assets/bundle/*`), not any sibling dir. **`AppConfig::makeWritable()` — qrc-copied files are read-only; this restores owner-write** (config.yaml seeding + every later save depends on it, or they silently fail). Parses YAML with regex helpers (YAML note below).
+- **`ConfigBuilder`** — generates `full.yaml` into `configDir`: merges base config, plugin DNS/TUN, subscription proxies, proxy groups, auto region groups. `ensureFullConfig(tunEnabled)` is the entry point. `applyCustomRules()` consumes `configDir/rules.json` (settings-page area/rule CRUD): `area` → regex custom proxy-groups (wired into the first selector), `rule` → prepended to `rules:`. A settings/rule/subscription change triggers `CoreController::rebuildConfig()` (regenerate + hot-reload).
+- **`SubscriptionStore`** — owns `configDir/subscribe.yaml`: add/enable/disable subs and individual nodes, remote/local fetch + `sub`-format conversion, incremental update, allow/no-allow filtering (`nodeAllowed`).
+- **`CoreController`** — launches/stops the core via `QProcess` (`-d userDir -f configDir/full.yaml`); on first run seeds `Country.mmdb` (from qrc) into userDir and, on Windows, extracts the arch's `wintun.dll` (from qrc) next to the core. Toggles system proxy **natively** (Windows WinINET `InternetSetOption` / macOS SCPreferences via a **root helper** / Linux `gsettings` — no bundled binary) + TUN. Hot-reloads via PUT `/configs`. Emits `statusChanged`/`logUpdated`.
+- **`ClashService`** — polls the core's REST API on `host:uiPort` (**default `127.0.0.1:9191`** — avoids the original 9090): `/traffic`, `/connections`, `/proxies`; sets mode via `/configs`; selects nodes via `/proxies/<group>`; `DELETE /connections[/<id>]`; download speed-test. Async via `QNetworkAccessManager`; emits Qt signals.
+- **`TrayController`** — system tray menu, traffic display, quick core/proxy/TUN toggles, `notify()`. (`#include`s `MainWindow.h` only for QWidget base methods.)
 
-Data flow: `MainWindow` builds config through `ConfigBuilder`/`SubscriptionStore` → `CoreController` starts the core with `full.yaml` → `ClashService` polls the core's REST API → signals update the UI.
+**QML UI layer** (`src/main_qml.cpp` + `qml/` + `src/qml/`):
+
+- **`main_qml.cpp`** — `QApplication` + `QQmlApplicationEngine`; sets app/org name **"Coast"** (→ data dir); **forces the Qt Quick software backend** (`QQuickWindow::setGraphicsApi(QSGRendererInterface::Software)`) — the UI is pure 2D (no `ShaderEffect`), so software rendering is lighter on GPU-less machines and lets CI drop the GL/D3D fallback DLLs. Registers MiSans, `loadFromModule("ClashAuto","Main")` (the QML module URI is kept **`ClashAuto`** internally — invisible to users). `COAST_NO_AUTOSTART=1` skips auto-starting the core (used by headless smoke tests / local UI dev).
+- **`QmlBridge`** — the thin glue exposing the shared backend to QML (status lights, traffic, nodes, mode, toggles, notifications; `persistConfigBool` writes `configDir/config.yaml`).
+- **`src/qml/*Controller` + `*Model`** — `SubscriptionsController`, `SettingsController`, `UpdateController`, `AboutController`, `I18n` (12-language JSON tables in `assets/i18n/`, loaded from qrc), plus `NodeListModel` / `ConnectionsModel` / `LogModel`. Models update **incrementally** (`dataChanged`/`beginInsertRows`, deliberately **never** `beginResetModel`).
+- **`qml/`** — `Main.qml` (shell: sidebar + `StackLayout` pages + footer), pages (`StatusPage`/`SubscriptionsPage`/`SettingsPage`/`LogsPage`/`AboutPage`), reusable components (`Card`/`NavButton`/`FooterSwitch`/`MetricCard`/`NodeRow`/`BandwidthChart`/`LogTimeline`), extra windows (`ConnectionsWindow`/`UpdateWindow`/`RuleEditorWindow`), and `Theme.qml` (singleton design tokens). `BandwidthChart.qml` is a `Canvas` realtime line chart.
+
+Data flow: QML → `QmlBridge`/controllers → `ConfigBuilder`/`SubscriptionStore` build `full.yaml` → `CoreController` starts the core → `ClashService` polls REST → signals update QML.
 
 ### YAML is manipulated as text, not parsed
 
-There is **no YAML library**. `AppConfig`, `ConfigBuilder`, and `SubscriptionStore` read and rewrite YAML with `QRegularExpression` and manual string surgery (e.g. `setScalar`, `replaceProxyListAt`, `parseProxyList`). When touching config/subscription generation, preserve exact indentation and key formatting, and verify the result with `clash -t -f` — malformed output won't be caught at compile time.
+There is **no YAML library**. `AppConfig`, `ConfigBuilder`, `SubscriptionStore` read and rewrite YAML with `QRegularExpression` + manual string surgery (`setScalar`, `replaceProxyListAt`, `parseProxyList`). Preserve exact indentation and key formatting, and verify the result with `mihomo -t -f full.yaml` — malformed output isn't caught at compile time.
 
 ### Runtime data locations
 
-User-writable state lives under the Qt `AppDataLocation`, i.e. `%AppData%/ClashAuto/Clash Auto/clash-auto/` on Windows: the user's `config.yaml` (copied from the bundled one on first run), the generated `full.yaml`, and `logs/qt-main.log`. The user copy takes precedence over the bundled `Clashr-Auto/config/config.yaml`.
+Under Qt `AppDataLocation`, rebased to a flat brand dir (**no migration** from the old `%AppData%\ClashAuto\Clash Auto\clash-auto\` — a rename = fresh state). On Windows:
+- **`userDir = %AppData%\Coast\`** — the core's `-d` home: `logs\`, `Country.mmdb`, cache, `command\` (downloaded core + extracted `wintun.dll`).
+- **`configDir = %AppData%\Coast\config\`** — `config.yaml` (user copy, seeded from qrc on first run), generated `full.yaml`, plus `default.yaml`/`plugin.yaml`/`subscribe.yaml`/`rules.json`.
+
+(macOS: `~/Library/Application Support/Coast`; Linux: `~/.local/share/Coast`.)
 
 ### Fonts — MiSans everywhere
 
-The whole UI uses one family, **`MiSans`**, bundled in `clashauto-c++/assets/fonts/` (committed to git, embedded into the binary via `resources.qrc`): `MiSans-Regular.ttf` + `MiSans-Semibold.ttf` (the Semibold is the `MiSans`-typographic-family face so `font.bold` maps to it instead of synthesizing). Source: the `dsrkafuu/misans` mirror (static TTFs). There is **no monospace font** — an earlier Sarasa Mono SC pass was reverted; everything is MiSans.
+One family, **`MiSans`**, bundled in `clashauto-c++/assets/fonts/` (committed, embedded via `resources.qrc`): `MiSans-Regular.ttf` + `MiSans-Semibold.ttf` (Semibold is the typographic-family bold face so `font.bold` maps to it instead of synthesizing). No monospace. `main_qml.cpp` sets the **global default app font to MiSans**, so every QML `Text`/control that doesn't set `font.family` inherits it — you essentially never set `font.family`. `Theme.uiFont` (`"MiSans"`) is named explicitly only where it isn't inherited: `Canvas`-drawn text (e.g. `BandwidthChart.qml`'s `ctx.font`).
 
-`main_qml.cpp` registers both weights with `QFontDatabase::addApplicationFont` and sets the **global default app font to `MiSans`** (`app.setFont`), so every QML `Text`/control that doesn't set `font.family` inherits it — that *is* how "UI uses MiSans" is enforced; you essentially never set `font.family` for text. The family name is also exposed as `Theme.uiFont` (`"MiSans"`) for the one case that needs it explicitly: `Canvas`-drawn text does **not** inherit the app default (see `BandwidthChart.qml`, which names `Theme.uiFont` in its `ctx.font` strings).
+## Naming, packaging & branding — per platform
+
+Product is **Coast**; names follow each platform's convention:
+
+- **Windows** — `Coast.exe`; installs to `%LOCALAPPDATA%\Coast`; portable zip is **flat** (exe + Qt runtime at the root, no `clashauto-c++`/`Clashr-Auto` subdirs).
+- **macOS** — `Coast.app`; bundle id `com.yuehongsun.coast`; privileged root helper `com.yuehongsun.coast.helper` (**launchd Label = mach service = plist filename = codesign `-i` must all match**, see `helper/HelperProtocol.h`). **Signing/notarization is done by an EXTERNAL repo** `integemjack/schat.build` (branch `clashauto-mac`, `.github/workflows/clashauto-mac.yml`): clashauto's CI `trigger-mac` job pushes an empty commit there; it builds+signs+notarizes and clobbers the DMG onto the **same** release. clashauto's own macos job only uploads an Actions artifact. `Ireoo` can't push to `integemjack/schat.build` — needs an `integemjack` PAT.
+- **Linux** — binary `coast` (lowercase, command convention); `.deb` installs flat to `/opt/coast/coast` + `/usr/bin/coast` symlink + `coast.desktop`; Debian `Package: coast`. **The `.deb` must `Depends` on `libopengl0`** — Qt6::Gui hard-links `libOpenGL.so.0` (an ELF NEEDED entry) even under the software backend; without it a clean system fails to launch.
+- **Kept as "Clash Auto" / `ClashAuto` on purpose** (do not "fix"): the GitHub Release **name** + download **filenames** (`ClashAuto-<ver>-…`) — the in-app updater matches them and the external mac signer targets the same release tag; also the QML module URI `ClashAuto`, the CMake target/dir names, and the Windows `%AppData%` registry org.
 
 ## Releases & CI (`.github/workflows/release.yml`)
 
-- The release version **auto-increments per commit**: the "Resolve build version" step takes `major.minor` from `project(... VERSION x.y.z)` in `clashauto-c++/CMakeLists.txt` and uses the git commit count (`git rev-list --count HEAD`) as the patch/build number → `major.minor.<count>` (e.g. `0.1.15`), tag `v<version>`. Bump `major`/`minor` in CMakeLists to start a new line; the build number rises on its own each commit. This is why both checkout steps use `fetch-depth: 0` (full history is needed for the count), and both jobs compute the same version from the same `github.sha`. The resolved `APP_VERSION` is passed to CMake (`-DAPP_VERSION=`), which `configure_file`s `src/Version.h.in` → `Version.h` (`#define APP_VERSION`), so the **app UI (sidebar `Ver:` + About page) shows the exact packaged version**. Local builds default `APP_VERSION` to `PROJECT_VERSION`.
-- Any **push to `master`/`main`** builds and publishes a GitHub Release (Windows x64 + ARM64 portable zip & NSIS installer; Linux x64 + ARM64 tar.gz/zip & `.deb`). PRs build artifacts but do not publish.
-- CI does **not** build `Clashr-Auto/`; it downloads the runtime bundle from `Clashr-Auto-Desktop` release `v2.5.7` and, for ARM64, pulls the matching mihomo core. It then stages `clashauto-cpp.exe` (via `windeployqt`) alongside a trimmed `Clashr-Auto/` resource dir, preserving the sibling-directory layout the app expects.
-- Windows CI builds with **MSVC (Visual Studio 17 2022)**, not MinGW; Linux CI uses Ninja + system Qt6. ARM64 Windows is a cross-compile and passes `-DQT_HOST_PATH`.
+- Version **auto-increments per commit**: `major.minor` from `project(... VERSION x.y.z)` in `CMakeLists.txt` + git commit count (`git rev-list --count HEAD`) → `major.minor.<count>`, tag `v<version>` (hence `fetch-depth: 0`). `APP_VERSION` → CMake `configure_file` → `Version.h` → shown in-app (sidebar `Ver:` + About).
+- **Any push to `master`/`main`** builds + publishes a GitHub Release: Windows x64/arm64 (portable zip + NSIS setup), Linux x64/arm64 (tar.gz/zip + `.deb`), macOS universal DMG (via schat.build). PRs build artifacts but don't publish.
+- **Self-contained CI** — no Clashr-Auto download/staging; the package is just the exe + Qt runtime (resources embedded in the exe, core downloaded in-app). `windeployqt` runs with **`--no-opengl-sw --no-system-d3d-compiler`** (paired with the forced software backend) to drop ~24 MB of GL/D3D fallback DLLs.
+- Windows CI = **MSVC (VS 17 2022)**; Linux CI = Ninja + aqt Qt6 (bundled into the package, RPATH `$ORIGIN/lib`); macOS = aqt universal Qt6. ARM64 Windows is a cross-compile (`-DQT_HOST_PATH`).
