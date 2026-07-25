@@ -108,8 +108,13 @@ Item {
             spacing: 10
 
             // —————————— 左：设备列表 ——————————
+            // 左右各占一半：两侧必须给同样的 fillWidth + preferredWidth 权重。
+            // （曾经左 preferredWidth:320 / 右不给 —— Layouts 在未设 stretchFactor 时按
+            //  preferredWidth 的比例分配剩余空间，右侧权重 0 → 永远 0 宽，怎么拉窗口都看不见第二栏。）
             ColumnLayout {
-                Layout.preferredWidth: 320
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
+                Layout.minimumWidth: 200
                 Layout.fillHeight: true
                 spacing: 8
 
@@ -207,6 +212,8 @@ Item {
             // —————————— 右：详情 ——————————
             Item {
                 Layout.fillWidth: true
+                Layout.preferredWidth: 1 // 与左列表同权重 → 平分宽度
+                Layout.minimumWidth: 200
                 Layout.fillHeight: true
 
                 Text {
