@@ -7,6 +7,15 @@
 #import "HelperProtocol.h"
 #include "Version.h" // 由 CMake configure_file 生成：#define APP_VERSION "x.y.z"（与应用同版本号）
 
+#include <errno.h>
+#include <fcntl.h>
+#include <net/bpf.h>
+#include <net/if.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
 // ---- 以 root 用 SCPreferences 在所有已启用网络服务上设/清 HTTP/HTTPS/SOCKS 代理 ----
 // 与应用侧 Option B 的 macApplyProxies 同逻辑，但去掉 AuthorizationRef：root 直接提交即可。
 static void cfDictSetInt(CFMutableDictionaryRef d, CFStringRef key, int v)
@@ -107,7 +116,13 @@ static BOOL applyProxies(BOOL enable, NSString *host, int port, NSArray<NSString
     } else {
         return NO; // 本 helper 只面向 macOS 13+（SMAppService daemon）
     }
-    newConnection.exportedInterface = [NSXPCInterface interfaceWithProtocol:@protocol(CAHelperProtocol)];
+    NSXPCInterface *iface = [NSXPCInterface interfaceWithProtocol:@protocol(CAHelperProtocol)];
+    // openBpf 的 reply 参数含 NSFileHandle（fd 传递），需在接口上显式允许该类。
+    [iface setClasses:[NSSet setWithObject:[NSFileHandle class]]
+         forSelector:@selector(openBpfForInterface:withReply:)
+         argumentIndex:0
+         ofReply:YES];
+    newConnection.exportedInterface = iface;
     newConnection.exportedObject = self;
     [newConnection resume];
     return YES;
@@ -178,6 +193,41 @@ static BOOL applyProxies(BOOL enable, NSString *host, int port, NSArray<NSString
     }
     _coreTask = nil;
     reply(YES, @"");
+}
+
+- (void)openBpfForInterface:(NSString *)ifname
+                  withReply:(void (^)(NSFileHandle *, NSString *))reply
+{
+    // 逐个试 /dev/bpf0..255（root 权限）。
+    int fd = -1;
+    for (int i = 0; i < 256 && fd < 0; ++i) {
+        char dev[16];
+        snprintf(dev, sizeof(dev), "/dev/bpf%d", i);
+        fd = open(dev, O_RDWR);
+        if (fd < 0 && errno != EBUSY)
+            break;
+    }
+    if (fd < 0) {
+        reply(nil, [NSString stringWithFormat:@"open /dev/bpf 失败: %s", strerror(errno)]);
+        return;
+    }
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof(ifr));
+    strncpy(ifr.ifr_name, ifname.UTF8String ?: "", IFNAMSIZ - 1);
+    if (ioctl(fd, BIOCSETIF, &ifr) < 0) {
+        NSString *e = [NSString stringWithFormat:@"BIOCSETIF(%@) 失败: %s", ifname, strerror(errno)];
+        close(fd);
+        reply(nil, e);
+        return;
+    }
+    u_int on = 1, off = 0;
+    ioctl(fd, BIOCIMMEDIATE, &on);  // 立即返回
+    ioctl(fd, BIOCPROMISC, &on);    // 混杂：收目的非本机 MAC 的帧
+    ioctl(fd, BIOCSHDRCMPLT, &on);  // 写时提供完整链路头
+    ioctl(fd, BIOCSSEESENT, &off);  // 不回显自己发出的帧
+    // 传 fd 给应用；closeOnDealloc:YES —— reply 序列化(dup)后本 fh 释放即关闭 helper 侧 fd。
+    NSFileHandle *fh = [[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:YES];
+    reply(fh, nil);
 }
 
 @end

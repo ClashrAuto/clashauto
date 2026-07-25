@@ -36,4 +36,10 @@
 // 停止 helper 启动的核心。
 - (void)stopCoreWithReply:(void (^)(BOOL ok, NSString *error))reply;
 
+// 以 root 打开并配置一个 BPF 设备(绑到 ifname)，把 fd 经 NSFileHandle 传回应用（透明网关二层收发）。
+// /dev/bpf* 需 root，故由 helper 开好、配好(BIOCSETIF/PROMISC/IMMEDIATE/SHDRCMPLT)再传 fd，
+// 应用即可非 root 收发帧。失败时 fh 为 nil、error 说明原因。
+- (void)openBpfForInterface:(NSString *)ifname
+                  withReply:(void (^)(NSFileHandle *_Nullable fh, NSString *_Nullable error))reply;
+
 @end

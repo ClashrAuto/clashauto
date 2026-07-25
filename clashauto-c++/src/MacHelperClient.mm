@@ -4,6 +4,8 @@
 #import <ServiceManagement/ServiceManagement.h>
 #import "../helper/HelperProtocol.h"
 
+#include <unistd.h> // dup()
+
 // daemon 的 launchd plist 文件名（位于 .app/Contents/Library/LaunchDaemons/ 下）
 static NSString *const kPlistName = @"com.yuehongsun.coast.helper.plist";
 
@@ -164,6 +166,45 @@ bool stopCore(QString *err)
     return callBoolReply(err, ^(id<CAHelperProtocol> proxy, void (^reply)(BOOL, NSString *)) {
         [proxy stopCoreWithReply:reply];
     });
+}
+
+int openBpf(const QString &ifname, QString *err)
+{
+    NSXPCConnection *conn =
+        [[NSXPCConnection alloc] initWithMachServiceName:@CA_HELPER_MACH_SERVICE
+                                                 options:NSXPCConnectionPrivileged];
+    NSXPCInterface *iface = [NSXPCInterface interfaceWithProtocol:@protocol(CAHelperProtocol)];
+    // reply 里的 NSFileHandle（fd 传递）需显式允许。
+    [iface setClasses:[NSSet setWithObject:[NSFileHandle class]]
+         forSelector:@selector(openBpfForInterface:withReply:)
+         argumentIndex:0
+         ofReply:YES];
+    conn.remoteObjectInterface = iface;
+    [conn resume];
+
+    __block int fd = -1;
+    __block NSString *failure = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    id proxy = [conn remoteObjectProxyWithErrorHandler:^(NSError *e) {
+        failure = e.localizedDescription;
+        dispatch_semaphore_signal(sem);
+    }];
+    [(id<CAHelperProtocol>)proxy
+        openBpfForInterface:ifname.toNSString()
+                  withReply:^(NSFileHandle *fh, NSString *emsg) {
+                      if (fh)
+                          fd = dup(fh.fileDescriptor); // 复制成本进程自有、可自主关闭的 fd
+                      else
+                          failure = emsg.length ? emsg : @"helper 返回空句柄";
+                      dispatch_semaphore_signal(sem);
+                  }];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+    [conn invalidate];
+
+    if (fd < 0 && err)
+        *err = failure ? QString::fromNSString(failure) : QStringLiteral("超时/无应答");
+    return fd;
 }
 
 } // namespace MacHelper

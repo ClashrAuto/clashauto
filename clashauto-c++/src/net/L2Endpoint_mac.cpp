@@ -8,6 +8,8 @@
 
 #if defined(Q_OS_MACOS)
 
+#include "../MacHelperClient.h" // M3.5：非 root 时经 root helper 拿 bpf fd
+
 #include <QByteArray>
 #include <QSocketNotifier>
 
@@ -35,40 +37,54 @@ public:
 
     bool open(const QString &ifname, QString *err) override
     {
-        // 逐个尝试 /dev/bpf0../bpf255（新系统也支持克隆节点，但逐个更稳）。
-        for (int i = 0; i < 256 && m_fd < 0; ++i) {
-            char dev[16];
-            std::snprintf(dev, sizeof(dev), "/dev/bpf%d", i);
-            m_fd = ::open(dev, O_RDWR);
-            if (m_fd < 0 && errno != EBUSY)
-                break; // 非「设备忙」（多为权限）→ 不再试
-        }
-        if (m_fd < 0) {
-            if (err) *err = QStringLiteral("打开 /dev/bpf 失败（需 root）: ") + strerror(errno);
-            return false;
+        // 优先经 root helper 拿「已开好、已配好」的 bpf fd（正式运行：app 非 root，M3.5）。
+        // helper 没装/没批准（isReady()=false，快速返回不阻塞）→ 落到直接开（需 root，联调 sudo / 自测）。
+        if (MacHelper::isReady()) {
+            QString herr;
+            const int fd = MacHelper::openBpf(ifname, &herr);
+            if (fd >= 0)
+                return finishOpen(fd, ifname);
+            // helper 在但开失败：不致命，继续尝试直接开（herr 仅备参考）。
         }
 
+        // 直接打开 /dev/bpf0../bpf255（需 root）并配置。
+        int fd = -1;
+        for (int i = 0; i < 256 && fd < 0; ++i) {
+            char dev[16];
+            std::snprintf(dev, sizeof(dev), "/dev/bpf%d", i);
+            fd = ::open(dev, O_RDWR);
+            if (fd < 0 && errno != EBUSY)
+                break; // 非「设备忙」（多为权限）→ 不再试
+        }
+        if (fd < 0) {
+            if (err) *err = QStringLiteral("打开 /dev/bpf 失败（需 root 或安装 helper）: ")
+                            + strerror(errno);
+            return false;
+        }
         struct ifreq ifr;
         std::memset(&ifr, 0, sizeof(ifr));
         std::strncpy(ifr.ifr_name, ifname.toLatin1().constData(), IFNAMSIZ - 1);
-        if (::ioctl(m_fd, BIOCSETIF, &ifr) < 0) {
+        if (::ioctl(fd, BIOCSETIF, &ifr) < 0) {
             if (err) *err = QStringLiteral("BIOCSETIF(%1) 失败: %2").arg(ifname, strerror(errno));
-            close();
+            ::close(fd);
             return false;
         }
+        unsigned int on = 1, off = 0;
+        ::ioctl(fd, BIOCIMMEDIATE, &on);  // 立即返回，不缓冲等待
+        ::ioctl(fd, BIOCPROMISC, &on);    // 混杂：收目的非本机 MAC 的帧
+        ::ioctl(fd, BIOCSHDRCMPLT, &on);  // 写时我们提供完整链路头
+        ::ioctl(fd, BIOCSSEESENT, &off);  // 不回显自己发出的帧
+        return finishOpen(fd, ifname);
+    }
 
-        // 取内核选定的缓冲长度（读时按此大小 read）。
+    // 共用收尾：无论 fd 来自 helper 还是直接开——查缓冲长度、置非阻塞、读本机 MAC、挂 notifier。
+    bool finishOpen(int fd, const QString &ifname)
+    {
+        m_fd = fd;
         if (::ioctl(m_fd, BIOCGBLEN, &m_bufLen) < 0 || m_bufLen <= 0)
             m_bufLen = 32768;
-        unsigned int on = 1, off = 0;
-        ::ioctl(m_fd, BIOCIMMEDIATE, &on);  // 立即返回，不缓冲等待
-        ::ioctl(m_fd, BIOCPROMISC, &on);    // 混杂：收目的非本机 MAC 的帧（被劫持设备发给「网关」的帧）
-        ::ioctl(m_fd, BIOCSHDRCMPLT, &on);  // 写时我们提供完整链路头，内核不改源 MAC
-        ::ioctl(m_fd, BIOCSSEESENT, &off);  // 不回显自己发出的帧，避免自环
         ::fcntl(m_fd, F_SETFL, O_NONBLOCK);
-
         m_localMac = readMac(ifname);
-
         m_notifier = new QSocketNotifier(m_fd, QSocketNotifier::Read, this);
         QObject::connect(m_notifier, &QSocketNotifier::activated, this, [this] { drain(); });
         return true;

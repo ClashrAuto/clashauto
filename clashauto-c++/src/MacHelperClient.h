@@ -43,4 +43,8 @@ bool startCore(const QString &execPath, const QString &configPath, const QString
 // 经 helper 停止其启动的核心。返回是否成功。
 bool stopCore(QString *err);
 
+// 经 helper 以 root 打开并配置绑到 ifname 的 BPF 设备，返回**本进程可用的 fd**（已 dup，调用方负责 close）。
+// 失败返回 -1 并把原因写入 err。透明网关(L2Endpoint_mac)非 root 运行时用它拿二层收发能力。
+int openBpf(const QString &ifname, QString *err);
+
 } // namespace MacHelper
