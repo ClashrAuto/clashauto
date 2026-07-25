@@ -1,3 +1,14 @@
+// Windows 的默认路由改用 IP Helper API（见 defaultRoutes）。winsock2.h 必须排在任何会拉进
+// windows.h 的头之前，故这段放在最前面，并用编译器内建宏 _WIN32 作守卫（此时还没有 Qt 的 Q_OS_WIN）。
+#ifdef _WIN32
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  include <iphlpapi.h>
+#endif
+
 #include "LanScanner.h"
 
 #include <QDateTime>
@@ -25,9 +36,16 @@ namespace {
 //  80/443 通用；445 SMB(Windows)；62078 iOS lockdown；22 ssh；
 //  8009 Chromecast；5555 adb(Android)；9100 打印机 raw；554 RTSP(摄像头)；32469 DLNA。
 const quint16 kProbePorts[] = {80, 443, 445, 62078, 22, 8009, 5555, 9100, 554, 32469};
-constexpr int kMaxInFlight = 120;         // 同时在途 TCP 探测上限，防 FD 耗尽
+constexpr quint16 kArpPort = 80;          // 阶段①：逼系统做 ARP 只需要连这一个端口
+// 同时在途 TCP 探测上限。曾经是 120——建/关 120 个 socket 的系统调用挤在同一次事件循环里，
+// 实测把 GUI 线程按住最长 1.8 秒（进设备页就是这么卡住的）。24 并发实测总耗时不变（瓶颈本来
+// 就不在并发度上），最长卡顿从 1846ms 掉到几十毫秒。
+constexpr int kMaxInFlight = 24;
+constexpr int kPumpSlice = 8;             // 每轮事件循环最多新建的 socket 数
+constexpr int kNbnsSlice = 32;            // 每轮事件循环最多发的 NBNS 查询数
 constexpr int kProbeTimeoutMs = 1200;
 constexpr int kSettleMs = 2500;           // 探测发完后等收 ARP/名称回包的静默期
+constexpr int kScanWatchdogMs = 45000;    // 两阶段都卡死时的兜底（强制收尾，不让 UI 停在「扫描中」）
 
 QString macFromLine(const QString &line)
 {
@@ -110,7 +128,8 @@ bool isVirtualIface(const QNetworkInterface &iface, quint32 ip)
 }
 
 // 系统路由表里的全部默认路由 → (网关 IP, 网卡标识)。
-// 网卡标识：Windows = 出口接口 IP；Linux/macOS = 接口名。用来把网关配到对应网卡上。
+// 网卡标识一律是接口名（Windows 上即适配器 GUID，由接口索引查得）；macOS 拿不到时给空串。
+// 调用方按「接口名或接口 IP 对得上」配对，两种都兼容。
 QVector<QPair<QString, QString>> defaultRoutes()
 {
     QVector<QPair<QString, QString>> out;
@@ -163,26 +182,43 @@ QVector<QPair<QString, QString>> defaultRoutes()
         }
     }
 #else // Windows
+    // 走 IP Helper API，**不再 spawn `route print`**：那是个同步 QProcess + waitForFinished(2000)，
+    // 实测占住 GUI 线程 ~60ms，而 refreshLiveness 每 5 秒就要来一次 —— 设备页里最稳定的一段
+    // 周期性卡顿就是它。GetIpForwardTable2 是纯内存查询，微秒级，还免了「解析本地化命令输出」。
     {
-        QProcess p;
-        p.start("route", {"print", "-4", "0.0.0.0"});
-        if (p.waitForFinished(2000)) {
-            const QString text = QString::fromLocal8Bit(p.readAllStandardOutput());
-            // 行："0.0.0.0  0.0.0.0  <网关>  <接口IP>  <跃点>"；多网卡/开 TUN 时会有多行。
-            for (const QString &row : text.split('\n')) {
-                const QString t = row.simplified();
-                if (!t.startsWith(QStringLiteral("0.0.0.0 0.0.0.0")))
+        MIB_IPFORWARD_TABLE2 *table = nullptr;
+        if (GetIpForwardTable2(AF_INET, &table) == NO_ERROR && table) {
+            for (ULONG i = 0; i < table->NumEntries; ++i) {
+                const MIB_IPFORWARD_ROW2 &r = table->Table[i];
+                if (r.DestinationPrefix.PrefixLength != 0)
+                    continue; // 只要默认路由（0.0.0.0/0）
+                const quint32 gw = ntohl(r.NextHop.Ipv4.sin_addr.s_addr);
+                const QString gwStr = QHostAddress(gw).toString();
+                if (!validIp(gwStr))
                     continue;
-                const QStringList c = t.split(' ');
-                if (c.size() >= 4 && validIp(c.at(2)))
-                    out.append({c.at(2), c.at(3)});
+                // 网卡标识用 Qt 的接口名（Windows 上即适配器 GUID）——调用方拿它和 LocalIface::name
+                // 比对。索引→接口由 Qt 查表完成，与 QNetworkInterface::allInterfaces() 同源。
+                const QString ifName =
+                    QNetworkInterface::interfaceFromIndex(static_cast<int>(r.InterfaceIndex)).name();
+                out.append({gwStr, ifName});
             }
+            FreeMibTable(table);
         }
     }
 #endif
     return out;
 }
 } // namespace
+
+// 带缓存的拓扑探测：refreshLiveness 每 5s 一次、scanFull 每次进页面都要，而网卡/路由几乎不变。
+// force=true（扫描入口）永远重算；其余走 kTopologyTtlMs 缓存。
+void LanScanner::ensureTopology(bool force)
+{
+    if (!force && m_topologyAge.isValid() && m_topologyAge.elapsed() < kTopologyTtlMs)
+        return;
+    detectLocalTopology();
+    m_topologyAge.restart();
+}
 
 void LanScanner::detectLocalTopology()
 {
@@ -357,21 +393,45 @@ void LanScanner::appendSelfRecords(QVector<DeviceRecord> &out) const
 }
 
 // ———————————————————————————— 主动探测 ————————————————————————————
-void LanScanner::probeArp(const QVector<quint32> &hosts)
+// 通用探测泵：把 (ip,port) 作业按 kMaxInFlight 限流跑完，全部收口后回调 onDone。
+//
+// 两条「别把 GUI 线程按住」的硬规矩（都是实测逼出来的，别回退）：
+//  1) 每轮事件循环最多新建 kPumpSlice 个 socket。建 socket / connect / abort 在 Windows 上各是
+//     几百微秒的系统调用，一口气推 120 个，单次事件循环实测能卡 1.8 秒（页面直接冻住）。
+//  2) 收口后的补位**不在原地递归调用泵**，而是排到下一轮事件循环（且合并成一次）。否则一批
+//     socket 同时报错/同时超时时，finish→pump→新 socket→立即报错→finish… 会在一个事件循环里
+//     连锁跑完剩下的所有作业。
+void LanScanner::runProbes(QVector<QPair<quint32, quint16>> jobs, std::function<void()> onDone)
 {
-    // 构造 (ip,port) 作业清单，按 kMaxInFlight 限流泵出。用共享的待办队列 + 计数。
-    auto jobs = std::make_shared<QVector<QPair<quint32, quint16>>>();
-    for (quint32 ip : hosts)
-        for (quint16 port : kProbePorts)
-            jobs->append({ip, port});
-
+    if (jobs.isEmpty()) {
+        if (onDone)
+            onDone();
+        return;
+    }
+    auto queue = std::make_shared<QVector<QPair<quint32, quint16>>>(std::move(jobs));
     auto inFlight = std::make_shared<int>(0);
+    auto left = std::make_shared<int>(queue->size());
+    auto finished = std::make_shared<std::function<void()>>(std::move(onDone));
+    auto pumpScheduled = std::make_shared<bool>(false);
     auto pump = std::make_shared<std::function<void()>>();
-    *pump = [this, jobs, inFlight, pump]() {
-        while (*inFlight < kMaxInFlight && !jobs->isEmpty()) {
-            const auto job = jobs->takeFirst();
+
+    // 合并式排程：一轮事件循环里无论多少个 socket 收口，都只排一次泵。
+    auto schedulePump = [this, pump, pumpScheduled] {
+        if (*pumpScheduled)
+            return;
+        *pumpScheduled = true;
+        QTimer::singleShot(0, this, [pump, pumpScheduled] {
+            *pumpScheduled = false;
+            (*pump)();
+        });
+    };
+
+    *pump = [this, queue, inFlight, left, finished, schedulePump, pump]() {
+        int made = 0;
+        while (*inFlight < kMaxInFlight && !queue->isEmpty() && made < kPumpSlice) {
+            const auto job = queue->takeFirst();
             ++(*inFlight);
-            ++m_pendingProbes;
+            ++made;
             auto *sock = new QTcpSocket(this);
             auto *timer = new QTimer(sock);
             timer->setSingleShot(true);
@@ -381,9 +441,10 @@ void LanScanner::probeArp(const QVector<quint32> &hosts)
             const quint16 port = job.second;
 
             // 每个 socket 的 connected / errorOccurred / 超时 三路只允许收口一次，否则会重复
-            // 递减计数（导致 pending 提前归零 / 变负、settle 误触发）。
+            // 递减计数（导致 left 提前归零 / 变负、onDone 误触发）。
             auto done = std::make_shared<bool>(false);
-            auto finish = [this, sock, inFlight, pump, done](bool open, const QString &ip, quint16 pt) {
+            auto finish = [this, sock, inFlight, left, finished, schedulePump, done](
+                              bool open, const QString &ip, quint16 pt) {
                 if (*done)
                     return;
                 *done = true;
@@ -392,13 +453,12 @@ void LanScanner::probeArp(const QVector<quint32> &hosts)
                 sock->abort();
                 sock->deleteLater();
                 --(*inFlight);
-                if (--m_pendingProbes <= 0) {
-                    // 探测全部收口 → 立刻读一次 ARP 表（此时系统已对存活主机解析完 MAC），
-                    // 再起静默计时器，等 mDNS/SSDP/NBNS 名称回包后 assemble。
-                    readArpTable();
-                    m_settleTimer->start(kSettleMs);
+                if (--(*left) <= 0) {
+                    if (*finished)
+                        (*finished)();
+                    return;
                 }
-                (*pump)(); // 补位下一批
+                schedulePump(); // 补位——下一轮事件循环再建，绝不在这里递归
             };
 
             connect(sock, &QTcpSocket::connected, sock, [finish, ipStr, port]() {
@@ -415,8 +475,40 @@ void LanScanner::probeArp(const QVector<quint32> &hosts)
             timer->start();
             sock->connectToHost(ipStr, port);
         }
+        // 名额还有、队列还有 → 说明是被 kPumpSlice 截断的，下一轮继续。
+        if (!queue->isEmpty() && *inFlight < kMaxInFlight)
+            schedulePump();
     };
     (*pump)();
+}
+
+// 阶段②：只给「ARP 表里真的存在」的主机补其余指纹端口 + 反向 DNS。
+// 阶段①已经用一个端口把整段网段扫过一遍，空 IP 不必再连 9 次——作业量从 主机数×端口数
+// 降到 主机数 + 存活数×(端口数-1)（/24 实测 2530 → 约 330）。
+void LanScanner::startFingerprintPhase()
+{
+    QVector<QPair<quint32, quint16>> jobs;
+    for (auto it = m_arp.constBegin(); it != m_arp.constEnd(); ++it) {
+        const QHostAddress a(it.key());
+        if (a.protocol() != QAbstractSocket::IPv4Protocol)
+            continue;
+        const quint32 ip = a.toIPv4Address();
+        for (quint16 port : kProbePorts) {
+            if (port == kArpPort)
+                continue; // 阶段①已经连过
+            jobs.append({ip, port});
+        }
+        // 反向 DNS 也只对存活主机做：原先对整个 /24 发 253 条 PTR，绝大多数注定失败，
+        // 白占 Qt 的 host-info 线程池和 DNS 往返。
+        reverseDnsLookup(it.key());
+    }
+    // 抢先出一版列表：此刻在线设备已经确定（差的只是名称/端口指纹）。
+    emitSnapshot(false);
+    runProbes(std::move(jobs), [this] {
+        // 指纹阶段收口 → 再读一次 ARP 表（此时系统对存活主机的解析最全），
+        // 起静默计时器等 mDNS/SSDP/NBNS 的名称回包，到点 assemble。
+        readArpTable([this] { m_settleTimer->start(kSettleMs); });
+    });
 }
 
 void LanScanner::probePort(quint32 ip, quint16 port)
@@ -427,7 +519,8 @@ void LanScanner::probePort(quint32 ip, quint16 port)
 }
 
 // ———————————————————————————— ARP 表 ————————————————————————————
-void LanScanner::readArpTable()
+// onDone 在 ARP 输出解析完后回调（进程失败/被杀也一样会回调，调用链不会断在这里）。
+void LanScanner::readArpTable(std::function<void()> onDone)
 {
     auto *p = new QProcess(this);
 #if defined(Q_OS_WIN)
@@ -437,13 +530,26 @@ void LanScanner::readArpTable()
 #else
     p->start("arp", {"-n"});
 #endif
+    auto called = std::make_shared<bool>(false);
+    auto fire = [called, cb = std::move(onDone)] {
+        if (*called || !cb)
+            return;
+        *called = true;
+        cb();
+    };
     connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this, p](int, QProcess::ExitStatus) {
+            [this, p, fire](int, QProcess::ExitStatus) {
                 onArpOutput(p->readAllStandardOutput());
                 p->deleteLater();
+                fire();
             });
-    // arp 命令偶发不存在/超时：3s 兜底杀掉，走 assemble 也不会卡。
+    // arp 命令偶发不存在/超时：3s 兜底杀掉（finished 随后照常触发 fire），走 assemble 也不会卡。
     QTimer::singleShot(3000, p, [p] { if (p->state() != QProcess::NotRunning) p->kill(); });
+    // 进程压根起不来（arp 不存在）时 finished 不一定来，兜底把链子接上。
+    connect(p, &QProcess::errorOccurred, this, [fire](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart)
+            fire();
+    });
 }
 
 void LanScanner::onArpOutput(const QByteArray &out)
@@ -694,6 +800,26 @@ void LanScanner::setupNbns()
     connect(m_nbns, &QUdpSocket::readyRead, this, &LanScanner::onNbnsDatagram);
 }
 
+// 整段网段的 NBNS 查询切片发送：每轮事件循环最多 kNbnsSlice 个，剩下的排到下一轮。
+// （一次性 writeDatagram 253 下实测占住 GUI 线程 20~50ms——本身不致命，但进页面那一瞬间
+//  正好和 QML 首帧、探测启动挤在一起，能省就省。）
+void LanScanner::sendNbnsQueriesSliced(const QVector<quint32> &hosts)
+{
+    if (hosts.isEmpty() || !m_nbns)
+        return;
+    auto rest = std::make_shared<QVector<quint32>>(hosts);
+    auto step = std::make_shared<std::function<void()>>();
+    *step = [this, rest, step] {
+        const int n = qMin<int>(kNbnsSlice, rest->size());
+        for (int i = 0; i < n; ++i)
+            sendNbnsQuery(rest->at(i));
+        rest->remove(0, n);
+        if (!rest->isEmpty())
+            QTimer::singleShot(0, this, [step] { (*step)(); });
+    };
+    (*step)();
+}
+
 void LanScanner::sendNbnsQuery(quint32 ip)
 {
     if (!m_nbns)
@@ -857,6 +983,14 @@ DeviceType LanScanner::classify(const QString &mac, const QString &name, const Q
 // ———————————————————————————— 汇总 ————————————————————————————
 void LanScanner::assemble()
 {
+    emitSnapshot(true);
+}
+
+// final=false 时是「阶段①刚探完」的抢先快照：ARP 表已经知道哪些设备在线（实测进页面 ~1.8s），
+// 先把这批发给 UI，别让用户对着空列表干等到指纹阶段结束（~8s）。名称/类型等最终快照再刷新。
+// final=true 才结束扫描态（scanningChanged(false)），指示器在补齐名称期间继续转。
+void LanScanner::emitSnapshot(bool final)
+{
     QVector<DeviceRecord> out;
     const QSet<QString> gwMacs = gatewayMacs();
     // 以 ARP 表为准（有 MAC 才算一台设备）。名称/服务信号按 IP 合并进来。
@@ -886,8 +1020,10 @@ void LanScanner::assemble()
     // 本机（每张物理网卡一条）也作为设备加入（不参与劫持，UI 标「本机·保护」）。
     appendSelfRecords(out);
 
-    m_scanning = false;
-    emit scanningChanged(false);
+    if (final) {
+        m_scanning = false;
+        emit scanningChanged(false);
+    }
     emit discovered(out);
 }
 
@@ -901,33 +1037,34 @@ void LanScanner::scanFull()
 
     m_arp.clear();
     m_sig.clear();
-    m_pendingProbes = 0;
 
-    detectLocalTopology();
+    ensureTopology(true); // 扫描入口：拓扑一定重算
     const QVector<quint32> hosts = hostsToProbe();
 
     // 先发名称查询（组播/单播），与 TCP 探测并行；回包在静默期内陆续到达。
     sendMdnsQueries();
     sendSsdpQuery();
-    for (quint32 ip : hosts)
-        sendNbnsQuery(ip);
-    for (quint32 ip : hosts)
-        reverseDnsLookup(u32ToIp(ip));
+    sendNbnsQueriesSliced(hosts); // 253 个 UDP 一口气发要占住 GUI 线程 20~50ms，切片发
 
     if (hosts.isEmpty()) {
         // 大网段/无网段：只读一次 ARP 表后收口。
-        readArpTable();
-        m_settleTimer->start(kSettleMs);
+        readArpTable([this] { m_settleTimer->start(kSettleMs); });
         return;
     }
-    probeArp(hosts);
-    // ARP 表在探测过程中由系统填充；所有探测收口(m_pendingProbes→0)后，finish 里读一次 ARP 表
-    // 并起静默计时器 → 到点 assemble（用最新 m_arp + 迟到的名称信号）。
-    // 兜底：万一探测计数异常未归零，超时后也强制读表 + assemble，避免永久不出结果。
-    QTimer::singleShot(kProbeTimeoutMs + kSettleMs + 2000, this, [this] {
+
+    // 阶段①：整段网段每台主机只连 **一个** 端口，目的仅是逼系统做 ARP 解析。
+    // 收口后读 ARP 表，再进阶段②只给真实存在的主机做端口指纹（见 startFingerprintPhase）。
+    QVector<QPair<quint32, quint16>> arpJobs;
+    arpJobs.reserve(hosts.size());
+    for (quint32 ip : hosts)
+        arpJobs.append({ip, kArpPort});
+    runProbes(std::move(arpJobs), [this] { readArpTable([this] { startFingerprintPhase(); }); });
+
+    // 兜底：万一某一阶段的收口计数异常（回调链断了），超时后也强制读表 + assemble，
+    // 避免扫描永久停在「扫描中」。两阶段都算上，给足余量。
+    QTimer::singleShot(kScanWatchdogMs, this, [this] {
         if (m_scanning) {
-            readArpTable();
-            m_settleTimer->start(600);
+            readArpTable([this] { m_settleTimer->start(600); });
         }
     });
 }
@@ -937,7 +1074,7 @@ void LanScanner::refreshLiveness(const QStringList &knownIps)
     // 轻量：定向探测已知 IP（触发/维持 ARP）+ 重读 ARP 表，产出「仅在线态」快照。
     if (m_scanning)
         return;
-    detectLocalTopology();
+    ensureTopology(false); // 5s 一次的热更新走缓存：网卡/路由几乎不变，没必要每次重算
     for (const QString &ip : knownIps) {
         auto *sock = new QTcpSocket(this);
         connect(sock, &QTcpSocket::connected, sock, &QTcpSocket::deleteLater);

@@ -143,8 +143,10 @@ void DevicesController::refreshModel()
 
 void DevicesController::scan()
 {
-    if (m_scanner)
+    if (m_scanner) {
+        m_lastScan.restart();
         m_scanner->scanFull();
+    }
 }
 
 void DevicesController::setActive(bool active)
@@ -153,7 +155,11 @@ void DevicesController::setActive(bool active)
         return;
     m_active = active;
     if (active) {
-        scan();                       // 进页面立刻扫一次
+        // 进页面扫一次——但**别每次切回来都重扫**。全量扫描是这个页面最重的动作（整段网段的
+        // TCP 探测），来回点几次导航就会反复触发；在此期间 5s 的 liveness 热更新已经在维持
+        // 在线态/流量了，30s 内切回来没必要再来一轮。
+        if (!m_lastScan.isValid() || m_lastScan.elapsed() > kRescanMinIntervalMs)
+            scan();
         m_livenessTimer->start();
         m_connTimer->start();
         m_clock.restart();

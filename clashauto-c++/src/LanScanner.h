@@ -17,11 +17,15 @@
 // 定向探测已知设备，仅更新在线态（3~5s）。名称解析监听持续开着，随到随更新。
 #include "DeviceStore.h"
 
+#include <QElapsedTimer>
 #include <QHostAddress>
 #include <QObject>
+#include <QPair>
 #include <QSet>
 #include <QString>
 #include <QVector>
+
+#include <functional>
 
 class QUdpSocket;
 class QTimer;
@@ -64,6 +68,9 @@ signals:
 
 private:
     // —— 网络拓扑 ——
+    // 带缓存的入口：force=true（扫描）必重算，否则 kTopologyTtlMs 内复用上次结果。
+    // refreshLiveness 每 5s 调一次，而枚举网卡 + 查路由表在 GUI 线程上是实打实的开销。
+    void ensureTopology(bool force);
     void detectLocalTopology();       // 填 m_physIfaces/m_localMacs/m_gatewayIps + 主网卡那几个字段
     QVector<quint32> hostsToProbe() const; // 各物理网卡网段内待探测的主机 IP（网络/广播/本机除外）
     // 本机每张物理网卡各产出一条「本机」记录，附加到快照里。**每轮快照都必须带上**，
@@ -71,11 +78,17 @@ private:
     void appendSelfRecords(QVector<DeviceRecord> &out) const;
 
     // —— 主动探测（触发系统 ARP + 端口指纹）——
-    void probeArp(const QVector<quint32> &hosts); // 异步 TCP 连若干端口
+    // 探测分两阶段跑：
+    //   ① 全网段每台主机只连 kArpPort 一个端口 —— 唯一目的是逼系统对存活主机做 ARP 解析；
+    //   ② 读完 ARP 表后，只给「真的存在」的主机补其余指纹端口 + 反向 DNS。
+    // 空 IP 不再被连 10 次，/24 的作业量从 2530 降到约 330。
+    void runProbes(QVector<QPair<quint32, quint16>> jobs, std::function<void()> onDone);
+    void startFingerprintPhase();
     void probePort(quint32 ip, quint16 port);
 
     // —— ARP 表 ——
-    void readArpTable();              // QProcess arp → m_arp（ip→mac）
+    // onDone 在输出解析完（或进程起不来）后回调，用来串起两阶段探测。
+    void readArpTable(std::function<void()> onDone = {}); // QProcess arp → m_arp（ip→mac）
     void onArpOutput(const QByteArray &out);
 
     // —— 名称/型号解析器（QUdpSocket，持续监听）——
@@ -87,12 +100,15 @@ private:
     void onSsdpDatagram();
     void fetchSsdpLocation(const QString &url, const QString &ip);
     void setupNbns();
+    void sendNbnsQueriesSliced(const QVector<quint32> &hosts); // 分片发，别一次占住 GUI 线程
     void sendNbnsQuery(quint32 ip);
     void onNbnsDatagram();
     void reverseDnsLookup(const QString &ip);
 
     // —— 汇总 & 分类 ——
-    void assemble();                  // 合并各信号 → DeviceRecord 列表 → emit discovered
+    void assemble();                  // 合并各信号 → DeviceRecord 列表 → emit discovered（终版）
+    // 出一版快照。final=false 是阶段①后的抢先快照（在线设备已知、名称待补），不结束扫描态。
+    void emitSnapshot(bool final);
     DeviceType classify(const QString &mac, const QString &name, const QString &model,
                         const QString &vendor, const QSet<quint16> &ports,
                         const QSet<QString> &services) const;
@@ -130,8 +146,9 @@ private:
     QSet<QString> m_gatewayIps;           // 全部默认路由网关 IP
     QHash<QString, QString> m_arp;         // ip → mac（本轮 ARP 表）
     QHash<QString, Signals> m_sig;         // ip → 解析信号
-    int m_pendingProbes = 0;               // 在途探测计数（归零 → 收尾）
     QTimer *m_settleTimer = nullptr;       // 探测发完后再等一小会儿收 ARP/名称，再 assemble
+    QElapsedTimer m_topologyAge;           // 上次 detectLocalTopology 的时刻（配 ensureTopology 用）
+    static constexpr int kTopologyTtlMs = 30000;
 
     QUdpSocket *m_mdns = nullptr;
     QUdpSocket *m_ssdp = nullptr;

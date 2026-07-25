@@ -123,6 +123,9 @@ private:
     bool m_firstScanDone = false;
     // 上一次已提示过的网关错误（LanGateway::deviceError）——每轮扫描都会重试 open，用它去重。
     QString m_lastGatewayErr;
+    // 上次全量扫描的时刻：进页面时用它去抖，避免来回切导航反复触发重扫（scan() 里 restart）。
+    QElapsedTimer m_lastScan;
+    static constexpr int kRescanMinIntervalMs = 30000;
     // 每连接 id → 上次累计字节 (down,up)：逐连接取增量，避免连接关闭时和值回退。
     QHash<QString, QPair<qint64, qint64>> m_connBytes;
     QElapsedTimer m_clock;
