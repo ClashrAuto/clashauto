@@ -43,8 +43,7 @@ QPixmap renderTrayGlobe(int size, const QColor &globeColor, const QString &badge
         bp.addRoundedRect(br, bs * 0.28, bs * 0.28);
         p.fillPath(bp, Qt::white);
         QFont bf(QStringLiteral("MiSans"));
-        bf.setPixelSize(qRound(bs * 0.66));
-        bf.setBold(true);
+        bf.setPixelSize(qRound(bs * 0.66)); // 全 UI 不加粗——托盘角标同样用 Regular
         p.setFont(bf);
         p.setPen(QColor(0x48, 0x98, 0xF8));
         p.drawText(br, Qt::AlignCenter, badge);

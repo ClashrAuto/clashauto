@@ -177,7 +177,6 @@ ApplicationWindow {
                                     : bridge.proxyEnabled ? "W"
                                     : bridge.coreRunning ? "C" : "N"
                                 font.pixelSize: 15
-                                font.bold: true
                                 color: "#4898f8"
                             }
                         }
@@ -206,7 +205,7 @@ ApplicationWindow {
                 Item { Layout.fillHeight: true }
 
                 // 版本行：点击打开更新窗。平时灰色；程序有新版 → 右上角 "new" 角标，
-                // 内核有新版 → "core" 角标（均全圆角、红底、白边、白字）；有更新时版本转红加粗。
+                // 内核有新版 → "core" 角标（均全圆角、红底、白边、白字）；有更新时版本转红（全 UI 不加粗）。
                 Item {
                     id: verRow
                     Layout.alignment: Qt.AlignHCenter
@@ -220,7 +219,6 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         text: "Ver: " + bridge.version
                         font.pixelSize: 12
-                        font.bold: verRow.anyUpdate
                         color: verRow.anyUpdate ? Theme.danger : Theme.versionColor
                     }
 
@@ -247,7 +245,6 @@ ApplicationWindow {
                                 anchors.centerIn: parent
                                 text: "new"
                                 font.pixelSize: 8
-                                font.bold: true
                                 color: "#ffffff"
                             }
                         }
@@ -265,7 +262,6 @@ ApplicationWindow {
                                 anchors.centerIn: parent
                                 text: "core"
                                 font.pixelSize: 8
-                                font.bold: true
                                 color: "#ffffff"
                             }
                         }

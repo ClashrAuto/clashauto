@@ -76,7 +76,6 @@ Rectangle {
                     text: root.name
                     elide: Text.ElideRight
                     font.pixelSize: 13
-                    font.bold: root.selected
                     color: Theme.textPrimary
                 }
                 // 本机 / 网关 保护徽章

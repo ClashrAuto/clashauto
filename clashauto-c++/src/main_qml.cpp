@@ -67,15 +67,17 @@ int main(int argc, char *argv[])
     QFontDatabase::addApplicationFont(":/assets/remixicon.ttf"); // family "remixicon"（Remix Icon 通用 UI 图标集，Apache-2.0）
 
     // —— 应用字体 ——
-    // 全 UI 统一用 MiSans（不再用等宽字体）。装两档：Regular 作正文，Semibold 供 font.bold
-    // 映射到真实半粗体（避免合成粗体发虚）。
+    // 全 UI 统一用 MiSans（不再用等宽字体）。**UI 里任何地方都不加粗**——QML 已无 font.bold，
+    // 层级只靠字号/颜色区分。Semibold 仍装着作兜底：万一某个控件内部要粗体，落到真实半粗体
+    // 而不是合成粗体（发虚）。
     QFontDatabase::addApplicationFont(":/assets/fonts/MiSans-Regular.ttf");  // family "MiSans"
     QFontDatabase::addApplicationFont(":/assets/fonts/MiSans-Semibold.ttf"); // 归入 "MiSans"（typo family），weight=Semibold
     // 全局默认字体设为 MiSans：所有未显式指定 family 的 QML Text 自动继承 → 整个 UI 即用 MiSans。
-    // 仅换 family、保留原默认字号，字号仍由各 QML 的 font.pixelSize 决定。
+    // 仅换 family + 强制 Normal 字重、保留原默认字号，字号仍由各 QML 的 font.pixelSize 决定。
     {
         QFont uiFont = app.font();
         uiFont.setFamily(QStringLiteral("MiSans"));
+        uiFont.setWeight(QFont::Normal);
         app.setFont(uiFont);
     }
 

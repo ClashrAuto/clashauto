@@ -115,7 +115,6 @@ ApplicationWindow {
         Text {
             text: qsTr("Coast 更新")
             font.pixelSize: 16
-            font.bold: true
             color: Theme.textPrimary
         }
 
@@ -158,7 +157,6 @@ ApplicationWindow {
                     Text {
                         text: updater.releaseVersion
                         font.pixelSize: 15
-                        font.bold: true
                         color: Theme.textPrimary
                     }
                     Text { text: qsTr("更新说明"); font.pixelSize: 12; color: Theme.textMuted }
@@ -176,7 +174,6 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         text: updater.coreVersion.length > 0 ? updater.coreVersion : qsTr("内核版本: 检测中...")
                         font.pixelSize: 15
-                        font.bold: true
                         wrapMode: Text.WordWrap
                         color: Theme.textPrimary
                     }
@@ -194,7 +191,6 @@ ApplicationWindow {
                     Text {
                         text: qsTr("GeoIP 数据库")
                         font.pixelSize: 15
-                        font.bold: true
                         color: Theme.textPrimary
                     }
                     Text { text: qsTr("说明"); font.pixelSize: 12; color: Theme.textMuted }

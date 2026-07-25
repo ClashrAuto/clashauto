@@ -41,7 +41,6 @@ Item {
                 Layout.alignment: Qt.AlignHCenter
                 text: "Coast"
                 font.pixelSize: 30
-                font.bold: true
                 color: Theme.textPrimary
             }
 
@@ -51,7 +50,6 @@ Item {
                 Layout.alignment: Qt.AlignHCenter
                 horizontalAlignment: Text.AlignHCenter
                 font.pixelSize: 14
-                font.bold: about.updateAvailable
                 color: about.checking ? Theme.textMuted
                      : about.updateAvailable ? Theme.danger
                      : "#4da13e"

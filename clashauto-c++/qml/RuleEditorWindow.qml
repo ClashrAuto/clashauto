@@ -309,7 +309,6 @@ ApplicationWindow {
             text: win.editIndex >= 0 ? qsTr("编辑规则") : qsTr("新增规则")
             color: Theme.textPrimary
             font.pixelSize: 16
-            font.bold: true
         }
 
         FieldLabel { text: qsTr("类型") }

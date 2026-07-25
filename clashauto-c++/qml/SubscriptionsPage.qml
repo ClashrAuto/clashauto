@@ -253,7 +253,6 @@ Item {
                                 text: model.name
                                 elide: Text.ElideRight
                                 font.pixelSize: 14
-                                font.bold: true
                                 color: Theme.textPrimary
                             }
                         }
@@ -350,7 +349,6 @@ Item {
                 Layout.rightMargin: 16
                 text: page.editingIndex < 0 ? qsTr("添加订阅") : qsTr("编辑订阅")
                 font.pixelSize: 16
-                font.bold: true
                 color: Theme.textPrimary
             }
 
@@ -536,7 +534,6 @@ Item {
                 Text {
                     text: qsTr("订阅节点")
                     font.pixelSize: 16
-                    font.bold: true
                     color: Theme.textPrimary
                 }
                 Text {

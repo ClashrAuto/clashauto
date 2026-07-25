@@ -46,7 +46,6 @@ Item {
                     text: sc.title
                     color: Theme.accentStrong
                     font.pixelSize: 13
-                    font.bold: true
                 }
                 Item { Layout.fillWidth: true }
             }
@@ -820,7 +819,7 @@ Item {
             spacing: 8
 
             Label { text: page.editAreaIndex >= 0 ? qsTr("编辑区域分组") : qsTr("新增区域分组")
-                color: Theme.textPrimary; font.pixelSize: 16; font.bold: true }
+                color: Theme.textPrimary; font.pixelSize: 16 }
 
             Label { text: qsTr("名称"); color: Theme.textSecondary; font.pixelSize: 12 }
             ThemedField { id: aNameField; Layout.fillWidth: true }

@@ -102,7 +102,7 @@ Item {
 
             // 左上标题——正文字体（与 UI 一致）
             ctx.fillStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.70);
-            ctx.font = "bold 11px '" + Theme.uiFont + "'";
+            ctx.font = "11px '" + Theme.uiFont + "'"; // 全 UI 不加粗
             ctx.textAlign = "left";
             ctx.fillText(root.title, 10, 18);
 

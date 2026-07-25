@@ -45,7 +45,6 @@ Rectangle {
                 elide: Text.ElideRight
                 text: root.value
                 font.pixelSize: 17
-                font.bold: true
                 color: root.accentColor
             }
         }

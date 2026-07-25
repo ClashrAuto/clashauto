@@ -254,7 +254,7 @@ Item {
                                 spacing: 2
                                 Text {
                                     text: detailCol.dev.name || ""
-                                    font.pixelSize: 18; font.bold: true
+                                    font.pixelSize: 18
                                     color: Theme.textPrimary
                                     elide: Text.ElideRight; Layout.fillWidth: true
                                 }
