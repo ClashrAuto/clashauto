@@ -1,5 +1,34 @@
-// LanGateway 的 Linux 真实现（编译条件由 CMake 控制：仅 Linux 编入本文件）。
-// 组合：IL2Endpoint(AF_PACKET 二层) + ArpSpoofer(双向 ARP 投毒/还原) + NetStack(lwIP 用户态栈)。
+// LanGateway 的 Linux/mac/Windows 真实现（编译条件由 CMake 控制：Linux OR APPLE OR WIN32 都编入
+// 本文件——文件名是历史遗留，实为 POSIX/Win 通用，二层差异全在 createL2Endpoint）。
+// 组合：IL2Endpoint(二层) + ArpSpoofer(双向 ARP 投毒/还原) + NetStack(lwIP 用户态栈)。
+//
+// ——————————————————————————— 线程模型（本次重构核心）———————————————————————————
+//
+// 数据面（每包都要碰的东西）整体搬到一个专用 QThread 上：
+//   · 二层端点 IL2Endpoint（QSocketNotifier/QWinEventNotifier —— 通知器必须在服务它的线程上创建，
+//     所以端点的 open() 必须在工作线程跑）；
+//   · NetStack（NO_SYS 的 lwIP + 每连接一个 Socks5Tcp / 每 UDP 流一个 Socks5Udp）——lwIP 完全不是
+//     线程安全的，它的**所有**公开方法只能在工作线程上被调；
+//   · ArpSpoofer（1500ms 定时器发 ARP）；
+//   · 帧过滤 lambda（frameReceived → 旁路判断 → NetStack::inputFrame）。
+// 这些全部由下面的 GatewayWorker 持有，GatewayWorker moveToThread 到 m_thread。
+//
+// GUI 线程只保留 LanGateway 这层「编排入口」。它的公共 API 一个字没改；跨线程的事都在这里消化：
+//   · 会改状态的写方法（configure / enableDevice / disableDevice / disableAll / recoverFromCrash）
+//     用 **BlockingQueuedConnection** 投到工作线程执行——保持原来的同步语义（尤其 enableDevice 要
+//     同步返回 bool+错误串；disableAll 要在还原 ARP 真正发出去之后才返回，见下）。
+//   · GUI 线程会读的只读方法（isAvailable / canProxy / activeDevices）**不跨线程**：工作线程每次改
+//     状态后把一份快照写进 GwShared（互斥量保护），GUI 直接读快照。没有线程往返 ⇒ 不阻塞、不撕裂。
+//   · 信号 deviceError / statusChanged 由工作线程 emit，经 Qt 队列连接转成 LanGateway 的同名信号在
+//     GUI 线程重发（只携带 QString 值类型，不传裸指针）。
+//
+// —— 为什么不会互等死锁（改这块最容易写出双向阻塞）——
+//   GUI→worker 是阻塞调用；而 worker 在处理这些调用时**从不反过来阻塞等 GUI**：它 emit 的信号都是
+//   队列连接（只投递、不等待），写快照只碰一把自己的互斥量，端点 send / lwIP / QTcpSocket 都不发任何
+//   跨线程 Qt 调用。于是「GUI 等 worker」+「worker 从不等 GUI」⇒ 无环 ⇒ 不可能死锁。唯一的外部调用者
+//   只有 GUI 线程（DevicesController / main_qml 都在主线程），所以这个论证是完备的。
+//   工作线程处理每个事件都是有界的（pcap 一次 drain 完当前缓冲、lwIP 一次泵完），不存在无界循环把
+//   阻塞调用饿死——所以 GUI 的阻塞等待也总是有界的。
 #include "LanGateway.h"
 
 #include "ArpSpoofer.h"
@@ -13,10 +42,14 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMutex>
 #include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QThread>
 #include <QVector>
+
+#include <memory>
 
 namespace {
 // "aa:bb:cc:dd:ee:ff" → 6 字节（非法返回空）。
@@ -58,7 +91,7 @@ quint32 ipToU32(const QString &ip)
 }
 } // namespace
 
-// 一张物理网卡的运行时套件：二层端点 + ARP 投毒器 + 该卡的拓扑数值。
+// 一张物理网卡的运行时套件：二层端点 + ARP 投毒器 + 该卡的拓扑数值。（活在工作线程上。）
 struct GwNic {
     LanGateway::NicSpec spec;
     IL2Endpoint *ep = nullptr;
@@ -68,123 +101,185 @@ struct GwNic {
     int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
 };
 
-struct LanGateway::Impl {
-    NetStack *net = nullptr;         // 共用（lwIP 单实例，多 netif）
-    LanGateway *owner = nullptr;
-    QHash<QString, GwNic *> nics;    // ifname → 套件
-    quint16 socksPort = 0;
-
-    // 被劫持设备：src MAC 打包成的 quint64 键 → ip（帧过滤 + 记账，见 macKey 注释）。
-    QHash<quint64, QString> victimByMac;
-    QHash<QString, QString> victimMacStr; // ip → mac 串（disable 用）
-    QHash<QString, QString> victimNic;    // ip → ifname（disable/持久化要找回对应那张卡）
-
-    // 把「属于这张卡的」被劫持设备源 MAC 集合推给它的二层端点，装成内核态源 MAC 过滤（收方优化）。
-    // 多网卡：只推 victimNic 记为这张卡的设备。集合为空 → 端点装「全丢」过滤（这张卡当前没有劫持）。
-    // 装不上（平台不支持/失败）无所谓——frameReceived 的 lambda 仍按 victimByMac 在用户态兜底过滤。
-    // 这里要的是真正的 6 字节 MAC，而 victimByMac 的键已经是打包过的整数，所以改从 victimMacStr
-    // （ip → mac 串）走一遍 macBytes()——冷路径（只在 configure/enable/disable 时跑），无所谓开销。
-    void pushMacFilter(GwNic *n) const
-    {
-        if (!n || !n->ep)
-            return;
-        QVector<QByteArray> macs;
-        for (auto it = victimMacStr.constBegin(); it != victimMacStr.constEnd(); ++it) {
-            if (victimNic.value(it.key()) != n->spec.ifname)
-                continue;
-            const QByteArray mb = macBytes(it.value());
-            if (mb.size() == 6)
-                macs.append(mb);
-        }
-        n->ep->setSourceMacFilter(macs);
-    }
-
-    // 按 IP 找它属于哪张已就绪网卡（同网段判定）。找不到返回 nullptr。
-    GwNic *nicForIp(const QString &ip) const
-    {
-        const quint32 v = ipToU32(ip);
-        if (!v)
-            return nullptr;
-        for (GwNic *n : nics) {
-            if (n->ready && n->netMask4 && (v & n->netMask4) == (n->localIp4 & n->netMask4))
-                return n;
-        }
-        return nullptr;
-    }
-
-    // 崩溃恢复清单文件路径。
-    QString statePath() const
-    {
-        const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-        QDir().mkpath(dir);
-        return QDir(dir).filePath("gateway_active.json");
-    }
-    // 每条 victim 自带它那张卡的还原所需信息：多网卡下不能再靠一份全局 ifname/gateway。
-    void persist() const
-    {
-        QJsonArray arr;
-        for (auto it = victimMacStr.constBegin(); it != victimMacStr.constEnd(); ++it) {
-            const QString ip = it.key();
-            QJsonObject o;
-            o["ip"] = ip;
-            o["mac"] = it.value();
-            const QString ifn = victimNic.value(ip);
-            if (GwNic *n = nics.value(ifn)) {
-                o["ifname"] = n->spec.ifname;
-                o["localMac"] = n->spec.localMac;
-                o["gatewayIp"] = n->spec.gatewayIp;
-                o["gatewayMac"] = n->spec.gatewayMac;
-            }
-            arr.append(o);
-        }
-        QJsonObject root;
-        root["victims"] = arr;
-        QFile f(statePath());
-        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            f.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
-            f.close();
-        }
-    }
-    void clearState() const { QFile::remove(statePath()); }
+// GUI 线程只读的一份状态快照。工作线程每次改状态后写、GUI 读，都在这把互斥量下——
+// 不做线程往返，所以 isAvailable/canProxy/activeDevices 既不会阻塞也读不到撕裂的中间态。
+// 用 shared_ptr 让 LanGateway 与工作线程共享同一实例，工作线程 deleteLater 的时机再晚也不悬垂。
+struct GwSubnet {
+    quint32 ip = 0;
+    quint32 mask = 0;
+};
+struct GwShared {
+    QMutex mutex;
+    bool available = false;
+    QStringList active;          // activeDevices()：被劫持 mac 列表
+    QVector<GwSubnet> subnets;   // canProxy()：已就绪网卡的 (ip,mask)
 };
 
-LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl)
+// ———————————————————————— 工作线程对象：整个数据面都在它身上 ————————————————————————
+// 它的所有方法（configureLocal/enableDeviceLocal/…）都**只在工作线程上**执行：由 LanGateway 经
+// BlockingQueuedConnection 投过来。它创建的一切 QObject（NetStack、端点、ArpSpoofer、Socks5*）都
+// parent 到自己 → 都活在工作线程上 → 也在工作线程上析构（constraint 9）。
+class GatewayWorker : public QObject
 {
-    d->owner = this;
+    Q_OBJECT
+public:
+    explicit GatewayWorker(std::shared_ptr<GwShared> shared, QObject *parent = nullptr)
+        : QObject(parent), m_shared(std::move(shared))
+    {
+    }
+    ~GatewayWorker() override { teardownLocal(); }
+
+    // 以下六个方法皆在工作线程执行。
+    void configureLocal(const QVector<LanGateway::NicSpec> &specs, quint16 socksPort);
+    bool enableDeviceLocal(const QString &mac, const QString &ip, const QString &socksUser,
+                           QString *err);
+    void disableDeviceLocal(const QString &mac);
+    void disableAllLocal();
+    void recoverLocal();
+    void teardownLocal(); // 还原全部 ARP + 销毁 NetStack/端点/ArpSpoofer（幂等）。退出/析构走它。
+
+signals:
+    void deviceError(const QString &mac, const QString &message);
+    void statusChanged();
+
+private:
+    bool availableLocal() const;
+    GwNic *nicForIp(const QString &ip) const;
+    void pushMacFilter(GwNic *n) const;
+    QString statePath() const;
+    void persist() const;
+    void clearState() const { QFile::remove(statePath()); }
+    // 把当前状态刷进 GUI 可读的快照（每次改状态后调用一次）。
+    void publishSnapshot();
+
+    NetStack *m_net = nullptr;               // 共用（lwIP 单实例，多 netif）
+    QHash<QString, GwNic *> m_nics;          // ifname → 套件
+    quint16 m_socksPort = 0;
+    QHash<quint64, QString> m_victimByMac;   // src MAC 打包键 → ip（帧过滤 + 记账）
+    QHash<QString, QString> m_victimMacStr;  // ip → mac 串（disable 用）
+    QHash<QString, QString> m_victimNic;     // ip → ifname（disable/持久化找回对应网卡）
+    std::shared_ptr<GwShared> m_shared;
+    bool m_torndown = false;
+};
+
+// 把「属于这张卡的」被劫持设备源 MAC 集合推给它的二层端点，装成内核态源 MAC 过滤（收方优化）。
+void GatewayWorker::pushMacFilter(GwNic *n) const
+{
+    if (!n || !n->ep)
+        return;
+    QVector<QByteArray> macs;
+    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it) {
+        if (m_victimNic.value(it.key()) != n->spec.ifname)
+            continue;
+        const QByteArray mb = macBytes(it.value());
+        if (mb.size() == 6)
+            macs.append(mb);
+    }
+    n->ep->setSourceMacFilter(macs);
 }
 
-LanGateway::~LanGateway()
+// 按 IP 找它属于哪张已就绪网卡（同网段判定）。找不到返回 nullptr。
+GwNic *GatewayWorker::nicForIp(const QString &ip) const
 {
-    disableAll();
-    delete d;
+    const quint32 v = ipToU32(ip);
+    if (!v)
+        return nullptr;
+    for (GwNic *n : m_nics) {
+        if (n->ready && n->netMask4 && (v & n->netMask4) == (n->localIp4 & n->netMask4))
+            return n;
+    }
+    return nullptr;
 }
 
-void LanGateway::configure(const QVector<NicSpec> &specs, quint16 socksPort)
+bool GatewayWorker::availableLocal() const
 {
-    d->socksPort = socksPort;
+    if (!m_net)
+        return false;
+    for (GwNic *n : m_nics) {
+        if (n->ready && n->ep && n->ep->isOpen())
+            return true;
+    }
+    return false;
+}
 
-    // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。
+QString GatewayWorker::statePath() const
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    QDir().mkpath(dir);
+    return QDir(dir).filePath("gateway_active.json");
+}
+
+// 每条 victim 自带它那张卡的还原所需信息：多网卡下不能再靠一份全局 ifname/gateway。
+void GatewayWorker::persist() const
+{
+    QJsonArray arr;
+    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it) {
+        const QString ip = it.key();
+        QJsonObject o;
+        o["ip"] = ip;
+        o["mac"] = it.value();
+        const QString ifn = m_victimNic.value(ip);
+        if (GwNic *n = m_nics.value(ifn)) {
+            o["ifname"] = n->spec.ifname;
+            o["localMac"] = n->spec.localMac;
+            o["gatewayIp"] = n->spec.gatewayIp;
+            o["gatewayMac"] = n->spec.gatewayMac;
+        }
+        arr.append(o);
+    }
+    QJsonObject root;
+    root["victims"] = arr;
+    QFile f(statePath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
+        f.close();
+    }
+}
+
+void GatewayWorker::publishSnapshot()
+{
+    bool available = false;
+    QVector<GwSubnet> subnets;
+    for (GwNic *n : m_nics) {
+        if (n->ready && n->ep && n->ep->isOpen()) {
+            available = true;
+            if (n->netMask4)
+                subnets.append(GwSubnet{n->localIp4, n->netMask4});
+        }
+    }
+    const QStringList active = m_victimMacStr.values();
+    QMutexLocker lk(&m_shared->mutex);
+    m_shared->available = available;
+    m_shared->subnets = subnets;
+    m_shared->active = active;
+}
+
+void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, quint16 socksPort)
+{
+    m_socksPort = socksPort;
+
+    // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。都在工作线程上创建。
     QString err;
-    if (!d->net) {
-        d->net = new NetStack(socksPort, this);
-        if (!d->net->init(&err)) {
+    if (!m_net) {
+        m_net = new NetStack(socksPort, this);
+        if (!m_net->init(&err)) {
             emit deviceError(QString(), QStringLiteral("协议栈初始化失败: ") + err);
-            d->net->deleteLater();
-            d->net = nullptr;
+            delete m_net;
+            m_net = nullptr;
             return;
         }
     }
 
     QSet<QString> seen;
-    for (const NicSpec &spec : specs) {
+    for (const LanGateway::NicSpec &spec : specs) {
         if (spec.ifname.isEmpty() || spec.localIp.isEmpty() || spec.localMac.isEmpty())
             continue;
         seen.insert(spec.ifname);
-        GwNic *n = d->nics.value(spec.ifname);
+        GwNic *n = m_nics.value(spec.ifname);
         if (!n) {
             n = new GwNic;
             n->spec = spec;
-            d->nics.insert(spec.ifname, n);
+            m_nics.insert(spec.ifname, n);
         }
         // 拓扑数值每次都刷新（网关 MAC 常常是扫描几轮后才解析出来的）。
         n->spec = spec;
@@ -201,28 +296,32 @@ void LanGateway::configure(const QVector<NicSpec> &specs, quint16 socksPort)
             continue;
         }
         if (!n->ep) {
-            n->ep = createL2Endpoint(this);
+            n->ep = createL2Endpoint(this); // parent=worker → 端点及其通知器都在工作线程上
             if (!n->ep)
                 break; // 平台不支持，后面几张也没必要试（仍要走下面的摘卡清理）
         }
+        // ★ open() 在工作线程执行：QSocketNotifier/QWinEventNotifier 因此在工作线程创建、也在工作
+        //   线程被服务（Qt 硬性要求通知器与服务它的线程同线程）。这正是把 configure 投到工作线程的
+        //   根本原因之一。
         if (!n->ep->isOpen() && !n->ep->open(spec.ifname, &err)) {
             emit deviceError(QString(),
                              QStringLiteral("打开网卡失败(%1): ").arg(spec.ifname) + err);
             continue;
         }
-        if (!d->net->hasNic(n->ep)
-            && !d->net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask, &err)) {
+        if (!m_net->hasNic(n->ep)
+            && !m_net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask, &err)) {
             emit deviceError(QString(),
                              QStringLiteral("协议栈挂载网卡失败(%1): ").arg(spec.ifname) + err);
             continue;
         }
         // 二层帧过滤：只把被劫持设备发来的帧喂进用户态栈（按这张卡的网段做旁路判断）。
+        // context = this(worker)，sender = n->ep 也在工作线程 → 直连，lambda 在工作线程上跑。
         connect(n->ep, &IL2Endpoint::frameReceived, this, [this, n](const QByteArray &frame) {
             if (frame.size() < 12)
                 return;
             const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
             // 源 MAC 原地打包成 quint64 查表：不做 frame.mid(6, 6)，省掉每帧一次堆分配。
-            if (!d->victimByMac.contains(macKey(f + 6)))
+            if (!m_victimByMac.contains(macKey(f + 6)))
                 return;
             // 同网段直连旁路：被劫持设备发往「本网段内（且非网关本身）」的 IPv4 帧不喂用户态栈，
             // 让它照常二层直达——设备回给本机 LAN IP 的包若被 lwIP 终结会触发 RST，导致本机无法
@@ -238,7 +337,7 @@ void LanGateway::configure(const QVector<NicSpec> &specs, quint16 socksPort)
                         return; // LAN 内直连，放行给系统
                 }
             }
-            d->net->inputFrame(n->ep, frame);
+            m_net->inputFrame(n->ep, frame);
         });
         if (!n->arp) {
             n->arp = new ArpSpoofer(n->ep, this);
@@ -246,53 +345,39 @@ void LanGateway::configure(const QVector<NicSpec> &specs, quint16 socksPort)
         }
         n->ready = true;
         // 刚就绪、还没劫持任何设备：先装「全丢」内核过滤，避免混杂模式下整段流量白白进用户态。
-        // （后续 enable/disable 会按这张卡的最新 victim 集合重推。）
-        d->pushMacFilter(n);
+        pushMacFilter(n);
     }
 
     // 消失的网卡（拔网线/断 WiFi）：没有活动劫持的直接摘掉，有的先留着等 disable 收尾。
-    const QStringList known = d->nics.keys();
+    const QStringList known = m_nics.keys();
     for (const QString &ifn : known) {
         if (seen.contains(ifn))
             continue;
-        GwNic *n = d->nics.value(ifn);
+        GwNic *n = m_nics.value(ifn);
         if (!n || n->victims > 0)
             continue;
         if (n->ep) {
-            // **先断信号再删**：帧过滤 lambda 捕获了 n，而 deleteLater 要到下一轮事件循环才生效——
-            // 这中间若再收到一帧，就会用到已 delete 的 n（use-after-free）。
+            // **先断信号再删**：帧过滤 lambda 捕获了 n。这里在工作线程上同步 delete（不是 GUI 线程），
+            // 端点的通知器随之在工作线程被销毁——合法。delete 后 n->ep 立刻失效，先 disconnect 免得
+            // 尚未 delete 之前再进一帧踩到正被拆的 n。
             disconnect(n->ep, nullptr, this, nullptr);
-            if (d->net)
-                d->net->removeNic(n->ep);
-            n->ep->deleteLater();
+            if (m_net)
+                m_net->removeNic(n->ep);
+            delete n->ep;
         }
         if (n->arp)
-            n->arp->deleteLater();
-        d->nics.remove(ifn);
+            delete n->arp;
+        m_nics.remove(ifn);
         delete n;
     }
+
+    publishSnapshot();
 }
 
-bool LanGateway::isAvailable() const
+bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
+                                      const QString &socksUser, QString *err)
 {
-    if (!d->net)
-        return false;
-    for (GwNic *n : d->nics) {
-        if (n->ready && n->ep && n->ep->isOpen())
-            return true;
-    }
-    return false;
-}
-
-bool LanGateway::canProxy(const QString &ip) const
-{
-    return d->nicForIp(ip) != nullptr;
-}
-
-bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QString &socksUser,
-                              QString *err)
-{
-    if (!d->net || !isAvailable()) {
+    if (!m_net || !availableLocal()) {
         if (err)
             *err = QStringLiteral("网关未就绪（需要 root/CAP_NET_RAW，或网卡未配置）");
         return false;
@@ -303,97 +388,102 @@ bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QStri
             *err = QStringLiteral("设备 MAC/IP 非法");
         return false;
     }
-    if (d->victimMacStr.contains(ip))
+    if (m_victimMacStr.contains(ip))
         return true; // 已在劫持
 
     // 按设备 IP 落在哪张卡的子网里选那套 {端点, ArpSpoofer}——这就是多网卡同时可代理的入口。
-    GwNic *n = d->nicForIp(ip);
+    GwNic *n = nicForIp(ip);
     if (!n) {
         if (err)
             *err = QStringLiteral("该设备不在任何已就绪网卡的网段内");
         return false;
     }
 
-    d->net->addDevice(ip, mb, socksUser);
+    m_net->addDevice(ip, mb, socksUser);
     n->arp->startSpoof(mac, ip);
     ++n->victims;
-    d->victimByMac.insert(macKey(mb), ip);
-    d->victimMacStr.insert(ip, mac);
-    d->victimNic.insert(ip, n->spec.ifname);
-    d->pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
-    d->persist();
+    m_victimByMac.insert(macKey(mb), ip);
+    m_victimMacStr.insert(ip, mac);
+    m_victimNic.insert(ip, n->spec.ifname);
+    pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
+    persist();
+    publishSnapshot();
     emit statusChanged();
     return true;
 }
 
-void LanGateway::disableDevice(const QString &mac)
+void GatewayWorker::disableDeviceLocal(const QString &mac)
 {
     const QByteArray mb = macBytes(mac);
     if (mb.isEmpty())
         return; // 非法 MAC：macKey 会得到 0，和「全零 MAC」撞键，干脆挡在这里
     const quint64 key = macKey(mb);
-    const QString ip = d->victimByMac.value(key);
+    const QString ip = m_victimByMac.value(key);
     if (ip.isEmpty())
         return;
-    GwNic *n = d->nics.value(d->victimNic.value(ip));
+    GwNic *n = m_nics.value(m_victimNic.value(ip));
     if (n) {
         if (n->arp)
             n->arp->stopSpoof(mac); // 内部会 heal（还原 ARP）
         if (n->victims > 0)
             --n->victims;
     }
-    if (d->net)
-        d->net->removeDevice(ip);
-    d->victimByMac.remove(key);
-    d->victimMacStr.remove(ip);
-    d->victimNic.remove(ip);
+    if (m_net)
+        m_net->removeDevice(ip);
+    m_victimByMac.remove(key);
+    m_victimMacStr.remove(ip);
+    m_victimNic.remove(ip);
     if (n)
-        d->pushMacFilter(n); // 该卡移除一台设备：重推内核过滤（可能变回「全丢」）
-    if (d->victimMacStr.isEmpty())
-        d->clearState();
+        pushMacFilter(n); // 该卡移除一台设备：重推内核过滤（可能变回「全丢」）
+    if (m_victimMacStr.isEmpty())
+        clearState();
     else
-        d->persist();
+        persist();
+    publishSnapshot();
     emit statusChanged();
 }
 
-void LanGateway::disableAll()
+void GatewayWorker::disableAllLocal()
 {
     // 每张卡都要还原：漏掉任何一张，那张卡上的设备会一直用着被投毒的 ARP → 断网。
-    for (GwNic *n : d->nics) {
+    // 全程在工作线程上同步执行：端点 send() 是裸的 pcap_sendpacket/::sendto，本函数返回时还原 ARP 帧
+    // 已经写到网卡上了。LanGateway::disableAll 用 BlockingQueued 投过来，于是「disableAll() 返回」==
+    // 「还原已发出」，进程退出前必然完成还原（constraint 2）。
+    for (GwNic *n : m_nics) {
         if (n->arp)
             n->arp->healAll();
         n->victims = 0;
     }
-    if (d->net) {
-        const QStringList ips = d->victimMacStr.keys();
+    if (m_net) {
+        const QStringList ips = m_victimMacStr.keys();
         for (const QString &ip : ips)
-            d->net->removeDevice(ip);
+            m_net->removeDevice(ip);
     }
-    d->victimByMac.clear();
-    d->victimMacStr.clear();
-    d->victimNic.clear();
+    m_victimByMac.clear();
+    m_victimMacStr.clear();
+    m_victimNic.clear();
     // 所有设备清空后，每张卡都重推（现在集合都空了 → 全部装「全丢」，收方彻底静默）。
-    for (GwNic *n : d->nics)
-        d->pushMacFilter(n);
-    d->clearState();
+    for (GwNic *n : m_nics)
+        pushMacFilter(n);
+    clearState();
+    publishSnapshot();
     emit statusChanged();
 }
 
-void LanGateway::recoverFromCrash()
+void GatewayWorker::recoverLocal()
 {
-    QFile f(d->statePath());
+    QFile f(statePath());
     if (!f.open(QIODevice::ReadOnly))
         return;
     const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
     f.close();
     const QJsonArray victims = root["victims"].toArray();
     if (victims.isEmpty()) {
-        d->clearState();
+        clearState();
         return;
     }
     // 用上次留下的网卡/网关信息，给这些设备发还原 ARP（先修复被投毒的缓存，避免设备断网）。
-    // 多网卡：victim 按 ifname 分组，每张卡各开一次端点还原自己那批。
-    // 兼容旧格式（字段在 root 上、只有一张卡）：取不到 per-victim 字段就回落到 root。
+    // 在工作线程上开临时端点、healAll——纯 send，不需要跑事件循环。端点 parent=worker、也在工作线程析构。
     QHash<QString, QVector<QJsonObject>> byIface;
     for (const QJsonValue &v : victims) {
         const QJsonObject o = v.toObject();
@@ -419,13 +509,169 @@ void LanGateway::recoverFromCrash()
                 healer.stopSpoof(o["mac"].toString()); // startSpoof 建档、stopSpoof 立刻 heal
             }
         }
-        if (ep)
-            ep->deleteLater();
+        // 同步 delete（工作线程上），把临时端点的通知器一并在本线程销毁；不用 deleteLater 免得
+        // 悬到不确定时点。healer 是栈对象，其析构再 healAll 一次（集合已空 → no-op）。
+        delete ep;
     }
-    d->clearState();
+    clearState();
+}
+
+void GatewayWorker::teardownLocal()
+{
+    if (m_torndown)
+        return;
+    m_torndown = true;
+    // 先还原全部 ARP（constraint 2 对析构/退出同样成立），再销毁数据面对象——全在工作线程上。
+    disableAllLocal();
+    for (GwNic *n : m_nics) {
+        if (n->ep) {
+            disconnect(n->ep, nullptr, this, nullptr);
+            if (m_net)
+                m_net->removeNic(n->ep);
+            delete n->ep; // 端点+通知器在工作线程析构（constraint 9）
+        }
+        if (n->arp)
+            delete n->arp; // ArpSpoofer 的 QTimer 在工作线程析构
+        delete n;
+    }
+    m_nics.clear();
+    delete m_net; // NetStack 的 QTimer + 所有 Socks5*/lwIP 结构在工作线程析构
+    m_net = nullptr;
+}
+
+// ———————————————————————————— LanGateway（GUI 线程的编排入口）————————————————————————————
+struct LanGateway::Impl {
+    QThread *thread = nullptr;
+    GatewayWorker *worker = nullptr;
+    std::shared_ptr<GwShared> shared;
+
+    // 工作线程是否可被阻塞调用（已 start、未 quit，且当前不在工作线程上——外部调用者恒为 GUI 线程）。
+    bool workerReady() const
+    {
+        return worker && thread && thread->isRunning()
+               && QThread::currentThread() != thread;
+    }
+};
+
+LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl)
+{
+    d->shared = std::make_shared<GwShared>();
+    d->thread = new QThread(this);
+    d->thread->setObjectName(QStringLiteral("LanGatewayWorker"));
+    d->worker = new GatewayWorker(d->shared); // 无 parent：随后 moveToThread
+    d->worker->moveToThread(d->thread);
+    // 线程干净退出后在**它自己的线程**上删 worker（constraint 9）。teardownLocal 已在退出前把
+    // NetStack/端点/ArpSpoofer 全删干净，此刻 worker 已无子对象，deleteLater 只是回收空壳。
+    connect(d->thread, &QThread::finished, d->worker, &QObject::deleteLater);
+    // 工作线程 emit 的信号 → 队列连接 → 在 GUI 线程重发本类同名信号（只带 QString 值类型，constraint 7）。
+    connect(d->worker, &GatewayWorker::deviceError, this, &LanGateway::deviceError);
+    connect(d->worker, &GatewayWorker::statusChanged, this, &LanGateway::statusChanged);
+    d->thread->start();
+}
+
+LanGateway::~LanGateway()
+{
+    if (d->thread) {
+        if (d->workerReady()) {
+            // 阻塞投递 teardown：还原全部 ARP + 在工作线程上销毁数据面对象，之后再停线程（constraint 2/9）。
+            QMetaObject::invokeMethod(d->worker, [w = d->worker] { w->teardownLocal(); },
+                                      Qt::BlockingQueuedConnection);
+        }
+        d->thread->quit();
+        d->thread->wait(); // 等 exec() 退出；退出途中处理 finished→deleteLater，把 worker 删在本线程上
+        // d->worker 此刻已被 deleteLater 回收，置空避免误用。
+        d->worker = nullptr;
+        delete d->thread; // QThread 对象 affinity 属 GUI，本线程删除是标准做法
+        d->thread = nullptr;
+    }
+    delete d;
+}
+
+void LanGateway::configure(const QVector<NicSpec> &nics, quint16 socksPort)
+{
+    if (!d->workerReady())
+        return;
+    // BlockingQueued：保持原来的同步语义（configure 返回后紧跟的 isAvailable/enableDevice 立刻能看到
+    // 新配置）。它做的是开端点这类冷路径工作，代价与「重构前就在 GUI 线程同步跑」相同，无回归。
+    QMetaObject::invokeMethod(
+        d->worker, [w = d->worker, nics, socksPort] { w->configureLocal(nics, socksPort); },
+        Qt::BlockingQueuedConnection);
+}
+
+bool LanGateway::isAvailable() const
+{
+    // 只读快照：无线程往返，不阻塞、不撕裂（constraint 5）。
+    QMutexLocker lk(&d->shared->mutex);
+    return d->shared->available;
+}
+
+bool LanGateway::canProxy(const QString &ip) const
+{
+    const quint32 v = ipToU32(ip);
+    if (!v)
+        return false;
+    QMutexLocker lk(&d->shared->mutex);
+    for (const GwSubnet &s : d->shared->subnets) {
+        if (s.mask && (v & s.mask) == (s.ip & s.mask))
+            return true;
+    }
+    return false;
+}
+
+bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QString &socksUser,
+                              QString *err)
+{
+    if (!d->workerReady()) {
+        if (err)
+            *err = QStringLiteral("网关未就绪");
+        return false;
+    }
+    // 同步语义（constraint 6）：BlockingQueued 让 lambda 在工作线程跑、GUI 阻塞等它完成，其间按引用
+    // 捕获 ok/e/参数都安全（GUI 栈全程存活）。工作线程处理本调用时只 emit 队列信号 + 写快照，绝不反向
+    // 阻塞等 GUI → 不可能互等死锁。
+    bool ok = false;
+    QString e;
+    QMetaObject::invokeMethod(
+        d->worker,
+        [this, &ok, &e, &mac, &ip, &socksUser] {
+            ok = d->worker->enableDeviceLocal(mac, ip, socksUser, &e);
+        },
+        Qt::BlockingQueuedConnection);
+    if (err)
+        *err = e;
+    return ok;
+}
+
+void LanGateway::disableDevice(const QString &mac)
+{
+    if (!d->workerReady())
+        return;
+    QMetaObject::invokeMethod(d->worker, [w = d->worker, mac] { w->disableDeviceLocal(mac); },
+                              Qt::BlockingQueuedConnection);
+}
+
+void LanGateway::disableAll()
+{
+    if (!d->workerReady())
+        return;
+    // 必须同步完成才返回（挂在 aboutToQuit 上，还原 ARP 要在进程退出前真正发出去，constraint 2）。
+    QMetaObject::invokeMethod(d->worker, [w = d->worker] { w->disableAllLocal(); },
+                              Qt::BlockingQueuedConnection);
+}
+
+void LanGateway::recoverFromCrash()
+{
+    if (!d->workerReady())
+        return;
+    // 启动时调用：临时端点/通知器必须在工作线程上开（constraint 4），故投到工作线程同步执行。
+    QMetaObject::invokeMethod(d->worker, [w = d->worker] { w->recoverLocal(); },
+                              Qt::BlockingQueuedConnection);
 }
 
 QStringList LanGateway::activeDevices() const
 {
-    return d->victimMacStr.values();
+    QMutexLocker lk(&d->shared->mutex);
+    return d->shared->active;
 }
+
+#include "LanGateway_linux.moc"

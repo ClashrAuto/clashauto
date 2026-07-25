@@ -294,6 +294,11 @@ namespace {
 // lwIP 本身只能有一个实例（lwip_init 全局、ARP 表全局、PCB 链全局），所以「栈」确实是单例：
 // g_impl 只用来给 TCP accept 这类**与网卡无关**的全局回调取上下文（监听 pcb、设备表、socks 端口）。
 // 与网卡相关的东西（二层端点、本机 MAC）一律从 netif->state 取，不走这里——多网卡的关键。
+//
+// 线程前提：g_impl（以及下方的 ConnWatch / g_destroyedConn 哨兵）都是进程级全局，只在「lwIP 只跑在
+// 一个线程」这个前提下成立。这个前提仍然成立——全进程只有一个 NetStack 实例（init() 里用 g_impl 判重），
+// 而它始终被单一线程拥有（App 里是 LanGateway 的工作线程，自测里是主线程，二者从不并存）。绝不能出现
+// 两个线程同时碰 lwIP/这些全局的情况。
 NetStack::Impl *g_impl = nullptr;
 bool g_debug = false;             // COAST_GATEWAY_DEBUG=1 时打诊断日志（自测/联调用）
 
