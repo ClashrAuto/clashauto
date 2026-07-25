@@ -28,14 +28,16 @@
 //
 // 每个 memp 池的字节数 = 条目数 × LWIP_MEM_ALIGN_SIZE(sizeof(结构))。
 // 结构大小（mingw x86_64，本移植的开关组合；MSVC x64 同布局——cc.h 的 pack 只作用于协议头结构）：
-//   tcp_pcb 240 | tcp_pcb_listen 56 | tcp_seg 32 | udp_pcb 48
+//   tcp_pcb 272 | tcp_pcb_listen 56 | tcp_seg 32 | udp_pcb 48
 //   pbuf 24 | ip_reassdata 40 | etharp_q_entry 16 | sys_timeo 32
 //   PBUF_POOL 单元 = align(24) + align(1600) = 1624
-// tcp_pcb 曾实测 216；打开 LWIP_WND_SCALE 后按字段布局推算为 240：tcpwnd_size_t 由 u16_t 变
-// u32_t（tcp.h 里有 8 个这种字段：rcv_wnd / rcv_ann_wnd / cwnd / ssthresh / snd_wnd /
-// snd_wnd_max / snd_buf / bytes_acked）= +16 B，末尾新增 snd_scale + rcv_scale = +2 B，
-// 重排后到 8 字节对齐的尾部填充 = +6 B。**本机无法编译，这 240 是推算值**，改动此文件时
-// 若能在 CI/真机上 size -A 复核一次更稳妥（偏差只影响下面小结表的账，不影响正确性）。
+// tcp_pcb 曾实测 216（未开窗口缩放/SACK 时）；现按字段布局推算为 272：
+//   +24 = LWIP_WND_SCALE：tcpwnd_size_t 由 u16_t 变 u32_t（tcp.h 里有 8 个这种字段：
+//         rcv_wnd / rcv_ann_wnd / cwnd / ssthresh / snd_wnd / snd_wnd_max / snd_buf /
+//         bytes_acked）= +16 B，末尾新增 snd_scale + rcv_scale = +2 B，重排后的尾部填充 +6 B
+//   +32 = LWIP_TCP_SACK_OUT：rcv_sacks[LWIP_TCP_MAX_SACK_NUM=4]，每项 {u32 left, u32 right}
+// **本机无法编译，272 是推算值**，改动此文件时若能在 CI/真机上 size -A 复核一次更稳妥
+// （偏差只影响下面小结表的账，不影响正确性）。
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
 #define MEM_ALIGNMENT                   4
@@ -66,7 +68,7 @@
 //   杀最老 TIME-WAIT → 杀 LAST-ACK → 杀 CLOSING → **杀一条优先级更低的活连接** → 才丢 SYN，
 // 全程无日志：设备侧只看到「网页转圈」或「连接莫名断掉」，极难定位（故下面打开 MEMP_STATS）。
 // 取 2048：十几台设备 × ~130 条 ≈ 2000，家用场景有充分余量。
-//     2048 × 240 = 491,520 B（≈480 KiB）
+//     2048 × 272 = 557,056 B（≈544 KiB）
 // 不取更大的理由不是内存，是 tcp_active_pcbs 是**单链表**：tcp_slowtmr(500ms) 每次全表走一遍
 // （2048 项 ≈ 0.1 ms，可忽略），tcp_input 查表虽是 O(n) 但命中后会把该 pcb 移到表头(MRU)，
 // 热流基本 O(1)。再往上（万级）收益递减，且本机侧 ephemeral 端口（Windows 默认 16384 个）
@@ -128,8 +130,8 @@
 // —— 静态内存小结（BSS，惰性提交）——
 //   mem.c 堆               16,777,216
 //   PBUF_POOL  2048×1624    3,325,952
+//   TCP_PCB    2048× 272      557,056
 //   TCP_SEG   16384×  32      524,288
-//   TCP_PCB    2048× 240      491,520
 //   PBUF        256×  24        6,144
 //   ARP_QUEUE    64×  16        1,024
 //   UDP_PCB      16×  48          768
@@ -137,13 +139,15 @@
 //   SYS_TIMEOUT  16×  32          512
 //   PCB_LISTEN    8×  56          448
 //   ──────────────────────────────────
-//   合计        4,351,296 + 16,777,216 = 21,128,512 B ≈ **20.15 MiB**
-// 上一版同口径实测（mingw x86_64，size -A 各 .obj 的 .bss）是 12,428,480 B ≈ 11.85 MiB
-//   （memp.c 4,039,712 + mem.c 8,388,672 + stats.c 96；与表格差 288 B 是池描述符表/对齐）。
+//   合计        4,416,832 + 16,777,216 = 21,194,048 B ≈ **20.21 MiB**
+// 上一版（未开窗口缩放/SACK）同口径实测（mingw x86_64，size -A 各 .obj 的 .bss）是
+//   12,428,480 B ≈ 11.85 MiB（memp.c 4,039,712 + mem.c 8,388,672 + stats.c 96；与表格差
+//   288 B 是池描述符表/对齐）。
 // 本版**没有实测**（本机无工具链）：mem.c 那半是精确的（+8 MiB），memp.c 那半里 TCP_SEG 是
-//   精确的（+262,144），只有 TCP_PCB 依赖上面 240 的推算（若实际是 240±8，总账偏差 ≤ 16 KiB）。
-// → 相对上一版 **净增 ≈ 8.3 MiB 的 BSS**，全部是「窗口从 60 KiB 提到 128 KiB 之后，为了不让
-//   并发连接容量回退而同步扩的池子」。BSS 惰性提交，实际 RSS 仍按真实用量增长。
+//   精确的（+262,144），只有 TCP_PCB 依赖上面 272 的推算（若实际是 272±8，总账偏差 ≤ 16 KiB）。
+// → 相对上一版 **净增 ≈ 8.4 MiB 的 BSS**：其中 ≈8.3 MiB 是「窗口从 60 KiB 提到 128 KiB 之后，
+//   为了不让并发连接容量回退而同步扩的池子」，64 KiB 是 SACK 的 rcv_sacks 数组。
+//   BSS 惰性提交，实际 RSS 仍按真实用量增长。
 
 // —— 协议开关 ——
 #define LWIP_IPV4                       1
@@ -231,7 +235,37 @@
 // 触发：一条坏链路的连接不再有能力把全局池子拖垮。
 // 48 × 1460 ≈ 68 KiB 的乱序缓冲，覆盖「第 1 个包丢了、后面 47 个都到了」的典型场景绰绰有余。
 #define TCP_OOSEQ_MAX_PBUFS             48
-#define LWIP_TCP_SACK_OUT               0
+
+// ★ 选择性确认（RFC 2018）。**注意方向：这个开关只管「出」，名字里的 _OUT 是字面意思。**
+// 打开后 lwIP 作为**接收方**会在 ACK 里带上 SACK 块，告诉对端「这几段我已经收到了」；
+// lwIP 作为**发送方**并不解析收到的 SACK（tcp_in.c 的 tcp_parseopt 只认 MSS/TS/WS/SACK_PERM，
+// 没有 SACK 块的解析），所以它自己的重传仍是「从丢失点整段重来」。于是：
+//   · 受益方向 = 设备 → 本机（设备**上传**）：设备内核拿到我们的 SACK 后只补真正缺的那几段，
+//     不用把丢包点之后已经送达的数据全部重发。
+//   · 本机 → 设备（设备**下载**）**没有**收益 —— 那是 lwIP 当发送方，它看不懂 SACK。
+// 再强调一遍口径（和窗口缩放同理，这是终结式代理）：这里能救的是**局域网丢包**——WiFi 的
+// 重传耗尽、AP/交换机缓冲溢出、信道拥塞。跨境节点那段丢包发生在 mihomo 的 OS socket 上，
+// 跟 lwIP 这条 TCP 没有任何关系，本开关**管不着**。别把它当"跨境链路优化"。
+// 家用 WiFi 上行虽然量不大（多是 ACK、表单、上传照片、视频会议推流），但恰恰是最容易丢包的
+// 那条腿：一次丢包在无 SACK 时可能白白重传半个窗口，视频会议/网盘上传会直接卡一下。
+//
+// 代价，逐项：
+//   · 内存：每个 tcp_pcb 多 LWIP_TCP_MAX_SACK_NUM × 8 = 32 B（rcv_sacks 数组），
+//     2048 条 → +65,536 B（64 KiB）。默认的 4 条 SACK 范围够用，不下调（调小只省几十 KiB，
+//     却会在多点丢包时少通告一段，反而多一次重传）。
+//   · 选项字节：SYN-ACK 多 4 B 的 SACK_PERM（含 NOP 对齐），与 MSS(4) + WS(4) 合计 12 B，
+//     远在 40 B 的 TCP 选项上限内 ✓。带 SACK 块的 ACK：第一块 12 B（2 NOP + 2 B 头 + 8 B），
+//     之后每块 +8 B，最多 4 块 = 36 B ≤ TCP_MAX_OPTION_BYTES(40)，lwIP 的 tcp_get_num_sacks
+//     自己按 optlen 收着发，不会溢出。
+//   · 多几个纯 ACK：lwIP 不支持把 SACK 塞进带数据的包，有待发 SACK 时 tcp_in.c 会强制
+//     tcp_ack_now() 单发一个空 ACK。只在乱序期间发生，是丢包恢复的代价，划算。
+//   · CPU：tcp_add_sack / tcp_remove_sacks_lt|gt 都是 O(LWIP_TCP_MAX_SACK_NUM)=O(4) 的小循环，
+//     且只在 ooseq 非空（即真的乱序了）时才跑，正常收包路径零开销。
+// 硬约束（init.c）：LWIP_TCP_SACK_OUT 需要 TCP_QUEUE_OOSEQ=1 ✓（SACK 块就是从乱序队列推出来的）；
+// LWIP_TCP_MAX_SACK_NUM >= 1 ✓（用 opt.h 默认的 4）。
+// 与上面 TCP_OOSEQ_MAX_PBUFS 的配合已由 lwIP 保证：乱序队列被截断时会
+// tcp_remove_sacks_gt() 同步收回对应的 SACK 通告，不会谎报「已收到」。
+#define LWIP_TCP_SACK_OUT               1
 #define TCP_LISTEN_BACKLOG              1
 #define TCP_DEFAULT_LISTEN_BACKLOG      0xff
 
