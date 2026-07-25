@@ -72,12 +72,21 @@ int main(int argc, char *argv[])
     // 不加粗看不清。Semibold 就是给这些例外用的真实半粗体（不走合成粗体，避免发虚）。
     QFontDatabase::addApplicationFont(":/assets/fonts/MiSans-Regular.ttf");  // family "MiSans"
     QFontDatabase::addApplicationFont(":/assets/fonts/MiSans-Semibold.ttf"); // 归入 "MiSans"（typo family），weight=Semibold
-    // 全局默认字体设为 MiSans：所有未显式指定 family 的 QML Text 自动继承 → 整个 UI 即用 MiSans。
-    // 仅换 family + 强制 Normal 字重、保留原默认字号，字号仍由各 QML 的 font.pixelSize 决定。
+    // 全局默认字体设为 MiSans：所有未显式指定的属性都由 QML Text 通过 QFont resolve 继承下来
+    // （family / 字重 / hinting / styleStrategy 都算），字号仍由各 QML 的 font.pixelSize 决定。
+    //
+    // hinting = PreferNoHinting：**别把字形吸附到像素网格**。软件后端（QQuickWindow 强制
+    // Software，见上方）只能走原生文字渲染，Windows 默认是全 hinting——笔画被阈值化成硬边、
+    // 中文尤其显得又锐又硬（实测边缘中间调占比仅 78%）。关掉 hinting 后是 94%，笔画回到字体
+    // 设计的形状、边缘有正常的灰阶过渡。
+    // styleStrategy = PreferAntialias：补上 NoHinting 单用时笔画偏淡的问题（实心像素 352→766），
+    // 小字号也强制抗锯齿，不会在某些字号退化成锯齿硬边。
     {
         QFont uiFont = app.font();
         uiFont.setFamily(QStringLiteral("MiSans"));
         uiFont.setWeight(QFont::Normal);
+        uiFont.setHintingPreference(QFont::PreferNoHinting);
+        uiFont.setStyleStrategy(QFont::PreferAntialias);
         app.setFont(uiFont);
     }
 
