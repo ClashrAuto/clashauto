@@ -57,9 +57,11 @@ public:
 
 private:
     // UDP（含 DNS）不走 lwIP：手工解析设备发出的 UDP → Socks5Udp 转发；回程手工封包发回设备。
+    // NAT 粒度是「每个设备源端口一条独立的 SOCKS UDP 关联」，所以回程不需要（也无法）靠
+    // (fromIp,fromPort) 反查设备端口——vport 由「回包从哪条关联进来」直接给出。细节见 .cpp。
     void handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl);
-    void onUdpResponse(const QString &victimIp, const QHostAddress &fromIp, quint16 fromPort,
-                       const QByteArray &payload);
+    void onUdpResponse(const QString &victimIp, quint16 vport, const QHostAddress &fromIp,
+                       quint16 fromPort, const QByteArray &payload);
 
     Impl *d;
 };

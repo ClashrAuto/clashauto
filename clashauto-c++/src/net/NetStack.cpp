@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QHostAddress>
 #include <QList>
+#include <QSet>
 #include <QTimer>
 
 #include <chrono>
@@ -59,16 +60,137 @@ struct NetStack::Nic {
 
 namespace {
 
-// 一台设备的 UDP 会话（含 DNS）：一个 Socks5Udp + 简易 NAT（记住每个目标对应的设备源端口）。
-struct UdpSess {
+// ————————— UDP NAT：为什么是「每个设备源端口一条独立 SOCKS 关联」 —————————
+//
+// 老实现是「一台设备一个 Socks5Udp + 一张 QHash<"dstIp:dport" → 设备源端口>」。这张表的键少了
+// 源端口，于是同一台设备用**两个不同源端口打同一个目标**时，后一条 insert 直接覆盖前一条：先发
+// 的那个请求的回包被封成「目的端口 = 另一个源端口」发回去，设备当然丢弃。DNS 就是典型受害者
+// ——多数系统每次查询换一个源端口、还会并发几条打同一个 resolver——症状即「偶发 DNS 超时、
+// 解析时快时慢」。
+//
+// 回程方向能用来查表的**只有** (fromIp, fromPort)：Socks5Udp 的回程头里就这两样。只要两个设备
+// 源端口共用同一个 SOCKS 关联去打同一个 (dstIp,dport)，回包在 SOCKS 这一层就是**信息论意义上
+// 不可区分**的，换什么键都救不回来（按 DNS 事务 ID 消歧只能救 DNS，救不了两条 QUIC 打同一个
+// CDN 的 443）。所以唯一真正能工作的做法，是让「关联」本身携带这个信息：
+//
+//     一个设备源端口 = 一条 UdpFlow = 一个独立的 Socks5Udp（各自有自己的本地 UDP socket）。
+//
+// 回包从哪条关联进来，就发回哪个设备源端口，不用猜。这正是真实 NAT 的 endpoint-independent
+// mapping：内网 (IP,端口) ↔ 外部映射一一对应，与目的地址无关。
+//
+// 代价（诚实记下）：每条流多一个 QUdpSocket + 一条到 mihomo 的 TCP 控制连接（UDP ASSOCIATE 要求
+// 控制连接全程保持）。DNS 突发能在几秒内造出几十条流，所以老化必须给力，外加容量上限兜底。
+
+struct UdpFlow;
+
+// 侵入式 LRU 链（按 lastUsed 降序，链首最新、链尾最旧）。老化只看链尾：尾巴没过期，前面的更不
+// 可能过期 → 直接停。所以「回收」常态下就是一两次整数比较，O(1) 摊还，绝不扫全表——这条路挂在
+// 已有的 200ms lwIP 定时器上，不能给 GUI 线程添任何负担。
+struct UdpLru {
+    UdpFlow *head = nullptr;
+    UdpFlow *tail = nullptr;
+};
+
+struct UdpSess; // 每设备的壳（MAC / 网卡 / 该设备的所有流）
+
+// 一条 UDP 流 = 设备的一个源端口。
+struct UdpFlow {
+    UdpSess *sess = nullptr;
     Socks5Udp *socks = nullptr;
+    quint16 vport = 0;                 // 设备源端口：回程包的目的端口就是它
+    bool ready = false;                // associate 完成
+    struct Pending {
+        quint32 dstIp = 0;
+        quint16 dport = 0;
+        QByteArray payload;
+    };
+    QList<Pending> pending;            // ready 前暂存的上行包
+    QSet<quint32> peers;               // 联系过的目的 IP：做「地址限制型」来源校验
+    bool coneOpen = false;             // peers 溢出后放弃校验（退化成全锥）
+    qint64 lastUsed = 0;
+    qint64 idleMs = 0;                 // 该流的空闲超时档位（短档/长档）
+    UdpLru *lru = nullptr;             // 当前挂在哪条链上
+    UdpFlow *lruPrev = nullptr;
+    UdpFlow *lruNext = nullptr;
+};
+
+// 一台设备的 UDP 上下文（含 DNS）：一堆按源端口索引的流。
+struct UdpSess {
     QByteArray mac6;
     QString victimIp;
-    NetStack::Nic *nic = nullptr;           // 该设备所在网卡：回程包从这张卡、用这张卡的 MAC 发
-    bool ready = false;
-    QList<QByteArray> pending;              // ready 前暂存的 (dstIp,dport,payload) 打包
-    QHash<QString, quint16> nat;            // "dstIp:dport" → 设备源端口(vport)
+    NetStack::Nic *nic = nullptr;      // 该设备所在网卡：回程包从这张卡、用这张卡的 MAC 发
+    QHash<quint16, UdpFlow *> flows;   // 设备源端口 → 流
 };
+
+// 空闲超时。选值理由：
+//  · 一般 UDP 取 120s —— RFC 4787 REQ-5 规定 NAT 的 UDP 映射不得短于 2 分钟；QUIC/游戏/VPN 这类
+//    长连接的保活心跳普遍按 15~30s 设计，2 分钟足够宽松，不会把正在用的流掐断。
+//  · DNS/NTP/mDNS 这类「一问一答」取 15s —— 回包基本 1s 内到，15s 只是兜重传。它们又恰恰是源端口
+//    爆炸的元凶（每次查询换端口），短超时才能把 socket 和 mihomo 侧的关联迅速还回去。
+// 两档阈值不同 ⇒ **必须两条独立的 LRU 链**：混在一条链里，链尾就不再是「最先过期」的那条，
+// O(1) 的尾部回收会被一条长档流挡住，短档形同虚设。
+constexpr qint64 kUdpIdleMs = 120000;
+constexpr qint64 kUdpDnsIdleMs = 15000;
+
+// 容量兜底：句柄和 mihomo 侧的关联数都是有限资源。BT/DHT 这类应用通常共用一个源端口广撒（对本
+// 方案友好），但「源端口也乱换」的极端情况必须挡住，不能让一台设备把整个进程的 fd 吃光。
+constexpr int kMaxUdpFlowsPerDevice = 128;
+constexpr int kMaxUdpFlowsTotal = 1024;
+// peers 只为保留老代码「查不到就丢」的严格度（地址限制型 NAT）。超过上限说明这条流在广撒，
+// 再记下去只是白吃内存 → 退化成全锥，不再校验来源。
+constexpr int kMaxUdpPeersPerFlow = 256;
+// associate 未就绪时最多暂存几个包。老代码是无上限 QList：mihomo 没起来时会一直堆。
+constexpr int kMaxUdpPendingPerFlow = 16;
+
+// 短档目的端口：53 DNS / 5353 mDNS / 5355 LLMNR / 853 DoQ / 123 NTP。
+bool isShortLivedUdpPort(quint16 dport)
+{
+    return dport == 53 || dport == 5353 || dport == 5355 || dport == 853 || dport == 123;
+}
+
+// 单调毫秒。和 sys_now() 同一个 steady_clock，但用 64 位：老化算的是「多久没用」，
+// 不想为了 u32 的 49 天回绕再套一层回绕安全的减法。
+qint64 monoMs()
+{
+    using namespace std::chrono;
+    static const steady_clock::time_point t0 = steady_clock::now();
+    return duration_cast<milliseconds>(steady_clock::now() - t0).count();
+}
+
+void lruUnlink(UdpFlow *f)
+{
+    if (!f->lru)
+        return;
+    if (f->lruPrev)
+        f->lruPrev->lruNext = f->lruNext;
+    else
+        f->lru->head = f->lruNext;
+    if (f->lruNext)
+        f->lruNext->lruPrev = f->lruPrev;
+    else
+        f->lru->tail = f->lruPrev;
+    f->lruPrev = f->lruNext = nullptr;
+    f->lru = nullptr;
+}
+
+// 移到链首（顺带完成「短档→长档」的换链：先 unlink 再挂到目标链上）。
+void lruPushFront(UdpLru *l, UdpFlow *f)
+{
+    lruUnlink(f);
+    f->lru = l;
+    f->lruNext = l->head;
+    if (l->head)
+        l->head->lruPrev = f;
+    else
+        l->tail = f;
+    l->head = f;
+}
+
+void lruTouch(UdpFlow *f)
+{
+    if (f->lru)
+        lruPushFront(f->lru, f);
+}
 
 } // namespace
 
@@ -79,12 +201,83 @@ struct NetStack::Impl {
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的 netif 上下文
     QHash<QString, DeviceInfo> devices;      // 设备 IP → {mac,user}
     QHash<QString, UdpSess *> udp;           // 设备 IP → UDP 会话
+    UdpLru udpLruShort;                      // 短档(DNS 类)流的 LRU
+    UdpLru udpLruLong;                       // 长档(一般 UDP)流的 LRU
+    int udpFlowCount = 0;                    // 全局流数（对上限用，省得遍历）
     QTimer *timer = nullptr;
     bool inited = false;
 
     QString userForIp(const QString &ip) const { return devices.value(ip).socksUser; }
     QByteArray macForIp(const QString &ip) const { return devices.value(ip).mac6; }
 };
+
+namespace {
+
+// 拆掉一条流：摘 LRU、摘设备表、断信号、关 SOCKS 关联。
+// 先 disconnect 再 closeSession 是必须的——closeSession 会同步 emit closed()，而我们正是在
+// closed/failed 的槽里调用本函数，不断开就会自己递归进来。socks 用 deleteLater：本函数常常是
+// 从 socks 自己的信号里被调用的，当场 delete 等于在信号发射途中析构发射者。
+void destroyUdpFlow(NetStack::Impl *d, UdpFlow *f)
+{
+    if (!f)
+        return;
+    lruUnlink(f);
+    if (f->sess)
+        f->sess->flows.remove(f->vport);
+    if (f->socks) {
+        QObject::disconnect(f->socks, nullptr, nullptr, nullptr);
+        f->socks->closeSession();
+        f->socks->deleteLater();
+        f->socks = nullptr;
+    }
+    if (d->udpFlowCount > 0)
+        d->udpFlowCount--;
+    delete f;
+}
+
+// 老化：只看两条链的链尾，过期就摘，没过期立刻停（链按 lastUsed 有序，链尾即最旧）。
+void reapUdpFlows(NetStack::Impl *d)
+{
+    const qint64 now = monoMs();
+    for (UdpLru *l : {&d->udpLruShort, &d->udpLruLong}) {
+        while (l->tail && now - l->tail->lastUsed > l->tail->idleMs)
+            destroyUdpFlow(d, l->tail);
+    }
+}
+
+// 淘汰某设备最久未用的一条流。只在该设备顶到上限时才走，这时扫它自己那张最多 128 条的表，比在
+// 全局 LRU 链上一路找「属于这台设备的最旧一条」更划算（后者最坏要走完 1024 条）。
+void evictOldestFlowOfDevice(NetStack::Impl *d, UdpSess *s)
+{
+    UdpFlow *victim = nullptr;
+    for (UdpFlow *f : std::as_const(s->flows)) {
+        if (!victim || f->lastUsed < victim->lastUsed)
+            victim = f;
+    }
+    destroyUdpFlow(d, victim);
+}
+
+// 全局最久未用：两条链的链尾里挑更旧的那个，O(1)。
+void evictGlobalOldestFlow(NetStack::Impl *d)
+{
+    UdpFlow *a = d->udpLruShort.tail;
+    UdpFlow *b = d->udpLruLong.tail;
+    UdpFlow *victim = !a ? b : (!b ? a : (a->lastUsed <= b->lastUsed ? a : b));
+    destroyUdpFlow(d, victim);
+}
+
+// 收掉一台设备的全部流并释放会话壳。
+void destroyUdpSess(NetStack::Impl *d, UdpSess *s)
+{
+    if (!s)
+        return;
+    const QList<UdpFlow *> flows = s->flows.values();
+    for (UdpFlow *f : flows)
+        destroyUdpFlow(d, f);
+    delete s;
+}
+
+} // namespace
 
 // ———————————————————————————— 前置：C 回调 ————————————————————————————
 namespace {
@@ -315,11 +508,9 @@ NetStack::NetStack(quint16 socksPort, QObject *parent)
 
 NetStack::~NetStack()
 {
-    for (UdpSess *s : d->udp) {
-        if (s->socks)
-            s->socks->closeSession();
-        delete s;
-    }
+    for (UdpSess *s : std::as_const(d->udp))
+        destroyUdpSess(d, s);
+    d->udp.clear();
     for (Nic *n : d->nics) {
         if (d->inited)
             netif_remove(&n->nif);
@@ -365,10 +556,15 @@ bool NetStack::init(QString *err)
     d->listener->local_port = 0; // 通配任意目的端口
     tcp_accept(d->listener, lwipTcpAccept);
 
-    // lwIP 定时器泵（TCP 重传/超时/ARP 老化）。
+    // lwIP 定时器泵（TCP 重传/超时/ARP 老化）+ UDP 流老化。
+    // 老化搭这趟车而不是自己再开一个定时器：reapUdpFlows 只看两条 LRU 链的链尾，没到期就是两次
+    // 整数比较，200ms 一次的代价可以忽略；绝不能在这里扫全表——GUI 线程刚治完卡顿。
     d->timer = new QTimer(this);
     d->timer->setInterval(200);
-    connect(d->timer, &QTimer::timeout, this, [] { sys_check_timeouts(); });
+    connect(d->timer, &QTimer::timeout, this, [this] {
+        sys_check_timeouts();
+        reapUdpFlows(d);
+    });
     d->timer->start();
 
     d->inited = true;
@@ -440,12 +636,8 @@ void NetStack::removeNic(IL2Endpoint *ep)
     for (const QString &ip : victims) {
         UdpSess *s = d->udp.value(ip);
         if (s && s->nic == nic) {
-            if (s->socks) {
-                s->socks->closeSession();
-                s->socks->deleteLater();
-            }
             d->udp.remove(ip);
-            delete s;
+            destroyUdpSess(d, s);
         }
     }
     delete nic;
@@ -475,13 +667,8 @@ void NetStack::addDevice(const QString &ip, const QByteArray &mac6, const QStrin
 void NetStack::removeDevice(const QString &ip)
 {
     d->devices.remove(ip);
-    if (auto *s = d->udp.take(ip)) {
-        if (s->socks) {
-            s->socks->closeSession();
-            s->socks->deleteLater();
-        }
-        delete s;
-    }
+    if (auto *s = d->udp.take(ip))
+        destroyUdpSess(d, s);
     if (d->inited) {
         ip4_addr_t a;
         if (ip4addr_aton(ip.toLatin1().constData(), &a))
@@ -534,7 +721,8 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
     if (14 + ihl + 8 > frame.size())
         return;
     const QString srcIp = QString("%1.%2.%3.%4").arg(ip[12]).arg(ip[13]).arg(ip[14]).arg(ip[15]);
-    const QString dstIp = QString("%1.%2.%3.%4").arg(ip[16]).arg(ip[17]).arg(ip[18]).arg(ip[19]);
+    const quint32 dstIpV4 = (quint32(ip[16]) << 24) | (quint32(ip[17]) << 16)
+                          | (quint32(ip[18]) << 8) | quint32(ip[19]);
     const uchar *udp = ip + ihl;
     const quint16 sport = (quint16(udp[0]) << 8) | udp[1];
     const quint16 dport = (quint16(udp[2]) << 8) | udp[3];
@@ -553,48 +741,92 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         s->mac6 = dev.mac6;
         s->victimIp = srcIp;
         s->nic = nic; // 回程包要从这张卡发、用这张卡的本机 MAC 当源
-        s->socks = new Socks5Udp(this);
         d->udp.insert(srcIp, s);
-        connect(s->socks, &Socks5Udp::ready, this, [s]() {
-            s->ready = true;
-            for (const QByteArray &pk : std::as_const(s->pending)) {
-                // pending 打包格式：[dstIp\0 dport(2) payload]
-                const int z = pk.indexOf('\0');
-                const QString di = QString::fromLatin1(pk.left(z));
-                const quint16 dp = (quint16(uchar(pk[z + 1])) << 8) | uchar(pk[z + 2]);
-                s->socks->sendTo(QHostAddress(di), dp, pk.mid(z + 3));
-            }
-            s->pending.clear();
-        });
-        connect(s->socks, &Socks5Udp::datagramReceived, this,
-                [this, srcIp](const QHostAddress &fromIp, quint16 fromPort, const QByteArray &data) {
-                    onUdpResponse(srcIp, fromIp, fromPort, data);
-                });
-        s->socks->associate(d->socksPort, dev.socksUser);
     }
 
-    s->nat.insert(dstIp + ':' + QString::number(dport), sport); // 记住回程该发到哪个设备端口
-    if (s->ready) {
-        s->socks->sendTo(QHostAddress(dstIp), dport, payload);
-    } else {
-        QByteArray pk = dstIp.toLatin1();
-        pk.append('\0');
-        pk.append(char((dport >> 8) & 0xFF));
-        pk.append(char(dport & 0xFF));
-        pk.append(payload);
-        s->pending.append(pk);
+    // 一个设备源端口一条流（= 一个独立 Socks5Udp）。回程靠「从哪条关联进来」定位设备端口，
+    // 不再靠 (dstIp,dport) 反查——那正是老代码串包的根因，见文件上方的方案说明。
+    UdpFlow *flow = s->flows.value(sport);
+    if (!flow) {
+        reapUdpFlows(d); // 建流前顺手回收：突发 DNS 场景下这一步就够把上一波流还回去了
+        if (s->flows.size() >= kMaxUdpFlowsPerDevice)
+            evictOldestFlowOfDevice(d, s);
+        while (d->udpFlowCount >= kMaxUdpFlowsTotal
+               && (d->udpLruShort.tail || d->udpLruLong.tail))
+            evictGlobalOldestFlow(d);
+
+        flow = new UdpFlow;
+        flow->sess = s;
+        flow->vport = sport;
+        flow->idleMs = isShortLivedUdpPort(dport) ? kUdpDnsIdleMs : kUdpIdleMs;
+        flow->socks = new Socks5Udp(this);
+        s->flows.insert(sport, flow);
+        d->udpFlowCount++;
+
+        UdpFlow *nf = flow;
+        connect(nf->socks, &Socks5Udp::ready, this, [nf]() {
+            nf->ready = true;
+            for (const UdpFlow::Pending &pk : std::as_const(nf->pending))
+                nf->socks->sendTo(QHostAddress(pk.dstIp), pk.dport, pk.payload);
+            nf->pending.clear();
+        });
+        connect(nf->socks, &Socks5Udp::datagramReceived, this,
+                [this, srcIp, sport](const QHostAddress &fromIp, quint16 fromPort,
+                                     const QByteArray &data) {
+                    // 捕值不捕流指针：即便这条流已经被老化/淘汰掉，槽里也只是查表落空，
+                    // 绝不会踩到悬垂指针。
+                    onUdpResponse(srcIp, sport, fromIp, fromPort, data);
+                });
+        // 关联建不起来（mihomo 没起来）或控制连接掉线（mihomo 重启）→ 立刻收掉这条流，别让这个
+        // 源端口一直黑洞到老化为止；设备下次发包会重建。destroyUdpFlow 走的是 disconnect +
+        // deleteLater，在被删对象自己的信号里调用是安全的。
+        connect(nf->socks, &Socks5Udp::failed, this, [this, nf](const QString &) {
+            destroyUdpFlow(d, nf);
+        });
+        connect(nf->socks, &Socks5Udp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
+
+        nf->socks->associate(d->socksPort, dev.socksUser);
+    }
+
+    // 续命 + 换档：同一个源端口只要打过一次非 DNS 目的，就永久升到长档（降回去会把一条正在用的
+    // 长连接按 15s 掐掉）。lruPushFront 内部先 unlink，换链是顺带完成的。
+    if (!isShortLivedUdpPort(dport))
+        flow->idleMs = kUdpIdleMs;
+    flow->lastUsed = monoMs();
+    lruPushFront(flow->idleMs == kUdpDnsIdleMs ? &d->udpLruShort : &d->udpLruLong, flow);
+
+    if (!flow->coneOpen) {
+        flow->peers.insert(dstIpV4);
+        if (flow->peers.size() > kMaxUdpPeersPerFlow) { // 广撒型流量：放弃来源校验，别再吃内存
+            flow->coneOpen = true;
+            flow->peers.clear();
+        }
+    }
+
+    if (flow->ready) {
+        flow->socks->sendTo(QHostAddress(dstIpV4), dport, payload);
+    } else if (flow->pending.size() < kMaxUdpPendingPerFlow) {
+        flow->pending.append(UdpFlow::Pending{dstIpV4, dport, payload});
     }
 }
 
-void NetStack::onUdpResponse(const QString &victimIp, const QHostAddress &fromIp, quint16 fromPort,
-                             const QByteArray &payload)
+void NetStack::onUdpResponse(const QString &victimIp, quint16 vport, const QHostAddress &fromIp,
+                             quint16 fromPort, const QByteArray &payload)
 {
     UdpSess *s = d->udp.value(victimIp);
     if (!s || !s->nic)
         return;
-    const quint16 vport = s->nat.value(fromIp.toString() + ':' + QString::number(fromPort), 0);
-    if (vport == 0)
+    UdpFlow *f = s->flows.value(vport);
+    if (!f)
+        return; // 流已被老化/淘汰：迟到的回包直接丢
+    // 来源校验只比对 IP、不比对端口：保留老代码「没见过的来源就丢」的严格度（地址限制型 NAT），
+    // 又不至于误杀 TFTP/部分 STUN 那种「换个端口回你」的服务器。
+    if (!f->coneOpen && !f->peers.contains(fromIp.toIPv4Address()))
         return;
+    // 下行也续命：QUIC 大文件下载这类「上行只有稀疏 ACK」的流，光靠上行续命可能被误判为空闲。
+    f->lastUsed = monoMs();
+    lruTouch(f);
+
     // 手工封 UDP/IP/以太 回程包发给设备。
     const quint32 srcIp = fromIp.toIPv4Address();     // 服务器
     QHostAddress va(victimIp);
