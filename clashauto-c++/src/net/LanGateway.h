@@ -12,29 +12,45 @@
 // ARP**（给被劫持设备重发「网关的真实 MAC」），否则设备断网。启动时应调用 recoverFromCrash()
 // 读取上次留下的劫持清单先还原再继续。
 //
-// 权限：Linux 需 CAP_NET_RAW/root。isAvailable() 反映「平台支持 且 能打开 AF_PACKET」。
+// 权限：Linux 需 CAP_NET_RAW/root。isAvailable() 反映「平台支持 且 至少一张网卡能打开二层」。
+//
+// **多网卡**：有线接 A 路由、WiFi 接 B 路由时，两个网段的设备都可代理。每张物理网卡各有一套
+// {二层端点 + ArpSpoofer}，共用同一个 NetStack（lwIP 只能有一个实例，但可挂多个 netif）。
+// 开代理时按设备 IP 落在哪张卡的子网里，自动选对应的那套。
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 class LanGateway : public QObject
 {
     Q_OBJECT
 public:
+    // 一张物理网卡的拓扑。mac 均为 "aa:bb:cc:dd:ee:ff"；netmask 为点分（如 "255.255.255.0"）。
+    struct NicSpec {
+        QString ifname;     // OS 级接口名（AF_PACKET/BPF/Npcap 绑定用）
+        QString localIp;    // 本机在这张卡上的 IPv4
+        QString localMac;
+        QString gatewayIp;  // 这张卡的默认网关
+        QString gatewayMac;
+        QString netmask;    // 该卡子网掩码；空/非法则这张卡不启用（出方向没法定路由）
+    };
+
     explicit LanGateway(QObject *parent = nullptr);
     ~LanGateway() override;
 
-    // 配置本机拓扑 + mihomo SOCKS 端点。localMac/gatewayMac 为 "aa:bb:cc:dd:ee:ff"。
-    // 每次网段/网关变化（扫描后）都可重配。socksPort 通常 = config.mixedPort(7890)。
-    // netmask 为主网卡子网掩码（点分，如 "255.255.255.0"）：被劫持设备发往「本网段内且非网关本身」
-    // 的帧不进用户态栈、照常二层直达——否则设备回给本机 LAN IP 的包会被 lwIP 误终结，导致本机
-    // 无法直连该设备（SSH/网页/共享）。空掩码=不做旁路（退回旧行为，全部帧进栈）。
-    void configure(const QString &ifname, const QString &localIp, const QString &localMac,
-                   const QString &gatewayIp, const QString &gatewayMac, quint16 socksPort,
-                   const QString &netmask = QString());
+    // 配置全部可用物理网卡 + mihomo SOCKS 端点。每次扫描后（网段/网关变化）都可重配；
+    // 已有活动劫持的网卡不会被重建（避免断流）。socksPort 通常 = config.mixedPort(7890)。
+    //
+    // netmask 还用于「同网段直连旁路」：被劫持设备发往「本网段内且非网关本身」的帧不进用户态栈、
+    // 照常二层直达——否则设备回给本机 LAN IP 的包会被 lwIP 误终结，导致本机无法直连该设备
+    // （SSH/网页/共享）。
+    void configure(const QVector<NicSpec> &nics, quint16 socksPort);
 
-    // 平台是否可用（Linux 且能打开二层）。DevicesController.gatewayReady 返回它。
+    // 平台是否可用（至少一张网卡的二层端点 + 协议栈就绪）。DevicesController.gatewayReady 返回它。
     bool isAvailable() const;
+    // 该 IP 是否落在某张已就绪网卡的子网里（= 能不能对它开代理）。
+    bool canProxy(const QString &ip) const;
 
     // 开始劫持某设备：ip+mac 为目标，socksUser 为其 mihomo 身份（dev-<mac 短哈希>）。
     // 成功后该设备所有 IP 流量经用户态栈拨 mihomo。失败置 *err。

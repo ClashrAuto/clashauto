@@ -13,7 +13,11 @@
 #define SYS_LIGHTWEIGHT_PROT            0
 #define LWIP_NETCONN                    0
 #define LWIP_SOCKET                     0
-#define LWIP_SINGLE_NETIF               1   // 只有一个 netif（本网关），省掉遍历
+// **必须为 0**：网关支持多网卡（有线接 A 路由 + WiFi 接 B 路由，两个网段的设备都能代理），
+// 一个 lwIP 实例要挂多个 netif。置 1 会把 netif 链表遍历整个编译掉——ip4_route() 直接返回
+// netif_default、NETIF_FOREACH 只访问 netif_default，于是 B 网段设备的回包会从 A 网卡发出去，
+// 而且**不报任何错**，只是死活不通。
+#define LWIP_SINGLE_NETIF               0
 
 // —— 内存 ——（吞吐优先，桌面内存充裕）
 #define MEM_LIBC_MALLOC                 0
@@ -40,6 +44,9 @@
 #define LWIP_ETHERNET                   1
 // 为每台被劫持设备预置静态 ARP(ip↔mac)，lwIP 回包直接用其 MAC，不发 ARP 请求（默认关，必须打开）。
 #define ETHARP_SUPPORT_STATIC_ENTRIES   1
+// ARP 表容量：每台被劫持设备占一条静态项，默认 10 条太小（多网卡下两个网段的设备加起来更容易顶到）。
+// 顶满时 etharp_add_static_entry 会挤掉别人的条目 —— 表现为某台设备莫名不通，不会报错。
+#define ARP_TABLE_SIZE                  64
 #define LWIP_ICMP                       1
 #define LWIP_RAW                        0
 #define LWIP_DHCP                       0

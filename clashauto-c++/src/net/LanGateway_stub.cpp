@@ -8,11 +8,9 @@ struct LanGateway::Impl {};
 LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl) {}
 LanGateway::~LanGateway() { delete d; }
 
-void LanGateway::configure(const QString &, const QString &, const QString &, const QString &,
-                           const QString &, quint16, const QString &)
-{
-}
+void LanGateway::configure(const QVector<NicSpec> &, quint16) {}
 bool LanGateway::isAvailable() const { return false; }
+bool LanGateway::canProxy(const QString &) const { return false; }
 
 bool LanGateway::enableDevice(const QString &, const QString &, const QString &, QString *err)
 {

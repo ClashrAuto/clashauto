@@ -58,6 +58,21 @@ public:
     const QSet<QString> &gatewayIps() const { return m_gatewayIps; }
     // 该 IP 是否在主网卡子网内（只有同网段设备能被 ARP 劫持）。
     bool inPrimarySubnet(const QString &ip) const;
+    // 该 IP 是否在**任意一张**物理网卡的子网内。有线接 A 路由、WiFi 接 B 路由时两个网段都算——
+    // 透明网关每张卡各有一套端点/ArpSpoofer，两边设备都能劫持（见 LanGateway::NicSpec）。
+    bool inAnyLanSubnet(const QString &ip) const;
+
+    // 一张可做透明网关的物理网卡（喂给 LanGateway::configure）。
+    struct NicInfo {
+        QString name;       // OS 级接口名
+        QString ip;         // 本机在该卡上的 IPv4
+        QString mac;
+        QString netmask;    // 点分
+        QString gatewayIp;  // 该卡的默认网关
+        QString gatewayMac; // 本轮 ARP 表里查到的网关 MAC（未解析出来则为空）
+    };
+    // 全部可用物理网卡（第 0 个是主网卡）。缺 IP/MAC/掩码的会被剔除。
+    QVector<NicInfo> physicalNics() const;
     // 全部网关的 MAC（按 m_gatewayIps 在本轮 ARP 表里查）——路由器可能有多个 IP，认 MAC 更稳。
     QSet<QString> gatewayMacs() const;
 
@@ -135,6 +150,7 @@ private:
         QString name;   // OS 级接口名（AF_PACKET/BPF/Npcap 绑定用）
         QString ip;
         QString mac;
+        QString gatewayIp;          // 这张卡自己的默认网关（多网卡各不相同）
         quint32 base = 0, mask = 0; // 网段（主机序）
     };
 

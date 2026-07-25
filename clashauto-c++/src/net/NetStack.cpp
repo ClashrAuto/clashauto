@@ -46,11 +46,25 @@ struct TcpConn {
     bool lwipClosed = false;
 };
 
+} // namespace
+
+// 一张网卡对应的 netif 上下文。指针存进 netif->state，C 回调据此拿到「该从哪个二层端点发出去」
+// 和「本机在这张卡上的 MAC」——多网卡就是靠它区分的。
+struct NetStack::Nic {
+    struct netif nif;          // 必须是稳定地址：Nic 一律堆分配，不放进会搬家的容器里
+    IL2Endpoint *ep = nullptr;
+    QByteArray localMac6;
+    QString localIp, netmask;
+};
+
+namespace {
+
 // 一台设备的 UDP 会话（含 DNS）：一个 Socks5Udp + 简易 NAT（记住每个目标对应的设备源端口）。
 struct UdpSess {
     Socks5Udp *socks = nullptr;
     QByteArray mac6;
     QString victimIp;
+    NetStack::Nic *nic = nullptr;           // 该设备所在网卡：回程包从这张卡、用这张卡的 MAC 发
     bool ready = false;
     QList<QByteArray> pending;              // ready 前暂存的 (dstIp,dport,payload) 打包
     QHash<QString, quint16> nat;            // "dstIp:dport" → 设备源端口(vport)
@@ -59,12 +73,10 @@ struct UdpSess {
 } // namespace
 
 struct NetStack::Impl {
-    IL2Endpoint *ep = nullptr;
     quint16 socksPort = 0;
     NetStack *owner = nullptr;
-    QByteArray localMac6;
-    struct netif netif;
     struct tcp_pcb *listener = nullptr;
+    QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的 netif 上下文
     QHash<QString, DeviceInfo> devices;      // 设备 IP → {mac,user}
     QHash<QString, UdpSess *> udp;           // 设备 IP → UDP 会话
     QTimer *timer = nullptr;
@@ -77,8 +89,16 @@ struct NetStack::Impl {
 // ———————————————————————————— 前置：C 回调 ————————————————————————————
 namespace {
 
-NetStack::Impl *g_impl = nullptr; // 单实例（一台机器一个网关）——lwIP 回调用它取上下文
+// lwIP 本身只能有一个实例（lwip_init 全局、ARP 表全局、PCB 链全局），所以「栈」确实是单例：
+// g_impl 只用来给 TCP accept 这类**与网卡无关**的全局回调取上下文（监听 pcb、设备表、socks 端口）。
+// 与网卡相关的东西（二层端点、本机 MAC）一律从 netif->state 取，不走这里——多网卡的关键。
+NetStack::Impl *g_impl = nullptr;
 bool g_debug = false;             // COAST_GATEWAY_DEBUG=1 时打诊断日志（自测/联调用）
+
+NetStack::Nic *nicOf(struct netif *netif)
+{
+    return netif ? static_cast<NetStack::Nic *>(netif->state) : nullptr;
+}
 
 // pbuf 链 → QByteArray
 QByteArray pbufToBytes(struct pbuf *p)
@@ -93,15 +113,17 @@ QByteArray pbufToBytes(struct pbuf *p)
     return out;
 }
 
-// netif linkoutput：lwIP 要发一帧 → 序列化 → 二层发出（dst MAC 已由静态 ARP 填好）。
+// netif linkoutput：lwIP 要发一帧 → 序列化 → 从**该 netif 自己的**二层端点发出
+//（dst MAC 已由静态 ARP 填好）。多网卡就靠这里分流：绝不能回到某个全局端点上。
 err_t lwipLinkOutput(struct netif *netif, struct pbuf *p)
 {
-    Q_UNUSED(netif);
-    if (g_impl && g_impl->ep) {
+    NetStack::Nic *nic = nicOf(netif);
+    if (nic && nic->ep) {
         const QByteArray f = pbufToBytes(p);
         if (g_debug)
-            std::fprintf(stderr, "NETSTACK OUT len=%d\n", int(f.size()));
-        g_impl->ep->send(f);
+            std::fprintf(stderr, "NETSTACK OUT nic=%s len=%d\n",
+                         nic->localIp.toLatin1().constData(), int(f.size()));
+        nic->ep->send(f);
     }
     return ERR_OK;
 }
@@ -114,8 +136,8 @@ err_t lwipNetifInit(struct netif *netif)
     netif->linkoutput = lwipLinkOutput; // 二层出口
     netif->mtu = 1500;
     netif->hwaddr_len = 6;
-    if (g_impl)
-        std::memcpy(netif->hwaddr, g_impl->localMac6.constData(), 6);
+    if (NetStack::Nic *nic = nicOf(netif))
+        std::memcpy(netif->hwaddr, nic->localMac6.constData(), 6);
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET
                    | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
     return ERR_OK;
@@ -284,10 +306,9 @@ quint16 ipChecksum(const uchar *data, int len)
 } // namespace
 
 // ———————————————————————————— NetStack ————————————————————————————
-NetStack::NetStack(IL2Endpoint *endpoint, quint16 socksPort, QObject *parent)
+NetStack::NetStack(quint16 socksPort, QObject *parent)
     : QObject(parent), d(new Impl)
 {
-    d->ep = endpoint;
     d->socksPort = socksPort;
     d->owner = this;
 }
@@ -299,48 +320,32 @@ NetStack::~NetStack()
             s->socks->closeSession();
         delete s;
     }
-    delete d;
+    for (Nic *n : d->nics) {
+        if (d->inited)
+            netif_remove(&n->nif);
+        delete n;
+    }
     if (g_impl == d)
         g_impl = nullptr;
+    delete d;
 }
 
-bool NetStack::init(const QByteArray &localMac6, QString *err)
+bool NetStack::init(QString *err)
 {
-    if (localMac6.size() != 6) {
-        if (err)
-            *err = QStringLiteral("本机 MAC 非法");
-        return false;
-    }
+    if (d->inited)
+        return true;
     if (g_impl && g_impl != d) {
         if (err)
             *err = QStringLiteral("已有一个网关协议栈实例在运行");
         return false;
     }
-    d->localMac6 = localMac6;
     g_impl = d;
     g_debug = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
 
     lwip_init();
 
-    // netif 占位 IP（非零）+ /0 掩码：lwIP 的 ip4_route 会**跳过 IP 为 0.0.0.0 的 netif**，导致回包
-    // （SYN-ACK 等）找不到出口 netif 而被丢弃（现象：SYN 命中监听但无 SYN-ACK 出栈）。给个非零占位 IP、
-    // 掩码 0.0.0.0 → 匹配所有目的 → 本 netif 成为「万能出口」。该占位 IP 不作源地址（每条连接的源 =
-    // 被接管的目的服务器 IP，pcb->local_ip 覆盖），也不会真发 ARP（每设备静态 ARP），故任意非零值即可。
-    ip4_addr_t nip, nmask, ngw;
-    IP4_ADDR(&nip, 0, 0, 0, 1);
-    IP4_ADDR(&nmask, 0, 0, 0, 0);
-    ip4_addr_set_zero(&ngw);
-    if (netif_add(&d->netif, &nip, &nmask, &ngw, nullptr, lwipNetifInit, ethernet_input) == nullptr) {
-        g_impl = nullptr;
-        if (err)
-            *err = QStringLiteral("netif_add 失败");
-        return false;
-    }
-    netif_set_default(&d->netif);
-    netif_set_up(&d->netif);
-    netif_set_link_up(&d->netif);
-
     // catch-all TCP 监听：绑任意 IP + 端口 0（配合 tcp_in.c 补丁通配任意目的端口）。
+    // 监听是全局的、与网卡无关：哪张卡进来的 SYN 都命中它，accept 里再按设备 IP 查身份。
     struct tcp_pcb *pcb = tcp_new();
     if (!pcb) {
         g_impl = nullptr;
@@ -370,6 +375,87 @@ bool NetStack::init(const QByteArray &localMac6, QString *err)
     return true;
 }
 
+bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QString &localIp,
+                      const QString &netmask, QString *err)
+{
+    if (!d->inited) {
+        if (err)
+            *err = QStringLiteral("协议栈未初始化");
+        return false;
+    }
+    if (!ep || localMac6.size() != 6) {
+        if (err)
+            *err = QStringLiteral("网卡端点或本机 MAC 非法");
+        return false;
+    }
+    if (d->nics.contains(ep))
+        return true;
+
+    // netif 的 IP/掩码用**本机在这张卡上的真实地址**，不能再用早期的 0.0.0.1 // 0.0.0.0 占位：
+    //  · ip4_route 会跳过 IP 为 0.0.0.0 的 netif（回包找不到出口而被丢），所以 IP 必须非零；
+    //  · 掩码若给 0.0.0.0，该 netif「匹配一切」，多网卡时 ip4_route 永远返回链表第一张 →
+    //    B 网段设备的回包会从 A 网卡发出去。用真实掩码，出方向按子网各归各的。
+    ip4_addr_t nip, nmask, ngw;
+    if (!ip4addr_aton(localIp.toLatin1().constData(), &nip) || ip4_addr_isany_val(nip)) {
+        if (err)
+            *err = QStringLiteral("本机 IP 非法: ") + localIp;
+        return false;
+    }
+    if (!ip4addr_aton(netmask.toLatin1().constData(), &nmask) || ip4_addr_isany_val(nmask)) {
+        if (err)
+            *err = QStringLiteral("子网掩码非法: ") + netmask;
+        return false;
+    }
+    ip4_addr_set_zero(&ngw);
+
+    auto *nic = new Nic;
+    nic->ep = ep;
+    nic->localMac6 = localMac6;
+    nic->localIp = localIp;
+    nic->netmask = netmask;
+    // state 必须在 netif_add 之前就绪：lwipNetifInit 里要用它填 hwaddr。
+    if (netif_add(&nic->nif, &nip, &nmask, &ngw, nic, lwipNetifInit, ethernet_input) == nullptr) {
+        delete nic;
+        if (err)
+            *err = QStringLiteral("netif_add 失败");
+        return false;
+    }
+    if (d->nics.isEmpty())
+        netif_set_default(&nic->nif); // ip4_route 无匹配时的兜底出口
+    netif_set_up(&nic->nif);
+    netif_set_link_up(&nic->nif);
+    d->nics.insert(ep, nic);
+    return true;
+}
+
+void NetStack::removeNic(IL2Endpoint *ep)
+{
+    Nic *nic = d->nics.take(ep);
+    if (!nic)
+        return;
+    if (d->inited)
+        netif_remove(&nic->nif);
+    // 该卡上的 UDP 会话失去出口，一并收掉（设备重新发包会重建）。
+    const QStringList victims = d->udp.keys();
+    for (const QString &ip : victims) {
+        UdpSess *s = d->udp.value(ip);
+        if (s && s->nic == nic) {
+            if (s->socks) {
+                s->socks->closeSession();
+                s->socks->deleteLater();
+            }
+            d->udp.remove(ip);
+            delete s;
+        }
+    }
+    delete nic;
+}
+
+bool NetStack::hasNic(IL2Endpoint *ep) const
+{
+    return d->nics.contains(ep);
+}
+
 void NetStack::addDevice(const QString &ip, const QByteArray &mac6, const QString &socksUser)
 {
     if (ip.isEmpty() || mac6.size() != 6)
@@ -390,9 +476,10 @@ void NetStack::removeDevice(const QString &ip)
 {
     d->devices.remove(ip);
     if (auto *s = d->udp.take(ip)) {
-        if (s->socks)
+        if (s->socks) {
             s->socks->closeSession();
-        s->socks->deleteLater();
+            s->socks->deleteLater();
+        }
         delete s;
     }
     if (d->inited) {
@@ -402,16 +489,19 @@ void NetStack::removeDevice(const QString &ip)
     }
 }
 
-void NetStack::inputFrame(const QByteArray &frame)
+void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
 {
     if (!d->inited || frame.size() < 14)
         return;
+    Nic *nic = d->nics.value(from);
+    if (!nic)
+        return; // 帧来自一张没挂上来的卡（正在重配/已摘除）
     const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
     const quint16 ethType = (quint16(f[12]) << 8) | f[13];
     if (g_debug) {
         const int proto = (frame.size() >= 24) ? f[14 + 9] : -1;
-        std::fprintf(stderr, "NETSTACK IN len=%d eth=%04x proto=%d\n",
-                     int(frame.size()), ethType, proto);
+        std::fprintf(stderr, "NETSTACK IN nic=%s len=%d eth=%04x proto=%d\n",
+                     nic->localIp.toLatin1().constData(), int(frame.size()), ethType, proto);
     }
 
     // 仅处理 IPv4；ARP 等不喂 lwIP（ARP 投毒由 ArpSpoofer 负责，避免 lwIP 误答）。
@@ -424,20 +514,20 @@ void NetStack::inputFrame(const QByteArray &frame)
     const quint8 proto = ip[9];
 
     if (proto == 17) { // UDP：手工拦截转发（含 DNS）
-        handleUdpFrame(frame, ihl);
+        handleUdpFrame(nic, frame, ihl);
         return;
     }
-    // TCP/ICMP 等交给 lwIP。
+    // TCP/ICMP 等交给 lwIP —— 注入**收到它的那个 netif**（accept-all 补丁会把无主单播收到 inp 上）。
     struct pbuf *p = pbuf_alloc(PBUF_RAW, static_cast<u16_t>(frame.size()), PBUF_POOL);
     if (!p)
         return;
     pbuf_take(p, frame.constData(), static_cast<u16_t>(frame.size()));
-    if (d->netif.input(p, &d->netif) != ERR_OK)
+    if (nic->nif.input(p, &nic->nif) != ERR_OK)
         pbuf_free(p);
 }
 
 // ———————————————————————————— UDP 拦截 ————————————————————————————
-void NetStack::handleUdpFrame(const QByteArray &frame, int ihl)
+void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
 {
     const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
     const uchar *ip = f + 14;
@@ -462,6 +552,7 @@ void NetStack::handleUdpFrame(const QByteArray &frame, int ihl)
         s = new UdpSess;
         s->mac6 = dev.mac6;
         s->victimIp = srcIp;
+        s->nic = nic; // 回程包要从这张卡发、用这张卡的本机 MAC 当源
         s->socks = new Socks5Udp(this);
         d->udp.insert(srcIp, s);
         connect(s->socks, &Socks5Udp::ready, this, [s]() {
@@ -499,7 +590,7 @@ void NetStack::onUdpResponse(const QString &victimIp, const QHostAddress &fromIp
                              const QByteArray &payload)
 {
     UdpSess *s = d->udp.value(victimIp);
-    if (!s)
+    if (!s || !s->nic)
         return;
     const quint16 vport = s->nat.value(fromIp.toString() + ':' + QString::number(fromPort), 0);
     if (vport == 0)
@@ -514,8 +605,8 @@ void NetStack::onUdpResponse(const QString &victimIp, const QHostAddress &fromIp
     QByteArray frame(14 + ipLen, char(0));
     uchar *b = reinterpret_cast<uchar *>(frame.data());
     // 以太头
-    std::memcpy(b, s->mac6.constData(), 6);            // dst = 设备
-    std::memcpy(b + 6, d->localMac6.constData(), 6);   // src = 本机
+    std::memcpy(b, s->mac6.constData(), 6);                 // dst = 设备
+    std::memcpy(b + 6, s->nic->localMac6.constData(), 6);   // src = 本机在该设备那张卡上的 MAC
     b[12] = 0x08; b[13] = 0x00;
     // IP 头
     uchar *ip = b + 14;
@@ -552,6 +643,6 @@ void NetStack::onUdpResponse(const QString &victimIp, const QHostAddress &fromIp
         uck = 0xFFFF;
     u[6] = (uck >> 8) & 0xFF; u[7] = uck & 0xFF;
 
-    if (d->ep)
-        d->ep->send(frame);
+    if (s->nic->ep)
+        s->nic->ep->send(frame);
 }

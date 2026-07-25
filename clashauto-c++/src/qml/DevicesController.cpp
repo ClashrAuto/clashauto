@@ -82,11 +82,23 @@ void DevicesController::ensureGatewayConfigured()
 {
     if (!m_gateway || !m_scanner)
         return;
-    // 用当前扫描到的拓扑配置网关（网卡/本机 IP+MAC/网关 IP+MAC + mihomo 专用网关端口）。
-    // 网关 MAC 需从 ARP 表拿到；扫描过至少一轮后才有值。
-    m_gateway->configure(m_scanner->interfaceName(), m_scanner->localIp(), m_scanner->localMac(),
-                         m_scanner->gatewayIp(), m_scanner->gatewayMac(), DeviceStore::kGatewayPort,
-                         m_scanner->localNetmask());
+    // 用当前扫描到的拓扑配置网关。**每张物理网卡都配**——有线接 A 路由、WiFi 接 B 路由时，
+    // 两个网段的设备都要能代理；LanGateway 按设备 IP 落在哪张卡的网段自动选对应那套。
+    // 网关 MAC 需从 ARP 表拿到；扫描过至少一轮后才有值（每轮都会重新 configure 刷新）。
+    QVector<LanGateway::NicSpec> specs;
+    const QVector<LanScanner::NicInfo> nics = m_scanner->physicalNics();
+    specs.reserve(nics.size());
+    for (const LanScanner::NicInfo &n : nics) {
+        LanGateway::NicSpec s;
+        s.ifname = n.name;
+        s.localIp = n.ip;
+        s.localMac = n.mac;
+        s.gatewayIp = n.gatewayIp;
+        s.gatewayMac = n.gatewayMac;
+        s.netmask = n.netmask;
+        specs.append(s);
+    }
+    m_gateway->configure(specs, DeviceStore::kGatewayPort);
     // 起来了就清掉去重记忆：之后再坏（拔网卡等）还要能重新报一次。
     if (m_gateway->isAvailable())
         m_lastGatewayErr.clear();
@@ -262,8 +274,8 @@ void DevicesController::setProxyEnabled(const QString &mac, bool on)
             return;
         }
         if (!d->inLanSubnet) {
-            emit gatewayError(QStringLiteral("该设备不在主网卡所在网段，无法代理"
-                                            "（透明网关只能劫持同一张网卡下的同网段设备）"));
+            emit gatewayError(QStringLiteral("该设备不在本机任何一张网卡的网段内，无法代理"
+                                            "（透明网关只能劫持与本机同网段的设备）"));
             return;
         }
         if (!d->online || d->ip.isEmpty()) {

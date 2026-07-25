@@ -246,14 +246,23 @@ int runGatewaySelfTest()
         return 3;
     }
 #endif
-    auto *net = new NetStack(ep, socksPort, qApp);
-    if (!net->init(localMac, &err)) {
+    auto *net = new NetStack(socksPort, qApp);
+    if (!net->init(&err)) {
         std::fprintf(stderr, "SELFTEST: NetStack.init 失败: %s\n", err.toLatin1().constData());
+        return 3;
+    }
+    // 挂上这张（唯一的）测试网卡。本机 IP/掩码要让 victimIp 落在同一子网里——netif 的出方向
+    // 路由靠子网匹配（见 NetStack 头注释），默认 10.9.9.254/24 配默认 victim 10.9.9.1。
+    const QString selfIp = QString::fromLatin1(envOr("COAST_SELFTEST_LOCAL_IP", "10.9.9.254"));
+    const QString selfMask = QString::fromLatin1(envOr("COAST_SELFTEST_NETMASK", "255.255.255.0"));
+    if (!net->addNic(ep, localMac, selfIp, selfMask, &err)) {
+        std::fprintf(stderr, "SELFTEST: NetStack.addNic 失败: %s\n", err.toLatin1().constData());
         return 3;
     }
     // 关键：把二层收到的帧接进用户态栈。真实路径由 LanGateway 做此连接（并按 victim MAC 过滤）；
     // 自测直连 NetStack，必须在这里手动接线，否则读到的帧无人消费（= 之前 0 条 NETSTACK IN 的原因）。
-    QObject::connect(ep, &IL2Endpoint::frameReceived, net, &NetStack::inputFrame);
+    QObject::connect(ep, &IL2Endpoint::frameReceived, net,
+                     [net, ep](const QByteArray &f) { net->inputFrame(ep, f); });
     net->addDevice(victimIp, victimMac, expectUser);
     std::fprintf(stderr, "SELFTEST: 就绪 tap=%s victim=%s user=%s，等待 curl…\n",
                  tap.toLatin1().constData(), victimIp.toLatin1().constData(),

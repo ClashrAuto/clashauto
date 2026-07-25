@@ -297,27 +297,31 @@ void LanScanner::detectLocalTopology()
         m_netMask = f.mask;
     }
 
-    // 4) 主网卡的网关（网关劫持要用）：优先同网卡的默认路由，其次落在本网段内的，最后 base+1 兜底。
-    m_gatewayIp.clear();
-    for (const auto &r : routes) {
-        if (!r.second.isEmpty() && (r.second == m_localIp || r.second == m_ifaceName)) {
-            m_gatewayIp = r.first;
-            break;
-        }
-    }
-    if (m_gatewayIp.isEmpty() && m_netMask) {
+    // 4) **每张**物理网卡各自的网关（网关劫持要用，多网卡时每张卡都得有）：
+    //    优先同网卡的默认路由，其次落在该卡网段内的路由，最后 base+1 兜底。
+    for (LocalIface &f : m_physIfaces) {
+        f.gatewayIp.clear();
         for (const auto &r : routes) {
-            const quint32 gw = QHostAddress(r.first).toIPv4Address();
-            if (gw && (gw & m_netMask) == m_netBase) {
-                m_gatewayIp = r.first;
+            if (!r.second.isEmpty() && (r.second == f.ip || r.second == f.name)) {
+                f.gatewayIp = r.first;
                 break;
             }
         }
+        if (f.gatewayIp.isEmpty() && f.mask) {
+            for (const auto &r : routes) {
+                const quint32 gw = QHostAddress(r.first).toIPv4Address();
+                if (gw && (gw & f.mask) == f.base) {
+                    f.gatewayIp = r.first;
+                    break;
+                }
+            }
+        }
+        if (f.gatewayIp.isEmpty() && f.base)
+            f.gatewayIp = u32ToIp(f.base + 1);
+        if (!f.gatewayIp.isEmpty())
+            m_gatewayIps.insert(f.gatewayIp);
     }
-    if (m_gatewayIp.isEmpty() && m_netBase)
-        m_gatewayIp = u32ToIp(m_netBase + 1);
-    if (!m_gatewayIp.isEmpty())
-        m_gatewayIps.insert(m_gatewayIp);
+    m_gatewayIp = m_physIfaces.isEmpty() ? QString() : m_physIfaces.constFirst().gatewayIp;
 }
 
 QSet<QString> LanScanner::gatewayMacs() const
@@ -345,6 +349,41 @@ bool LanScanner::inPrimarySubnet(const QString &ip) const
     if (a.protocol() != QAbstractSocket::IPv4Protocol)
         return false;
     return (a.toIPv4Address() & m_netMask) == m_netBase;
+}
+
+// 落在**任意一张**物理网卡的网段里即可被劫持（有线接 A 路由、WiFi 接 B 路由 → 两边都能代理）。
+bool LanScanner::inAnyLanSubnet(const QString &ip) const
+{
+    if (ip.isEmpty())
+        return false;
+    const QHostAddress a(ip);
+    if (a.protocol() != QAbstractSocket::IPv4Protocol)
+        return false;
+    const quint32 v = a.toIPv4Address();
+    for (const LocalIface &f : m_physIfaces) {
+        if (f.base && f.mask && (v & f.mask) == f.base)
+            return true;
+    }
+    return false;
+}
+
+QVector<LanScanner::NicInfo> LanScanner::physicalNics() const
+{
+    QVector<NicInfo> out;
+    out.reserve(m_physIfaces.size());
+    for (const LocalIface &f : m_physIfaces) {
+        if (f.name.isEmpty() || f.ip.isEmpty() || f.mac.isEmpty() || !f.mask)
+            continue;
+        NicInfo n;
+        n.name = f.name;
+        n.ip = f.ip;
+        n.mac = f.mac;
+        n.netmask = QHostAddress(f.mask).toString();
+        n.gatewayIp = f.gatewayIp;
+        n.gatewayMac = m_arp.value(f.gatewayIp); // 扫过一轮后才有值；网关配置每轮刷新
+        out.append(n);
+    }
+    return out;
 }
 
 QVector<quint32> LanScanner::hostsToProbe() const
@@ -1012,7 +1051,7 @@ void LanScanner::emitSnapshot(bool final)
         d.vendor = !s.vendor.isEmpty() ? s.vendor : ouiVendor(mac);
         d.isGateway = m_gatewayIps.contains(ip) || gwMacs.contains(mac);
         d.isSelf = false;
-        d.inLanSubnet = inPrimarySubnet(ip);
+        d.inLanSubnet = inAnyLanSubnet(ip);
         d.autoType = d.isGateway ? DeviceType::Router
                                  : classify(mac, d.autoName, d.model, d.vendor, s.ports, s.services);
         out.append(d);
@@ -1122,7 +1161,7 @@ void LanScanner::refreshLiveness(const QStringList &knownIps)
                         d.online = true;
                         d.lastSeen = QDateTime::currentDateTime();
                         d.isGateway = m_gatewayIps.contains(ip) || gwMacs.contains(mac);
-                        d.inLanSubnet = inPrimarySubnet(ip);
+                        d.inLanSubnet = inAnyLanSubnet(ip);
                         out.append(d);
                     }
                     // 本机每张物理网卡都必须每轮上报，否则 15s 陈旧判定会把本机判成掉线。

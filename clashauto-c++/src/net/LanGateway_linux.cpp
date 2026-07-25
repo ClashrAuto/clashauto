@@ -15,6 +15,8 @@
 #include <QJsonObject>
 #include <QSet>
 #include <QStandardPaths>
+#include <QStringList>
+#include <QVector>
 
 namespace {
 // "aa:bb:cc:dd:ee:ff" → 6 字节（非法返回空）。
@@ -43,22 +45,39 @@ quint32 ipToU32(const QString &ip)
 }
 } // namespace
 
-struct LanGateway::Impl {
+// 一张物理网卡的运行时套件：二层端点 + ARP 投毒器 + 该卡的拓扑数值。
+struct GwNic {
+    LanGateway::NicSpec spec;
     IL2Endpoint *ep = nullptr;
     ArpSpoofer *arp = nullptr;
-    NetStack *net = nullptr;
-    LanGateway *owner = nullptr;
-
-    QString ifname, localIp, localMac, gatewayIp, gatewayMac;
-    quint16 socksPort = 0;
-    bool stackReady = false; // ep 打开 + net 初始化成功
-
-    // 同网段直连旁路用（主机序 quint32；netMask4==0 表示掩码未知 → 不旁路）。
     quint32 localIp4 = 0, netMask4 = 0, gatewayIp4 = 0;
+    bool ready = false;      // ep 已打开且 netif 已挂上协议栈
+    int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
+};
+
+struct LanGateway::Impl {
+    NetStack *net = nullptr;         // 共用（lwIP 单实例，多 netif）
+    LanGateway *owner = nullptr;
+    QHash<QString, GwNic *> nics;    // ifname → 套件
+    quint16 socksPort = 0;
 
     // 被劫持设备：src MAC(6 字节) → ip（帧过滤 + 记账）。
     QHash<QByteArray, QString> victimByMac;
     QHash<QString, QString> victimMacStr; // ip → mac 串（disable 用）
+    QHash<QString, QString> victimNic;    // ip → ifname（disable/持久化要找回对应那张卡）
+
+    // 按 IP 找它属于哪张已就绪网卡（同网段判定）。找不到返回 nullptr。
+    GwNic *nicForIp(const QString &ip) const
+    {
+        const quint32 v = ipToU32(ip);
+        if (!v)
+            return nullptr;
+        for (GwNic *n : nics) {
+            if (n->ready && n->netMask4 && (v & n->netMask4) == (n->localIp4 & n->netMask4))
+                return n;
+        }
+        return nullptr;
+    }
 
     // 崩溃恢复清单文件路径。
     QString statePath() const
@@ -67,20 +86,25 @@ struct LanGateway::Impl {
         QDir().mkpath(dir);
         return QDir(dir).filePath("gateway_active.json");
     }
+    // 每条 victim 自带它那张卡的还原所需信息：多网卡下不能再靠一份全局 ifname/gateway。
     void persist() const
     {
         QJsonArray arr;
         for (auto it = victimMacStr.constBegin(); it != victimMacStr.constEnd(); ++it) {
+            const QString ip = it.key();
             QJsonObject o;
-            o["ip"] = it.key();
+            o["ip"] = ip;
             o["mac"] = it.value();
+            const QString ifn = victimNic.value(ip);
+            if (GwNic *n = nics.value(ifn)) {
+                o["ifname"] = n->spec.ifname;
+                o["localMac"] = n->spec.localMac;
+                o["gatewayIp"] = n->spec.gatewayIp;
+                o["gatewayMac"] = n->spec.gatewayMac;
+            }
             arr.append(o);
         }
         QJsonObject root;
-        root["ifname"] = ifname;
-        root["localMac"] = localMac;
-        root["gatewayIp"] = gatewayIp;
-        root["gatewayMac"] = gatewayMac;
         root["victims"] = arr;
         QFile f(statePath());
         if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -102,47 +126,65 @@ LanGateway::~LanGateway()
     delete d;
 }
 
-void LanGateway::configure(const QString &ifname, const QString &localIp, const QString &localMac,
-                           const QString &gatewayIp, const QString &gatewayMac, quint16 socksPort,
-                           const QString &netmask)
+void LanGateway::configure(const QVector<NicSpec> &specs, quint16 socksPort)
 {
-    d->ifname = ifname;
-    d->localIp = localIp;
-    d->localMac = localMac;
-    d->gatewayIp = gatewayIp;
-    d->gatewayMac = gatewayMac;
     d->socksPort = socksPort;
-    // 供过滤 lambda 做同网段旁路（每次配置都刷新，跟随网段/网关变化）。
-    d->localIp4 = ipToU32(localIp);
-    d->gatewayIp4 = ipToU32(gatewayIp);
-    d->netMask4 = ipToU32(netmask);
 
-    // 首次或换网卡：建立/重建协议栈。有活动劫持时不贸然重建（避免断流）。
-    if (d->stackReady && !d->victimByMac.isEmpty())
-        return;
-
-    if (!d->ep) {
-        d->ep = createL2Endpoint(this);
-        if (!d->ep)
-            return; // 平台不支持
-    }
+    // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。
     QString err;
-    if (!d->ep->isOpen()) {
-        if (!d->ep->open(ifname, &err)) {
-            emit deviceError(QString(), QStringLiteral("打开网卡失败: ") + err);
-            return;
-        }
-    }
     if (!d->net) {
-        d->net = new NetStack(d->ep, socksPort, this);
-        if (!d->net->init(d->ep->localMac(), &err)) {
+        d->net = new NetStack(socksPort, this);
+        if (!d->net->init(&err)) {
             emit deviceError(QString(), QStringLiteral("协议栈初始化失败: ") + err);
             d->net->deleteLater();
             d->net = nullptr;
             return;
         }
-        // 二层帧过滤：只把被劫持设备发来的帧喂进用户态栈。
-        connect(d->ep, &IL2Endpoint::frameReceived, this, [this](const QByteArray &frame) {
+    }
+
+    QSet<QString> seen;
+    for (const NicSpec &spec : specs) {
+        if (spec.ifname.isEmpty() || spec.localIp.isEmpty() || spec.localMac.isEmpty())
+            continue;
+        seen.insert(spec.ifname);
+        GwNic *n = d->nics.value(spec.ifname);
+        if (!n) {
+            n = new GwNic;
+            n->spec = spec;
+            d->nics.insert(spec.ifname, n);
+        }
+        // 拓扑数值每次都刷新（网关 MAC 常常是扫描几轮后才解析出来的）。
+        n->spec = spec;
+        n->localIp4 = ipToU32(spec.localIp);
+        n->gatewayIp4 = ipToU32(spec.gatewayIp);
+        n->netMask4 = ipToU32(spec.netmask);
+        if (n->arp)
+            n->arp->configure(spec.localMac, spec.gatewayIp, spec.gatewayMac);
+
+        if (n->ready)
+            continue; // 已就绪：只刷新拓扑，不重建（重建会断掉这张卡上的活动劫持）
+        if (!n->netMask4) {
+            // 没有有效掩码就没法给 netif 定路由，也没法做同网段旁路——这张卡直接不启用。
+            continue;
+        }
+        if (!n->ep) {
+            n->ep = createL2Endpoint(this);
+            if (!n->ep)
+                break; // 平台不支持，后面几张也没必要试（仍要走下面的摘卡清理）
+        }
+        if (!n->ep->isOpen() && !n->ep->open(spec.ifname, &err)) {
+            emit deviceError(QString(),
+                             QStringLiteral("打开网卡失败(%1): ").arg(spec.ifname) + err);
+            continue;
+        }
+        if (!d->net->hasNic(n->ep)
+            && !d->net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask, &err)) {
+            emit deviceError(QString(),
+                             QStringLiteral("协议栈挂载网卡失败(%1): ").arg(spec.ifname) + err);
+            continue;
+        }
+        // 二层帧过滤：只把被劫持设备发来的帧喂进用户态栈（按这张卡的网段做旁路判断）。
+        connect(n->ep, &IL2Endpoint::frameReceived, this, [this, n](const QByteArray &frame) {
             if (frame.size() < 12)
                 return;
             const QByteArray src = frame.mid(6, 6);
@@ -152,35 +194,69 @@ void LanGateway::configure(const QString &ifname, const QString &localIp, const 
             // 让它照常二层直达——设备回给本机 LAN IP 的包若被 lwIP 终结会触发 RST，导致本机无法
             // 直连该设备（SSH/网页/共享）；同理 LAN 内设备互访也不该被代理绕行。只有真正出网
             // （目的在子网外）或发往网关 IP（DNS/路由器后台等，其 ARP 被投毒必须由我们接管）的帧进栈。
-            if (d->netMask4 != 0 && frame.size() >= 34) {
+            if (n->netMask4 != 0 && frame.size() >= 34) {
                 const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
                 const quint16 ethType = (quint16(f[12]) << 8) | f[13];
                 if (ethType == 0x0800) { // IPv4
                     const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
                                         | (quint32(f[32]) << 8) | quint32(f[33]);
-                    const bool sameSubnet = (dst & d->netMask4) == (d->localIp4 & d->netMask4);
-                    if (sameSubnet && dst != d->gatewayIp4)
+                    const bool sameSubnet = (dst & n->netMask4) == (n->localIp4 & n->netMask4);
+                    if (sameSubnet && dst != n->gatewayIp4)
                         return; // LAN 内直连，放行给系统
                 }
             }
-            d->net->inputFrame(frame);
+            d->net->inputFrame(n->ep, frame);
         });
+        if (!n->arp) {
+            n->arp = new ArpSpoofer(n->ep, this);
+            n->arp->configure(spec.localMac, spec.gatewayIp, spec.gatewayMac);
+        }
+        n->ready = true;
     }
-    if (!d->arp)
-        d->arp = new ArpSpoofer(d->ep, this);
-    d->arp->configure(localMac, gatewayIp, gatewayMac);
-    d->stackReady = true;
+
+    // 消失的网卡（拔网线/断 WiFi）：没有活动劫持的直接摘掉，有的先留着等 disable 收尾。
+    const QStringList known = d->nics.keys();
+    for (const QString &ifn : known) {
+        if (seen.contains(ifn))
+            continue;
+        GwNic *n = d->nics.value(ifn);
+        if (!n || n->victims > 0)
+            continue;
+        if (n->ep) {
+            // **先断信号再删**：帧过滤 lambda 捕获了 n，而 deleteLater 要到下一轮事件循环才生效——
+            // 这中间若再收到一帧，就会用到已 delete 的 n（use-after-free）。
+            disconnect(n->ep, nullptr, this, nullptr);
+            if (d->net)
+                d->net->removeNic(n->ep);
+            n->ep->deleteLater();
+        }
+        if (n->arp)
+            n->arp->deleteLater();
+        d->nics.remove(ifn);
+        delete n;
+    }
 }
 
 bool LanGateway::isAvailable() const
 {
-    return d->ep != nullptr && d->ep->isOpen() && d->stackReady;
+    if (!d->net)
+        return false;
+    for (GwNic *n : d->nics) {
+        if (n->ready && n->ep && n->ep->isOpen())
+            return true;
+    }
+    return false;
+}
+
+bool LanGateway::canProxy(const QString &ip) const
+{
+    return d->nicForIp(ip) != nullptr;
 }
 
 bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QString &socksUser,
                               QString *err)
 {
-    if (!d->stackReady) {
+    if (!d->net || !isAvailable()) {
         if (err)
             *err = QStringLiteral("网关未就绪（需要 root/CAP_NET_RAW，或网卡未配置）");
         return false;
@@ -194,10 +270,20 @@ bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QStri
     if (d->victimMacStr.contains(ip))
         return true; // 已在劫持
 
+    // 按设备 IP 落在哪张卡的子网里选那套 {端点, ArpSpoofer}——这就是多网卡同时可代理的入口。
+    GwNic *n = d->nicForIp(ip);
+    if (!n) {
+        if (err)
+            *err = QStringLiteral("该设备不在任何已就绪网卡的网段内");
+        return false;
+    }
+
     d->net->addDevice(ip, mb, socksUser);
-    d->arp->startSpoof(mac, ip);
+    n->arp->startSpoof(mac, ip);
+    ++n->victims;
     d->victimByMac.insert(mb, ip);
     d->victimMacStr.insert(ip, mac);
+    d->victimNic.insert(ip, n->spec.ifname);
     d->persist();
     emit statusChanged();
     return true;
@@ -209,12 +295,17 @@ void LanGateway::disableDevice(const QString &mac)
     const QString ip = d->victimByMac.value(mb);
     if (ip.isEmpty())
         return;
-    if (d->arp)
-        d->arp->stopSpoof(mac); // 内部会 heal（还原 ARP）
+    if (GwNic *n = d->nics.value(d->victimNic.value(ip))) {
+        if (n->arp)
+            n->arp->stopSpoof(mac); // 内部会 heal（还原 ARP）
+        if (n->victims > 0)
+            --n->victims;
+    }
     if (d->net)
         d->net->removeDevice(ip);
     d->victimByMac.remove(mb);
     d->victimMacStr.remove(ip);
+    d->victimNic.remove(ip);
     if (d->victimMacStr.isEmpty())
         d->clearState();
     else
@@ -224,8 +315,12 @@ void LanGateway::disableDevice(const QString &mac)
 
 void LanGateway::disableAll()
 {
-    if (d->arp)
-        d->arp->healAll();
+    // 每张卡都要还原：漏掉任何一张，那张卡上的设备会一直用着被投毒的 ARP → 断网。
+    for (GwNic *n : d->nics) {
+        if (n->arp)
+            n->arp->healAll();
+        n->victims = 0;
+    }
     if (d->net) {
         const QStringList ips = d->victimMacStr.keys();
         for (const QString &ip : ips)
@@ -233,6 +328,7 @@ void LanGateway::disableAll()
     }
     d->victimByMac.clear();
     d->victimMacStr.clear();
+    d->victimNic.clear();
     d->clearState();
     emit statusChanged();
 }
@@ -250,22 +346,36 @@ void LanGateway::recoverFromCrash()
         return;
     }
     // 用上次留下的网卡/网关信息，给这些设备发还原 ARP（先修复被投毒的缓存，避免设备断网）。
-    const QString ifname = root["ifname"].toString();
-    const QString localMac = root["localMac"].toString();
-    const QString gatewayIp = root["gatewayIp"].toString();
-    const QString gatewayMac = root["gatewayMac"].toString();
-    IL2Endpoint *ep = createL2Endpoint(this);
-    if (ep && ep->open(ifname, nullptr)) {
-        ArpSpoofer healer(ep, this);
-        healer.configure(localMac, gatewayIp, gatewayMac);
-        for (const QJsonValue &v : victims) {
-            const QJsonObject o = v.toObject();
-            healer.startSpoof(o["mac"].toString(), o["ip"].toString());
-            healer.stopSpoof(o["mac"].toString()); // startSpoof 建档、stopSpoof 立刻 heal
-        }
+    // 多网卡：victim 按 ifname 分组，每张卡各开一次端点还原自己那批。
+    // 兼容旧格式（字段在 root 上、只有一张卡）：取不到 per-victim 字段就回落到 root。
+    QHash<QString, QVector<QJsonObject>> byIface;
+    for (const QJsonValue &v : victims) {
+        const QJsonObject o = v.toObject();
+        const QString ifn = o.contains("ifname") ? o["ifname"].toString()
+                                                 : root["ifname"].toString();
+        byIface[ifn].append(o);
     }
-    if (ep)
-        ep->deleteLater();
+    for (auto it = byIface.constBegin(); it != byIface.constEnd(); ++it) {
+        const QString ifname = it.key();
+        if (ifname.isEmpty())
+            continue;
+        const QVector<QJsonObject> &group = it.value();
+        const QJsonObject &first = group.constFirst();
+        const auto field = [&](const char *k) {
+            return first.contains(k) ? first[k].toString() : root[k].toString();
+        };
+        IL2Endpoint *ep = createL2Endpoint(this);
+        if (ep && ep->open(ifname, nullptr)) {
+            ArpSpoofer healer(ep, this);
+            healer.configure(field("localMac"), field("gatewayIp"), field("gatewayMac"));
+            for (const QJsonObject &o : group) {
+                healer.startSpoof(o["mac"].toString(), o["ip"].toString());
+                healer.stopSpoof(o["mac"].toString()); // startSpoof 建档、stopSpoof 立刻 heal
+            }
+        }
+        if (ep)
+            ep->deleteLater();
+    }
     d->clearState();
 }
 
