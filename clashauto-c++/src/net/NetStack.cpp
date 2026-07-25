@@ -332,9 +332,7 @@ bool NetStack::init(const QByteArray &localMac6, QString *err)
             *err = QStringLiteral("tcp_new 失败");
         return false;
     }
-    ip_addr_t anyIp;
-    ip_addr_set_any(false, &anyIp);
-    tcp_bind(pcb, &anyIp, 0);
+    tcp_bind(pcb, IP_ADDR_ANY, 0); // 绑任意 IP + 端口 0（配合 tcp_in.c 补丁通配任意目的端口）
     d->listener = tcp_listen_with_backlog(pcb, TCP_DEFAULT_LISTEN_BACKLOG);
     if (!d->listener) {
         tcp_close(pcb);

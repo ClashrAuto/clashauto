@@ -33,12 +33,15 @@ public:
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。
     void inputFrame(const QByteArray &frame);
 
+    // 前置声明公开（定义仍在 .cpp）：让 .cpp 内的自由函数/lwIP C 回调（在匿名命名空间里）
+    // 能命名该类型。不暴露任何实现细节。
+    struct Impl;
+
 private:
     // UDP（含 DNS）不走 lwIP：手工解析设备发出的 UDP → Socks5Udp 转发；回程手工封包发回设备。
     void handleUdpFrame(const QByteArray &frame, int ihl);
     void onUdpResponse(const QString &victimIp, const QHostAddress &fromIp, quint16 fromPort,
                        const QByteArray &payload);
 
-    struct Impl;
     Impl *d;
 };
