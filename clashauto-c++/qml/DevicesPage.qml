@@ -26,6 +26,10 @@ Item {
         default: return qsTr("未知设备");
         }
     }
+    // 类型覆盖下拉：unknown = 自动识别，其余为手动指定。
+    readonly property var typeKeys: ["unknown", "phone", "tablet", "computer", "router",
+                                     "tvbox", "speaker", "printer", "camera", "game", "nas", "iot"]
+    function typeOverrideName(k) { return k === "unknown" ? qsTr("自动识别") : typeName(k); }
     readonly property var modeKeys: ["follow", "rule", "global", "direct", "reject"]
     function modeName(k) {
         switch (k) {
@@ -66,6 +70,33 @@ Item {
                        font.pixelSize: 12; color: "#b14a4a" }
             }
             Item { Layout.fillWidth: true }
+            // 新设备提醒（蹭网检测）开关
+            Row {
+                spacing: 5
+                Text { text: qsTr("新设备提醒"); font.pixelSize: 11; color: Theme.textMuted
+                       anchors.verticalCenter: parent.verticalCenter }
+                Rectangle {
+                    width: 34; height: 18; radius: 9
+                    anchors.verticalCenter: parent.verticalCenter
+                    color: devices.newDeviceAlert ? Theme.accent : Theme.switchTrackOff
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                    Rectangle {
+                        width: 14; height: 14; radius: 7; y: 2
+                        x: devices.newDeviceAlert ? parent.width - width - 2 : 2
+                        color: "#ffffff"
+                        Behavior on x { NumberAnimation { duration: 120 } }
+                    }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: devices.newDeviceAlert = !devices.newDeviceAlert }
+                }
+            }
+            // 导出 CSV
+            Text {
+                text: qsTr("导出")
+                font.pixelSize: 11; color: Theme.accent
+                HoverHandler { cursorShape: Qt.PointingHandCursor }
+                TapHandler { onTapped: devices.exportCsv() }
+            }
             Text { text: qsTr("网关 ") + (devices.gatewayIp || "-")
                    font.pixelSize: 11; color: Theme.textMuted }
         }
@@ -320,6 +351,24 @@ Item {
                             }
                         }
 
+                        // 手动改类型（覆盖自动识别）
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text { text: qsTr("类型"); font.pixelSize: 12; color: Theme.textMuted
+                                   Layout.preferredWidth: 64 }
+                            ComboBox {
+                                id: typeCombo
+                                Layout.preferredWidth: 150
+                                Layout.preferredHeight: 28
+                                font.pixelSize: 12
+                                model: page.typeKeys.map(function (k) { return page.typeOverrideName(k); })
+                                currentIndex: Math.max(0, page.typeKeys.indexOf(detailCol.dev.typeOverride || "unknown"))
+                                onActivated: devices.setTypeOverride(devices.selectedMac, page.typeKeys[currentIndex])
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
                         // —— 实时流量卡 ——
                         Rectangle {
                             Layout.fillWidth: true
@@ -405,6 +454,26 @@ Item {
                                    visible: page.modeKeys[modeCombo.currentIndex] !== "global" }
                         }
 
+                        // —— 常用域名（Top 5，按累计字节）——
+                        Text {
+                            text: qsTr("常用域名")
+                            font.pixelSize: 14; color: Theme.textPrimary
+                            visible: (detailCol.dev.topDomains || []).length > 0
+                        }
+                        Repeater {
+                            model: detailCol.dev.topDomains || []
+                            delegate: RowLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Text { text: modelData.host; font.pixelSize: 11
+                                       color: Theme.textSecondary; elide: Text.ElideRight
+                                       Layout.fillWidth: true }
+                                Text { text: Theme.fmtBytes(modelData.bytes); font.pixelSize: 11
+                                       color: Theme.textMuted }
+                            }
+                        }
+
                         // —— 该设备连接列表（实时热更新）——
                         RowLayout {
                             Layout.fillWidth: true
@@ -483,5 +552,30 @@ Item {
             if (devices.selectedMac !== "")
                 devChart.push(devices.selectedDevice.rateDown || 0);
         }
+        function onCsvExported(path) { noticeBar.show(qsTr("已导出到 ") + path); }
+        function onGatewayError(msg) { noticeBar.show(msg); }
+    }
+
+    // 右下角浮动提示（导出成功 / 出错），3.5s 自动消失。
+    Rectangle {
+        id: noticeBar
+        property string msg: ""
+        visible: msg !== ""
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.margins: 12
+        radius: 5
+        color: Qt.rgba(0, 0, 0, 0.78)
+        implicitWidth: noticeTxt.implicitWidth + 20
+        implicitHeight: noticeTxt.implicitHeight + 12
+        Text {
+            id: noticeTxt
+            anchors.centerIn: parent
+            text: noticeBar.msg
+            color: "#ffffff"
+            font.pixelSize: 12
+        }
+        Timer { id: noticeTimer; interval: 3500; onTriggered: noticeBar.msg = "" }
+        function show(m) { msg = m; noticeTimer.restart(); }
     }
 }

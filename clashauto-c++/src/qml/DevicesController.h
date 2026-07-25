@@ -42,6 +42,8 @@ class DevicesController final : public QObject
     // 透明网关是否就绪（Linux 且有 CAP_NET_RAW/root 且网卡已配置）。QML 据此决定代理开关是否真正生效
     // 或显示提示。随拓扑/配置变化，走 topologyChanged 通知重取。
     Q_PROPERTY(bool gatewayReady READ gatewayReady NOTIFY topologyChanged)
+    // 新设备提醒（蹭网检测）：首轮扫描后再发现的新设备 → 托盘通知。QSettings 持久化。
+    Q_PROPERTY(bool newDeviceAlert READ newDeviceAlert WRITE setNewDeviceAlert NOTIFY newDeviceAlertChanged)
 
 public:
     DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
@@ -70,6 +72,10 @@ public:
     Q_INVOKABLE void setTypeOverride(const QString &mac, const QString &typeKey);
     Q_INVOKABLE void setPolicy(const QString &mac, const QString &modeKey, const QString &target);
     Q_INVOKABLE void closeDeviceConnections(const QString &mac); // 断开该设备全部活动连接
+    Q_INVOKABLE void exportCsv();                                // 导出设备列表为 CSV（弹保存对话框）
+
+    bool newDeviceAlert() const { return m_newDeviceAlert; }
+    void setNewDeviceAlert(bool on);
 
 signals:
     void scanningChanged();
@@ -77,6 +83,9 @@ signals:
     void overviewChanged();
     void selectedChanged();
     void gatewayError(const QString &message); // 开代理失败（无权限/网卡等）——QML 可提示
+    void newDeviceAlertChanged();
+    void newDeviceFound(const QString &name);  // 首轮后发现新设备 → main 连到托盘通知
+    void csvExported(const QString &path);     // 导出完成 → QML 可提示路径
 
 private:
     void onDiscovered(const QVector<class DeviceRecord> &devices);
@@ -103,9 +112,15 @@ private:
     QVariantMap m_selectedDevice;
     qint64 m_totalRateUp = 0, m_totalRateDown = 0;
 
+    void onDeviceAdded(const QString &mac); // store.deviceAdded → 首轮后发提醒
+
     // 每设备的会话累计（单调，算速率 + 落台账）。key = mac。
     struct Prev { qint64 up = 0, down = 0; qint64 elapsedMs = 0; };
     QHash<QString, Prev> m_prev;
+    // 每设备 域名→累计字节（Top 域名排行）。key = mac。
+    QHash<QString, QHash<QString, qint64>> m_devDomains;
+    bool m_newDeviceAlert = true;
+    bool m_firstScanDone = false;
     // 每连接 id → 上次累计字节 (down,up)：逐连接取增量，避免连接关闭时和值回退。
     QHash<QString, QPair<qint64, qint64>> m_connBytes;
     QElapsedTimer m_clock;

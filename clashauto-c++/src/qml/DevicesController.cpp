@@ -6,11 +6,16 @@
 #include "../net/LanGateway.h"
 
 #include <QDateTime>
+#include <QFile>
+#include <QFileDialog>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSet>
+#include <QSettings>
 #include <QStringList>
+#include <QTextStream>
 #include <QTimer>
+#include <algorithm>
 
 DevicesController::DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
                                     LanGateway *gateway, QObject *parent)
@@ -31,6 +36,11 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
         refreshModel();
         rebuildSelected();
     });
+    // 新设备提醒：首轮扫描后再出现的新设备 → 发信号（main 连托盘）。
+    connect(m_store, &DeviceStore::deviceAdded, this, &DevicesController::onDeviceAdded);
+
+    // 读持久化的「新设备提醒」偏好（org/app 已在 main 设为 Coast）。
+    m_newDeviceAlert = QSettings().value(QStringLiteral("devices/newDeviceAlert"), true).toBool();
 
     m_livenessTimer = new QTimer(this);
     m_livenessTimer->setInterval(5000);
@@ -64,9 +74,29 @@ void DevicesController::ensureGatewayConfigured()
                          m_scanner->gatewayIp(), m_scanner->gatewayMac(), DeviceStore::kGatewayPort);
 }
 
+void DevicesController::onDeviceAdded(const QString &mac)
+{
+    // 首轮扫描的设备在 mergeDiscovered 内触发（此时 m_firstScanDone 仍为 false）→ 不提醒，避免刷屏。
+    if (!m_firstScanDone || !m_newDeviceAlert)
+        return;
+    const DeviceRecord *d = m_store->find(mac);
+    if (d && !d->isSelf)
+        emit newDeviceFound(d->displayName());
+}
+
+void DevicesController::setNewDeviceAlert(bool on)
+{
+    if (on == m_newDeviceAlert)
+        return;
+    m_newDeviceAlert = on;
+    QSettings().setValue(QStringLiteral("devices/newDeviceAlert"), on);
+    emit newDeviceAlertChanged();
+}
+
 void DevicesController::onDiscovered(const QVector<DeviceRecord> &devices)
 {
     m_store->mergeDiscovered(devices);
+    m_firstScanDone = true; // 首轮已并完 → 之后 deviceAdded 才提醒
     // 离线判定：本轮快照没刷新到、且 lastSeen 超 15s 的设备置离线（宽限 15s≈3 轮 5s 热更新，
     // 避免单次探测丢包造成的在线/离线抖动）。先收集 mac 再统一标记，避免边遍历边改的再入。
     const QDateTime now = QDateTime::currentDateTime();
@@ -156,6 +186,27 @@ void DevicesController::rebuildSelected()
         m_selectedDevice["onlineSince"] = d->onlineSince.isValid()
                                               ? d->onlineSince.toMSecsSinceEpoch() : 0;
         m_selectedDevice["protectable"] = !(d->isSelf || d->isGateway); // 可劫持（本机/网关不可）
+
+        // Top 域名（按累计字节降序取前 5）。
+        QVariantList top;
+        const auto it = m_devDomains.constFind(m_selectedMac);
+        if (it != m_devDomains.constEnd()) {
+            QVector<QPair<QString, qint64>> v;
+            v.reserve(it->size());
+            for (auto h = it->constBegin(); h != it->constEnd(); ++h)
+                v.append({h.key(), h.value()});
+            std::sort(v.begin(), v.end(),
+                      [](const QPair<QString, qint64> &a, const QPair<QString, qint64> &b) {
+                          return a.second > b.second;
+                      });
+            for (int i = 0; i < v.size() && i < 5; ++i) {
+                QVariantMap e;
+                e["host"] = v[i].first;
+                e["bytes"] = static_cast<double>(v[i].second);
+                top.append(e);
+            }
+        }
+        m_selectedDevice["topDomains"] = top;
     }
     emit selectedChanged();
 }
@@ -215,6 +266,36 @@ void DevicesController::closeDeviceConnections(const QString &mac)
                 m_clash->closeConnection(c.value("id").toString());
         }
     });
+}
+
+void DevicesController::exportCsv()
+{
+    const QString path = QFileDialog::getSaveFileName(nullptr, QStringLiteral("导出设备列表"),
+                                                      QStringLiteral("devices.csv"),
+                                                      QStringLiteral("CSV (*.csv)"));
+    if (path.isEmpty())
+        return;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        emit gatewayError(QStringLiteral("导出失败：无法写入 ") + path);
+        return;
+    }
+    auto q = [](const QString &s) -> QString { // CSV 转义：含逗号/引号/换行则加引号并转义引号
+        if (s.contains(',') || s.contains('"') || s.contains('\n'))
+            return '"' + QString(s).replace('"', "\"\"") + '"';
+        return s;
+    };
+    QTextStream out(&f); // Qt6 QTextStream 默认 UTF-8
+    out << "name,ip,mac,type,vendor,model,online,proxied,totalDown,totalUp,firstSeen\n";
+    for (const DeviceRecord &d : m_store->devices()) {
+        out << q(d.displayName()) << ',' << d.ip << ',' << d.mac << ','
+            << DeviceStore::typeKey(d.effectiveType()) << ',' << q(d.vendor) << ',' << q(d.model)
+            << ',' << (d.online ? '1' : '0') << ',' << (d.proxyEnabled ? '1' : '0') << ','
+            << d.totalDown << ',' << d.totalUp << ','
+            << (d.firstSeen.isValid() ? d.firstSeen.toString(Qt::ISODate) : QString()) << '\n';
+    }
+    f.close();
+    emit csvExported(path);
 }
 
 void DevicesController::pollConnections()
@@ -290,6 +371,10 @@ void DevicesController::aggregate(const QVariantList &conns)
         acc.first += dd;
         acc.second += du;
         devConn[mac] += 1;
+        // Top 域名：按 host 累计该设备的字节增量。
+        const QString host = m.value("host").toString();
+        if (!host.isEmpty() && (dd > 0 || du > 0))
+            m_devDomains[mac][host] += dd + du;
     }
     // 清理本拍未出现的连接 id（已关闭，字节已计入）。
     for (auto it = connBytes.begin(); it != connBytes.end();) {

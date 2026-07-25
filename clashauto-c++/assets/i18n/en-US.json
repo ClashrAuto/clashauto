@@ -216,5 +216,12 @@
   "已标记代理此设备；透明网关模块启用后将自动接管其流量。": "This device is marked for proxying; the transparent gateway will take over its traffic once enabled.",
   "为该设备起个名字": "Give this device a name",
   "暂无经代理的连接": "No proxied connections yet",
-  "网关 ": "Gateway "
+  "网关 ": "Gateway ",
+  "新设备提醒": "New-device alert",
+  "导出": "Export",
+  "常用域名": "Top domains",
+  "自动识别": "Auto-detect",
+  "发现新设备": "New device found",
+  "已导出到 ": "Exported to ",
+  "导出设备列表": "Export device list"
 }

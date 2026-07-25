@@ -110,6 +110,11 @@ int main(int argc, char *argv[])
     QObject::connect(&app, &QCoreApplication::aboutToQuit, deviceStore, &DeviceStore::save);
     // 退出必须可靠还原所有被劫持设备的 ARP（否则设备断网）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, lanGateway, &LanGateway::disableAll);
+    // 新设备提醒（蹭网检测）：首轮扫描后发现新设备 → 托盘气泡。
+    QObject::connect(devicesCtrl, &DevicesController::newDeviceFound, tray,
+                     [tray](const QString &name) {
+                         tray->notify(QCoreApplication::translate("Devices", "发现新设备"), name);
+                     });
 
     // 托盘 toggle → 后端（与 Widgets 版契约一致）。核心生命周期仍由用户显式触发。
     // 增强(TUN) 走 bridge.toggleTun（而非直连 core）：Windows 上开启且非提权时先弹 UAC 提权重启，
