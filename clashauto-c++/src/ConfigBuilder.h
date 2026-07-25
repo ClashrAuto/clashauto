@@ -37,6 +37,7 @@ private:
     QVector<Subscription> readSubscriptions() const;
     QString applySubscriptions(QString yaml, const QVector<Subscription> &subscriptions) const;
     QString applyCustomRules(QString yaml) const;
+    QString applyDevicePolicies(QString yaml) const; // 设备台账 devices.json → 网关 SOCKS listener + IN-USER 规则
     QString addToFirstGroup(QString yaml, const QStringList &names) const;
     QString replaceTopLevelProxies(QString yaml, const QString &proxyBlock) const;
     QString replaceProxyListAt(QString yaml, qsizetype proxiesKey, const QStringList &values) const;

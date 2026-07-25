@@ -43,6 +43,7 @@ public:
     QString localIp() const { return m_localIp; }
     QString localMac() const { return m_localMac; }
     QString gatewayIp() const { return m_gatewayIp; }
+    QString gatewayMac() const { return m_arp.value(m_gatewayIp); } // 网关 MAC（本轮 ARP 表里）
     QString interfaceName() const { return m_ifaceName; }
 
 signals:

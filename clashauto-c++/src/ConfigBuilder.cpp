@@ -1,5 +1,7 @@
 #include "ConfigBuilder.h"
 
+#include "DeviceStore.h" // socksUser() / kGatewayPort / DevicePolicyMode 派生须与此处生成的规则一致
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -47,6 +49,7 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = normalizeEmptyProxies(yaml);
     yaml = applySubscriptions(yaml, readSubscriptions());
     yaml = applyCustomRules(yaml);
+    yaml = applyDevicePolicies(yaml);
 
     const QString fullPath = QDir(m_config.configDir).filePath("full.yaml");
     writeText(fullPath, yaml);
@@ -394,6 +397,115 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
         const QString rule = (type == "MATCH")
             ? QString("%1,%2").arg(type, node)
             : QString("%1,%2,%3").arg(type, val, node);
+        ruleLines += QString("  - %1\n").arg(yamlQuote(rule));
+    }
+    if (!ruleLines.isEmpty()) {
+        const qsizetype rulesPos = yaml.indexOf("\nrules:");
+        if (rulesPos >= 0) {
+            const qsizetype lineEnd = yaml.indexOf('\n', rulesPos + 1);
+            if (lineEnd >= 0) {
+                yaml.insert(lineEnd + 1, ruleLines);
+            }
+        }
+    }
+
+    return yaml;
+}
+
+QString ConfigBuilder::applyDevicePolicies(QString yaml) const
+{
+    // 消费「设备」页写入的 configDir/devices.json（纯 JSON，非 YAML 手术）：
+    //   为每台开启「代理网络」的设备派生一个 mihomo SOCKS 用户名 dev-<去冒号小写 mac>，
+    //   并据此生成两样东西：
+    //     1) 一个专用的 socks inbound listener（coast-gateway，端口 kGatewayPort=7899），
+    //        带 per-user users: 认证——被劫持设备的流量经此口带用户名进核心。**主混合口
+    //        (7890) 仍保持免认证**，Coast 自己的测速走 7890 不受影响。
+    //     2) 对非 follow/非 rule 的设备，前插 IN-USER 规则到 rules: 顶部，按用户名分流。
+    //   mihomo schema 假设：listeners 的 per-user `users:` 与 `IN-USER` 规则类型均被用户当前
+    //   mihomo 构建支持（用户已确认）——标准 clash 内核可能不支持，届时核心会在 -t 校验时报错。
+    const QString devicesPath = QDir(m_config.configDir).filePath("devices.json");
+    QFile file(devicesPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return yaml; // 台账不存在（还没发现/编辑过设备）→ 不改动
+    }
+    const QJsonArray devices = QJsonDocument::fromJson(file.readAll()).array();
+    file.close();
+
+    // 收集开启代理的设备：用户名 + 策略（顺序保留，规则前插时按此顺序）
+    struct ProxyDevice {
+        QString user;
+        QString mode;   // follow / rule / global / direct / reject
+        QString target; // global 模式的目标节点/组名
+    };
+    QVector<ProxyDevice> proxied;
+    for (const QJsonValue &value : devices) {
+        const QJsonObject obj = value.toObject();
+        if (!obj.value("proxyEnabled").toBool()) {
+            continue;
+        }
+        const QString mac = obj.value("mac").toString().trimmed();
+        if (mac.isEmpty()) {
+            continue;
+        }
+        const QString user = DeviceStore::socksUser(mac);
+        if (user.isEmpty()) {
+            continue; // 非法 mac → socksUser 返回空，跳过（否则会写出坏用户名）
+        }
+        ProxyDevice dev;
+        dev.user = user;
+        dev.mode = obj.value("policyMode").toString().trimmed();
+        dev.target = obj.value("policyTarget").toString().trimmed();
+        proxied.push_back(dev);
+    }
+
+    if (proxied.isEmpty()) {
+        return yaml; // 没有任何设备开代理 → 不生成 listener / 规则
+    }
+
+    // 1) 生成 coast-gateway listener（>=1 台代理设备时才发）。严格 2 空格 YAML 缩进：
+    //    listeners:(0) -> - name:(2) -> 字段(4) -> users:(4) -> - username:(6) -> password:(8)
+    QString block = "listeners:\n";
+    block += "  - name: coast-gateway\n";
+    block += "    type: socks\n";
+    block += "    listen: 127.0.0.1\n";
+    block += QString("    port: %1\n").arg(DeviceStore::kGatewayPort);
+    block += "    users:\n";
+    for (const ProxyDevice &dev : proxied) {
+        block += QString("      - username: %1\n").arg(dev.user); // dev-<hex>，纯 ascii 无需引号
+        block += "        password: coast\n"; // 密码固定字面量 coast，与 LanGateway 拨号一致
+    }
+
+    // 若已存在我们上轮生成的顶层 listeners: 块，整块替换（从 listeners: 到下一个顶层键为止，
+    // 用与 mergePlugin 相同的「顶层键 + 后续缩进行」正则匹配）；否则追加到文件末尾。
+    const QRegularExpression listenersBlock(
+        QStringLiteral("(?m)^listeners:\\n(?:(?:  |\\t)[^\\n]*(?:\\n|$))+"));
+    if (listenersBlock.match(yaml).hasMatch()) {
+        yaml.replace(listenersBlock, block);
+    } else {
+        if (!yaml.endsWith('\n')) {
+            yaml.append('\n');
+        }
+        yaml.append('\n').append(block); // 空行分隔，风格对齐 mergePlugin
+    }
+
+    // 2) 非 follow/非 rule 的设备 → 前插 IN-USER 规则到 rules: 顶部（follow/rule 走正常规则，不发）。
+    //    前插方式对齐 applyCustomRules：定位 "\nrules:"，在该行行尾后插入规则块，使其优先命中。
+    QString ruleLines;
+    for (const ProxyDevice &dev : proxied) {
+        QString target;
+        if (dev.mode == "reject") {
+            target = "REJECT";
+        } else if (dev.mode == "direct") {
+            target = "DIRECT";
+        } else if (dev.mode == "global") {
+            if (dev.target.isEmpty()) {
+                continue; // global 但没指定目标 → 跳过这台，避免写出悬空引用
+            }
+            target = dev.target;
+        } else {
+            continue; // follow / rule（及未知值）不生成 IN-USER 规则
+        }
+        const QString rule = QString("IN-USER,%1,%2").arg(dev.user, target);
         ruleLines += QString("  - %1\n").arg(yamlQuote(rule));
     }
     if (!ruleLines.isEmpty()) {

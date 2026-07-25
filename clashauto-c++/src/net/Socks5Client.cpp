@@ -1,0 +1,575 @@
+#include "Socks5Client.h"
+
+#include <QNetworkDatagram>
+#include <QTcpSocket>
+#include <QUdpSocket>
+
+// 说明：这里手写 SOCKS5（RFC1928 + 用户名/密码认证 RFC1929）。之所以不用 QNetworkProxy，是因为
+// 我们要「每设备唯一用户名」认证（user=dev-<mac>，密码恒 "coast"），让 mihomo 侧靠 IN-USER 规则
+// 做每设备分流/流量归属——QNetworkProxy 的凭据模型套不进这套自定义握手，且我们要拿到裸字节管道
+// （TCP CONNECT）与 UDP ASSOCIATE 中继端点，直接对接用户态网络栈。
+//
+// 关键约束（务必保持）：
+//  - readyRead 可能是「部分读」：握手每一步都要先把字节累积进 inbuf，凑够长度才推进状态机；
+//    否则会读到半个回复而错判。
+//  - 端口一律大端；host 恒 127.0.0.1（LocalHost，避免 DNS）。
+
+namespace {
+
+// 问候包：user 为空只报「无认证 0x00」；非空则同时报「无认证 0x00 + 用户名/密码 0x02」，
+// 让 mihomo 二选一（无认证 inbound 时也能连上，认证 inbound 时走 0x02）。
+QByteArray buildGreeting(const QByteArray &user)
+{
+    QByteArray g;
+    if (user.isEmpty()) {
+        g.append(char(0x05));
+        g.append(char(0x01));
+        g.append(char(0x00));
+    } else {
+        g.append(char(0x05));
+        g.append(char(0x02));
+        g.append(char(0x00));
+        g.append(char(0x02));
+    }
+    return g;
+}
+
+// RFC1929 认证包：ver=0x01, ulen, uname, plen, passwd。密码恒 "coast"（mihomo 只认 user 做 IN-USER）。
+QByteArray buildAuth(const QByteArray &user)
+{
+    static const QByteArray kPass = QByteArrayLiteral("coast");
+    QByteArray a;
+    a.append(char(0x01));
+    a.append(char(user.size() & 0xFF)); // dev-<mac> 远短于 255，不会截断
+    a.append(user);
+    a.append(char(kPass.size() & 0xFF));
+    a.append(kPass);
+    return a;
+}
+
+// 端口大端两字节
+QByteArray be16(quint16 v)
+{
+    QByteArray b;
+    b.append(char((v >> 8) & 0xFF));
+    b.append(char(v & 0xFF));
+    return b;
+}
+
+// SOCKS5 应答码 → 可读原因（RFC1928 §6）
+QString decodeRep(quint8 rep)
+{
+    switch (rep) {
+    case 0x00: return QStringLiteral("succeeded");
+    case 0x01: return QStringLiteral("general SOCKS server failure");
+    case 0x02: return QStringLiteral("connection not allowed by ruleset");
+    case 0x03: return QStringLiteral("network unreachable");
+    case 0x04: return QStringLiteral("host unreachable");
+    case 0x05: return QStringLiteral("connection refused");
+    case 0x06: return QStringLiteral("TTL expired");
+    case 0x07: return QStringLiteral("command not supported");
+    case 0x08: return QStringLiteral("address type not supported");
+    default:   return QStringLiteral("unknown SOCKS error %1").arg(rep);
+    }
+}
+
+// 计算一条 SOCKS5 应答（[ver,rep,rsv,atyp, bnd.addr, bnd.port]）的完整长度；字节不足返回 -1。
+// 域名(0x03) 的地址段 = 1 字节长度 + 长度字节个字符。
+int socksReplyLength(const QByteArray &buf)
+{
+    if (buf.size() < 4) {
+        return -1;
+    }
+    const quint8 atyp = quint8(buf.at(3));
+    int addrLen = 0;
+    if (atyp == 0x01) {
+        addrLen = 4;
+    } else if (atyp == 0x04) {
+        addrLen = 16;
+    } else if (atyp == 0x03) {
+        if (buf.size() < 5) {
+            return -1;
+        }
+        addrLen = 1 + quint8(buf.at(4));
+    } else {
+        return -2; // 未知地址类型：调用方判负数即报错
+    }
+    const int total = 4 + addrLen + 2;
+    return buf.size() < total ? -1 : total;
+}
+
+} // namespace
+
+// ============================ Socks5Tcp ============================
+
+class Socks5Tcp::Priv
+{
+public:
+    explicit Priv(Socks5Tcp *owner) : q(owner) {}
+
+    Socks5Tcp *q = nullptr;
+    QTcpSocket *sock = nullptr;
+
+    enum class Phase { Idle, Greeting, Auth, Connect, Established, Closed };
+    Phase phase = Phase::Idle;
+
+    QByteArray user;    // 已转好的 utf8
+    QString dstHost;
+    quint16 dstPort = 0;
+
+    QByteArray inbuf;   // 握手期累积的下行字节（凑够再解析）
+    QByteArray pending; // established 前缓冲的上行字节
+    bool established = false;
+    bool closedEmitted = false;
+
+    void onConnected()
+    {
+        phase = Phase::Greeting;
+        sock->write(buildGreeting(user));
+    }
+
+    void onReadyRead()
+    {
+        if (!sock) {
+            return;
+        }
+        // 建立后就是纯字节管道：读到什么直接上抛为下行数据。
+        if (phase == Phase::Established) {
+            const QByteArray data = sock->readAll();
+            if (!data.isEmpty()) {
+                emit q->dataReceived(data);
+            }
+            return;
+        }
+        inbuf += sock->readAll();
+
+        // 一次 readyRead 可能同时带来多个握手阶段的回复，循环推进直到数据不够或完成/出错。
+        for (;;) {
+            switch (phase) {
+            case Phase::Greeting: {
+                if (inbuf.size() < 2) {
+                    return;
+                }
+                const quint8 method = quint8(inbuf.at(1));
+                inbuf.remove(0, 2);
+                if (method == 0x00) {
+                    phase = Phase::Connect;
+                    sendConnect();
+                } else if (method == 0x02) {
+                    phase = Phase::Auth;
+                    sock->write(buildAuth(user));
+                } else if (method == 0xFF) {
+                    fail(QStringLiteral("no acceptable auth"));
+                    return;
+                } else {
+                    fail(QStringLiteral("unexpected auth method %1").arg(method));
+                    return;
+                }
+                continue;
+            }
+            case Phase::Auth: {
+                if (inbuf.size() < 2) {
+                    return;
+                }
+                const quint8 status = quint8(inbuf.at(1));
+                inbuf.remove(0, 2);
+                if (status != 0x00) {
+                    fail(QStringLiteral("username/password auth rejected"));
+                    return;
+                }
+                phase = Phase::Connect;
+                sendConnect();
+                continue;
+            }
+            case Phase::Connect: {
+                const int len = socksReplyLength(inbuf);
+                if (len == -1) {
+                    return; // 字节不足，等下一拍
+                }
+                if (len < 0) {
+                    fail(QStringLiteral("unsupported reply address type"));
+                    return;
+                }
+                const quint8 rep = quint8(inbuf.at(1));
+                inbuf.remove(0, len); // 连同变长 BND.ADDR/PORT 一起消费掉
+                if (rep != 0x00) {
+                    fail(QStringLiteral("CONNECT failed: %1").arg(decodeRep(rep)));
+                    return;
+                }
+                phase = Phase::Established;
+                established = true;
+                emit q->established();
+                if (!pending.isEmpty()) { // 建立前缓冲的上行字节，此刻补发
+                    sock->write(pending);
+                    pending.clear();
+                }
+                if (!inbuf.isEmpty()) { // 回复之后若已捎带下行数据，直接上抛
+                    const QByteArray data = inbuf;
+                    inbuf.clear();
+                    emit q->dataReceived(data);
+                }
+                return;
+            }
+            default:
+                return; // Idle / Established / Closed：不在此循环处理
+            }
+        }
+    }
+
+    // 组装 CONNECT 请求：dstHost 能解析为 IPv4 → ATYP 0x01 + 4 裸字节；否则按域名 ATYP 0x03。
+    void sendConnect()
+    {
+        QByteArray req;
+        req.append(char(0x05));
+        req.append(char(0x01)); // CMD=CONNECT
+        req.append(char(0x00)); // RSV
+        QHostAddress addr;
+        if (addr.setAddress(dstHost) && addr.protocol() == QAbstractSocket::IPv4Protocol) {
+            const quint32 ip = addr.toIPv4Address();
+            req.append(char(0x01));
+            req.append(char((ip >> 24) & 0xFF));
+            req.append(char((ip >> 16) & 0xFF));
+            req.append(char((ip >> 8) & 0xFF));
+            req.append(char(ip & 0xFF));
+        } else {
+            const QByteArray host = dstHost.toUtf8();
+            req.append(char(0x03));
+            req.append(char(host.size() & 0xFF));
+            req.append(host);
+        }
+        req.append(be16(dstPort));
+        sock->write(req);
+    }
+
+    void fail(const QString &reason)
+    {
+        if (phase == Phase::Closed) {
+            return;
+        }
+        phase = Phase::Closed;
+        closedEmitted = true; // failed 即终态：抑制随后 abort 触发的 closed，避免双重信号
+        emit q->failed(reason);
+        if (sock) {
+            sock->abort();
+        }
+    }
+
+    void emitClosed()
+    {
+        if (closedEmitted) {
+            return;
+        }
+        closedEmitted = true;
+        phase = Phase::Closed;
+        emit q->closed();
+    }
+};
+
+Socks5Tcp::Socks5Tcp(QObject *parent) : QObject(parent), d(new Priv(this)) {}
+
+Socks5Tcp::~Socks5Tcp()
+{
+    delete d;
+}
+
+void Socks5Tcp::connectTo(quint16 socksPort, const QString &dstHost, quint16 dstPort, const QString &user)
+{
+    d->user = user.toUtf8();
+    d->dstHost = dstHost;
+    d->dstPort = dstPort;
+    d->established = false;
+    d->closedEmitted = false;
+    d->inbuf.clear();
+    d->pending.clear();
+
+    d->sock = new QTcpSocket(this);
+    // 用 this 作 context：本对象析构时自动断开这些连接，回调里安全访问 d。
+    connect(d->sock, &QTcpSocket::connected, this, [this] { d->onConnected(); });
+    connect(d->sock, &QTcpSocket::readyRead, this, [this] { d->onReadyRead(); });
+    connect(d->sock, &QAbstractSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
+        // 建立后出错（如对端 RST/关闭）视为正常关闭；建立前出错为握手/连接失败。
+        if (d->established) {
+            d->emitClosed();
+        } else {
+            d->fail(d->sock->errorString());
+        }
+    });
+    connect(d->sock, &QTcpSocket::disconnected, this, [this] { d->emitClosed(); });
+
+    d->phase = Priv::Phase::Idle;
+    d->sock->connectToHost(QHostAddress(QHostAddress::LocalHost), socksPort);
+}
+
+void Socks5Tcp::write(const QByteArray &data)
+{
+    if (d->established && d->sock) {
+        d->sock->write(data);
+    } else {
+        d->pending += data; // 建立前先缓冲，established 时统一补发
+    }
+}
+
+void Socks5Tcp::closeTunnel()
+{
+    if (d->sock) {
+        d->sock->abort();
+    }
+    d->emitClosed();
+}
+
+bool Socks5Tcp::isEstablished() const
+{
+    return d->established;
+}
+
+// ============================ Socks5Udp ============================
+
+class Socks5Udp::Priv
+{
+public:
+    explicit Priv(Socks5Udp *owner) : q(owner) {}
+
+    Socks5Udp *q = nullptr;
+    QTcpSocket *ctrl = nullptr; // 控制连接：ASSOCIATE 的 TCP，须为会话生命周期保持打开
+    QUdpSocket *udp = nullptr;
+
+    enum class Phase { Idle, Greeting, Auth, Associate, Ready, Closed };
+    Phase phase = Phase::Idle;
+
+    QByteArray user;
+    QByteArray inbuf;
+
+    QHostAddress relayAddr;  // BND.ADDR:BND.PORT —— 发 UDP 的中继端点
+    quint16 relayPort = 0;
+    bool ready = false;
+    bool closedEmitted = false;
+
+    void onConnected()
+    {
+        phase = Phase::Greeting;
+        ctrl->write(buildGreeting(user));
+    }
+
+    void onCtrlReadyRead()
+    {
+        if (!ctrl) {
+            return;
+        }
+        if (phase == Phase::Ready || phase == Phase::Closed) {
+            ctrl->readAll(); // 会话建立后控制连接不应再有数据；读掉丢弃即可
+            return;
+        }
+        inbuf += ctrl->readAll();
+        for (;;) {
+            switch (phase) {
+            case Phase::Greeting: {
+                if (inbuf.size() < 2) {
+                    return;
+                }
+                const quint8 method = quint8(inbuf.at(1));
+                inbuf.remove(0, 2);
+                if (method == 0x00) {
+                    sendAssociate();
+                } else if (method == 0x02) {
+                    phase = Phase::Auth;
+                    ctrl->write(buildAuth(user));
+                } else if (method == 0xFF) {
+                    fail(QStringLiteral("no acceptable auth"));
+                    return;
+                } else {
+                    fail(QStringLiteral("unexpected auth method %1").arg(method));
+                    return;
+                }
+                continue;
+            }
+            case Phase::Auth: {
+                if (inbuf.size() < 2) {
+                    return;
+                }
+                const quint8 status = quint8(inbuf.at(1));
+                inbuf.remove(0, 2);
+                if (status != 0x00) {
+                    fail(QStringLiteral("username/password auth rejected"));
+                    return;
+                }
+                sendAssociate();
+                continue;
+            }
+            case Phase::Associate: {
+                const int len = socksReplyLength(inbuf);
+                if (len == -1) {
+                    return;
+                }
+                if (len < 0) {
+                    fail(QStringLiteral("unsupported reply address type"));
+                    return;
+                }
+                const quint8 rep = quint8(inbuf.at(1));
+                const quint8 atyp = quint8(inbuf.at(3));
+                if (rep != 0x00) {
+                    inbuf.remove(0, len);
+                    fail(QStringLiteral("UDP ASSOCIATE failed: %1").arg(decodeRep(rep)));
+                    return;
+                }
+                if (atyp != 0x01) {
+                    inbuf.remove(0, len);
+                    fail(QStringLiteral("relay endpoint not IPv4"));
+                    return;
+                }
+                // BND.ADDR(4) 在偏移 4，BND.PORT(2) 紧随其后
+                const quint32 ip = (quint32(quint8(inbuf.at(4))) << 24)
+                                 | (quint32(quint8(inbuf.at(5))) << 16)
+                                 | (quint32(quint8(inbuf.at(6))) << 8)
+                                 | quint32(quint8(inbuf.at(7)));
+                relayPort = quint16((quint8(inbuf.at(8)) << 8) | quint8(inbuf.at(9)));
+                inbuf.remove(0, len);
+                // BND.ADDR 常为 0.0.0.0（表示「用你连控制连接的那个地址」）→ 回落 127.0.0.1
+                relayAddr = (ip == 0) ? QHostAddress(QHostAddress::LocalHost) : QHostAddress(ip);
+
+                udp = new QUdpSocket(q);
+                connect(udp, &QUdpSocket::readyRead, q, [this] { onDatagram(); });
+                udp->bind(QHostAddress(QHostAddress::LocalHost), 0); // 绑本地临时端口以收回程
+                phase = Phase::Ready;
+                ready = true;
+                emit q->ready();
+                return;
+            }
+            default:
+                return;
+            }
+        }
+    }
+
+    void sendAssociate()
+    {
+        phase = Phase::Associate;
+        QByteArray req;
+        req.append(char(0x05));
+        req.append(char(0x03)); // CMD=UDP ASSOCIATE
+        req.append(char(0x00)); // RSV
+        req.append(char(0x01)); // ATYP=IPv4
+        req.append(char(0x00)); // 0.0.0.0
+        req.append(char(0x00));
+        req.append(char(0x00));
+        req.append(char(0x00));
+        req.append(char(0x00)); // 端口 0
+        req.append(char(0x00));
+        ctrl->write(req);
+    }
+
+    void onDatagram()
+    {
+        while (udp && udp->hasPendingDatagrams()) {
+            const QNetworkDatagram dg = udp->receiveDatagram();
+            const QByteArray buf = dg.data();
+            // SOCKS UDP 头：RSV(2) FRAG(1) ATYP(1) ADDR PORT(2) 之后才是载荷。仅支持 IPv4(0x01)。
+            if (buf.size() < 10) {
+                continue;
+            }
+            const quint8 atyp = quint8(buf.at(3));
+            if (atyp != 0x01) {
+                continue; // 非 IPv4 回程直接跳过（本客户端只处理 v4）
+            }
+            const quint32 ip = (quint32(quint8(buf.at(4))) << 24)
+                             | (quint32(quint8(buf.at(5))) << 16)
+                             | (quint32(quint8(buf.at(6))) << 8)
+                             | quint32(quint8(buf.at(7)));
+            const quint16 port = quint16((quint8(buf.at(8)) << 8) | quint8(buf.at(9)));
+            const QByteArray payload = buf.mid(10);
+            emit q->datagramReceived(QHostAddress(ip), port, payload);
+        }
+    }
+
+    void fail(const QString &reason)
+    {
+        if (phase == Phase::Closed) {
+            return;
+        }
+        phase = Phase::Closed;
+        closedEmitted = true;
+        emit q->failed(reason);
+        if (ctrl) {
+            ctrl->abort();
+        }
+        if (udp) {
+            udp->close();
+        }
+    }
+
+    void emitClosed()
+    {
+        if (closedEmitted) {
+            return;
+        }
+        closedEmitted = true;
+        phase = Phase::Closed;
+        emit q->closed();
+    }
+};
+
+Socks5Udp::Socks5Udp(QObject *parent) : QObject(parent), d(new Priv(this)) {}
+
+Socks5Udp::~Socks5Udp()
+{
+    delete d;
+}
+
+void Socks5Udp::associate(quint16 socksPort, const QString &user)
+{
+    d->user = user.toUtf8();
+    d->ready = false;
+    d->closedEmitted = false;
+    d->inbuf.clear();
+
+    d->ctrl = new QTcpSocket(this);
+    connect(d->ctrl, &QTcpSocket::connected, this, [this] { d->onConnected(); });
+    connect(d->ctrl, &QTcpSocket::readyRead, this, [this] { d->onCtrlReadyRead(); });
+    connect(d->ctrl, &QAbstractSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
+        // 会话就绪后控制连接掉线 = 会话结束；就绪前出错 = 建立失败。
+        if (d->ready) {
+            d->emitClosed();
+        } else {
+            d->fail(d->ctrl->errorString());
+        }
+    });
+    connect(d->ctrl, &QTcpSocket::disconnected, this, [this] { d->emitClosed(); });
+
+    d->phase = Priv::Phase::Idle;
+    d->ctrl->connectToHost(QHostAddress(QHostAddress::LocalHost), socksPort);
+}
+
+void Socks5Udp::sendTo(const QHostAddress &dstIp, quint16 dstPort, const QByteArray &payload)
+{
+    if (!d->ready || !d->udp) {
+        return; // 未就绪前丢弃（DNS/UDP 会重试，无需缓冲）
+    }
+    const quint32 ip = dstIp.toIPv4Address();
+    QByteArray dg;
+    dg.append(char(0x00)); // RSV
+    dg.append(char(0x00));
+    dg.append(char(0x00)); // FRAG=0（不分片）
+    dg.append(char(0x01)); // ATYP=IPv4
+    dg.append(char((ip >> 24) & 0xFF));
+    dg.append(char((ip >> 16) & 0xFF));
+    dg.append(char((ip >> 8) & 0xFF));
+    dg.append(char(ip & 0xFF));
+    dg.append(be16(dstPort));
+    dg.append(payload);
+    d->udp->writeDatagram(dg, d->relayAddr, d->relayPort);
+}
+
+void Socks5Udp::closeSession()
+{
+    if (d->ctrl) {
+        d->ctrl->abort();
+    }
+    if (d->udp) {
+        d->udp->close();
+    }
+    d->emitClosed();
+}
+
+bool Socks5Udp::isReady() const
+{
+    return d->ready;
+}

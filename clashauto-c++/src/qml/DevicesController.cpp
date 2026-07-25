@@ -1,7 +1,9 @@
 #include "DevicesController.h"
 #include "../ClashService.h"
+#include "../CoreController.h"
 #include "../DeviceStore.h"
 #include "../LanScanner.h"
+#include "../net/LanGateway.h"
 
 #include <QDateTime>
 #include <QJsonArray>
@@ -10,8 +12,9 @@
 #include <QStringList>
 #include <QTimer>
 
-DevicesController::DevicesController(DeviceStore *store, ClashService *clash, QObject *parent)
-    : QObject(parent), m_store(store), m_clash(clash)
+DevicesController::DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
+                                    LanGateway *gateway, QObject *parent)
+    : QObject(parent), m_store(store), m_clash(clash), m_core(core), m_gateway(gateway)
 {
     m_scanner = new LanScanner(this);
 
@@ -49,6 +52,17 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, QO
 QString DevicesController::localIp() const { return m_scanner ? m_scanner->localIp() : QString(); }
 QString DevicesController::gatewayIp() const { return m_scanner ? m_scanner->gatewayIp() : QString(); }
 int DevicesController::deviceCount() const { return m_store ? m_store->devices().size() : 0; }
+bool DevicesController::gatewayReady() const { return m_gateway && m_gateway->isAvailable(); }
+
+void DevicesController::ensureGatewayConfigured()
+{
+    if (!m_gateway || !m_scanner)
+        return;
+    // 用当前扫描到的拓扑配置网关（网卡/本机 IP+MAC/网关 IP+MAC + mihomo 专用网关端口）。
+    // 网关 MAC 需从 ARP 表拿到；扫描过至少一轮后才有值。
+    m_gateway->configure(m_scanner->interfaceName(), m_scanner->localIp(), m_scanner->localMac(),
+                         m_scanner->gatewayIp(), m_scanner->gatewayMac(), DeviceStore::kGatewayPort);
+}
 
 void DevicesController::onDiscovered(const QVector<DeviceRecord> &devices)
 {
@@ -62,6 +76,8 @@ void DevicesController::onDiscovered(const QVector<DeviceRecord> &devices)
             stale << d.mac;
     for (const QString &mac : stale)
         m_store->markOffline(mac);
+    // 扫描后拓扑（含网关 MAC）已知 → 配置网关，使 gatewayReady 反映真实可用性。
+    ensureGatewayConfigured();
     // mergeDiscovered/markOffline 会 emit changed → refreshModel/rebuildSelected 已连；此处补拓扑通知。
     emit topologyChanged();
     emit overviewChanged();
@@ -147,10 +163,25 @@ void DevicesController::rebuildSelected()
 void DevicesController::setProxyEnabled(const QString &mac, bool on)
 {
     const DeviceRecord *d = m_store->find(mac);
-    if (d && (d->isSelf || d->isGateway))
+    if (!d || d->isSelf || d->isGateway)
         return; // 本机/网关保护：不允许开代理
+    const QString ip = d->ip;
     m_store->setProxyEnabled(mac, on);
-    // M1 起：这里将通知 LanGateway enable/disableForDevice；M0 仅落台账。
+    m_store->save(); // 立刻落盘，供 ConfigBuilder 读 devices.json 生成网关 listener + auth/IN-USER
+    if (m_core)
+        m_core->rebuildConfig(); // 重生成 full.yaml + 热重载 mihomo（网关口 + 每设备身份就绪）
+    if (m_gateway) {
+        ensureGatewayConfigured();
+        if (on) {
+            QString err;
+            if (!m_gateway->enableDevice(mac, ip, DeviceStore::socksUser(mac), &err)
+                && !err.isEmpty())
+                emit gatewayError(err);
+        } else {
+            m_gateway->disableDevice(mac);
+        }
+    }
+    emit topologyChanged(); // gatewayReady 可能变化
 }
 
 void DevicesController::setAlias(const QString &mac, const QString &alias)
@@ -166,7 +197,9 @@ void DevicesController::setTypeOverride(const QString &mac, const QString &typeK
 void DevicesController::setPolicy(const QString &mac, const QString &modeKey, const QString &target)
 {
     m_store->setPolicy(mac, DeviceStore::modeFromKey(modeKey), target.trimmed());
-    // M2 起：策略变更触发 ConfigBuilder 重建（IN-USER 规则）+ 核心热重载。
+    m_store->save();             // 立刻落盘，供 ConfigBuilder
+    if (m_core)
+        m_core->rebuildConfig(); // 生成 IN-USER 规则 + 热重载
 }
 
 void DevicesController::closeDeviceConnections(const QString &mac)

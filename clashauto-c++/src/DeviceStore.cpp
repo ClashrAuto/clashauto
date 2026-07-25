@@ -62,6 +62,14 @@ DevicePolicyMode DeviceStore::modeFromKey(const QString &k)
     return m.value(k, DevicePolicyMode::Follow);
 }
 
+QString DeviceStore::socksUser(const QString &mac)
+{
+    const QString norm = normalizeMac(mac);
+    if (norm.isEmpty())
+        return {};
+    return QStringLiteral("dev-") + QString(norm).remove(':');
+}
+
 QString DeviceStore::normalizeMac(const QString &raw)
 {
     // 抽出 12 个十六进制字符，统一成小写 aa:bb:cc:dd:ee:ff。

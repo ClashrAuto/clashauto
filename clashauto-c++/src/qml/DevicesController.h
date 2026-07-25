@@ -20,6 +20,8 @@
 class DeviceStore;
 class LanScanner;
 class ClashService;
+class CoreController;
+class LanGateway;
 class QTimer;
 
 class DevicesController final : public QObject
@@ -37,12 +39,13 @@ class DevicesController final : public QObject
     Q_PROPERTY(double totalRateDown READ totalRateDown NOTIFY overviewChanged)
     Q_PROPERTY(QString selectedMac READ selectedMac NOTIFY selectedChanged)
     Q_PROPERTY(QVariantMap selectedDevice READ selectedDevice NOTIFY selectedChanged)
-    // 透明网关是否就绪：M0 恒 false（劫持未接入，UI 据此提示「代理开关将在网关模块启用后生效」）；
-    // M1 接入 LanGateway 后翻真。QML 用它决定是否显示等待提示。
-    Q_PROPERTY(bool gatewayReady READ gatewayReady CONSTANT)
+    // 透明网关是否就绪（Linux 且有 CAP_NET_RAW/root 且网卡已配置）。QML 据此决定代理开关是否真正生效
+    // 或显示提示。随拓扑/配置变化，走 topologyChanged 通知重取。
+    Q_PROPERTY(bool gatewayReady READ gatewayReady NOTIFY topologyChanged)
 
 public:
-    DevicesController(DeviceStore *store, ClashService *clash, QObject *parent = nullptr);
+    DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
+                      LanGateway *gateway, QObject *parent = nullptr);
 
     DeviceListModel *model() { return &m_model; }
     DeviceConnectionsModel *connModel() { return &m_connModel; }
@@ -56,7 +59,7 @@ public:
     double totalRateDown() const { return static_cast<double>(m_totalRateDown); }
     QString selectedMac() const { return m_selectedMac; }
     QVariantMap selectedDevice() const { return m_selectedDevice; }
-    bool gatewayReady() const { return false; } // M0：劫持未接入
+    bool gatewayReady() const; // Linux 网关可用性（LanGateway::isAvailable）
 
     // —— UI 动作 ——
     Q_INVOKABLE void scan();                       // 手动全量扫描
@@ -73,6 +76,7 @@ signals:
     void topologyChanged();
     void overviewChanged();
     void selectedChanged();
+    void gatewayError(const QString &message); // 开代理失败（无权限/网卡等）——QML 可提示
 
 private:
     void onDiscovered(const QVector<class DeviceRecord> &devices);
@@ -80,9 +84,12 @@ private:
     void rebuildSelected();       // 重算 selectedDevice map
     void pollConnections();       // 拉 /connections → 聚合每设备流量 + 喂连接模型
     void aggregate(const QVariantList &conns);
+    void ensureGatewayConfigured(); // 用当前扫描到的拓扑配置 LanGateway（每次开代理前确保）
 
     DeviceStore *m_store = nullptr;
     ClashService *m_clash = nullptr;
+    CoreController *m_core = nullptr;
+    LanGateway *m_gateway = nullptr;
     LanScanner *m_scanner = nullptr;
     DeviceListModel m_model;
     DeviceConnectionsModel m_connModel;

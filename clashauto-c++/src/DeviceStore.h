@@ -126,6 +126,13 @@ public:
     static QString modeKey(DevicePolicyMode m);
     static DevicePolicyMode modeFromKey(const QString &k);
     static QString normalizeMac(const QString &raw); // 统一小写冒号；非法返回空
+    // 每设备的 mihomo SOCKS 身份用户名（ConfigBuilder 生成 authentication/IN-USER 与
+    // LanGateway 拨号必须用同一派生，否则规则/流量归属对不上）：dev-<去冒号小写 mac>。
+    static QString socksUser(const QString &mac);
+    // mihomo 专用「网关」socks inbound 端口：被劫持设备的流量经此口带每设备用户名进 mihomo。
+    // 独立于主混合口(7890)，让 Coast 自己的测速仍免认证走 7890。ConfigBuilder 生成此 listener，
+    // LanGateway 拨号连此端口——两边必须一致。
+    static constexpr quint16 kGatewayPort = 7899;
 
 signals:
     void changed();          // 任一展示字段变化（控制器据此刷新模型）

@@ -19,6 +19,7 @@
 #include "qml/SettingsController.h"
 #include "qml/UpdateController.h"
 #include "qml/DevicesController.h"
+#include "net/LanGateway.h"
 
 #include <QApplication>
 #include <QFont>
@@ -90,10 +91,15 @@ int main(int argc, char *argv[])
     auto *about = new AboutController(config, &app);
     auto *settingsCtrl = new SettingsController(core, clash, &app);
     auto *updateCtrl = new UpdateController(config, core, &app);
-    // 设备页：局域网发现台账 + 控制器（自持连接轮询/热更新；页面显隐时开停）。
+    // 设备页：局域网发现台账 + 透明网关 + 控制器（自持连接轮询/热更新；页面显隐时开停）。
     auto *deviceStore = new DeviceStore(config.configDir, &app);
-    auto *devicesCtrl = new DevicesController(deviceStore, clash, &app);
+    auto *lanGateway = new LanGateway(&app);
+    // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
+    lanGateway->recoverFromCrash();
+    auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, &app);
     QObject::connect(&app, &QCoreApplication::aboutToQuit, deviceStore, &DeviceStore::save);
+    // 退出必须可靠还原所有被劫持设备的 ARP（否则设备断网）。
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, lanGateway, &LanGateway::disableAll);
 
     // 托盘 toggle → 后端（与 Widgets 版契约一致）。核心生命周期仍由用户显式触发。
     // 增强(TUN) 走 bridge.toggleTun（而非直连 core）：Windows 上开启且非提权时先弹 UAC 提权重启，

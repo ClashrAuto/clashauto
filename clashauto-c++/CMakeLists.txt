@@ -46,6 +46,12 @@ set(BACKEND_SOURCES
     # 设备页后端（局域网发现 + 台账；框架无关）
     src/LanScanner.cpp       src/LanScanner.h
     src/DeviceStore.cpp      src/DeviceStore.h
+    # M1 透明网关——跨平台可编译层（L2 工厂在非 Linux 返回 nullptr；ARP/SOCKS5 纯 Qt；网关公共头）
+    src/net/IL2Endpoint.h
+    src/net/L2Endpoint_linux.cpp
+    src/net/ArpSpoofer.cpp   src/net/ArpSpoofer.h
+    src/net/Socks5Client.cpp src/net/Socks5Client.h
+    src/net/LanGateway.h
 )
 
 # QML 绑定胶水（新增的薄适配层）
@@ -100,6 +106,36 @@ qt_add_qml_module(clashauto-qml
         qml/UpdateWindow.qml
         qml/RuleEditorWindow.qml
 )
+
+# —— M1 透明网关：平台相关部分 ——
+# Linux：编入用户态栈(vendored lwIP 子集 + NetStack) 与 LanGateway 真实现；lwIP 走 NO_SYS raw API，
+#        移植配置在 src/net/lwip_port/（lwipopts.h + arch/cc.h），ip4.c/tcp_in.c 有 accept-all 补丁。
+# 其它平台：只编 LanGateway 桩（isAvailable()=false），保证跨平台链接。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(LWIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lwip/src")
+    target_sources(clashauto-qml PRIVATE
+        src/net/NetStack.cpp src/net/NetStack.h
+        src/net/LanGateway_linux.cpp
+        ${LWIP_DIR}/core/init.c        ${LWIP_DIR}/core/def.c
+        ${LWIP_DIR}/core/dns.c         ${LWIP_DIR}/core/inet_chksum.c
+        ${LWIP_DIR}/core/ip.c          ${LWIP_DIR}/core/mem.c
+        ${LWIP_DIR}/core/memp.c        ${LWIP_DIR}/core/netif.c
+        ${LWIP_DIR}/core/pbuf.c        ${LWIP_DIR}/core/raw.c
+        ${LWIP_DIR}/core/stats.c       ${LWIP_DIR}/core/sys.c
+        ${LWIP_DIR}/core/tcp.c         ${LWIP_DIR}/core/tcp_in.c
+        ${LWIP_DIR}/core/tcp_out.c     ${LWIP_DIR}/core/timeouts.c
+        ${LWIP_DIR}/core/udp.c
+        ${LWIP_DIR}/core/ipv4/etharp.c ${LWIP_DIR}/core/ipv4/icmp.c
+        ${LWIP_DIR}/core/ipv4/ip4.c    ${LWIP_DIR}/core/ipv4/ip4_addr.c
+        ${LWIP_DIR}/core/ipv4/ip4_frag.c ${LWIP_DIR}/core/ipv4/acd.c
+        ${LWIP_DIR}/netif/ethernet.c
+    )
+    target_include_directories(clashauto-qml PRIVATE
+        "${LWIP_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/lwip_port")
+else()
+    target_sources(clashauto-qml PRIVATE src/net/LanGateway_stub.cpp)
+endif()
 
 # Windows：把 assets/icon.ico 作为 exe 图标嵌入。
 if(WIN32)
