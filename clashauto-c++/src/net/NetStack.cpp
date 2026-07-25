@@ -322,10 +322,15 @@ bool NetStack::init(const QByteArray &localMac6, QString *err)
 
     lwip_init();
 
-    ip4_addr_t any;
-    ip4_addr_set_zero(&any);
-    // netif 无 IP（0.0.0.0）：不作为常规主机，仅承接被劫持流量；accept-all 补丁使其终结任意目的。
-    if (netif_add(&d->netif, &any, &any, &any, nullptr, lwipNetifInit, ethernet_input) == nullptr) {
+    // netif 占位 IP（非零）+ /0 掩码：lwIP 的 ip4_route 会**跳过 IP 为 0.0.0.0 的 netif**，导致回包
+    // （SYN-ACK 等）找不到出口 netif 而被丢弃（现象：SYN 命中监听但无 SYN-ACK 出栈）。给个非零占位 IP、
+    // 掩码 0.0.0.0 → 匹配所有目的 → 本 netif 成为「万能出口」。该占位 IP 不作源地址（每条连接的源 =
+    // 被接管的目的服务器 IP，pcb->local_ip 覆盖），也不会真发 ARP（每设备静态 ARP），故任意非零值即可。
+    ip4_addr_t nip, nmask, ngw;
+    IP4_ADDR(&nip, 0, 0, 0, 1);
+    IP4_ADDR(&nmask, 0, 0, 0, 0);
+    ip4_addr_set_zero(&ngw);
+    if (netif_add(&d->netif, &nip, &nmask, &ngw, nullptr, lwipNetifInit, ethernet_input) == nullptr) {
         g_impl = nullptr;
         if (err)
             *err = QStringLiteral("netif_add 失败");
