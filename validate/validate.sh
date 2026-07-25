@@ -25,6 +25,9 @@ TAG=$(echo "$J" | jq -r '.tag_name // empty')
 NAME=$(echo "$J" | jq -r '.name // empty')
 echo "release: $NAME  tag: $TAG"
 [ -n "$TAG" ] || { echo "没解析到 tag_name"; exit 2; }
+VER="${TAG#v}"
+# 缓存卷可能残留上一次 release 的产物；清掉非本版本的，避免 glob 抓到旧文件。
+for f in ClashAuto-*; do case "$f" in *"$VER"*) ;; *) rm -f "$f";; esac; done
 
 echo "$J" | jq -r '.assets[] | [.name, .browser_download_url] | @tsv' > assets.tsv
 echo "资产 $(wc -l < assets.tsv) 个，下载中…"
