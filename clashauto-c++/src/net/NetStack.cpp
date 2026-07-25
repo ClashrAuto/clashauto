@@ -47,7 +47,8 @@ struct TcpConn {
     Socks5Tcp *socks = nullptr;
     QByteArray toLwip;    // socks→设备 方向待写入 lwIP 的字节（受 tcp_sndbuf 限流）
     // 上行背压：已经交给 socks、但**还没**用 tcp_recved 归还给 lwIP 的接收窗口字节数。
-    // 上限天然是 TCP_WND(60 KiB)——lwIP 不会送来超过已通告窗口的数据。
+    // 上限天然是 TCP_WND(128 KiB)——lwIP 不会送来超过已通告窗口的数据。
+    // 必须是 quint32（不是 u16_t）：TCP_WND 开窗口缩放后已经超过 65535 了。
     quint32 pendingRecved = 0;
     bool upThrottled = false;  // 上行处于「等排空」状态（高/低水位的迟滞标志）
     bool downPaused = false;   // 下行已让 socks 停止读取（toLwip 顶到高水位）
@@ -378,11 +379,16 @@ void closeConn(TcpConn *c, bool abort);
 //    tcp_sent 就会来；设备彻底不响应时 lwIP 自己重传超时 → tcp_err → 拆连接。而且恢复是
 //    **排队**执行的（Socks5Tcp::setReadPaused），绝不在 lwIP 回调里同步重入。
 //
-// —— 水位取值 —— 都拿 lwIP 的单连接预算当尺子：TCP_SND_BUF = TCP_WND = 60 KiB。
-//  高水位 64 KiB ≈ 一个满 sndbuf：lwIP 一腾出空间就能被立刻填满，管道不会空转；
-//  低水位 16 KiB（¼）：足够的迟滞，免得在水位线上反复 暂停/恢复 抖动（每次恢复都要过一趟
-//  事件循环，抖起来纯属浪费）。上行同理：queued 掉到 16 KiB 才还窗口，一次还一大块，
-//  tcp_recved 内部的 TCP_WND_UPDATE_THRESHOLD(TCP_WND/4) 判据也才会真的触发一次窗口通告。
+// —— 水位取值 —— 高水位 64 KiB、低水位 16 KiB（¼）。
+//  低水位的作用是迟滞：免得在水位线上反复 暂停/恢复 抖动（每次恢复都要过一趟事件循环，
+//  抖起来纯属浪费）。上行同理：queued 掉到 16 KiB 才还窗口，一次还一大块，tcp_recved 内部的
+//  TCP_WND_UPDATE_THRESHOLD（= min(TCP_WND/4, 4*TCP_MSS) = 5840 B）判据才会真的触发窗口通告。
+//  ★ 这两个数**故意不跟着** lwIP 的单连接预算走。原本它们是照着 TCP_SND_BUF = TCP_WND = 60 KiB
+//  取的「≈ 一个满 sndbuf」；窗口缩放把预算提到 128 KiB 之后没有同步上调，因为：
+//    · 这里的队列是 QByteArray / QTcpSocket 读缓冲，落在**普通堆**上，按连接数线性膨胀
+//      （2048 条 × 128 KiB = 256 MiB 的病态上限），而 lwIP 那 128 KiB 是有池子封顶的；
+//    · 吞吐上也不需要 —— 下行管道深度 = lwIP 在途 128 KiB + toLwip 排队 64 KiB，
+//      toLwip 只需覆盖「lwIP 腾出空间 → 我们补上」这一次事件循环的往返，64 KiB 绰绰有余。
 constexpr int kUpQueueHighWater = 64 * 1024;
 constexpr int kUpQueueLowWater = 16 * 1024;
 constexpr int kToLwipHighWater = 64 * 1024;
@@ -450,7 +456,9 @@ void giveBackRecvWindow(TcpConn *c)
     if (!c || !c->pcb || c->lwipClosed)
         return;
     // 先扣账再调用：tcp_recved 内部可能立刻 tcp_output → linkoutput，保持状态自洽。
-    // 循环+钳位只是防御：pendingRecved 实际不可能超过 TCP_WND(60 KiB)。
+    // 循环+钳位**不是**防御性冗余：tcp_recved() 的形参恒为 u16_t（打开 LWIP_WND_SCALE 也不变，
+    // lwIP 把 raw API 的窗口参数一律钳在 u16 上），而 pendingRecved 的上限是 TCP_WND = 128 KiB，
+    // 已经超过 0xFFFF —— 单次调用还不完，必须分多次。
     while (c->pendingRecved > 0) {
         const u16_t give = static_cast<u16_t>(qMin<quint32>(c->pendingRecved, 0xFFFFu));
         c->pendingRecved -= give;
@@ -501,6 +509,10 @@ bool pumpToLwip(TcpConn *c)
     if (!c || !c->pcb || c->lwipClosed)
         return false;
     while (!c->toLwip.isEmpty()) {
+        // u16_t 是**对的**，不是窗口缩放漏改的窄化：tcp_sndbuf(pcb) 展开成 TCPWND16(pcb->snd_buf)
+        // = (u16_t)LWIP_MIN(x, 0xFFFF)，lwIP 自己就把它钳在 65535（tcp_write 的 len 形参也只有
+        // u16_t，收不下更多）。TCP_SND_BUF = 128 KiB 时它报的是 65535 而不是回绕成 0 ——
+        // 外面这个 while 会再转一圈把剩下的窗口用掉。
         const u16_t space = tcp_sndbuf(c->pcb);
         if (space == 0)
             break;

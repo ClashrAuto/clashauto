@@ -292,7 +292,8 @@ void Socks5Tcp::connectTo(quint16 socksPort, const QString &dstHost, quint16 dst
 
     d->sock = new QTcpSocket(this);
     // 读缓冲设上限（默认是 0 = 无上限，Qt 会一直往上读，暂停也就无从谈起）。
-    // 取 64 KiB 是照着 lwIP 的单连接预算来的（TCP_WND = 60 KiB）：非暂停态下每次 readyRead
+    // 取 64 KiB 与 NetStack 的下行水位 kToLwipHighWater 一致（那里有为什么不跟着 lwIP 的
+    // TCP_WND/TCP_SND_BUF = 128 KiB 一起上调的理由）：非暂停态下每次 readyRead
     // 我们都当场读干净，64 KiB 远够一个事件循环周期内的回环吞吐；暂停态下它就是每条连接
     // 在本进程里额外滞留的上限。
     d->sock->setReadBufferSize(64 * 1024);

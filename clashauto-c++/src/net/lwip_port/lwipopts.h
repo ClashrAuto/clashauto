@@ -27,10 +27,15 @@
 // 余量的代价是「虚拟地址 + 一点 BSS」，不是「开机就吃掉十几 MB 物理内存」。
 //
 // 每个 memp 池的字节数 = 条目数 × LWIP_MEM_ALIGN_SIZE(sizeof(结构))。
-// 结构大小实测（mingw x86_64，本移植的开关组合；MSVC x64 同布局——cc.h 的 pack 只作用于协议头结构）：
-//   tcp_pcb 216 | tcp_pcb_listen 56 | tcp_seg 32 | udp_pcb 48
+// 结构大小（mingw x86_64，本移植的开关组合；MSVC x64 同布局——cc.h 的 pack 只作用于协议头结构）：
+//   tcp_pcb 240 | tcp_pcb_listen 56 | tcp_seg 32 | udp_pcb 48
 //   pbuf 24 | ip_reassdata 40 | etharp_q_entry 16 | sys_timeo 32
 //   PBUF_POOL 单元 = align(24) + align(1600) = 1624
+// tcp_pcb 曾实测 216；打开 LWIP_WND_SCALE 后按字段布局推算为 240：tcpwnd_size_t 由 u16_t 变
+// u32_t（tcp.h 里有 8 个这种字段：rcv_wnd / rcv_ann_wnd / cwnd / ssthresh / snd_wnd /
+// snd_wnd_max / snd_buf / bytes_acked）= +16 B，末尾新增 snd_scale + rcv_scale = +2 B，
+// 重排后到 8 字节对齐的尾部填充 = +6 B。**本机无法编译，这 240 是推算值**，改动此文件时
+// 若能在 CI/真机上 size -A 复核一次更稳妥（偏差只影响下面小结表的账，不影响正确性）。
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
 #define MEM_ALIGNMENT                   4
@@ -38,12 +43,17 @@
 // mem.c 堆：**只服务「本机→设备」方向的发送数据**。NetStack::pumpToLwip 用
 // tcp_write(..., TCP_WRITE_FLAG_COPY) 把 socks 收来的字节拷进 PBUF_RAM，这些 pbuf 就在这个堆里；
 // 另有 tcp_output/ICMP 的小头部 pbuf（几十字节，瞬时）。
-// 单条连接最多占 tcp_sndbuf() ≤ TCP_SND_BUF = 60 KB，所以堆容量 ≈ 能同时「满窗下载」的连接数：
-//     8 MiB / 60 KB ≈ 139 条并发大流量连接
+// 单条连接最多占 tcp_sndbuf() ≤ TCP_SND_BUF = 128 KiB，所以堆容量 ≈ 能同时「满窗下载」的连接数：
+//     16 MiB / 128 KiB = 128 条并发大流量连接
 // 十几台设备里同时真正在拉满带宽的连接远不到这个数（其余是空闲/小请求，几乎不占堆）。
+// ★ 这个分母是**跟着 TCP_SND_BUF 走**的，别只改一头：TCP_SND_BUF 从 60 KiB 提到 128 KiB
+//   （理由见下面「TCP 调参」里开窗口缩放的那段），若堆仍是 8 MiB 就只剩 8 MiB/128 KiB = 64 条，
+//   相对上一版的 139 条是**并发能力腰斩** —— 而容量目标是「十几台设备、每台 50~150 条连接」。
+//   所以堆同步翻倍到 16 MiB，把「能同时满窗下载的连接数」按在 128 条（139 → 128，基本持平）。
+//   代价是 BSS 多 8 MiB，惰性提交，见本节开头；实际 RSS 仍只随真实在途字节增长。
 // 堆耗尽不会静默丢数据：tcp_write 返回 ERR_MEM → pumpToLwip 保留 c->toLwip 里的剩余字节，
-// 等 tcp_sent 回调再续（降速而已）。2 MiB 时只够 ~34 条，十几台设备一起下载就会明显限速。
-#define MEM_SIZE                        (8 * 1024 * 1024)   // 8,388,608 B
+// 等 tcp_sent 回调再续（降速而已）。2 MiB 时只够 ~16 条，十几台设备一起下载就会明显限速。
+#define MEM_SIZE                        (16 * 1024 * 1024)  // 16,777,216 B
 
 // MEMP_PBUF：只给 PBUF_ROM/PBUF_REF 用的「无 payload 的 pbuf 壳」。
 // 本移植 **不随连接数增长**：tcp_write 一律 COPY(走 mem.c 堆，不用 PBUF_ROM)，
@@ -56,7 +66,7 @@
 //   杀最老 TIME-WAIT → 杀 LAST-ACK → 杀 CLOSING → **杀一条优先级更低的活连接** → 才丢 SYN，
 // 全程无日志：设备侧只看到「网页转圈」或「连接莫名断掉」，极难定位（故下面打开 MEMP_STATS）。
 // 取 2048：十几台设备 × ~130 条 ≈ 2000，家用场景有充分余量。
-//     2048 × 216 = 442,368 B（≈432 KiB）
+//     2048 × 240 = 491,520 B（≈480 KiB）
 // 不取更大的理由不是内存，是 tcp_active_pcbs 是**单链表**：tcp_slowtmr(500ms) 每次全表走一遍
 // （2048 项 ≈ 0.1 ms，可忽略），tcp_input 查表虽是 O(n) 但命中后会把该 pcb 移到表头(MRU)，
 // 热流基本 O(1)。再往上（万级）收益递减，且本机侧 ephemeral 端口（Windows 默认 16384 个）
@@ -65,17 +75,18 @@
 #define MEMP_NUM_TCP_PCB_LISTEN         8       // 8 × 56 = 448 B（只挂 accept-all 监听，不随设备数变）
 
 // tcp_seg：出站发送队列（未发/未确认）+ 乱序重组队列(TCP_QUEUE_OOSEQ)。
-// 单条连接的发送队列硬上限 = TCP_SND_QUEUELEN = 4*60KB/1460 = 168 段。
-// 「所有连接同时满队列」= 2048 × 168 = 344k 段 = 11 MB —— 这是病态上限，不值得预留。
-// 按现实取值：真正把队列填满的是「正在满窗下载」的连接，其在途深度 ≈ TCP_WND/TCP_MSS = 42 段
-// （设备在局域网侧 RTT ~1ms，队列排空很快）。
-//     8192 / 168 = 48 条连接可同时顶到 TCP_SND_QUEUELEN 硬上限
-//     8192 /  42 = 195 条连接可同时满窗下载
-// 覆盖十几台设备绰绰有余，代价仅 8192 × 32 = 262,144 B（256 KiB）。
+// 单条连接的发送队列硬上限 = TCP_SND_QUEUELEN = 4*128KiB/1460 = 359 段。
+// 「所有连接同时满队列」= 2048 × 359 = 735k 段 = 23 MB —— 这是病态上限，不值得预留。
+// 按现实取值：真正把队列填满的是「正在满窗下载」的连接，其在途深度 ≈ TCP_SND_BUF/TCP_MSS = 89 段
+// （设备在局域网侧 RTT ~1ms，队列排空很快；WiFi 抖到 20~30ms 时才会真的堆到这个深度）。
+//     16384 / 359 = 45 条连接可同时顶到 TCP_SND_QUEUELEN 硬上限
+//     16384 /  89 = 184 条连接可同时满窗下载
+// 池子跟着 TCP_SND_BUF 一起翻倍（8192 → 16384）：不翻的话上面两个数会掉到 22 / 92，
+// 相对上一版的 48 / 195 是明显回退。代价 16384 × 32 = 524,288 B（512 KiB），便宜。
 // 另：段池耗尽是**优雅降级**（tcp_write 返 ERR_MEM 由 pumpToLwip 重试；OOSEQ 拷贝失败就丢，
 // 对端重传补上），不像 TCP_PCB 耗尽那样会杀活连接。
-// 硬约束：MEMP_NUM_TCP_SEG >= TCP_SND_QUEUELEN(168)，否则 init.c #error。
-#define MEMP_NUM_TCP_SEG                8192
+// 硬约束：MEMP_NUM_TCP_SEG(16384) >= TCP_SND_QUEUELEN(359)，否则 init.c #error。
+#define MEMP_NUM_TCP_SEG                16384
 
 // ★ lwIP 的 UDP 层在本移植里**完全没用到**：NetStack::inputFrame 见 proto==17 就转
 // handleUdpFrame 自己做四元组 NAT（上限在 NetStack 的 kMaxUdpFlowsTotal/PerDevice），
@@ -101,31 +112,38 @@
 // PBUF_POOL：**入站**方向的帧缓冲（inputFrame 用 pbuf_alloc(PBUF_RAW,…,PBUF_POOL)），
 // 以及被 TCP 乱序队列(OOSEQ)扣住不放的那些段。一帧 ≤1514 < 1600，恒为单个 pbuf。
 // 在序数据是「收到→lwipTcpRecv 拷走→立刻 free」，占用极短；真正压住池子的是 OOSEQ：
-// 一条丢包重传中的连接最多扣住 TCP_WND/TCP_MSS ≈ 42 个 pbuf。
-//     2048 / 42 ≈ 48 条连接可同时处于丢包恢复而不耗尽池子
-// 代价 2048 × 1624 = 3,325,952 B（≈3.17 MiB），是本文件最大的一块。
-// 池子见底时 lwIP 有安全阀（NO_SYS + PBUF_POOL_FREE_OOSEQ=1 默认开）：pbuf_pool_is_empty()
+// 一条丢包重传中的连接最多扣住 min(TCP_WND/TCP_MSS, TCP_OOSEQ_MAX_PBUFS) 个 pbuf。
+// ★ TCP_WND 提到 128 KiB 后，前一项是 90，光靠它就只剩 2048/90 ≈ 22 条连接可同时丢包恢复 ——
+//   比上一版（60 KiB 窗口 → 42 个 → 48 条）差一倍多。而 PBUF_POOL 是本文件**单价最贵**的池
+//   （1624 B/条），靠把 2048 加到 4096 去补要多花 3.2 MiB，太亏。改用 TCP_OOSEQ_MAX_PBUFS
+//   给**每条连接**的乱序队列直接封顶 48（见下面「TCP 调参」），于是：
+//     2048 / 48 ≈ 42 条连接可同时处于丢包恢复而不耗尽池子（与上一版的 48 条基本持平）
+// 代价 2048 × 1624 = 3,325,952 B（≈3.17 MiB），是本文件第二大的一块（仅次于 mem.c 堆）。
+// 池子见底时 lwIP 还有全局安全阀（NO_SYS + PBUF_POOL_FREE_OOSEQ=1 默认开）：pbuf_pool_is_empty()
 // 会调 tcp_free_ooseq() 把乱序队列整体丢掉换回 pbuf，代价只是几次重传。
-// 硬约束：TCP_WND(61440) <= PBUF_POOL_SIZE × (PBUF_POOL_BUFSIZE - 54) = 2048 × 1546 = 3,166,208 ✓
+// 硬约束：TCP_WND(131072) <= PBUF_POOL_SIZE × (PBUF_POOL_BUFSIZE - 54) = 2048 × 1546 = 3,166,208 ✓
 #define PBUF_POOL_SIZE                  2048
 #define PBUF_POOL_BUFSIZE               1600  // > MTU+以太头
 
 // —— 静态内存小结（BSS，惰性提交）——
-//   mem.c 堆                8,388,608
-//   PBUF_POOL 2048×1624     3,325,952
-//   TCP_PCB   2048× 216       442,368
-//   TCP_SEG   8192×  32       262,144
-//   PBUF       256×  24         6,144
-//   ARP_QUEUE   64×  16         1,024
-//   UDP_PCB     16×  48           768
-//   REASSDATA   16×  40           640
-//   SYS_TIMEOUT 16×  32           512
-//   PCB_LISTEN   8×  56           448
-//   ─────────────────────────────────
-//   合计         4,040,000 + 8,388,608
-// 实测（mingw x86_64，size -A 各 .obj 的 .bss）：memp.c 4,039,712 + mem.c 8,388,672
-//   + stats.c 96 = **12,428,480 B ≈ 11.85 MiB**（与上表差 288 B 是池描述符表/对齐）。
-// 调优前同口径 ≈ 3,021,000 B ≈ 2.88 MiB → **净增 ≈ 9.0 MiB 的 BSS**（惰性提交，实际 RSS 按用量）。
+//   mem.c 堆               16,777,216
+//   PBUF_POOL  2048×1624    3,325,952
+//   TCP_SEG   16384×  32      524,288
+//   TCP_PCB    2048× 240      491,520
+//   PBUF        256×  24        6,144
+//   ARP_QUEUE    64×  16        1,024
+//   UDP_PCB      16×  48          768
+//   REASSDATA    16×  40          640
+//   SYS_TIMEOUT  16×  32          512
+//   PCB_LISTEN    8×  56          448
+//   ──────────────────────────────────
+//   合计        4,351,296 + 16,777,216 = 21,128,512 B ≈ **20.15 MiB**
+// 上一版同口径实测（mingw x86_64，size -A 各 .obj 的 .bss）是 12,428,480 B ≈ 11.85 MiB
+//   （memp.c 4,039,712 + mem.c 8,388,672 + stats.c 96；与表格差 288 B 是池描述符表/对齐）。
+// 本版**没有实测**（本机无工具链）：mem.c 那半是精确的（+8 MiB），memp.c 那半里 TCP_SEG 是
+//   精确的（+262,144），只有 TCP_PCB 依赖上面 240 的推算（若实际是 240±8，总账偏差 ≤ 16 KiB）。
+// → 相对上一版 **净增 ≈ 8.3 MiB 的 BSS**，全部是「窗口从 60 KiB 提到 128 KiB 之后，为了不让
+//   并发连接容量回退而同步扩的池子」。BSS 惰性提交，实际 RSS 仍按真实用量增长。
 
 // —— 协议开关 ——
 #define LWIP_IPV4                       1
@@ -154,11 +172,65 @@
 // —— TCP 调参 ——（桌面高吞吐）
 #define LWIP_TCP                        1
 #define TCP_MSS                         1460
-// TCP_WND/TCP_SND_BUF 必须 <= u16_t(65535)（未开窗口缩放）；取 60KB 兼顾吞吐与该约束。
-#define TCP_WND                         (60 * 1024)
-#define TCP_SND_BUF                     (60 * 1024)
+
+// ★ 窗口缩放（RFC 7323）。**先把收益口径说清楚，别当成「翻数倍吞吐」的银弹**：
+// 本网关是**终结式（split-TCP）代理** —— 被劫持设备的 TCP 连接就在 lwIP 里终结，去上游的
+// 那条连接由 mihomo 另开。所以 lwIP 这条 TCP 的 RTT 是「设备 ↔ 本机」的**局域网 RTT**，
+// 不是跨境节点那 50ms+（那部分 RTT 落在 mihomo 的 socket 上，与本文件无关）。
+// 单流上限 ≈ 窗口 / RTT：
+//   · 有线 0.3~1ms： 60 KiB → 约 480 Mbps ~ 1.6 Gbps。窗口**根本不是瓶颈**，本改动零收益。
+//   · WiFi 5~30ms（同频干扰、省电休眠、A-MPDU 聚合都会把 RTT 抖上去，且是**抖动**不是常数）：
+//        60 KiB → 20ms 时约 24 Mbps、30ms 时约 16 Mbps ——**这里窗口就是瓶颈**。
+//       128 KiB → 20ms 时约 51 Mbps、30ms 时约 35 Mbps。
+// 结论：收益集中在「WiFi / 高延迟或高抖动的局域网链路」，外加突发流量时少一些「窗口满了只能
+// 干等 ACK」的停顿。有线千兆桌面基本看不出差别 —— 不要对外宣称成倍提升。
+// 已知代价（老实写在这）：单条连接可以在本机排到 128 KiB 的下行数据，对一条只有 5 Mbps 的
+// 弱 WiFi 客户端就是 ~200ms 的自制缓冲膨胀。只影响该条大流量连接自身的时延（拥塞窗口才是
+// 真正的发送闸门，snd_buf 只是上限），且 NetStack 的下行水位另有 64 KiB 的二级闸。
+#define LWIP_WND_SCALE                  1
+// 缩放因子：TCP 头里通告的是 TCP_WND >> TCP_RCV_SCALE。init.c 的三条硬约束：
+//   TCP_RCV_SCALE <= 14 ✓ | TCP_WND <= (0xFFFF << TCP_RCV_SCALE) | (TCP_WND >> TCP_RCV_SCALE) != 0
+//   取 1 会 #error：131072 > 0xFFFF<<1 = 131070。取 2：131072 <= 262140 ✓，>>2 = 32768 ✓。
+// 只取「刚好够用」的 2：因子越大通告粒度越粗（2 → 4 字节一档，无所谓），但也越容易在将来
+// 调大 TCP_WND 时忘掉这条约束 —— 保持紧配合，改 TCP_WND 时编译器会当场提醒。
+// 对端不支持窗口缩放时 lwIP 自动降级：TCP_WND_MAX(pcb) 在 TF_WND_SCALE 未置位时返回
+// TCPWND16(TCP_WND) = 65535，rcv_wnd 停在 tcp_alloc 时的 TCPWND_MIN16(TCP_WND)，行为同旧版。
+#define TCP_RCV_SCALE                   2
+
+// 两个方向压的是**完全不同的池**（改任一个都要回上面把对应的账算一遍）：
+//   TCP_WND     = 设备→本机（设备**上传**）的接收窗口 → 压 PBUF_POOL（乱序队列扣住的 pbuf）
+//   TCP_SND_BUF = 本机→设备（设备**下载**）的发送缓冲 → 压 mem.c 堆（tcp_write COPY 进 PBUF_RAM）
+// 这里仍取同一个值（128 KiB）只是因为两边各自配了对应的补偿（堆翻倍 / OOSEQ 封顶），不是因为
+// 它们有什么内在关系。为什么不拉到 256 KiB：那要么把「能同时满窗下载的连接数」从 128 条
+// 再砍半到 64 条，要么把堆再翻到 32 MiB；而 20ms RTT 的 WiFi 本来也交付不了 100 Mbps 的单流，
+// 属于拿实打实的并发容量去换用不上的峰值。
+#define TCP_WND                         (128 * 1024)  // 131,072
+#define TCP_SND_BUF                     (128 * 1024)  // 131,072
+// 沿用「4 段/MSS」的老公式：4 × 131072 / 1460 = 359 段。
+// init.c 硬约束：<= 0xFFFF ✓ | >= 2 ✓ | >= 2*(TCP_SND_BUF/TCP_MSS) = 178 ✓
+//               | MEMP_NUM_TCP_SEG(16384) >= 359 ✓
 #define TCP_SND_QUEUELEN                ((4 * TCP_SND_BUF) / TCP_MSS)
+// ★ 必须**显式**给，不能吃 opt.h 的默认值。默认是
+//     min(max(TCP_SND_BUF/2, 2*MSS+1), TCP_SND_BUF-1) = 65536，
+// 而 init.c 有一条 `TCP_SNDLOWAT >= (0xFFFF - 4*TCP_MSS)`（= 59695）就 #error 的检查
+// （它是替 api_msg.c 里的 u16 运算兜底的）—— 60 KiB 时默认值 30720 恰好过关，128 KiB 时
+// 直接撞墙。取 32 KiB：远低于 59695，也远低于 TCP_SND_BUF。
+// 用不上但必须合法：TCP_SNDLOWAT 只被 netconn/socket 的「可写」判据引用，而本移植
+// LWIP_NETCONN = LWIP_SOCKET = 0，raw API 一处都不碰它。写死常量而不是 TCP_SND_BUF/4，
+// 是为了将来有人再调大 TCP_SND_BUF 时不会又悄悄漂过 59695。
+#define TCP_SNDLOWAT                    (32 * 1024)
 #define TCP_QUEUE_OOSEQ                 1
+// ★ 给**每条连接**的乱序队列封顶 48 个 pbuf（≈68 KiB），配合上面 TCP_WND 的提升。
+// 不封顶的话一条正在丢包恢复的连接最多扣住 TCP_WND/TCP_MSS = 90 个 PBUF_POOL 条目，
+// 2048/90 ≈ 22 条这样的连接就能把池子抽干（上一版：60 KiB → 42 个 → 48 条）。48 把它拉回
+// 2048/48 ≈ 42 条，代价为零 —— 比把单价 1624 B 的 PBUF_POOL 加大划算得多。
+// 触发时的行为（tcp_in.c，TCP_OOSEQ_PBUFS_LIMIT 分支）：把越界的那个 seg **及其之后**整段
+// tcp_segs_free 掉，靠对端重传补回来；开了 SACK 时还会同步 tcp_remove_sacks_gt 收回对应的
+// SACK 通告，不会出现「SACK 说收到了、实际已经丢了」的谎报。
+// 这跟池子见底时 pbuf_pool_is_empty() → tcp_free_ooseq() 是同一类降级，只是改成**每连接**
+// 触发：一条坏链路的连接不再有能力把全局池子拖垮。
+// 48 × 1460 ≈ 68 KiB 的乱序缓冲，覆盖「第 1 个包丢了、后面 47 个都到了」的典型场景绰绰有余。
+#define TCP_OOSEQ_MAX_PBUFS             48
 #define LWIP_TCP_SACK_OUT               0
 #define TCP_LISTEN_BACKLOG              1
 #define TCP_DEFAULT_LISTEN_BACKLOG      0xff
