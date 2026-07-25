@@ -1,5 +1,7 @@
 #include "GatewaySelfTest.h"
 
+#include <QtGlobal> // 必须先引入才有 Q_OS_LINUX 宏，否则下面的 #if 恒假→整个实现被跳过→链接未定义
+
 #if defined(Q_OS_LINUX)
 
 #include "../DeviceStore.h"
