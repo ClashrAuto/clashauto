@@ -84,21 +84,26 @@ QtObject {
         default:         return "#888888";
         }
     }
-    // 设备类型 → 头像单字（CJK 恒可用 MiSans 渲染，避免图标字体码点不确定）。
+    // 设备类型 → 头像图标（Remix Icon 码点，用 -fill 实心款：白图标压在类型底色上更清楚）。
+    // 用法：Text{ font.family: Theme.riFont; text: Theme.deviceGlyph(k) }——务必带 riFont，
+    // 正文字体（MiSans）里这些私用区码点是空的。码点由 assets/remixicon.ttf 的 post/cmap 表核对过：
+    // smartphone-fill F159 / tablet-fill F1DF / computer-fill EBC9 / router-fill F09C / tv-fill F236 /
+    // speaker-fill F172 / printer-fill F028 / camera-fill EB2E / gamepad-fill EDAA /
+    // hard-drive-fill EDFA / home-wifi-fill EE30 / device-fill EC2D。
     function deviceGlyph(typeKey) {
         switch (typeKey) {
-        case "phone":    return "机";
-        case "tablet":   return "板";
-        case "computer": return "脑";
-        case "router":   return "由";
-        case "tvbox":    return "视";
-        case "speaker":  return "箱";
-        case "printer":  return "印";
-        case "camera":   return "摄";
-        case "game":     return "戏";
-        case "nas":      return "储";
-        case "iot":      return "智";
-        default:         return "?";
+        case "phone":    return "\uF159"; // smartphone-fill
+        case "tablet":   return "\uF1DF"; // tablet-fill
+        case "computer": return "\uEBC9"; // computer-fill
+        case "router":   return "\uF09C"; // router-fill
+        case "tvbox":    return "\uF236"; // tv-fill
+        case "speaker":  return "\uF172"; // speaker-fill
+        case "printer":  return "\uF028"; // printer-fill
+        case "camera":   return "\uEB2E"; // camera-fill
+        case "game":     return "\uEDAA"; // gamepad-fill
+        case "nas":      return "\uEDFA"; // hard-drive-fill
+        case "iot":      return "\uEE30"; // home-wifi-fill（智能家居）
+        default:         return "\uEC2D"; // device-fill（未知设备）
         }
     }
 }

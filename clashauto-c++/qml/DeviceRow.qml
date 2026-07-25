@@ -36,7 +36,7 @@ Rectangle {
         anchors.rightMargin: 8
         spacing: 8
 
-        // 类型头像（纯色圆角 + 单字）+ 在线小圆点
+        // 类型头像（纯色圆角 + 类型图标）+ 在线小圆点
         Item {
             Layout.preferredWidth: 34
             Layout.preferredHeight: 34
@@ -48,7 +48,8 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     text: Theme.deviceGlyph(root.typeKey)
-                    font.pixelSize: 16
+                    font.family: Theme.riFont // 图标字体（不继承默认的 MiSans，否则是空白方块）
+                    font.pixelSize: 18
                     color: "#ffffff"
                 }
             }

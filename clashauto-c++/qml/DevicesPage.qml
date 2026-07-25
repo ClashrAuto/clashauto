@@ -247,7 +247,8 @@ Item {
                                 color: Theme.deviceColor(detailCol.dev.typeKey || "unknown")
                                 Text { anchors.centerIn: parent
                                        text: Theme.deviceGlyph(detailCol.dev.typeKey || "unknown")
-                                       font.pixelSize: 22; color: "#ffffff" }
+                                       font.family: Theme.riFont // 图标字体（默认 MiSans 里这些码点是空的）
+                                       font.pixelSize: 26; color: "#ffffff" }
                             }
                             ColumnLayout {
                                 Layout.fillWidth: true
