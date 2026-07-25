@@ -69,6 +69,8 @@ set(QML_GLUE_SOURCES
     src/qml/SettingsController.cpp      src/qml/SettingsController.h
     src/qml/UpdateController.cpp         src/qml/UpdateController.h
     src/qml/I18n.cpp                     src/qml/I18n.h
+    # Npcap 安装窗后端（Windows 才有实际逻辑；其它平台 supported()=false）
+    src/qml/NpcapInstaller.cpp           src/qml/NpcapInstaller.h
     # 设备页 QML 胶水（薄适配层）
     src/qml/DevicesController.cpp        src/qml/DevicesController.h
     src/qml/DeviceListModel.cpp          src/qml/DeviceListModel.h
@@ -110,6 +112,7 @@ qt_add_qml_module(clashauto-qml
         qml/ConnectionsWindow.qml
         qml/UpdateWindow.qml
         qml/RuleEditorWindow.qml
+        qml/NpcapWindow.qml
 )
 
 # —— 透明网关：平台相关部分 ——
@@ -192,6 +195,9 @@ target_link_libraries(clashauto-qml PRIVATE
     $<$<PLATFORM_ID:Windows>:shell32>
     $<$<PLATFORM_ID:Windows>:advapi32>
     $<$<PLATFORM_ID:Windows>:wininet>
+    # NpcapInstaller：下载来的安装器要提权运行，先验 Authenticode 签名（WinVerifyTrust + 签名者名）
+    $<$<PLATFORM_ID:Windows>:wintrust>
+    $<$<PLATFORM_ID:Windows>:crypt32>
 )
 
 target_compile_options(clashauto-qml PRIVATE

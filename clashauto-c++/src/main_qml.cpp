@@ -19,6 +19,7 @@
 #include "qml/SettingsController.h"
 #include "qml/UpdateController.h"
 #include "qml/DevicesController.h"
+#include "qml/NpcapInstaller.h"
 #include "net/LanGateway.h"
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 #include "net/GatewaySelfTest.h"
@@ -124,6 +125,14 @@ int main(int argc, char *argv[])
     // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
     lanGateway->recoverFromCrash();
     auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, &app);
+    // Npcap 安装引导（Windows 专用；其它平台 supported()=false，设备页那条提示条不显示）。
+    auto *npcapInstaller = new NpcapInstaller(config, core, &app);
+    // 装完立刻重扫一轮：onDiscovered → ensureGatewayConfigured 会重新 open 二层端点，
+    // 此时 wpcap.dll 已在系统里（延迟加载，无需重启程序），gatewayReady 随之转真。
+    QObject::connect(npcapInstaller, &NpcapInstaller::finished, devicesCtrl, [devicesCtrl](bool ok) {
+        if (ok)
+            devicesCtrl->scan();
+    });
     QObject::connect(&app, &QCoreApplication::aboutToQuit, deviceStore, &DeviceStore::save);
     // 退出必须可靠还原所有被劫持设备的 ARP（否则设备断网）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, lanGateway, &LanGateway::disableAll);
@@ -160,6 +169,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("settings", settingsCtrl);
     engine.rootContext()->setContextProperty("updater", updateCtrl);
     engine.rootContext()->setContextProperty("devices", devicesCtrl);
+    engine.rootContext()->setContextProperty("npcap", npcapInstaller);
 
     // 界面语言（i18n）：按 config.language 在「加载 QML 前」装好翻译器，首帧即是目标语言（zh-CN 为默认，
     // 不装翻译器 → 用中文源串；en-US 装英文表）。设置页切语言经 languageChangeRequested → 运行时 retranslate。

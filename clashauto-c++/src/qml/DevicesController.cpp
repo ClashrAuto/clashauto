@@ -39,6 +39,20 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
     // 新设备提醒：首轮扫描后再出现的新设备 → 发信号（main 连托盘）。
     connect(m_store, &DeviceStore::deviceAdded, this, &DevicesController::onDeviceAdded);
 
+    // 网关自身的错误（打不开网卡 / 协议栈起不来）此前无人接听：LanGateway::deviceError 一直是
+    // 悬空信号，用户只看得到 enableDevice 那句泛化的「网关未就绪（需要 root/CAP_NET_RAW…）」——
+    // Windows 上真正的原因「未检测到 Npcap」就这么被吞了。转成 gatewayError 送到设备页浮动提示。
+    // ensureGatewayConfigured() 每轮扫描都会重试 open，同一句错误只报一次，避免刷屏。
+    if (m_gateway) {
+        connect(m_gateway, &LanGateway::deviceError, this,
+                [this](const QString &, const QString &msg) {
+                    if (msg == m_lastGatewayErr)
+                        return;
+                    m_lastGatewayErr = msg;
+                    emit gatewayError(msg);
+                });
+    }
+
     // 读持久化的「新设备提醒」偏好（org/app 已在 main 设为 Coast）。
     m_newDeviceAlert = QSettings().value(QStringLiteral("devices/newDeviceAlert"), true).toBool();
 
@@ -73,6 +87,9 @@ void DevicesController::ensureGatewayConfigured()
     m_gateway->configure(m_scanner->interfaceName(), m_scanner->localIp(), m_scanner->localMac(),
                          m_scanner->gatewayIp(), m_scanner->gatewayMac(), DeviceStore::kGatewayPort,
                          m_scanner->localNetmask());
+    // 起来了就清掉去重记忆：之后再坏（拔网卡等）还要能重新报一次。
+    if (m_gateway->isAvailable())
+        m_lastGatewayErr.clear();
 }
 
 void DevicesController::onDeviceAdded(const QString &mac)

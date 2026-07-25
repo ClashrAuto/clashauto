@@ -224,5 +224,19 @@
   "发现新设备": "New device found",
   "已导出到 ": "Exported to ",
   "导出设备列表": "Export device list",
-  "启动到托盘": "Start to tray"
+  "启动到托盘": "Start to tray",
+  "安装 Npcap": "Install Npcap",
+  "安装 Npcap 驱动": "Install the Npcap driver",
+  "未安装 Npcap 驱动 —— 「代理网络」开关不会真正接管设备流量。": "Npcap driver is not installed — the \"Proxy network\" switch will not actually take over device traffic.",
+  "设备页的「代理网络」靠透明网关接管局域网设备的流量。在 Windows 上它需要 Npcap 驱动来收发二层数据帧 —— 没装的话，开关能打开，但流量不会真正被接管。": "The \"Proxy network\" switch on the Devices page relies on a transparent gateway to take over LAN device traffic. On Windows that needs the Npcap driver to send and receive layer-2 frames — without it the switch still flips, but no traffic is actually intercepted.",
+  "本机状态": "This machine",
+  "已安装": "Installed",
+  "未安装": "Not installed",
+  "最新版本": "Latest version",
+  "查询中…": "Checking…",
+  "点「立即安装」后：自动下载官方安装包 → 校验数字签名 → 静默安装。\n· 安装驱动需要管理员权限，过程中会弹一次 UAC，请点「是」。\n· Npcap 免费版仅 OEM 授权允许静默安装；若静默被拒，会自动打开安装向导，按提示点 Install 即可。": "Clicking \"Install now\" will: download the official installer → verify its digital signature → install silently.\n· Installing a driver requires administrator rights, so Windows will show one UAC prompt — click Yes.\n· Only the OEM edition of Npcap is licensed for silent installation; if silent mode is refused, the setup wizard opens automatically — just click Install.",
+  "下载源：npcap.com（官方）": "Source: npcap.com (official)",
+  "官网下载": "Official download",
+  "处理中…": "Working…",
+  "立即安装": "Install now"
 }

@@ -101,6 +101,48 @@ Item {
                    font.pixelSize: 11; color: Theme.textMuted }
         }
 
+        // ———————— 缺 Npcap 提示条（仅 Windows 未装时显示）————————
+        // 没有它透明网关根本起不来，而程序对 wpcap.dll 是延迟加载 —— 不提示的话用户只会看到
+        // 「开关打开了但没生效」。点右侧按钮打开安装窗（下载 + 验签 + 静默安装，全自动）。
+        Rectangle {
+            Layout.fillWidth: true
+            visible: npcap.supported && !npcap.installed
+            radius: 5
+            color: Qt.rgba(198 / 255, 154 / 255, 84 / 255, 0.15)
+            border.width: 1
+            border.color: Qt.rgba(198 / 255, 154 / 255, 84 / 255, 0.35)
+            implicitHeight: npcapRow.implicitHeight + 16
+
+            RowLayout {
+                id: npcapRow
+                anchors.fill: parent
+                anchors.margins: 8
+                spacing: 10
+
+                Text {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    font.pixelSize: 11
+                    color: "#c69a54"
+                    text: qsTr("未安装 Npcap 驱动 —— 「代理网络」开关不会真正接管设备流量。")
+                }
+                Rectangle {
+                    Layout.preferredWidth: 96
+                    Layout.preferredHeight: 26
+                    radius: 4
+                    color: npcapBtnHover.hovered ? Theme.accentStrong : Theme.accent
+                    Text {
+                        anchors.centerIn: parent
+                        text: qsTr("安装 Npcap")
+                        font.pixelSize: 11
+                        color: "#ffffff"
+                    }
+                    HoverHandler { id: npcapBtnHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: npcapWindow.show(); }
+                }
+            }
+        }
+
         // —————————————————— 主体：左列表 + 右详情 ——————————————————
         RowLayout {
             Layout.fillWidth: true
@@ -633,4 +675,7 @@ Item {
         Timer { id: noticeTimer; interval: 3500; onTriggered: noticeBar.msg = "" }
         function show(m) { msg = m; noticeTimer.restart(); }
     }
+
+    // Npcap 安装窗（独立顶层窗口，默认隐藏；由上方提示条的「安装 Npcap」打开）。
+    NpcapWindow { id: npcapWindow }
 }
