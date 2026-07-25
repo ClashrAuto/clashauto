@@ -17,6 +17,7 @@ Rectangle {
     property real rateDown: 0
     property bool isSelf: false
     property bool isGateway: false
+    property bool proxyable: false // 能否开代理（非本机/网关 + 在主网卡网段内）
     property bool selected: false
     signal clicked()
     signal toggleProxy()
@@ -79,9 +80,9 @@ Rectangle {
                     font.pixelSize: 13
                     color: Theme.textPrimary
                 }
-                // 本机 / 网关 保护徽章
+                // 本机 / 网关 / 其它网络（跨网段，劫持不到）——不可代理的原因徽章
                 Rectangle {
-                    visible: root.isSelf || root.isGateway
+                    visible: root.isSelf || root.isGateway || !root.proxyable
                     radius: 3
                     color: Qt.rgba(0, 0, 0, 0.25)
                     implicitWidth: protTxt.implicitWidth + 8
@@ -89,7 +90,8 @@ Rectangle {
                     Text {
                         id: protTxt
                         anchors.centerIn: parent
-                        text: root.isSelf ? qsTr("本机") : qsTr("网关")
+                        text: root.isSelf ? qsTr("本机")
+                            : root.isGateway ? qsTr("网关") : qsTr("其它网络")
                         font.pixelSize: 9
                         color: Theme.textSecondary
                     }
@@ -125,9 +127,15 @@ Rectangle {
             }
         }
 
-        // 代理开关（本机/网关不显示）——迷你滑动开关
+        // 代理开关（本机/网关、以及跨网段设备不显示）——迷你滑动开关。
+        // 离线设备：已开的可以关（撤销），没开的不能开（没 IP/ARP 无从劫持）→ 开关变灰不可点。
         Rectangle {
-            visible: !(root.isSelf || root.isGateway)
+            id: proxySwitch
+            // 已经开着的一律可见可关（哪怕设备离线/已跨到另一个网络，也得能撤销）；
+            // 关着的只有「可代理且在线」才点得动。
+            readonly property bool canToggle: root.proxied || (root.proxyable && root.online)
+            visible: root.proxyable || root.proxied
+            opacity: canToggle ? 1.0 : 0.4
             Layout.alignment: Qt.AlignVCenter
             width: 38; height: 20; radius: 10
             color: root.proxied ? Theme.accent : Theme.switchTrackOff
@@ -139,8 +147,10 @@ Rectangle {
                 color: "#ffffff"
                 Behavior on x { NumberAnimation { duration: 120 } }
             }
-            HoverHandler { cursorShape: Qt.PointingHandCursor }
-            TapHandler { onTapped: root.toggleProxy() }
+            HoverHandler {
+                cursorShape: proxySwitch.canToggle ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+            }
+            TapHandler { enabled: proxySwitch.canToggle; onTapped: root.toggleProxy() }
         }
     }
 }

@@ -39,12 +39,21 @@ public:
     void refreshLiveness(const QStringList &knownIps);
     bool isScanning() const { return m_scanning; }
 
-    // 当前本机网段信息（供 UI 展示 / 网关保护）。
+    // 当前本机网段信息（供 UI 展示 / 网关保护）。这些是「主网卡」的——即挑出来做二层劫持的那张
+    // 物理网卡；TUN(Meta/utun/wintun)、Hyper-V/WSL/VMware 网桥等虚拟网卡一律不参选（见 isVirtualIface）。
     QString localIp() const { return m_localIp; }
     QString localMac() const { return m_localMac; }
     QString gatewayIp() const { return m_gatewayIp; }
     QString gatewayMac() const { return m_arp.value(m_gatewayIp); } // 网关 MAC（本轮 ARP 表里）
     QString interfaceName() const { return m_ifaceName; }
+    // 本机所有网卡 MAC（含虚拟网卡）——用来判定「这台设备就是本机」，不受主网卡选择影响。
+    const QSet<QString> &localMacs() const { return m_localMacs; }
+    // 所有默认路由的网关 IP（多网卡各一个）——用来判定「这台设备是某个网络的路由器」。
+    const QSet<QString> &gatewayIps() const { return m_gatewayIps; }
+    // 该 IP 是否在主网卡子网内（只有同网段设备能被 ARP 劫持）。
+    bool inPrimarySubnet(const QString &ip) const;
+    // 全部网关的 MAC（按 m_gatewayIps 在本轮 ARP 表里查）——路由器可能有多个 IP，认 MAC 更稳。
+    QSet<QString> gatewayMacs() const;
 
 signals:
     // 一轮扫描（或轻量刷新）产出的设备快照（运行时字段已填，持久字段留空由 store 保留）。
@@ -53,8 +62,11 @@ signals:
 
 private:
     // —— 网络拓扑 ——
-    void detectLocalTopology();       // 填 m_localIp/Mac/gatewayIp/ifaceName/m_subnet*
-    QVector<quint32> hostsToProbe() const; // 网段内待探测的主机 IP（网络/广播/本机除外）
+    void detectLocalTopology();       // 填 m_physIfaces/m_localMacs/m_gatewayIps + 主网卡那几个字段
+    QVector<quint32> hostsToProbe() const; // 各物理网卡网段内待探测的主机 IP（网络/广播/本机除外）
+    // 本机每张物理网卡各产出一条「本机」记录，附加到快照里。**每轮快照都必须带上**，
+    // 否则控制器的 15s 陈旧判定会把本机判成掉线（开 TUN 时曾因此显示本机离线）。
+    void appendSelfRecords(QVector<DeviceRecord> &out) const;
 
     // —— 主动探测（触发系统 ARP + 端口指纹）——
     void probeArp(const QVector<quint32> &hosts); // 异步 TCP 连若干端口
@@ -100,9 +112,20 @@ private:
     Signals &sig(const QString &ip);   // 取/建某 IP 的信号槽
 
     // —— 状态 ——
+    // 一张本机物理网卡（可作为二层劫持网卡的候选）。
+    struct LocalIface {
+        QString name;   // OS 级接口名（AF_PACKET/BPF/Npcap 绑定用）
+        QString ip;
+        QString mac;
+        quint32 base = 0, mask = 0; // 网段（主机序）
+    };
+
     bool m_scanning = false;
-    QString m_localIp, m_localMac, m_gatewayIp, m_ifaceName;
-    quint32 m_netBase = 0, m_netMask = 0; // 网段（主机序）
+    QString m_localIp, m_localMac, m_gatewayIp, m_ifaceName; // 主网卡
+    quint32 m_netBase = 0, m_netMask = 0; // 主网卡网段（主机序）
+    QVector<LocalIface> m_physIfaces;     // 全部物理网卡（第 0 个即主网卡）
+    QSet<QString> m_localMacs;            // 本机全部网卡 MAC（含虚拟网卡）
+    QSet<QString> m_gatewayIps;           // 全部默认路由网关 IP
     QHash<QString, QString> m_arp;         // ip → mac（本轮 ARP 表）
     QHash<QString, Signals> m_sig;         // ip → 解析信号
     int m_pendingProbes = 0;               // 在途探测计数（归零 → 收尾）

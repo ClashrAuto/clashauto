@@ -42,6 +42,25 @@ QString ipv4FromLine(const QString &line)
     const auto m = re.match(line);
     return m.hasMatch() ? m.captured(0) : QString();
 }
+
+// ARP 表里的非设备条目：组播（224.0.0.0/4 与 01:00:5e/33:33 开头的 MAC）、广播（255.255.255.255、
+// 网段广播地址，MAC 全 f）、空 MAC。系统 arp 表里这些一直都在，不过滤会当成一堆假设备显示。
+bool isJunkArpEntry(const QString &ip, const QString &mac)
+{
+    if (ip.isEmpty() || mac.isEmpty())
+        return true;
+    const QHostAddress a(ip);
+    if (a.protocol() != QAbstractSocket::IPv4Protocol)
+        return true;
+    const quint32 v = a.toIPv4Address();
+    if (v == 0 || v == 0xFFFFFFFFu)
+        return true;
+    if ((v & 0xF0000000u) == 0xE0000000u)
+        return true; // 224.0.0.0/4 组播
+    if (mac == QStringLiteral("ff:ff:ff:ff:ff:ff") || mac == QStringLiteral("00:00:00:00:00:00"))
+        return true; // 广播 / 空
+    return mac.startsWith(QStringLiteral("01:00:5e")) || mac.startsWith(QStringLiteral("33:33"));
+}
 } // namespace
 
 LanScanner::LanScanner(QObject *parent) : QObject(parent)
@@ -66,116 +85,269 @@ LanScanner::Signals &LanScanner::sig(const QString &ip)
 }
 
 // ———————————————————————————— 拓扑探测 ————————————————————————————
-void LanScanner::detectLocalTopology()
+namespace {
+// mihomo TUN 的假网段：198.18.0.0/15（当前 TUN inet4 默认）、172.19.0.0/16（旧默认）。
+bool isTunSubnet(quint32 ip)
 {
-    m_localIp.clear();
-    m_localMac.clear();
-    m_ifaceName.clear();
-    m_netBase = m_netMask = 0;
+    return (ip & 0xFFFE0000u) == 0xC6120000u || (ip & 0xFFFF0000u) == 0xAC130000u;
+}
 
-    // 选一个「活动、非回环、有 IPv4」的接口作为本机网段。优先带默认路由的；否则第一个可用。
-    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
-        const auto flags = iface.flags();
-        if (!(flags & QNetworkInterface::IsUp) || !(flags & QNetworkInterface::IsRunning)
-            || (flags & QNetworkInterface::IsLoopBack))
-            continue;
-        for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
-            const QHostAddress ip = entry.ip();
-            if (ip.protocol() != QAbstractSocket::IPv4Protocol)
-                continue;
-            if (ip.isLoopback())
-                continue;
-            const quint32 ip32 = ip.toIPv4Address();
-            const quint32 mask = entry.netmask().toIPv4Address();
-            if (mask == 0)
-                continue;
-            m_localIp = ip.toString();
-            m_localMac = DeviceStore::normalizeMac(iface.hardwareAddress());
-            // 用 OS 级接口名 name()（Linux eth0 / mac en0 / Windows {GUID}）：二层层要用它绑定网卡
-            // （AF_PACKET SIOCGIFINDEX / BPF BIOCSETIF / Npcap \Device\NPF_{GUID}）。
-            m_ifaceName = iface.name();
-            m_netMask = mask;
-            m_netBase = ip32 & mask;
-            break;
-        }
-        if (!m_localIp.isEmpty())
-            break;
-    }
+// 虚拟网卡判定。**必须排除**：这些网卡不能做二层收发，它们的网段也不是「局域网」。
+// 尤其是开「增强模式」后 mihomo 建的 TUN（Windows 叫 Meta，mac/Linux 是 utun/tun）——
+// 它在 QNetworkInterface::allInterfaces() 里往往排在最前面，一旦被选成主网卡，本机 MAC 取空、
+// 网段变成 /30 假网段，本机就从快照里消失 → 被 15s 陈旧判定判成「掉线」。
+bool isVirtualIface(const QNetworkInterface &iface, quint32 ip)
+{
+    static const QRegularExpression re(
+        "meta|mihomo|clash|utun|wintun|tunnel|\\btun\\d|\\btap\\d|vethernet|hyper-?v|vmware|"
+        "virtualbox|vbox|docker|\\bwsl|zerotier|tailscale|wireguard|\\bwg\\d|loopback|teredo|isatap",
+        QRegularExpression::CaseInsensitiveOption);
+    if (re.match(iface.humanReadableName()).hasMatch() || re.match(iface.name()).hasMatch())
+        return true;
+    if (DeviceStore::normalizeMac(iface.hardwareAddress()).isEmpty())
+        return true; // 没有 MAC = 三层虚拟网卡（wintun 等），二层收发无从谈起
+    return isTunSubnet(ip);
+}
 
-    // 默认网关（用于「网关·保护」徽章）。取不到就用网段首个主机 base+1 兜底。
-    m_gatewayIp.clear();
+// 系统路由表里的全部默认路由 → (网关 IP, 网卡标识)。
+// 网卡标识：Windows = 出口接口 IP；Linux/macOS = 接口名。用来把网关配到对应网卡上。
+QVector<QPair<QString, QString>> defaultRoutes()
+{
+    QVector<QPair<QString, QString>> out;
+    auto validIp = [](const QString &s) {
+        const QHostAddress a(s);
+        return a.protocol() == QAbstractSocket::IPv4Protocol && a.toIPv4Address() != 0;
+    };
 #if defined(Q_OS_LINUX)
     QFile rf("/proc/net/route");
     if (rf.open(QIODevice::ReadOnly)) {
         const QList<QByteArray> lines = rf.readAll().split('\n');
         for (const QByteArray &l : lines) {
             const QList<QByteArray> f = l.simplified().split(' ');
+            // 字段：Iface Destination Gateway Flags ...；目的地 00000000 即默认路由（多网卡多行）。
             if (f.size() >= 3 && f.at(1) == "00000000") {
                 bool ok = false;
-                // /proc/net/route 里网关是十六进制、按内存(小端)存的：值的第 0 字节即第一个点分段。
+                // 网关是十六进制、按内存(小端)存的：值的第 0 字节即第一个点分段。
                 const quint32 v = f.at(2).toUInt(&ok, 16);
-                if (ok && v) {
-                    m_gatewayIp = QString("%1.%2.%3.%4")
-                                      .arg(v & 0xFF).arg((v >> 8) & 0xFF)
-                                      .arg((v >> 16) & 0xFF).arg((v >> 24) & 0xFF);
-                    break;
-                }
+                const QString gw = QString("%1.%2.%3.%4")
+                                       .arg(v & 0xFF).arg((v >> 8) & 0xFF)
+                                       .arg((v >> 16) & 0xFF).arg((v >> 24) & 0xFF);
+                if (ok && v && validIp(gw))
+                    out.append({gw, QString::fromLatin1(f.at(0))});
             }
         }
         rf.close();
     }
-#else
+#elif defined(Q_OS_MACOS)
     {
         QProcess p;
-#if defined(Q_OS_MACOS)
-        p.start("route", {"-n", "get", "default"});
-#else // Windows
-        p.start("route", {"print", "0.0.0.0"});
-#endif
+        p.start("netstat", {"-rn", "-f", "inet"});
         if (p.waitForFinished(2000)) {
-            const QString out = QString::fromLocal8Bit(p.readAllStandardOutput());
-#if defined(Q_OS_MACOS)
-            static const QRegularExpression re("gateway:\\s*(\\S+)");
-            const auto m = re.match(out);
-            if (m.hasMatch())
-                m_gatewayIp = m.captured(1);
-#else
-            // route print: 行 "0.0.0.0  0.0.0.0  <网关>  <接口>  <跃点>"
-            const QStringList rows = out.split('\n');
-            for (const QString &r : rows) {
-                const QString t = r.simplified();
-                if (t.startsWith("0.0.0.0 0.0.0.0")) {
-                    const QStringList c = t.split(' ');
-                    if (c.size() >= 3)
-                        m_gatewayIp = c.at(2);
-                    break;
-                }
+            const QString text = QString::fromLocal8Bit(p.readAllStandardOutput());
+            // 行："default  192.168.1.1  UGScg  en0 [Expire]"
+            for (const QString &row : text.split('\n')) {
+                const QStringList c = row.simplified().split(' ');
+                if (c.size() >= 4 && c.at(0) == QStringLiteral("default") && validIp(c.at(1)))
+                    out.append({c.at(1), c.at(3)});
             }
-#endif
+        }
+    }
+    if (out.isEmpty()) { // 兜底：只问默认路由（拿不到接口名）
+        QProcess p;
+        p.start("route", {"-n", "get", "default"});
+        if (p.waitForFinished(2000)) {
+            static const QRegularExpression re("gateway:\\s*(\\S+)");
+            const auto m = re.match(QString::fromLocal8Bit(p.readAllStandardOutput()));
+            if (m.hasMatch() && validIp(m.captured(1)))
+                out.append({m.captured(1), QString()});
+        }
+    }
+#else // Windows
+    {
+        QProcess p;
+        p.start("route", {"print", "-4", "0.0.0.0"});
+        if (p.waitForFinished(2000)) {
+            const QString text = QString::fromLocal8Bit(p.readAllStandardOutput());
+            // 行："0.0.0.0  0.0.0.0  <网关>  <接口IP>  <跃点>"；多网卡/开 TUN 时会有多行。
+            for (const QString &row : text.split('\n')) {
+                const QString t = row.simplified();
+                if (!t.startsWith(QStringLiteral("0.0.0.0 0.0.0.0")))
+                    continue;
+                const QStringList c = t.split(' ');
+                if (c.size() >= 4 && validIp(c.at(2)))
+                    out.append({c.at(2), c.at(3)});
+            }
         }
     }
 #endif
+    return out;
+}
+} // namespace
+
+void LanScanner::detectLocalTopology()
+{
+    m_localIp.clear();
+    m_localMac.clear();
+    m_ifaceName.clear();
+    m_netBase = m_netMask = 0;
+    m_physIfaces.clear();
+    m_localMacs.clear();
+    m_gatewayIps.clear();
+
+    // 1) 枚举全部「活动、非回环、有 IPv4」接口：MAC 一律进 m_localMacs（本机判定用），
+    //    非虚拟的才进 m_physIfaces（主网卡候选 / 局域网网段）。
+    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+        const auto flags = iface.flags();
+        if (!(flags & QNetworkInterface::IsUp) || !(flags & QNetworkInterface::IsRunning)
+            || (flags & QNetworkInterface::IsLoopBack))
+            continue;
+        const QString mac = DeviceStore::normalizeMac(iface.hardwareAddress());
+        if (!mac.isEmpty())
+            m_localMacs.insert(mac);
+        for (const QNetworkAddressEntry &entry : iface.addressEntries()) {
+            const QHostAddress ip = entry.ip();
+            if (ip.protocol() != QAbstractSocket::IPv4Protocol || ip.isLoopback())
+                continue;
+            const quint32 ip32 = ip.toIPv4Address();
+            const quint32 mask = entry.netmask().toIPv4Address();
+            if (mask == 0)
+                continue;
+            if (isVirtualIface(iface, ip32))
+                continue;
+            LocalIface f;
+            f.ip = ip.toString();
+            f.mac = mac;
+            // 用 OS 级接口名 name()（Linux eth0 / mac en0 / Windows {GUID}）：二层层要用它绑定网卡
+            // （AF_PACKET SIOCGIFINDEX / BPF BIOCSETIF / Npcap \Device\NPF_{GUID}）。
+            f.name = iface.name();
+            f.mask = mask;
+            f.base = ip32 & mask;
+            m_physIfaces.append(f);
+        }
+    }
+
+    // 2) 全部默认路由 → m_gatewayIps。每个网络的路由器都要能被认出来，否则同时连两个网络时，
+    //    另一个网络的路由器会被当成普通设备、还能对它开代理（劫持路由器会把那个网络打瘫）。
+    const QVector<QPair<QString, QString>> routes = defaultRoutes();
+    for (const auto &r : routes)
+        m_gatewayIps.insert(r.first);
+
+    // 3) 主网卡：优先「带默认路由的那张物理网卡」（Windows 按接口 IP 配对，Linux/mac 按接口名；
+    //    配不上则退化为网关落在其子网内），否则第一张物理网卡。
+    int primary = -1;
+    for (int i = 0; i < m_physIfaces.size() && primary < 0; ++i) {
+        const LocalIface &f = m_physIfaces.at(i);
+        for (const auto &r : routes) {
+            const bool sameIface = !r.second.isEmpty()
+                                   && (r.second == f.ip || r.second == f.name);
+            const quint32 gw = QHostAddress(r.first).toIPv4Address();
+            if (sameIface || (gw && (gw & f.mask) == f.base)) {
+                primary = i;
+                break;
+            }
+        }
+    }
+    if (primary < 0 && !m_physIfaces.isEmpty())
+        primary = 0;
+    if (primary > 0)
+        m_physIfaces.move(primary, 0); // 约定：m_physIfaces[0] 即主网卡
+
+    if (!m_physIfaces.isEmpty()) {
+        const LocalIface &f = m_physIfaces.constFirst();
+        m_localIp = f.ip;
+        m_localMac = f.mac;
+        m_ifaceName = f.name;
+        m_netBase = f.base;
+        m_netMask = f.mask;
+    }
+
+    // 4) 主网卡的网关（网关劫持要用）：优先同网卡的默认路由，其次落在本网段内的，最后 base+1 兜底。
+    m_gatewayIp.clear();
+    for (const auto &r : routes) {
+        if (!r.second.isEmpty() && (r.second == m_localIp || r.second == m_ifaceName)) {
+            m_gatewayIp = r.first;
+            break;
+        }
+    }
+    if (m_gatewayIp.isEmpty() && m_netMask) {
+        for (const auto &r : routes) {
+            const quint32 gw = QHostAddress(r.first).toIPv4Address();
+            if (gw && (gw & m_netMask) == m_netBase) {
+                m_gatewayIp = r.first;
+                break;
+            }
+        }
+    }
     if (m_gatewayIp.isEmpty() && m_netBase)
         m_gatewayIp = u32ToIp(m_netBase + 1);
+    if (!m_gatewayIp.isEmpty())
+        m_gatewayIps.insert(m_gatewayIp);
+}
+
+QSet<QString> LanScanner::gatewayMacs() const
+{
+    QSet<QString> macs;
+    for (const QString &gw : m_gatewayIps) {
+        const QString mac = m_arp.value(gw);
+        if (!mac.isEmpty())
+            macs.insert(mac);
+    }
+    return macs;
+}
+
+bool LanScanner::inPrimarySubnet(const QString &ip) const
+{
+    if (ip.isEmpty() || !m_netBase || !m_netMask)
+        return false;
+    const QHostAddress a(ip);
+    if (a.protocol() != QAbstractSocket::IPv4Protocol)
+        return false;
+    return (a.toIPv4Address() & m_netMask) == m_netBase;
 }
 
 QVector<quint32> LanScanner::hostsToProbe() const
 {
     QVector<quint32> hosts;
-    if (!m_netBase || !m_netMask)
-        return hosts;
-    const quint32 hostBits = ~m_netMask;
-    // 只扫 /24 及更小（>256 主机的网段太大，逐个探测代价过高——退化为只读 ARP 表）。
-    if (hostBits >= 256)
-        return hosts;
-    const quint32 localU = QHostAddress(m_localIp).toIPv4Address();
-    const quint32 broadcast = m_netBase | hostBits;
-    for (quint32 ip = m_netBase + 1; ip < broadcast; ++ip) {
-        if (ip == localU)
-            continue; // 本机不探
-        hosts.append(ip);
+    // 每张物理网卡的网段都扫（同时连两个网络时，两边的设备都要能发现）。
+    for (const LocalIface &f : m_physIfaces) {
+        if (!f.base || !f.mask)
+            continue;
+        const quint32 hostBits = ~f.mask;
+        // 只扫 /24 及更小（>256 主机的网段太大，逐个探测代价过高——退化为只读 ARP 表）。
+        if (hostBits >= 256)
+            continue;
+        const quint32 selfU = QHostAddress(f.ip).toIPv4Address();
+        const quint32 broadcast = f.base | hostBits;
+        for (quint32 ip = f.base + 1; ip < broadcast; ++ip) {
+            if (ip == selfU)
+                continue; // 本机不探
+            hosts.append(ip);
+        }
+        if (hosts.size() >= 1024)
+            break; // 上限兜底：网卡再多也不至于把探测量放飞
     }
     return hosts;
+}
+
+void LanScanner::appendSelfRecords(QVector<DeviceRecord> &out) const
+{
+    // 本机每张物理网卡各一条记录（同时连两个网络 → 两条「本机」，各自属于自己的网段）。
+    for (const LocalIface &f : m_physIfaces) {
+        if (f.ip.isEmpty() || f.mac.isEmpty())
+            continue;
+        DeviceRecord me;
+        me.mac = f.mac;
+        me.ip = f.ip;
+        me.online = true; // 程序在跑，本机必然在线——绝不靠 ARP 表判定自己
+        me.isSelf = true;
+        me.isGateway = false;
+        me.inLanSubnet = false; // 本机不参与劫持
+        me.lastSeen = QDateTime::currentDateTime();
+        me.autoName = QHostInfo::localHostName();
+        me.vendor = ouiVendor(f.mac);
+        me.autoType = DeviceType::Computer;
+        out.append(me);
+    }
 }
 
 // ———————————————————————————— 主动探测 ————————————————————————————
@@ -274,14 +446,9 @@ void LanScanner::onArpOutput(const QByteArray &out)
     const QStringList lines = text.split('\n');
     for (const QString &line : lines) {
         const QString ip = ipv4FromLine(line);
-        if (ip.isEmpty())
-            continue;
-        const QString rawMac = macFromLine(line);
-        if (rawMac.isEmpty())
-            continue;
-        const QString mac = DeviceStore::normalizeMac(rawMac);
-        if (mac.isEmpty())
-            continue;
+        const QString mac = DeviceStore::normalizeMac(macFromLine(line));
+        if (isJunkArpEntry(ip, mac))
+            continue; // 组播/广播条目不是设备
         m_arp.insert(ip, mac);
         Signals &s = sig(ip);
         s.mac = mac;
@@ -685,13 +852,15 @@ DeviceType LanScanner::classify(const QString &mac, const QString &name, const Q
 void LanScanner::assemble()
 {
     QVector<DeviceRecord> out;
-    const QString localMac = m_localMac;
+    const QSet<QString> gwMacs = gatewayMacs();
     // 以 ARP 表为准（有 MAC 才算一台设备）。名称/服务信号按 IP 合并进来。
     for (auto it = m_arp.constBegin(); it != m_arp.constEnd(); ++it) {
         const QString ip = it.key();
         const QString mac = it.value();
-        if (mac.isEmpty())
+        if (isJunkArpEntry(ip, mac))
             continue;
+        if (m_localMacs.contains(mac))
+            continue; // 本机各网卡统一由 appendSelfRecords 产出（信息更全）
         DeviceRecord d;
         d.mac = mac;
         d.ip = ip;
@@ -701,25 +870,15 @@ void LanScanner::assemble()
         d.autoName = !s.hostname.isEmpty() ? s.hostname : s.friendly;
         d.model = s.model;
         d.vendor = !s.vendor.isEmpty() ? s.vendor : ouiVendor(mac);
-        d.isGateway = (ip == m_gatewayIp);
+        d.isGateway = m_gatewayIps.contains(ip) || gwMacs.contains(mac);
         d.isSelf = false;
+        d.inLanSubnet = inPrimarySubnet(ip);
         d.autoType = d.isGateway ? DeviceType::Router
                                  : classify(mac, d.autoName, d.model, d.vendor, s.ports, s.services);
         out.append(d);
     }
-    // 本机也作为一台设备加入（不参与劫持，UI 标「本机·保护」）。
-    if (!m_localIp.isEmpty() && !localMac.isEmpty()) {
-        DeviceRecord me;
-        me.mac = localMac;
-        me.ip = m_localIp;
-        me.online = true;
-        me.isSelf = true;
-        me.lastSeen = QDateTime::currentDateTime();
-        me.autoName = QHostInfo::localHostName();
-        me.vendor = ouiVendor(localMac);
-        me.autoType = DeviceType::Computer;
-        out.append(me);
-    }
+    // 本机（每张物理网卡一条）也作为设备加入（不参与劫持，UI 标「本机·保护」）。
+    appendSelfRecords(out);
 
     m_scanning = false;
     emit scanningChanged(false);
@@ -795,29 +954,36 @@ void LanScanner::refreshLiveness(const QStringList &knownIps)
                 [this, p](int, QProcess::ExitStatus) {
                     const QString text = QString::fromLocal8Bit(p->readAllStandardOutput());
                     p->deleteLater();
-                    QVector<DeviceRecord> out;
+                    // arp -a 给的是完整表 → 整表替换 m_arp（顺带让 gatewayMac() 保持新鲜，
+                    // 网关劫持配置要用）。**必须整表替换而不是累加**：只有「本轮表里没了」
+                    // 才会走陈旧判定→离线，累加会让设备永远显示在线。
+                    QHash<QString, QString> fresh;
                     for (const QString &line : text.split('\n')) {
                         const QString ip = ipv4FromLine(line);
                         const QString mac = DeviceStore::normalizeMac(macFromLine(line));
-                        if (ip.isEmpty() || mac.isEmpty())
+                        if (isJunkArpEntry(ip, mac))
                             continue;
+                        fresh.insert(ip, mac);
+                    }
+                    m_arp = fresh;
+                    const QSet<QString> gwMacs = gatewayMacs();
+                    QVector<DeviceRecord> out;
+                    for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it) {
+                        const QString ip = it.key();
+                        const QString mac = it.value();
+                        if (m_localMacs.contains(mac))
+                            continue; // 本机由 appendSelfRecords 统一产出
                         DeviceRecord d;
                         d.mac = mac;
                         d.ip = ip;
                         d.online = true;
                         d.lastSeen = QDateTime::currentDateTime();
-                        d.isGateway = (ip == m_gatewayIp);
+                        d.isGateway = m_gatewayIps.contains(ip) || gwMacs.contains(mac);
+                        d.inLanSubnet = inPrimarySubnet(ip);
                         out.append(d);
                     }
-                    if (!m_localIp.isEmpty() && !m_localMac.isEmpty()) {
-                        DeviceRecord me;
-                        me.mac = m_localMac;
-                        me.ip = m_localIp;
-                        me.online = true;
-                        me.isSelf = true;
-                        me.lastSeen = QDateTime::currentDateTime();
-                        out.append(me);
-                    }
+                    // 本机每张物理网卡都必须每轮上报，否则 15s 陈旧判定会把本机判成掉线。
+                    appendSelfRecords(out);
                     emit discovered(out);
                 });
     });

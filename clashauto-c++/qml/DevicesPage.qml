@@ -194,6 +194,7 @@ Item {
                         rateDown: model.rateDown
                         isSelf: model.isSelf
                         isGateway: model.isGateway
+                        proxyable: model.proxyable
                         selected: devices.selectedMac === model.mac
                         onClicked: devices.select(model.mac)
                         onToggleProxy: devices.setProxyEnabled(model.mac, !model.proxied)
@@ -266,11 +267,20 @@ Item {
                                 }
                             }
                             ColumnLayout {
-                                visible: detailCol.dev.protectable === true
+                                id: proxyBox
+                                // 已经开着的一律可见可关（离线/跨网段也得能撤销）；关着的只有
+                                // 「可代理且在线」才点得动（离线设备拿不到 IP/ARP，劫持无从下手）。
+                                visible: detailCol.dev.proxyable === true
+                                         || detailCol.dev.proxyEnabled === true
                                 spacing: 2
+                                readonly property bool canToggle:
+                                    detailCol.dev.proxyEnabled === true
+                                    || (detailCol.dev.proxyable === true
+                                        && detailCol.dev.online === true)
                                 Rectangle {
                                     Layout.alignment: Qt.AlignRight
                                     width: 52; height: 26; radius: 13
+                                    opacity: proxyBox.canToggle ? 1.0 : 0.4
                                     color: detailCol.dev.proxyEnabled ? Theme.accent : Theme.switchTrackOff
                                     Behavior on color { ColorAnimation { duration: 120 } }
                                     Rectangle {
@@ -279,8 +289,12 @@ Item {
                                         color: "#ffffff"
                                         Behavior on x { NumberAnimation { duration: 120 } }
                                     }
-                                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                                    HoverHandler {
+                                        cursorShape: proxyBox.canToggle ? Qt.PointingHandCursor
+                                                                        : Qt.ForbiddenCursor
+                                    }
                                     TapHandler {
+                                        enabled: proxyBox.canToggle
                                         onTapped: devices.setProxyEnabled(devices.selectedMac,
                                                                           !detailCol.dev.proxyEnabled)
                                     }
@@ -304,6 +318,38 @@ Item {
                                 wrapMode: Text.WordWrap
                                 text: qsTr("已标记代理此设备；透明网关模块启用后将自动接管其流量。")
                                 font.pixelSize: 11; color: "#c69a54"
+                            }
+                        }
+
+                        // 「为什么不能开代理」——本机/网关/跨网段/离线各给一句人话。
+                        Rectangle {
+                            Layout.fillWidth: true
+                            visible: blockTxt.text !== ""
+                            radius: 5
+                            color: Qt.rgba(1, 1, 1, 0.06)
+                            implicitHeight: blockTxt.implicitHeight + 14
+                            Text {
+                                id: blockTxt
+                                anchors.fill: parent
+                                anchors.margins: 7
+                                wrapMode: Text.WordWrap
+                                font.pixelSize: 11; color: Theme.textMuted
+                                text: {
+                                    switch (detailCol.dev.proxyBlockReason || "") {
+                                    case "self":
+                                        return qsTr("这是本机——它的流量已经由 Coast 自己接管，无需（也不能）代理。");
+                                    case "gateway":
+                                        return qsTr("这是当前网络的路由器（网关），劫持它会把整个网络打瘫，因此不可代理。");
+                                    case "foreign":
+                                        return qsTr("该设备不在主网卡所在网段（属于你连接的另一个网络），"
+                                                    + "透明网关只能劫持同一张网卡下的同网段设备，因此不可代理。");
+                                    case "offline":
+                                        return qsTr("设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。"
+                                                    + "（已经开着的代理随时可以关掉。）");
+                                    default:
+                                        return "";
+                                    }
+                                }
                             }
                         }
 
@@ -433,7 +479,7 @@ Item {
                         // —— 策略 ——
                         RowLayout {
                             Layout.fillWidth: true
-                            visible: detailCol.dev.protectable === true
+                            visible: detailCol.dev.proxyable === true
                             spacing: 8
                             Text { text: qsTr("策略"); font.pixelSize: 12; color: Theme.textMuted
                                    Layout.preferredWidth: 64 }

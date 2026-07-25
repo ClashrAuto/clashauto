@@ -241,6 +241,7 @@ void DeviceStore::mergeDiscovered(const QVector<DeviceRecord> &found)
         if (f.autoType != DeviceType::Unknown) d.autoType = f.autoType;
         d.isSelf = f.isSelf;
         d.isGateway = f.isGateway;
+        d.inLanSubnet = f.inLanSubnet;
         d.online = f.online;
         if (f.lastSeen.isValid()) d.lastSeen = f.lastSeen;
         if (f.online && !wasOnline)

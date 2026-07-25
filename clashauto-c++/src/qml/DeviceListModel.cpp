@@ -27,6 +27,7 @@ QVariant DeviceListModel::data(const QModelIndex &index, int role) const
     case RateDownRole:  return r.rateDown;
     case IsSelfRole:    return r.isSelf;
     case IsGatewayRole: return r.isGateway;
+    case ProxyableRole: return r.proxyable;
     default:            return {};
     }
 }
@@ -38,6 +39,7 @@ QHash<int, QByteArray> DeviceListModel::roleNames() const
         {TypeKeyRole, "typeKey"}, {VendorRole, "vendor"},   {OnlineRole, "online"},
         {ProxiedRole, "proxied"}, {RateUpRole, "rateUp"},   {RateDownRole, "rateDown"},
         {IsSelfRole, "isSelf"},   {IsGatewayRole, "isGateway"},
+        {ProxyableRole, "proxyable"},
     };
 }
 
@@ -53,6 +55,7 @@ DeviceListModel::Row DeviceListModel::toRow(const DeviceRecord &d)
     r.proxied = d.proxyEnabled;
     r.isSelf = d.isSelf;
     r.isGateway = d.isGateway;
+    r.proxyable = d.proxyable();
     r.rateUp = d.rateUp;
     r.rateDown = d.rateDown;
     return r;

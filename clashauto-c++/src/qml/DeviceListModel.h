@@ -29,6 +29,7 @@ public:
         RateDownRole,
         IsSelfRole,
         IsGatewayRole,
+        ProxyableRole, // 能否开代理（非本机/网关 + 在可劫持网段内）
     };
 
     explicit DeviceListModel(QObject *parent = nullptr);
@@ -57,12 +58,14 @@ private:
     struct Row {
         QString mac, ip, name, typeKey, vendor;
         bool online = false, proxied = false, isSelf = false, isGateway = false;
+        bool proxyable = false;
         qint64 rateUp = 0, rateDown = 0;
         bool sameFields(const Row &o) const
         {
             return ip == o.ip && name == o.name && typeKey == o.typeKey && vendor == o.vendor
                    && online == o.online && proxied == o.proxied && isSelf == o.isSelf
-                   && isGateway == o.isGateway && rateUp == o.rateUp && rateDown == o.rateDown;
+                   && isGateway == o.isGateway && proxyable == o.proxyable
+                   && rateUp == o.rateUp && rateDown == o.rateDown;
         }
     };
     static Row toRow(const DeviceRecord &d);

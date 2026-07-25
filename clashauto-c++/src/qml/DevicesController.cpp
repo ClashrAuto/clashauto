@@ -99,10 +99,14 @@ void DevicesController::onDiscovered(const QVector<DeviceRecord> &devices)
     m_firstScanDone = true; // 首轮已并完 → 之后 deviceAdded 才提醒
     // 离线判定：本轮快照没刷新到、且 lastSeen 超 15s 的设备置离线（宽限 15s≈3 轮 5s 热更新，
     // 避免单次探测丢包造成的在线/离线抖动）。先收集 mac 再统一标记，避免边遍历边改的再入。
+    // 本机（当前仍存在的网卡 MAC）永不判离线：程序在跑，本机必然在线；它的在线态不该依赖
+    // ARP/探测（开增强模式时正是这里把本机判成了掉线）。网卡被拔掉 → 不在 localMacs 里 → 照常判离线。
     const QDateTime now = QDateTime::currentDateTime();
+    const QSet<QString> selfMacs = m_scanner ? m_scanner->localMacs() : QSet<QString>();
     QStringList stale;
     for (const DeviceRecord &d : m_store->devices())
-        if (d.online && d.lastSeen.isValid() && d.lastSeen.secsTo(now) > 15)
+        if (d.online && !selfMacs.contains(d.mac) && d.lastSeen.isValid()
+            && d.lastSeen.secsTo(now) > 15)
             stale << d.mac;
     for (const QString &mac : stale)
         m_store->markOffline(mac);
@@ -185,7 +189,16 @@ void DevicesController::rebuildSelected()
                                             ? d->firstSeen.toString("yyyy-MM-dd") : QString();
         m_selectedDevice["onlineSince"] = d->onlineSince.isValid()
                                               ? d->onlineSince.toMSecsSinceEpoch() : 0;
-        m_selectedDevice["protectable"] = !(d->isSelf || d->isGateway); // 可劫持（本机/网关不可）
+        // 能否开代理：本机/网关不可，跨网段（另一张网卡那边的网络）也不可——二层端点只绑主网卡。
+        m_selectedDevice["proxyable"] = d->proxyable();
+        m_selectedDevice["inLanSubnet"] = d->inLanSubnet;
+        // 开关为什么不能开（QML 据此给一句人话）：""=可开 / self / gateway / foreign / offline
+        m_selectedDevice["proxyBlockReason"] =
+            d->isSelf      ? QStringLiteral("self")
+            : d->isGateway ? QStringLiteral("gateway")
+            : !d->inLanSubnet ? QStringLiteral("foreign")
+            : (!d->online || d->ip.isEmpty()) ? QStringLiteral("offline")
+                                             : QString();
 
         // Top 域名（按累计字节降序取前 5）。
         QVariantList top;
@@ -214,8 +227,26 @@ void DevicesController::rebuildSelected()
 void DevicesController::setProxyEnabled(const QString &mac, bool on)
 {
     const DeviceRecord *d = m_store->find(mac);
-    if (!d || d->isSelf || d->isGateway)
-        return; // 本机/网关保护：不允许开代理
+    if (!d)
+        return;
+    // 关闭永远允许（离线设备也得能撤销之前开的代理）；开启才做这些校验。
+    if (on) {
+        if (d->isSelf || d->isGateway) {
+            emit gatewayError(d->isSelf
+                                  ? QStringLiteral("本机不需要（也不能）代理自己")
+                                  : QStringLiteral("网关是路由器本身，劫持它会打瘫整个网络"));
+            return;
+        }
+        if (!d->inLanSubnet) {
+            emit gatewayError(QStringLiteral("该设备不在主网卡所在网段，无法代理"
+                                            "（透明网关只能劫持同一张网卡下的同网段设备）"));
+            return;
+        }
+        if (!d->online || d->ip.isEmpty()) {
+            emit gatewayError(QStringLiteral("设备已离线，等它上线后再开启代理"));
+            return;
+        }
+    }
     const QString ip = d->ip;
     m_store->setProxyEnabled(mac, on);
     m_store->save(); // 立刻落盘，供 ConfigBuilder 读 devices.json 生成网关 listener + auth/IN-USER

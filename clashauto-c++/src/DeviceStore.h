@@ -75,8 +75,14 @@ struct DeviceRecord {
     int connCount = 0;      // 当前活动连接数
     qint64 sessionUp = 0;   // 本次会话（本次程序运行内）累计
     qint64 sessionDown = 0;
-    bool isSelf = false;    // 本机
-    bool isGateway = false; // 网关
+    bool isSelf = false;    // 本机（任一本机网卡的 MAC）
+    bool isGateway = false; // 网关（任一默认路由的网关 IP/MAC）
+    // 是否位于「可劫持网段」= 用于二层收发的主物理网卡的子网。同时连两个网络时，另一张网卡
+    // 那边的设备（含它那边的路由器）无法被 ARP 劫持 —— 二层端点只绑一张网卡。
+    bool inLanSubnet = false;
+
+    // 能否开「代理网络」：本机/网关不动，且必须在可劫持网段内。
+    bool proxyable() const { return !isSelf && !isGateway && inLanSubnet; }
 
     // 展示名：别名 > 自动名 > 型号 > 厂商 > IP
     QString displayName() const;
