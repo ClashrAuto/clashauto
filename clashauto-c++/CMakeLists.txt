@@ -44,6 +44,8 @@ set(BACKEND_SOURCES
     src/ClashService.cpp     src/ClashService.h
     src/SubParser.cpp        src/SubParser.h
     src/TrayController.cpp   src/TrayController.h
+    # 运行时报错 → 脱敏 + 去重 + 提交到本项目 issue 区（默认关，见 IssueReporter.h 顶部说明）
+    src/IssueReporter.cpp    src/IssueReporter.h
     # 设备页后端（局域网发现 + 台账；框架无关）
     src/LanScanner.cpp       src/LanScanner.h
     src/DeviceStore.cpp      src/DeviceStore.h
@@ -150,23 +152,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     target_include_directories(clashauto-qml PRIVATE
         "${LWIP_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/net/lwip_port")
-    # Windows：Npcap SDK（env NPCAP_SDK 指向解压目录）+ 链接。按目标架构选 Lib 子目录。
+    # Windows：只要 Npcap SDK 的**头文件**（env NPCAP_SDK 指向解压目录）——wpcap 不进链接行。
+    # L2Endpoint_win.cpp 在运行时 LoadLibrary("wpcap.dll") + GetProcAddress 取全部 pcap_*，
+    # 所以没装 Npcap 的机器上 Coast 照常启动（只是网关不可用）。原先靠 MSVC 的 /DELAYLOAD 做到
+    # 这一点，但那条件只覆盖 MSVC：MinGW 构建把 wpcap.dll 写进导入表，无 Npcap 的机器上进程
+    # 直接 0xC0000135 起不来。改成运行时绑定后两种工具链行为一致，也不再需要 delayimp。
     if(WIN32)
         set(NPCAP_SDK "$ENV{NPCAP_SDK}")
-        if(CMAKE_GENERATOR_PLATFORM STREQUAL "ARM64")
-            set(_npcap_lib "${NPCAP_SDK}/Lib/ARM64")
-        else()
-            set(_npcap_lib "${NPCAP_SDK}/Lib/x64")
-        endif()
         target_include_directories(clashauto-qml PRIVATE "${NPCAP_SDK}/Include")
-        target_link_directories(clashauto-qml PRIVATE "${_npcap_lib}")
-        target_link_libraries(clashauto-qml PRIVATE wpcap Packet iphlpapi ws2_32)
-        # 延迟加载 Npcap DLL：没装 Npcap 的机器上 Coast 仍能启动（否则缺 wpcap.dll 直接起不来），
-        # 仅在真正用网关时按需加载；加载不到则优雅失败（见 L2Endpoint_win 的 LoadLibrary 检查）。
-        if(MSVC)
-            target_link_options(clashauto-qml PRIVATE /DELAYLOAD:wpcap.dll /DELAYLOAD:Packet.dll)
-            target_link_libraries(clashauto-qml PRIVATE delayimp)
-        endif()
+        target_link_libraries(clashauto-qml PRIVATE iphlpapi ws2_32)
     endif()
 else()
     target_sources(clashauto-qml PRIVATE src/net/LanGateway_stub.cpp)

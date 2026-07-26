@@ -9,6 +9,7 @@
 #include "ClashService.h"
 #include "CoreController.h"
 #include "DeviceStore.h"
+#include "IssueReporter.h"
 #include "SubscriptionStore.h"
 #include "TrayController.h"
 #include "qml/QmlBridge.h"
@@ -99,7 +100,37 @@ int main(int argc, char *argv[])
 
     // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 载入配置；资源已内嵌 qrc，不再找 Clashr-Auto）。
     AppConfig config = AppConfigLoader::load();
+    // 报错上报器要**最早**建：它的 Qt 消息处理器越早装上，越早的 QML/Qt 报错才捕得到。
+    // 默认关（enabled=false），此时它只在本地攒着并提示，不会往外发任何东西。
+    auto *issues = new IssueReporter(config, nullptr, &app);
+    issues->installMessageHandler();
+
+    // 脱敏自检（COAST_ISSUE_SELFTEST=1）：喂几条带敏感信息的假报错，把 preview() 打到 stdout
+    // 后退出，不建 GUI、不发任何网络请求。脱敏是隐私攸关的代码，不能没被执行过就发布；
+    // 本项目没有单测框架，沿用 COAST_GATEWAY_SELFTEST 那套 env 自检钩子的惯例。
+    if (qEnvironmentVariableIsSet("COAST_ISSUE_SELFTEST")) {
+        issues->report(QStringLiteral("selftest"),
+                       QStringLiteral("订阅更新失败: https://sub.example.com/link/AbCdEf123456?token=s3cr3tvalue"));
+        issues->report(QStringLiteral("selftest"),
+                       QStringLiteral("打开网卡失败({2D0C1C28-CC2A-4E5C-89EC-DF873D30F9B9}): "
+                                      "本机 192.168.20.51/255.255.255.0 网关 192.168.20.1 "
+                                      "MAC bc:24:11:8f:4d:f1，回环 127.0.0.1 不该被抹"));
+        issues->report(QStringLiteral("selftest"),
+                       QStringLiteral("写入失败: ") + config.configDir
+                               + QStringLiteral("/full.yaml (secret=abcdef123456)"));
+        // 重复同一条：应当被指纹合并成「重复 2 次」，而不是多出一条。
+        issues->report(QStringLiteral("selftest"),
+                       QStringLiteral("订阅更新失败: https://sub.example.com/link/ZZZZZZ999999?token=other"));
+        // GitHub 域名在白名单里，应保留 host（只抹路径）。
+        issues->report(QStringLiteral("selftest"),
+                       QStringLiteral("下载失败: https://github.com/ClashrAuto/clashauto/releases/x"));
+        const QByteArray out = issues->preview().toUtf8();
+        fwrite(out.constData(), 1, static_cast<size_t>(out.size()), stdout);
+        fflush(stdout);
+        return 0;
+    }
     auto *core = new CoreController(config, &app);
+    issues->setCore(core);
     auto *clash = new ClashService(&app);
     auto *subs = new SubscriptionStore(config, &app);
     // TrayController 用 MainWindow* 做 show/raise；QML 版无 MainWindow，传 nullptr，改用它的
@@ -133,6 +164,47 @@ int main(int argc, char *argv[])
         if (ok)
             devicesCtrl->scan();
     });
+    // —— 报错汇聚：把散在各处的失败信号收进 IssueReporter 这一个入口 ——
+    // 日志两路（核心 / 应用）只取被判为 error 的行，判定复用 LogEntryModel::severityFor，
+    // 保证「日志页标红的」和「会被上报的」是同一批，用户看到什么就上报什么。
+    {
+        auto reportLog = [issues](const QString &source) {
+            return [issues, source](const QString &message) {
+                if (LogEntryModel::severityFor(message) == QLatin1String("error"))
+                    issues->report(source, message);
+            };
+        };
+        QObject::connect(core, &CoreController::logUpdated, issues, reportLog("core"));
+        QObject::connect(clash, &ClashService::logUpdated, issues, reportLog("app"));
+        QObject::connect(core, &CoreController::coreMissing, issues, [issues](const QString &path) {
+            issues->report(QStringLiteral("core"), QStringLiteral("未找到内核二进制: ") + path);
+        });
+        QObject::connect(devicesCtrl, &DevicesController::gatewayError, issues,
+                         [issues](const QString &msg) {
+                             issues->report(QStringLiteral("gateway"), msg);
+                         });
+        QObject::connect(updateCtrl, &UpdateController::failed, issues,
+                         [issues](const QString &reason) {
+                             issues->report(QStringLiteral("update"), reason);
+                         });
+        QObject::connect(about, &AboutController::checkFailed, issues,
+                         [issues](const QString &reason) {
+                             issues->report(QStringLiteral("update-check"), reason);
+                         });
+        QObject::connect(subs, &SubscriptionStore::subscriptionUpdated, issues,
+                         [issues](int index, bool ok, const QString &message, bool) {
+                             if (!ok)
+                                 issues->report(QStringLiteral("subscription"),
+                                                QStringLiteral("订阅 #%1 更新失败: ").arg(index)
+                                                        + message);
+                         });
+        QObject::connect(npcapInstaller, &NpcapInstaller::finished, issues,
+                         [issues, npcapInstaller](bool ok) {
+                             if (!ok)
+                                 issues->report(QStringLiteral("npcap"), npcapInstaller->status());
+                         });
+    }
+
     QObject::connect(&app, &QCoreApplication::aboutToQuit, deviceStore, &DeviceStore::save);
     // 退出必须可靠还原所有被劫持设备的 ARP（否则设备断网）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, lanGateway, &LanGateway::disableAll);
@@ -170,6 +242,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("updater", updateCtrl);
     engine.rootContext()->setContextProperty("devices", devicesCtrl);
     engine.rootContext()->setContextProperty("npcap", npcapInstaller);
+    engine.rootContext()->setContextProperty("issues", issues);
 
     // 界面语言（i18n）：按 config.language 在「加载 QML 前」装好翻译器，首帧即是目标语言（zh-CN 为默认，
     // 不装翻译器 → 用中文源串；en-US 装英文表）。设置页切语言经 languageChangeRequested → 运行时 retranslate。

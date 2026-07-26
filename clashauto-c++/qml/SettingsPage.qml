@@ -539,6 +539,83 @@ Item {
                                 PillButton { text: qsTr("卸载"); onClicked: settings.uninstallMacHelper() } }
                         }
 
+                        // —— 错误上报 ——
+                        // 默认关。开启后程序运行期间捕获到的报错会被脱敏、去重，攒一小批后提交到
+                        // 本项目的 issue 区。没填令牌时走「浏览器预填 + 你点 Submit」——客户端里
+                        // 不内置任何 GitHub 凭据（开源二进制里的令牌等于公开）。
+                        SettingCard {
+                            icon: ""
+                            title: qsTr("错误上报")
+
+                            SettingRow { label: qsTr("自动上报运行错误")
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: issues.pendingCount > 0
+                                          ? qsTr("待上报 %1 条").arg(issues.pendingCount)
+                                          : qsTr("本次运行捕获 %1 条").arg(issues.capturedCount)
+                                    color: Theme.textMuted; font.pixelSize: 12
+                                }
+                                ThemedSwitch {
+                                    id: issueSwitch
+                                    checked: issues.enabled
+                                    onToggled: { issues.enabled = checked; issues.markAsked() }
+                                } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("GitHub 令牌（可选）")
+                                ThemedField {
+                                    id: issueTokenField
+                                    Layout.fillWidth: true
+                                    echoMode: TextInput.Password
+                                    // 不回显已保存的令牌，只用占位符说明当前有没有。
+                                    placeholderText: issues.hasToken
+                                                     ? qsTr("已保存（留空并保存可清除）")
+                                                     : qsTr("留空 = 用浏览器提交，无需令牌")
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: qsTr("填了才是真正的全自动提交。建议只勾 public_repo 权限；"
+                                                       + "令牌明文保存在本机设置里。")
+                                }
+                                PillButton {
+                                    text: qsTr("保存")
+                                    implicitWidth: 84
+                                    onClicked: { issues.setToken(issueTokenField.text); issueTokenField.text = "" }
+                                } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("上报目标")
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: issues.repo
+                                    color: Theme.textSecondary; font.pixelSize: 12; elide: Text.ElideRight
+                                }
+                                PillButton {
+                                    text: qsTr("预览")
+                                    implicitWidth: 84
+                                    enabled: issues.pendingCount > 0
+                                    onClicked: { issuePreview.text = issues.preview(); issuePreview.open() }
+                                }
+                                PillButton {
+                                    text: issues.submitting ? qsTr("提交中…") : qsTr("立即上报")
+                                    primary: true
+                                    implicitWidth: 96
+                                    enabled: issues.pendingCount > 0 && !issues.submitting
+                                    onClicked: issues.submit()
+                                }
+                                PillButton {
+                                    text: qsTr("忽略")
+                                    implicitWidth: 84
+                                    enabled: issues.pendingCount > 0
+                                    onClicked: issues.discard()
+                                } }
+                            CardDivider { visible: issues.status.length > 0 }
+                            SettingRow { visible: issues.status.length > 0
+                                label: qsTr("状态")
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: issues.status
+                                    wrapMode: Text.WordWrap
+                                    color: Theme.textMuted; font.pixelSize: 12
+                                } }
+                        }
+
                         Item { Layout.preferredHeight: 0 } // 占位：列 spacing 10 即为末卡距底距离
                     }
                 }
@@ -724,6 +801,72 @@ Item {
 
     // 规则编辑器——独立顶层窗口，抽成共享组件 RuleEditorWindow（设置页与连接窗右键复用同一实现）。
     RuleEditorWindow { id: ruleEditor }
+
+    // ———————————————— 上报预览（把要发出去的正文原样摊开给用户看）————————————————
+    // 这个窗不是可有可无的装饰：内容要发到**公开** issue 区，用户有权在点「立即上报」之前
+    // 逐字看一遍脱敏后的全文。文本可选中，方便自行复制去手动提交。
+    ApplicationWindow {
+        id: issuePreview
+        property alias text: issuePreviewArea.text
+        transientParent: null
+        flags: Qt.Window
+        width: 640
+        height: 560
+        minimumWidth: 420
+        minimumHeight: 360
+        title: qsTr("上报内容预览")
+        color: Theme.card
+
+        function open() {
+            issuePreview.show()
+            issuePreview.raise()
+            issuePreview.requestActivate()
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 8
+
+            Label { text: qsTr("以下内容将提交到 %1 的 issue 区（已脱敏）").arg(issues.repo)
+                color: Theme.textSecondary; font.pixelSize: 12; Layout.fillWidth: true
+                wrapMode: Text.WordWrap }
+
+            ScrollView {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                TextArea {
+                    id: issuePreviewArea
+                    readOnly: true
+                    color: Theme.textPrimary
+                    font.pixelSize: 12
+                    selectByMouse: true
+                    wrapMode: TextArea.Wrap
+                    background: Rectangle {
+                        radius: 3
+                        color: Theme.inputBg
+                        border.width: 1
+                        border.color: Theme.inputBorder
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                PillButton {
+                    text: qsTr("复制")
+                    onClicked: { issuePreviewArea.selectAll(); issuePreviewArea.copy(); issuePreviewArea.deselect() }
+                }
+                PillButton { text: qsTr("关闭"); onClicked: issuePreview.close() }
+                PillButton {
+                    text: qsTr("确认上报"); primary: true
+                    enabled: issues.pendingCount > 0 && !issues.submitting
+                    onClicked: { issues.submit(); issuePreview.close() }
+                }
+            }
+        }
+    }
 
     // ———————————————— 区域编辑器（独立顶层窗口，任务栏可切换）————————————————
     ApplicationWindow {
