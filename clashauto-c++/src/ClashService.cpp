@@ -433,7 +433,9 @@ void ClashService::pollConnections()
     m_connectionsInFlight = true;
     sendGet(QUrl(QString("http://%1:%2/connections").arg(m_host).arg(m_port)), [this](const QJsonDocument &doc) {
         const QJsonObject obj = doc.object();
-        emit connectionsUpdated(obj.value("connections").toArray().size(), obj.value("downloadTotal").toInteger());
+        const QJsonArray conns = obj.value("connections").toArray();
+        emit connectionsUpdated(conns.size(), obj.value("downloadTotal").toInteger());
+        emit connectionsSnapshot(conns); // 历史库消费同一份数据，不再多发一次请求
     }, [this] { m_connectionsInFlight = false; }); // finished：成功/失败/超时都在此清在途标志
 }
 

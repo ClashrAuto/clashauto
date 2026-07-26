@@ -22,8 +22,10 @@ set(CMAKE_AUTOUIC ON)
 
 # QML 前端需要 Qt6（qt_add_qml_module / loadFromModule 为 Qt6 API）。
 # Widgets 仍需链接：QSystemTrayIcon（TrayController）、QApplication 依赖它。
-find_package(QT NAMES Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2)
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2)
+# Sql：上网历史库（SQLite，见 src/HistoryStore.h）。只用 Qt 自带的 QSQLITE 驱动，不外挂任何库；
+# 打包时记得带上 plugins/sqldrivers（windeployqt 会自动跟着 Qt6::Sql 复制）。
+find_package(QT NAMES Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 
 # QML 模块资源默认前缀 :/qt/qml/（引擎的 qrc import path）。不设 NEW 时用旧前缀，
 # 运行时 loadFromModule("ClashAuto","Main") 找不到模块 → "contains no type named Main"。
@@ -49,6 +51,8 @@ set(BACKEND_SOURCES
     # 设备页后端（局域网发现 + 台账；框架无关）
     src/LanScanner.cpp       src/LanScanner.h
     src/DeviceStore.cpp      src/DeviceStore.h
+    # 上网历史库（SQLite）：连接断开时落一条，供「常用域名 / 按天用量」查询
+    src/HistoryStore.cpp     src/HistoryStore.h
     # 透明网关——跨平台可编译层。L2 工厂按平台各一份实现（Linux=AF_PACKET / mac=BPF /
     # Windows=Npcap待做，现桩 nullptr）；每个 .cpp 用 #if <os> 守卫，同一平台只有一个定义。
     src/net/IL2Endpoint.h
@@ -186,6 +190,7 @@ target_link_libraries(clashauto-qml PRIVATE
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
+    Qt6::Sql
     $<$<PLATFORM_ID:Windows>:dwmapi>
     $<$<PLATFORM_ID:Windows>:shell32>
     $<$<PLATFORM_ID:Windows>:advapi32>

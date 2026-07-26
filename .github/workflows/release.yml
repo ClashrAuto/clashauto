@@ -192,6 +192,11 @@ jobs:
           if (-not (Test-Path "$stage\Coast.exe")) {
             throw "Missing staged executable"
           }
+          # 上网历史库（src/HistoryStore）用 QSQLITE 驱动插件；windeployqt 跟着 Qt6Sql.dll 一起带上。
+          # 缺了程序照常跑，只是历史静默不记录 —— 所以只警告不失败，但要在日志里看得见。
+          if (-not (Test-Path "$stage\sqldrivers\qsqlite.dll")) {
+            Write-Host "::warning::未见 sqldrivers\qsqlite.dll（上网历史/常用域名将不可用）"
+          }
 
       - name: Create portable zip
         shell: pwsh
@@ -676,6 +681,9 @@ jobs:
           test -e "$app_dir/lib/libQt6Quick.so.6"
           ls "$app_dir/plugins/tls/"*.so >/dev/null 2>&1 \
             || echo "::warning::未见 plugins/tls 后端（HTTPS 订阅/更新可能不可用，请核对 aqt Qt 是否含 openssl 后端）"
+          # 上网历史库（src/HistoryStore）用 QSQLITE 驱动插件；缺了不会崩，但历史会静默不记录
+          test -e "$app_dir/plugins/sqldrivers/libqsqlite.so" \
+            || echo "::warning::未见 plugins/sqldrivers/libqsqlite.so（上网历史/常用域名将不可用）"
           # 内核不再随包分发：不校验 command/clash 下的核心是否存在
 
       - name: Create portable tar.gz

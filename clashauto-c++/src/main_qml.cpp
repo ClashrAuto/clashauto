@@ -9,7 +9,8 @@
 #include "ClashService.h"
 #include "CoreController.h"
 #include "DeviceStore.h"
-#include "LanScanner.h" // COAST_SCAN_SELFTEST 的扫描耗时自检
+#include "HistoryStore.h" // 上网历史库（SQLite）
+#include "LanScanner.h"   // COAST_SCAN_SELFTEST 的扫描耗时自检
 #include "IssueReporter.h"
 #include "SubscriptionStore.h"
 #include "TrayController.h"
@@ -35,7 +36,10 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QDir>
 #include <QElapsedTimer>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QTimer>
 
 #include <cstdio>
@@ -149,6 +153,44 @@ int main(int argc, char *argv[])
         return app.exec();
     }
 
+    // 上网历史库自检（COAST_HISTORY_SELFTEST=1）：在临时目录建一个库，喂两拍伪造的 /connections
+    // 快照（第二拍连接全消失 = 全部断开），落盘后把记录数和两个聚合查询打到 stdout 再退出。
+    // 这些 SQL 字符串编译期一个字都不检查，跑错了只会安静地返回空表——必须真跑一遍。
+    if (qEnvironmentVariableIsSet("COAST_HISTORY_SELFTEST")) {
+        const QString dir = QDir::temp().filePath(QStringLiteral("coast-history-selftest"));
+        QDir(dir).removeRecursively();
+        HistoryStore h(dir, nullptr); // devices=nullptr → mac 记空串，查询用空 mac（= 全部设备）
+        std::printf("[hist] driver-ok=%d db=%s\n", int(h.isOpen()),
+                    h.databasePath().toUtf8().constData());
+        const QByteArray snapshot = R"([
+            {"id":"c1","start":"2026-07-27T00:00:00.000+08:00","upload":100,"download":900,
+             "chains":["Auto"],"metadata":{"host":"example.com","destinationIP":"93.184.216.34",
+             "network":"tcp","sourceIP":"127.0.0.1","process":"firefox.exe"}},
+            {"id":"c2","start":"2026-07-27T00:00:01.000+08:00","upload":10,"download":40,
+             "chains":["DIRECT"],"metadata":{"host":"example.com","destinationIP":"93.184.216.34",
+             "network":"udp","sourceIP":"127.0.0.1"}},
+            {"id":"c3","start":"2026-07-27T00:00:02.000+08:00","upload":0,"download":0,
+             "chains":["DIRECT"],"metadata":{"host":"zero-bytes.example","network":"tcp"}}
+        ])";
+        QJsonParseError perr{};
+        const QJsonArray snap = QJsonDocument::fromJson(snapshot, &perr).array();
+        std::printf("[hist] parsed=%d err=%s\n", int(snap.size()),
+                    perr.errorString().toUtf8().constData());
+        h.observe(snap);
+        h.observe(QJsonArray()); // 全部消失 = 全部断开 → 有流量的两条入库，0 字节那条应被丢弃
+        h.flush(false);
+        std::printf("[hist] records=%lld (expect 2: 0 字节的连接不入库)\n",
+                    static_cast<long long>(h.recordCount()));
+        for (const HistoryStore::DomainTotal &d : h.topDomains(QString(), 7, 5))
+            std::printf("[hist] top %s = %lld bytes\n", d.host.toUtf8().constData(),
+                        static_cast<long long>(d.bytes));
+        for (const HistoryStore::DayTotal &d : h.dailyTraffic(QString(), 3))
+            std::printf("[hist] day %s up=%lld down=%lld\n", d.day.toUtf8().constData(),
+                        static_cast<long long>(d.up), static_cast<long long>(d.down));
+        std::fflush(stdout);
+        return 0;
+    }
+
     // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 载入配置；资源已内嵌 qrc，不再找 Clashr-Auto）。
     AppConfig config = AppConfigLoader::load();
     // 报错上报器要**最早**建：它的 Qt 消息处理器越早装上，越早的 QML/Qt 报错才捕得到。
@@ -203,10 +245,16 @@ int main(int argc, char *argv[])
     auto *updateCtrl = new UpdateController(config, core, &app);
     // 设备页：局域网发现台账 + 透明网关 + 控制器（自持连接轮询/热更新；页面显隐时开停）。
     auto *deviceStore = new DeviceStore(config.configDir, &app);
+    // 上网历史库（SQLite）：订阅 ClashService 每 2s 的连接快照，连接断开时落一条记录。
+    // 复用同一次 /connections 请求，不额外发包；设备详情的「常用域名」也从它查。
+    auto *history = new HistoryStore(config.configDir, deviceStore, &app);
+    QObject::connect(clash, &ClashService::connectionsSnapshot, history, &HistoryStore::observe);
+    // 退出前把待写缓冲 + 仍在途的长连接都落盘（aboutToQuit 时对象还活着；析构里也有一道保险）。
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, history, [history] { history->flush(true); });
     auto *lanGateway = new LanGateway(&app);
     // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
     lanGateway->recoverFromCrash();
-    auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, &app);
+    auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, history, &app);
     // Npcap 安装引导（Windows 专用；其它平台 supported()=false，设备页那条提示条不显示）。
     auto *npcapInstaller = new NpcapInstaller(config, core, &app);
     // 装完立刻重扫一轮：onDiscovered → ensureGatewayConfigured 会重新 open 二层端点，

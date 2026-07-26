@@ -2,6 +2,7 @@
 #include "../ClashService.h"
 #include "../CoreController.h"
 #include "../DeviceStore.h"
+#include "../HistoryStore.h"
 #include "../LanScanner.h"
 #include "../net/LanGateway.h"
 
@@ -20,8 +21,9 @@
 #include <algorithm>
 
 DevicesController::DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
-                                    LanGateway *gateway, QObject *parent)
-    : QObject(parent), m_store(store), m_clash(clash), m_core(core), m_gateway(gateway)
+                                    LanGateway *gateway, HistoryStore *history, QObject *parent)
+    : QObject(parent), m_store(store), m_clash(clash), m_core(core), m_gateway(gateway),
+      m_history(history)
 {
     m_scanner = new LanScanner(this);
 
@@ -249,6 +251,7 @@ void DevicesController::select(const QString &mac)
     m_connModel.setSourceIp(d ? d->ip : QString());
     // 网关代理的连接 sourceIP=127.0.0.1,还要靠 dev-<mac> 用户名归属(与 IP 取或)。
     m_connModel.setUser(d ? DeviceStore::socksUser(d->mac) : QString());
+    refreshTopDomains(true); // 换设备：立刻重查，别让详情先闪一下上一台的域名
     rebuildSelected();
     emit selectedChanged();
 }
@@ -297,28 +300,46 @@ void DevicesController::rebuildSelected()
             : (!d->online || d->ip.isEmpty()) ? QStringLiteral("offline")
                                              : QString();
 
-        // Top 域名（按累计字节降序取前 5）。
-        QVariantList top;
-        const auto it = m_devDomains.constFind(m_selectedMac);
-        if (it != m_devDomains.constEnd()) {
-            QVector<QPair<QString, qint64>> v;
-            v.reserve(it->size());
-            for (auto h = it->constBegin(); h != it->constEnd(); ++h)
-                v.append({h.key(), h.value()});
-            std::sort(v.begin(), v.end(),
-                      [](const QPair<QString, qint64> &a, const QPair<QString, qint64> &b) {
-                          return a.second > b.second;
-                      });
-            for (int i = 0; i < v.size() && i < 5; ++i) {
-                QVariantMap e;
-                e["host"] = v[i].first;
-                e["bytes"] = static_cast<double>(v[i].second);
-                top.append(e);
-            }
-        }
-        m_selectedDevice["topDomains"] = top;
+        // Top 域名 + 近 7 天用量：都来自历史库（跨重启保留），按 TTL 节流，见 refreshTopDomains。
+        refreshTopDomains(false);
+        m_selectedDevice["topDomains"] = m_topDomains;
+        m_selectedDevice["recentDays"] = m_recentDays;
     }
     emit selectedChanged();
+}
+
+// 「常用域名」和「近 7 天用量」都来自历史库。rebuildSelected 每秒都会跑（流量聚合完就刷一次
+// 详情），每秒查两次 SQL 纯属浪费——按 5s TTL 节流；换选中设备时 force=true 立刻重查，
+// 否则点开一台设备会先看到上一台的数据。
+void DevicesController::refreshTopDomains(bool force)
+{
+    if (!m_history || m_selectedMac.isEmpty()) {
+        m_topDomains.clear();
+        m_recentDays.clear();
+        return;
+    }
+    if (!force && m_topDomainsMac == m_selectedMac && m_topDomainsAge.isValid()
+        && m_topDomainsAge.elapsed() < kTopDomainsTtlMs)
+        return;
+
+    m_topDomainsMac = m_selectedMac;
+    m_topDomainsAge.restart();
+
+    m_topDomains.clear();
+    for (const HistoryStore::DomainTotal &d : m_history->topDomains(m_selectedMac, 7, 5)) {
+        QVariantMap e;
+        e["host"] = d.host;
+        e["bytes"] = static_cast<double>(d.bytes);
+        m_topDomains.append(e);
+    }
+    m_recentDays.clear();
+    for (const HistoryStore::DayTotal &d : m_history->dailyTraffic(m_selectedMac, 7)) {
+        QVariantMap e;
+        e["day"] = d.day;
+        e["up"] = static_cast<double>(d.up);
+        e["down"] = static_cast<double>(d.down);
+        m_recentDays.append(e);
+    }
 }
 
 void DevicesController::setProxyEnabled(const QString &mac, bool on)
@@ -492,12 +513,15 @@ void DevicesController::aggregate(const QVariantList &conns)
     // (= dev-<去冒号mac>,见 ConfigBuilder 的 per-user listener + DeviceStore::socksUser)。
     QHash<QString, QString> ipToMac;
     QHash<QString, QString> userToMac;
+    QString selfMac; // 本机（第一条 isSelf 记录）——回环来源的连接归到它名下
     for (const DeviceRecord &d : m_store->devices()) {
         if (!d.ip.isEmpty())
             ipToMac.insert(d.ip, d.mac);
         const QString u = DeviceStore::socksUser(d.mac);
         if (!u.isEmpty())
             userToMac.insert(u, d.mac);
+        if (d.isSelf && selfMac.isEmpty())
+            selfMac = d.mac;
     }
 
     const bool dbg = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
@@ -505,14 +529,21 @@ void DevicesController::aggregate(const QVariantList &conns)
     for (const QVariant &v : conns) {
         const QVariantMap m = v.toMap();
         const QString ip = m.value("sourceIP").toString();
+        const QString inUser = m.value("inboundUser").toString();
         QString mac = ipToMac.value(ip);
         if (!mac.isEmpty()) {
             ++dbgByIp;
         } else { // 网关代理:sourceIP=127.0.0.1 归不到设备 → 靠 inboundUser 归属
-            mac = userToMac.value(m.value("inboundUser").toString());
+            mac = userToMac.value(inUser);
             if (!mac.isEmpty())
                 ++dbgByUser;
         }
+        // 回环来源、又不是网关代理 = 本机自己经系统代理(127.0.0.1:7890)发出的连接。
+        // 以前这类全部落进「未归属」丢掉，于是设备列表里「本机」那一行的速率/今日用量恒为 0 ——
+        // 全机器最忙的一台反而永远显示没流量。
+        if (mac.isEmpty() && DeviceStore::isLoopbackIp(ip)
+            && !inUser.startsWith(QStringLiteral("dev-")))
+            mac = selfMac;
         if (mac.isEmpty()) {
             ++dbgUnattr;
             continue;
@@ -529,10 +560,8 @@ void DevicesController::aggregate(const QVariantList &conns)
         acc.first += dd;
         acc.second += du;
         devConn[mac] += 1;
-        // Top 域名：按 host 累计该设备的字节增量。
-        const QString host = m.value("host").toString();
-        if (!host.isEmpty() && (dd > 0 || du > 0))
-            m_devDomains[mac][host] += dd + du;
+        // （Top 域名不再在这里攒：以前那份 QHash 只活在内存里，重启就清零。改由 HistoryStore
+        //   统一记账——连接断了落库、在途的实时合并，见 refreshTopDomains。）
     }
     // 清理本拍未出现的连接 id（已关闭，字节已计入）。
     for (auto it = connBytes.begin(); it != connBytes.end();) {

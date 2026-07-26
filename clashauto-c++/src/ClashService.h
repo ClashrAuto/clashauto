@@ -53,6 +53,9 @@ public:
 signals:
     void trafficUpdated(qint64 up, qint64 down);
     void connectionsUpdated(int count, qint64 downloadTotal);
+    // 每次 /connections 轮询拿到的**完整**连接数组（HistoryStore 据此做「连接消失=已断开」判定）。
+    // 复用同一次请求，不额外发包；轮询周期即 m_connectionsTimer 的 2s。
+    void connectionsSnapshot(QJsonArray connections);
     void nodesUpdated(QVector<NodeInfo> nodes, QString selected);
     void proxyGroupsUpdated(QStringList groups, QString selectedGroup);
     void logUpdated(QString message);

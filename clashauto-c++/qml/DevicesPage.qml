@@ -30,6 +30,21 @@ Item {
     readonly property var typeKeys: ["unknown", "phone", "tablet", "computer", "router",
                                      "tvbox", "speaker", "printer", "camera", "game", "nas", "iot"]
     function typeOverrideName(k) { return k === "unknown" ? qsTr("自动识别") : typeName(k); }
+    // 近 7 天柱状图用：这 7 天里单日最大字节（归一化基准，至少 1 免得除零）、以及 7 天合计
+    // （合计为 0 时整块不显示——没历史的设备画 7 根空柱子只是噪音）。
+    function maxDayBytes(days) {
+        var m = 1;
+        for (var i = 0; days && i < days.length; ++i)
+            m = Math.max(m, days[i].up + days[i].down);
+        return m;
+    }
+    function daysTotal(days) {
+        var t = 0;
+        for (var i = 0; days && i < days.length; ++i)
+            t += days[i].up + days[i].down;
+        return t;
+    }
+
     readonly property var modeKeys: ["follow", "rule", "global", "direct", "reject"]
     function modeName(k) {
         switch (k) {
@@ -539,6 +554,59 @@ Item {
                                                font.pixelSize: 12; color: Theme.textSecondary }
                                     }
                                     Item { Layout.fillWidth: true }
+                                }
+                            }
+                        }
+
+                        // —— 近 7 天用量（来自历史库 history.db，跨重启保留）——
+                        // 数据是「连接结束时落库」攒出来的，加上仍在途连接的实时字节，所以今天
+                        // 那根柱子也会跟着涨。没有任何记录时整块不显示（新装/没开过代理的设备）。
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            visible: page.daysTotal(detailCol.dev.recentDays) > 0
+                            Text { text: qsTr("近 7 天"); font.pixelSize: 14; color: Theme.textPrimary }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 56
+                                spacing: 6
+                                Repeater {
+                                    model: detailCol.dev.recentDays || []
+                                    delegate: ColumnLayout {
+                                        required property var modelData
+                                        Layout.fillWidth: true
+                                        Layout.fillHeight: true
+                                        spacing: 3
+                                        Item {
+                                            Layout.fillWidth: true
+                                            Layout.fillHeight: true
+                                            Rectangle { // 柱子：按这 7 天里的最大值归一化
+                                                anchors.bottom: parent.bottom
+                                                width: parent.width
+                                                radius: 2
+                                                height: Math.max(2, parent.height
+                                                        * (modelData.up + modelData.down)
+                                                        / page.maxDayBytes(detailCol.dev.recentDays))
+                                                color: Theme.accent
+                                                opacity: 0.75
+                                            }
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: String(modelData.day).slice(5) // MM-DD
+                                            font.pixelSize: 9
+                                            color: Theme.textMuted
+                                        }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            horizontalAlignment: Text.AlignHCenter
+                                            text: Theme.fmtBytes(modelData.up + modelData.down)
+                                            font.pixelSize: 9
+                                            color: Theme.textSecondary
+                                            elide: Text.ElideRight
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -135,6 +135,14 @@ public:
     // 每设备的 mihomo SOCKS 身份用户名（ConfigBuilder 生成 authentication/IN-USER 与
     // LanGateway 拨号必须用同一派生，否则规则/流量归属对不上）：dev-<去冒号小写 mac>。
     static QString socksUser(const QString &mac);
+    // 该 sourceIP 是不是回环。**本机经系统代理(127.0.0.1:7890)发出的连接，在核心眼里 sourceIP
+    // 就是 127.0.0.1**，按 IP 归属会全部落空——本机那一行的流量/域名永远是 0。流量聚合与历史库
+    // 都用它把这类连接归到「本机」设备上（网关代理的连接 sourceIP 同样是回环，但带
+    // inboundUser=dev-*，必须先按用户名归属、别错记成本机）。
+    static bool isLoopbackIp(const QString &ip)
+    {
+        return ip.startsWith(QLatin1String("127.")) || ip == QLatin1String("::1");
+    }
     // mihomo 专用「网关」socks inbound 端口：被劫持设备的流量经此口带每设备用户名进 mihomo。
     // 独立于主混合口(7890)，让 Coast 自己的测速仍免认证走 7890。ConfigBuilder 生成此 listener，
     // LanGateway 拨号连此端口——两边必须一致。

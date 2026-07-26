@@ -22,6 +22,7 @@ class LanScanner;
 class ClashService;
 class CoreController;
 class LanGateway;
+class HistoryStore;
 class QTimer;
 
 class DevicesController final : public QObject
@@ -47,7 +48,7 @@ class DevicesController final : public QObject
 
 public:
     DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
-                      LanGateway *gateway, QObject *parent = nullptr);
+                      LanGateway *gateway, HistoryStore *history, QObject *parent = nullptr);
 
     DeviceListModel *model() { return &m_model; }
     DeviceConnectionsModel *connModel() { return &m_connModel; }
@@ -104,6 +105,7 @@ private:
     ClashService *m_clash = nullptr;
     CoreController *m_core = nullptr;
     LanGateway *m_gateway = nullptr;
+    HistoryStore *m_history = nullptr; // 常用域名从它查（跨重启保留）
     LanScanner *m_scanner = nullptr;
     DeviceListModel m_model;
     DeviceConnectionsModel m_connModel;
@@ -122,8 +124,14 @@ private:
     // 每设备的会话累计（单调，算速率 + 落台账）。key = mac。
     struct Prev { qint64 up = 0, down = 0; qint64 elapsedMs = 0; };
     QHash<QString, Prev> m_prev;
-    // 每设备 域名→累计字节（Top 域名排行）。key = mac。
-    QHash<QString, QHash<QString, qint64>> m_devDomains;
+    // 选中设备的 Top 域名（来自 HistoryStore，含在途连接）。rebuildSelected 每秒都会跑，
+    // 不能每次都去查库——按 kTopDomainsTtlMs 节流，选中设备变化时立即失效重查。
+    QVariantList m_topDomains;
+    QVariantList m_recentDays; // 近 7 天每天的 {day,up,down}（同样来自 HistoryStore）
+    QString m_topDomainsMac;
+    QElapsedTimer m_topDomainsAge;
+    static constexpr int kTopDomainsTtlMs = 5000;
+    void refreshTopDomains(bool force);
     bool m_newDeviceAlert = true;
     bool m_firstScanDone = false;
     // 上一次已提示过的网关错误（LanGateway::deviceError）——每轮扫描都会重试 open，用它去重。
