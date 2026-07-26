@@ -135,14 +135,19 @@ public:
     // 每设备的 mihomo SOCKS 身份用户名（ConfigBuilder 生成 authentication/IN-USER 与
     // LanGateway 拨号必须用同一派生，否则规则/流量归属对不上）：dev-<去冒号小写 mac>。
     static QString socksUser(const QString &mac);
-    // 该 sourceIP 是不是回环。**本机经系统代理(127.0.0.1:7890)发出的连接，在核心眼里 sourceIP
-    // 就是 127.0.0.1**，按 IP 归属会全部落空——本机那一行的流量/域名永远是 0。流量聚合与历史库
-    // 都用它把这类连接归到「本机」设备上（网关代理的连接 sourceIP 同样是回环，但带
-    // inboundUser=dev-*，必须先按用户名归属、别错记成本机）。
     static bool isLoopbackIp(const QString &ip)
     {
         return ip.startsWith(QLatin1String("127.")) || ip == QLatin1String("::1");
     }
+    // 这个 sourceIP 是不是「本机自己」。**本机发出的连接在核心眼里从来不是它的局域网 IP**：
+    //   · 走系统代理(127.0.0.1:7890) → sourceIP = 127.0.0.1
+    //   · 开增强(TUN) → sourceIP = TUN 网卡地址（mihomo 默认 198.18.0.1，实测就是它）
+    // 两种都按局域网 IP 归属不上，于是设备列表里「本机」那一行的流量/域名/今日用量恒为 0 ——
+    // 全机器最忙的一台反而永远显示没流量。判据取「回环 或 本机任一网卡的地址」，把 TUN、
+    // 虚拟网卡这些将来可能冒出来的出口一并覆盖住，不写死某个网段。
+    // 注意调用顺序：网关代理的设备 sourceIP 也是回环，但带 inboundUser=dev-*，**必须先按用户名
+    // 归属**，否则会把别的设备的流量记到本机头上。
+    static bool isLocalMachineIp(const QString &ip);
     // mihomo 专用「网关」socks inbound 端口：被劫持设备的流量经此口带每设备用户名进 mihomo。
     // 独立于主混合口(7890)，让 Coast 自己的测速仍免认证走 7890。ConfigBuilder 生成此 listener，
     // LanGateway 拨号连此端口——两边必须一致。

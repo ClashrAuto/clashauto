@@ -173,8 +173,9 @@ void HistoryStore::observe(const QJsonArray &conns)
             l.mac = ipToMac.value(srcIp);
             if (l.mac.isEmpty())
                 l.mac = userToMac.value(user); // 网关代理：sourceIP=127.0.0.1，只能靠用户名
-            // 回环且不是网关代理 = 本机经系统代理发出的连接 → 记到「本机」那台设备名下。
-            if (l.mac.isEmpty() && DeviceStore::isLoopbackIp(srcIp)
+            // 源地址是本机自己的网卡（回环 / TUN 的 198.18.0.1 …）且不是网关代理进来的
+            // → 本机自己的流量，记到「本机」那台设备名下（口径与流量聚合一致）。
+            if (l.mac.isEmpty() && DeviceStore::isLocalMachineIp(srcIp)
                 && !user.startsWith(QStringLiteral("dev-")))
                 l.mac = selfMac;
         }

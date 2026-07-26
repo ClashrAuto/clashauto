@@ -132,6 +132,27 @@ void DevicesController::resumeProxies()
 QString DevicesController::localIp() const { return m_scanner ? m_scanner->localIp() : QString(); }
 QString DevicesController::gatewayIp() const { return m_scanner ? m_scanner->gatewayIp() : QString(); }
 int DevicesController::deviceCount() const { return m_store ? m_store->devices().size() : 0; }
+
+// 概览条上的「今日总量」：直接把台账里每台设备的 todayUp/Down 加起来（十几台设备，随 UI 绑定
+// 每秒求一次和的开销可以忽略；也省得再维护一份会和台账走神的缓存）。
+// 注意这里天然只统计**归属到设备**的流量：归不到任何设备的连接不进任何一台的 today 计数。
+double DevicesController::totalTodayUp() const
+{
+    qint64 sum = 0;
+    if (m_store)
+        for (const DeviceRecord &d : m_store->devices())
+            sum += d.todayUp;
+    return static_cast<double>(sum);
+}
+
+double DevicesController::totalTodayDown() const
+{
+    qint64 sum = 0;
+    if (m_store)
+        for (const DeviceRecord &d : m_store->devices())
+            sum += d.todayDown;
+    return static_cast<double>(sum);
+}
 bool DevicesController::gatewayReady() const { return m_gateway && m_gateway->isAvailable(); }
 
 void DevicesController::ensureGatewayConfigured()
@@ -525,7 +546,7 @@ void DevicesController::aggregate(const QVariantList &conns)
     }
 
     const bool dbg = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
-    int dbgByIp = 0, dbgByUser = 0, dbgUnattr = 0;
+    int dbgByIp = 0, dbgByUser = 0, dbgByLocal = 0, dbgUnattr = 0;
     for (const QVariant &v : conns) {
         const QVariantMap m = v.toMap();
         const QString ip = m.value("sourceIP").toString();
@@ -538,14 +559,22 @@ void DevicesController::aggregate(const QVariantList &conns)
             if (!mac.isEmpty())
                 ++dbgByUser;
         }
-        // 回环来源、又不是网关代理 = 本机自己经系统代理(127.0.0.1:7890)发出的连接。
-        // 以前这类全部落进「未归属」丢掉，于是设备列表里「本机」那一行的速率/今日用量恒为 0 ——
-        // 全机器最忙的一台反而永远显示没流量。
-        if (mac.isEmpty() && DeviceStore::isLoopbackIp(ip)
-            && !inUser.startsWith(QStringLiteral("dev-")))
+        // 源地址是本机自己的某个网卡（回环 / TUN 的 198.18.0.1 / …）、又不是网关代理进来的
+        // → 这是本机自己发出的流量，记到「本机」那台设备名下。以前这类全部落进「未归属」丢掉，
+        // 于是设备列表里本机那一行的速率/今日用量恒为 0——全机器最忙的一台反而永远显示没流量。
+        if (mac.isEmpty() && DeviceStore::isLocalMachineIp(ip)
+            && !inUser.startsWith(QStringLiteral("dev-"))) {
             mac = selfMac;
+            if (!mac.isEmpty())
+                ++dbgByLocal;
+        }
         if (mac.isEmpty()) {
             ++dbgUnattr;
+            if (dbg && dbgUnattr <= 3) // 归不上时把原始线索打出来，否则只能看到一个「未归=N」
+                std::fprintf(stderr, "[DEV] 未归属样本 sourceIP=%s inboundUser=%s selfMac=%s\n",
+                             ip.toLatin1().constData(), inUser.toLatin1().constData(),
+                             selfMac.toLatin1().constData()),
+                    std::fflush(stderr);
             continue;
         }
         const QString id = m.value("id").toString();
@@ -602,8 +631,8 @@ void DevicesController::aggregate(const QVariantList &conns)
 
     // 有连接时才打印(避免空闲每秒刷屏):按 sourceIP / inboundUser 各归属了多少。
     if (dbg && !conns.isEmpty())
-        std::fprintf(stderr, "[DEV] conns=%d 归属:byIp=%d byUser=%d 未归=%d\n",
-                     int(conns.size()), dbgByIp, dbgByUser, dbgUnattr),
+        std::fprintf(stderr, "[DEV] conns=%d 归属:byIp=%d byUser=%d byLocal=%d 未归=%d\n",
+                     int(conns.size()), dbgByIp, dbgByUser, dbgByLocal, dbgUnattr),
             std::fflush(stderr);
 
     m_totalRateUp = totalUp;

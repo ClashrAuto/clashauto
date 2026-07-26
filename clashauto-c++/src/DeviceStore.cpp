@@ -2,11 +2,15 @@
 #include "AppConfig.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QNetworkInterface>
 #include <QRegularExpression>
+#include <QSet>
 #include <QTimer>
 
 // ———————————————————————————— 类型/模式 ↔ 字符串 ————————————————————————————
@@ -68,6 +72,28 @@ QString DeviceStore::socksUser(const QString &mac)
     if (norm.isEmpty())
         return {};
     return QStringLiteral("dev-") + QString(norm).remove(':');
+}
+
+bool DeviceStore::isLocalMachineIp(const QString &ip)
+{
+    if (ip.isEmpty())
+        return false;
+    if (isLoopbackIp(ip))
+        return true;
+    // 本机全部网卡的 IPv4（含 TUN 的 198.18.0.1 —— 开增强模式后本机流量的 sourceIP 就是它）。
+    // 枚举网卡是系统调用，而这函数每条连接都要问一次；网卡地址不会秒级变化，缓存 30s 足够。
+    // 只在 GUI 线程调用（流量聚合 / 历史库都在那儿），故用函数内静态缓存即可。
+    static QSet<QString> cache;
+    static QElapsedTimer age;
+    if (!age.isValid() || age.elapsed() > 30000) {
+        cache.clear();
+        const QList<QHostAddress> addrs = QNetworkInterface::allAddresses();
+        for (const QHostAddress &a : addrs)
+            if (a.protocol() == QAbstractSocket::IPv4Protocol)
+                cache.insert(a.toString());
+        age.restart();
+    }
+    return cache.contains(ip);
 }
 
 QString DeviceStore::normalizeMac(const QString &raw)
