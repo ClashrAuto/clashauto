@@ -83,15 +83,30 @@ public:
             // errbuf 里是 Windows 本地化的系统错误文案（zh-CN 下是 GBK），fromLatin1 会拧成乱码。
             const QString raw = QString::fromLocal8Bit(errbuf);
             // 走到这里 wpcap.dll 已经加载成功 = Npcap 装着的，所以旧文案那句「需装 Npcap」必然是
-            // 误导。真正最常见的原因是驱动被锁成「仅管理员可访问」（安装向导默认勾选），普通
-            // 用户身份下每次都是「拒绝访问(5)」——这条路可以一键修，别让用户去猜。
+            // 误导。这里按「驱动是否被锁 × 本进程是否提权」分三种情况给出真正能照着做的下一步，
+            // 并且**永远**把这两个事实附在末尾——这一带的问题隔着截图很难猜，state 直接写出来
+            // 就不用再来回问「你是管理员账户还是右键以管理员身份运行的」。
+            const bool locked = npcapstatus::adminOnly();
+            const bool elevated = npcapstatus::processElevated();
+            const QString state =
+                    QStringLiteral("[AdminOnly=%1, 本进程%2提权]")
+                            .arg(locked ? QStringLiteral("1") : QStringLiteral("0"),
+                                 elevated ? QStringLiteral("已") : QStringLiteral("未"));
             if (err) {
-                *err = npcapstatus::restricted()
-                        ? QStringLiteral("Npcap 驱动被限制为「仅管理员可访问」（安装时勾选了 "
-                                         "Restrict Npcap driver's access to Administrators only）"
-                                         "——请在设备页点「修复权限」一键解除。原始错误: ")
-                                + raw
-                        : QStringLiteral("打不开二层设备: ") + raw;
+                if (locked && !elevated) {
+                    // 绝大多数「总是打开网卡失败」都落在这里：账户是管理员 ≠ 进程被提权，
+                    // UAC 开着时双击启动拿到的是受限令牌，照样被 Npcap 挡在门外。
+                    *err = QStringLiteral("Npcap 驱动被限制为「仅管理员可访问」（安装时勾选了 "
+                                          "Restrict Npcap driver's access to Administrators only）"
+                                          "——请在设备页点「修复权限」一键解除。原始错误: ")
+                            + raw + QLatin1Char(' ') + state;
+                } else if (locked) {
+                    *err = QStringLiteral("已提权但仍打不开二层设备——若刚改过 Npcap 权限，"
+                                          "需重启 npcap 驱动或重启电脑才生效。原始错误: ")
+                            + raw + QLatin1Char(' ') + state;
+                } else {
+                    *err = QStringLiteral("打不开二层设备: ") + raw + QLatin1Char(' ') + state;
+                }
             }
             return false;
         }
