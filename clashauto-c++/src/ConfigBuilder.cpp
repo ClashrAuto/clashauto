@@ -50,6 +50,7 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = applySubscriptions(yaml, readSubscriptions());
     yaml = applyCustomRules(yaml);
     yaml = applyDevicePolicies(yaml);
+    yaml = applySniffer(yaml);
 
     const QString fullPath = QDir(m_config.configDir).filePath("full.yaml");
     writeText(fullPath, yaml);
@@ -518,6 +519,53 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         }
     }
 
+    return yaml;
+}
+
+// ———————————————————————— 域名嗅探（sniffer）————————————————————————
+// 没有它，**纯 IP 发起的连接在 mihomo 眼里就没有域名**：metadata.host 为空，UI 只能退回显示
+// destinationIP（用户看到的「连接里全是 IP」），更要命的是规则里绝大多数是域名规则
+// （DOMAIN-SUFFIX/GEOSITE），host 为空时一条都匹配不上，只能靠 GEOIP/IP-CIDR 兜底分流。
+//
+// 谁会「拿着纯 IP 来」：
+//   · 透明网关代理的局域网设备——它们自己做 DNS（我们只是把那个 UDP 中继出去，没走 fake-ip），
+//     拿到真实 IP 后直连；我们的用户态栈也只认识 IP，拨 SOCKS 时给的就是 IP:port。**主因**。
+//   · 本机上不走系统代理域名、直接连 IP 的程序。
+// sniffer 从 TLS ClientHello 的 SNI / HTTP 请求头的 Host 里把域名读回来，两个问题一起修。
+//
+// **生成在代码里而不是放进 plugin.yaml 种子**：plugin.yaml 首次运行就复制到用户目录了，之后
+// 再改种子对老用户无效（和 listeners: 块同理），所以每次生成 full.yaml 都整块重写一次。
+QString ConfigBuilder::applySniffer(QString yaml) const
+{
+    QString block = "sniffer:\n";
+    block += "  enable: true\n";
+    // 关键项：默认只对「已有域名」的连接做校正，纯 IP 连接压根不嗅探——而我们要修的正是纯 IP。
+    block += "  parse-pure-ip: true\n";
+    // 用嗅探出的域名覆盖连接目标，规则匹配才拿得到域名（否则只修了显示、没修分流）。
+    block += "  override-destination: true\n";
+    block += "  sniff:\n";
+    block += "    HTTP:\n";
+    block += "      ports: [80, 8080-8880]\n";
+    block += "    TLS:\n";
+    block += "      ports: [443, 8443]\n";
+    block += "    QUIC:\n";
+    block += "      ports: [443, 8443]\n";
+    // 已知会被嗅探搞坏的域名：小米/米家设备的云通道用自签证书 + 非常规 SNI，覆盖目标后连不上。
+    block += "  skip-domain:\n";
+    block += "    - Mijia Cloud\n";
+    block += "    - dlg.io.mi.com\n";
+
+    // 整块替换上一轮生成的（同 listeners: 的做法：顶层键 + 其后所有缩进行）；没有就追加。
+    const QRegularExpression snifferBlock(
+        QStringLiteral("(?m)^sniffer:\\n(?:(?:  |\\t)[^\\n]*(?:\\n|$))+"));
+    if (snifferBlock.match(yaml).hasMatch()) {
+        yaml.replace(snifferBlock, block);
+    } else {
+        if (!yaml.endsWith('\n')) {
+            yaml.append('\n');
+        }
+        yaml.append('\n').append(block);
+    }
     return yaml;
 }
 
