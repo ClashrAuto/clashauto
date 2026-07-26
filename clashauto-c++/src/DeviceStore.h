@@ -1,18 +1,22 @@
 #pragma once
 
-// 设备台账（configDir/devices.json）——「设备」页的持久层。
+// 设备台账（coast.db 的 device 表）——「设备」页的持久层。
 //
 // 设计要点：
 //  - **以 MAC 为主键**：局域网设备的 IP 会随 DHCP 漂移，MAC 才是稳定身份。扫描发现的
 //    实时字段（当前 IP、在线、主机名、厂商、自动识别的类型/型号）每次刷新覆盖；
 //    **用户可编辑字段**（别名、类型覆盖、代理开关、每设备策略）与累计流量长期保留。
-//  - 增量落盘：任一可持久字段变化才写文件（防止 3~5s 热更新把磁盘写爆）。
-//  - 无 YAML/JSON 手术：这里是纯 JSON（QJsonDocument），可放心结构化读写（不同于 *.yaml）。
+//  - 内存是主，库是影子：全表在构造时读进 m_devices，之后一切读写走内存，防抖 1.5s 整表回写
+//    （设备就几十台，整表 upsert 比维护脏行标记省心得多；热更新每 3~5s 一轮，不能每轮都写）。
+//  - 早期版本存的是 configDir/devices.json，首次启动会自动导入并把旧文件改名备份（见
+//    importLegacyJson）。改用 SQLite 是为了和上网历史共用一个库，不再有「一半 JSON 一半库」。
+//  - 库打不开时（缺 QSQLITE 驱动）整体降级为纯内存：设备页照常用，只是重启后不记得。
 //
 // 本类只管「存」；发现逻辑在 LanScanner，聚合流量在 DevicesController。
 #include <QDateTime>
 #include <QHash>
 #include <QObject>
+#include <QSqlDatabase>
 #include <QString>
 #include <QVector>
 
@@ -98,6 +102,7 @@ class DeviceStore final : public QObject
     Q_OBJECT
 public:
     explicit DeviceStore(const QString &configDir, QObject *parent = nullptr);
+    ~DeviceStore() override;
 
     // 全量当前设备（发现列表 + 台账合并后的视图；运行时字段来自最近扫描/聚合）。
     const QVector<DeviceRecord> &devices() const { return m_devices; }
@@ -125,6 +130,19 @@ public:
 
     // 立刻落盘（防抖后由定时器触发；退出时也强制存一次）。
     void save();
+
+    // 「开着代理的设备」——ConfigBuilder 生成网关 listener + IN-USER 规则要用。
+    // **静态、自带一条临时只读连接**：ConfigBuilder 由 CoreController 直接持有（值成员，端口变了
+    // 还会整个重建），塞一个 DeviceStore* 进去意味着一路改构造签名和生命周期；而它要的只是
+    // 「此刻库里哪些设备开着代理」这一次性快照，开条连接查完就关最省事。
+    // 顺序按 mac 升序——同一份台账在任何机器上生成的规则次序都一样（IN-USER 规则彼此独立，
+    // 顺序不影响语义，但配置文件逐字节可复现有利于 diff 和排错）。
+    struct ProxyDeviceRow {
+        QString mac;
+        QString policyMode;   // follow / rule / global / direct / reject
+        QString policyTarget; // global 模式的目标节点/组名
+    };
+    static QVector<ProxyDeviceRow> proxiedDevices(const QString &configDir);
 
     // 类型 ↔ 字符串（JSON 存储 + i18n key 派生）。
     static QString typeKey(DeviceType t);
@@ -159,11 +177,16 @@ signals:
 
 private:
     void load();
+    void ensureSchema();     // 建 device 表（幂等）
+    void importLegacyJson(); // 一次性：把旧的 devices.json 搬进库，然后把文件改名备份
     void scheduleSave();     // 防抖落盘
     int indexOf(const QString &mac) const;
     void rolloverTodayIfNeeded(DeviceRecord &d) const;
 
-    QString m_path;
+    QString m_configDir;
+    QString m_connName;
+    QSqlDatabase m_db;
+    bool m_ok = false;       // 库打不开（缺 QSQLITE 驱动等）时只在内存里跑，程序照常用
     QVector<DeviceRecord> m_devices;
     QHash<QString, int> m_index; // mac → m_devices 下标
     bool m_dirty = false;

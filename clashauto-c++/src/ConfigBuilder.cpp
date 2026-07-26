@@ -421,8 +421,8 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
 
 QString ConfigBuilder::applyDevicePolicies(QString yaml) const
 {
-    // 消费「设备」页写入的 configDir/devices.json（纯 JSON，非 YAML 手术）：
-    //   为每台开启「代理网络」的设备派生一个 mihomo SOCKS 用户名 dev-<去冒号小写 mac>，
+    // 消费设备台账（coast.db 的 device 表，由 DeviceStore 维护；早期版本是 configDir/devices.json，
+    // 已自动迁移）：为每台开启「代理网络」的设备派生一个 mihomo SOCKS 用户名 dev-<去冒号小写 mac>，
     //   并据此生成两样东西：
     //     1) 一个专用的 socks inbound listener（coast-gateway，端口 kGatewayPort=7899），
     //        带 per-user users: 认证——被劫持设备的流量经此口带用户名进核心。**主混合口
@@ -430,38 +430,27 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
     //     2) 对非 follow/非 rule 的设备，前插 IN-USER 规则到 rules: 顶部，按用户名分流。
     //   mihomo schema 假设：listeners 的 per-user `users:` 与 `IN-USER` 规则类型均被用户当前
     //   mihomo 构建支持（用户已确认）——标准 clash 内核可能不支持，届时核心会在 -t 校验时报错。
-    const QString devicesPath = QDir(m_config.configDir).filePath("devices.json");
-    QFile file(devicesPath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        return yaml; // 台账不存在（还没发现/编辑过设备）→ 不改动
-    }
-    const QJsonArray devices = QJsonDocument::fromJson(file.readAll()).array();
-    file.close();
-
-    // 收集开启代理的设备：用户名 + 策略（顺序保留，规则前插时按此顺序）
+    //
+    // 这里读的是**库**而不是 DeviceStore 对象：ConfigBuilder 是 CoreController 的值成员（换端口
+    // 时整个重建），塞一个 DeviceStore* 进来要一路改构造签名和生命周期；而它只需要「此刻谁开着
+    // 代理」这一次性快照，DeviceStore::proxiedDevices 开条临时只读连接查完就关。
+    // 时序上没有陈旧风险：设备页改开关时先 store->save()（同步提交）再 rebuildConfig()，
+    // WAL 下已提交的事务对别的连接立刻可见。
     struct ProxyDevice {
         QString user;
         QString mode;   // follow / rule / global / direct / reject
         QString target; // global 模式的目标节点/组名
     };
     QVector<ProxyDevice> proxied;
-    for (const QJsonValue &value : devices) {
-        const QJsonObject obj = value.toObject();
-        if (!obj.value("proxyEnabled").toBool()) {
-            continue;
-        }
-        const QString mac = obj.value("mac").toString().trimmed();
-        if (mac.isEmpty()) {
-            continue;
-        }
-        const QString user = DeviceStore::socksUser(mac);
+    for (const DeviceStore::ProxyDeviceRow &row : DeviceStore::proxiedDevices(m_config.configDir)) {
+        const QString user = DeviceStore::socksUser(row.mac);
         if (user.isEmpty()) {
             continue; // 非法 mac → socksUser 返回空，跳过（否则会写出坏用户名）
         }
         ProxyDevice dev;
         dev.user = user;
-        dev.mode = obj.value("policyMode").toString().trimmed();
-        dev.target = obj.value("policyTarget").toString().trimmed();
+        dev.mode = row.policyMode;
+        dev.target = row.policyTarget;
         proxied.push_back(dev);
     }
 

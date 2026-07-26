@@ -73,6 +73,7 @@ There is **no YAML library**. `AppConfig`, `ConfigBuilder`, `SubscriptionStore` 
 Under Qt `AppDataLocation`, rebased to a flat brand dir (**no migration** from the old `%AppData%\ClashAuto\Clash Auto\clash-auto\` — a rename = fresh state). On Windows:
 - **`userDir = %AppData%\Coast\`** — the core's `-d` home: `logs\`, `Country.mmdb`, cache, `command\` (downloaded core + extracted `wintun.dll`).
 - **`configDir = %AppData%\Coast\config\`** — `config.yaml` (user copy, seeded from qrc on first run), generated `full.yaml`, plus `default.yaml`/`plugin.yaml`/`subscribe.yaml`/`rules.json`.
+- **`configDir/coast.db`** — the app's only SQLite database (Qt6::Sql + QSQLITE, opened via `src/Sqlite.h`): `device` (the Devices-page ledger — identity/alias/proxy toggle/per-device policy/traffic counters) and `conn` (browsing history: one row per closed connection, 30-day retention). Three connections in-process: `DeviceStore`, `HistoryStore`, and a short-lived read-only one `ConfigBuilder` uses to find proxied devices (`DeviceStore::proxiedDevices`). Migrated automatically from the earlier `devices.json` + `history.db` (old ledger left as `devices.json.migrated`). Headless checks: `COAST_DEVICEDB_SELFTEST=1`, `COAST_HISTORY_SELFTEST=1`.
 
 (macOS: `~/Library/Application Support/Coast`; Linux: `~/.local/share/Coast`.)
 

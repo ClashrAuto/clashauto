@@ -1,5 +1,6 @@
 #include "HistoryStore.h"
 #include "DeviceStore.h"
+#include "Sqlite.h"
 
 #include <QDir>
 #include <QFileInfo>
@@ -47,35 +48,18 @@ HistoryStore::HistoryStore(const QString &configDir, DeviceStore *devices, QObje
 
 HistoryStore::~HistoryStore()
 {
-    if (m_ok) {
+    if (m_ok)
         flush(true); // 退出：在途长连接也各落一条，否则永远进不了库
-        m_db.close();
-    }
-    m_db = QSqlDatabase(); // 先释放引用再移除，否则 Qt 会警告连接仍在使用
-    if (!m_connName.isEmpty())
-        QSqlDatabase::removeDatabase(m_connName);
+    sqlite::close(m_db, m_connName);
 }
 
 void HistoryStore::openDatabase(const QString &configDir)
 {
-    if (!QSqlDatabase::isDriverAvailable(QStringLiteral("QSQLITE")))
-        return; // 没驱动就整体空转（打包漏了 sqldrivers 插件时不至于连程序都起不来）
-
-    QDir().mkpath(configDir);
-    m_path = QDir(configDir).filePath(QStringLiteral("history.db"));
-    // 专用连接名：别占默认连接，免得将来别处再用 QtSql 互相踩。
-    m_connName = QStringLiteral("coast-history");
-    m_db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"), m_connName);
-    m_db.setDatabaseName(m_path);
-    if (!m_db.open())
-        return;
-
-    QSqlQuery q(m_db);
-    // WAL：写入不阻塞读（每秒都在写，UI 还要查 Top 域名）；NORMAL：崩溃最多丢最后几条历史，
-    // 用这点风险换掉每次 commit 的 fsync——这是历史记录，不是账本。
-    q.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
-    q.exec(QStringLiteral("PRAGMA synchronous=NORMAL"));
-    m_ok = true;
+    // 库、pragma、旧库改名统一在 sqlite:: 里（设备台账也开在同一个文件上，见 Sqlite.h）。
+    m_connName = QStringLiteral("coast-history"); // 专用连接名，别占默认连接
+    m_path = sqlite::databasePath(configDir);
+    m_db = sqlite::open(m_connName, configDir);
+    m_ok = m_db.isOpen();
 }
 
 void HistoryStore::createSchema()
@@ -229,9 +213,7 @@ void HistoryStore::flush(bool includeLive)
         "VALUES (?,?,?,?,?,?,?,?,?,?)"));
     m_db.transaction(); // 一个事务包住整批：逐条 commit 会把磁盘按在地上摩擦
     int failed = 0;
-    // 空字符串必须真的绑成 ''：**null QString 绑出来是 SQL NULL**，撞上列的 NOT NULL 会整批写失败
-    // （未归属连接的 mac、没嗅到域名的 host、非本机连接的 process 天天都是空的）。
-    auto nn = [](const QString &v) { return v.isNull() ? QString(QLatin1String("")) : v; };
+    using sqlite::nn; // null QString 会绑成 SQL NULL 撞 NOT NULL，统一转空串（见 Sqlite.h）
     for (const Record &r : m_pending) {
         // **按位置 bindValue，不能用 addBindValue**：addBindValue 是往绑定列表尾部追加，
         // exec() 之后并不会清空，循环里第二条就变成绑第 10~19 个占位符 → 全部 exec 失败，

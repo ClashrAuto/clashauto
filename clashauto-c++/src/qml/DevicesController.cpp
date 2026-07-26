@@ -76,7 +76,7 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
 
     refreshModel();
 
-    // 重启后自动恢复代理。「代理网络」开关是**持久**的（devices.json），劫持是**运行时**的：
+    // 重启后自动恢复代理。「代理网络」开关是**持久**的（存在 coast.db 的 device 表），劫持是**运行时**的：
     // 上次退出时 aboutToQuit→disableAll() 把 ARP 全还原了，新进程里没有任何东西把它们重新劫持，
     // 于是开关明明还开着、设备却在走直连。而扫描/热更新只在设备页可见时才跑，用户不进那个页面
     // 就永远不会恢复。这里在启动后主动扫一轮（只在确实有设备开着代理时才扫，别给普通用户平白
@@ -388,7 +388,7 @@ void DevicesController::setProxyEnabled(const QString &mac, bool on)
     }
     const QString ip = d->ip;
     m_store->setProxyEnabled(mac, on);
-    m_store->save(); // 立刻落盘，供 ConfigBuilder 读 devices.json 生成网关 listener + auth/IN-USER
+    m_store->save(); // 立刻落盘，供 ConfigBuilder 从库里读出来生成网关 listener + auth/IN-USER
     if (m_core)
         m_core->rebuildConfig(); // 重生成 full.yaml + 热重载 mihomo（网关口 + 每设备身份就绪）
     if (m_gateway) {

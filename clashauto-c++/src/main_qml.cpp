@@ -191,6 +191,88 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // 设备台账自检（COAST_DEVICEDB_SELFTEST=1）：在临时目录里跑一遍「旧 devices.json 导入 →
+    // 发现+编辑 → 存 → 重开读回 → ConfigBuilder 那条查询」，打到 stdout 后退出。
+    // 台账是用户数据（别名/代理开关/累计流量），迁移把它写坏了没有任何补救，所以整条链必须真跑。
+    if (qEnvironmentVariableIsSet("COAST_DEVICEDB_SELFTEST")) {
+        const QString dir = QDir::temp().filePath(QStringLiteral("coast-devicedb-selftest"));
+        QDir(dir).removeRecursively();
+        QDir().mkpath(dir);
+        const QString legacy = QDir(dir).filePath(QStringLiteral("devices.json"));
+        {   // ① 放一份旧版 devices.json，验证一次性导入
+            QFile f(legacy);
+            f.open(QIODevice::WriteOnly);
+            // policyTarget 用 DIRECT：既走「global + 指定目标」这条分支，生成的规则又一定能被
+            // 核心解析（指向一个订阅里才有的节点名，-t 会因为「proxy not found」失败，那是配置的
+            // 引用完整性，不是本自检要验的东西）。
+            f.write(R"([{"mac":"aa:bb:cc:dd:ee:01","alias":"老设备","proxyEnabled":true,
+                         "policyMode":"global","policyTarget":"DIRECT","totalDown":"12345",
+                         "todayDown":"999","vendor":"Acme","ip":"192.168.1.9",
+                         "firstSeen":"2026-07-01T10:00:00"}])");
+            f.close();
+        }
+        {   // ② 导入 + 新发现一台 + 用户编辑 + 存盘
+            DeviceStore store(dir);
+            std::printf("[devdb] 导入后设备数=%d  旧文件还在=%d  备份存在=%d\n",
+                        int(store.devices().size()), int(QFile::exists(legacy)),
+                        int(QFile::exists(legacy + QStringLiteral(".migrated"))));
+            DeviceRecord d;
+            d.mac = QStringLiteral("aa:bb:cc:dd:ee:02");
+            d.ip = QStringLiteral("192.168.1.10");
+            d.vendor = QStringLiteral("Foo Inc");
+            d.autoName = QStringLiteral("living-room-tv");
+            d.autoType = DeviceType::TvBox;
+            d.online = true;
+            d.lastSeen = QDateTime::currentDateTime();
+            store.mergeDiscovered({d});
+            store.setAlias(d.mac, QStringLiteral("客厅电视"));
+            store.setProxyEnabled(d.mac, true);
+            store.setPolicy(d.mac, DevicePolicyMode::Direct, QString());
+            store.save();
+        }
+        {   // ③ 重开：验证往返（上一个 store 已析构、连接已注销）
+            DeviceStore store(dir);
+            for (const DeviceRecord &d : store.devices())
+                std::printf("[devdb] 读回 %s 别名=%s ip=%s 厂商=%s 类型=%s 代理=%d 策略=%s "
+                            "累计下行=%lld 今日下行=%lld 在线=%d\n",
+                            d.mac.toUtf8().constData(), d.alias.toUtf8().constData(),
+                            d.ip.toUtf8().constData(), d.vendor.toUtf8().constData(),
+                            DeviceStore::typeKey(d.effectiveType()).toUtf8().constData(),
+                            int(d.proxyEnabled),
+                            DeviceStore::modeKey(d.policyMode).toUtf8().constData(),
+                            static_cast<long long>(d.totalDown),
+                            static_cast<long long>(d.todayDown), int(d.online));
+        }
+        // ④ ConfigBuilder 生成网关 listener / IN-USER 规则时走的就是这条查询
+        for (const DeviceStore::ProxyDeviceRow &r : DeviceStore::proxiedDevices(dir))
+            std::printf("[devdb] 代理中 mac=%s user=%s 策略=%s 目标=%s\n",
+                        r.mac.toUtf8().constData(),
+                        DeviceStore::socksUser(r.mac).toUtf8().constData(),
+                        r.policyMode.toUtf8().constData(), r.policyTarget.toUtf8().constData());
+
+        // ⑤ 真的生成一遍配置：把 configDir 指到临时目录（种子从 qrc 拷过去），产出 full.yaml。
+        // 这一步把「库 → ConfigBuilder → YAML」整条链跑通；生成的文件可以再拿真核心 -t 校验，
+        // 确认 coast-gateway listener 和 IN-USER 规则确实按库里的设备写出来了。
+        {
+            AppConfig cfg = AppConfigLoader::load();
+            cfg.configDir = dir;
+            cfg.userDir = dir;
+            ConfigBuilder builder(cfg);
+            const QString full = builder.ensureFullConfig(false);
+            QFile ff(full);
+            int listeners = 0, inUserRules = 0;
+            if (ff.open(QIODevice::ReadOnly)) {
+                const QString text = QString::fromUtf8(ff.readAll());
+                listeners = text.contains(QStringLiteral("coast-gateway")) ? 1 : 0;
+                inUserRules = int(text.count(QStringLiteral("IN-USER,")));
+            }
+            std::printf("[devdb] 生成配置 %s  coast-gateway=%d  IN-USER 规则=%d\n",
+                        full.toUtf8().constData(), listeners, inUserRules);
+        }
+        std::fflush(stdout);
+        return 0;
+    }
+
     // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 载入配置；资源已内嵌 qrc，不再找 Clashr-Auto）。
     AppConfig config = AppConfigLoader::load();
     // 报错上报器要**最早**建：它的 Qt 消息处理器越早装上，越早的 QML/Qt 报错才捕得到。
