@@ -73,7 +73,13 @@ public:
         }
         unsigned int on = 1, off = 0;
         ::ioctl(fd, BIOCIMMEDIATE, &on);  // 立即返回，不缓冲等待
-        ::ioctl(fd, BIOCPROMISC, &on);    // 混杂：收目的非本机 MAC 的帧
+        // ★ 默认**不开混杂**（与 Windows 侧同款根因修复，见 L2Endpoint_win）。这套「先投毒、再抓
+        //   设备发来的帧」的透明网关根本不需要混杂：设备被投毒后发往「网关」的帧目的 MAC 就是本机
+        //   MAC，非混杂也照收；广播 ARP 同样照收。而开混杂时网卡把**所有**帧上交，本机自己的网络栈
+        //   也可能据此把我们单播给别人的 ARP 欺骗应答学进 ARP 缓存 → 本机自投毒断网。宁可关掉。
+        //   联调兜底：COAST_GATEWAY_PROMISC=1 时才开混杂。
+        if (qEnvironmentVariableIsSet("COAST_GATEWAY_PROMISC"))
+            ::ioctl(fd, BIOCPROMISC, &on);
         ::ioctl(fd, BIOCSHDRCMPLT, &on);  // 写时我们提供完整链路头
         ::ioctl(fd, BIOCSSEESENT, &off);  // 不回显自己发出的帧
         return finishOpen(fd, ifname);
@@ -129,15 +135,21 @@ public:
             if (valid.size() > 60) // 8bit 跳转偏移保护；真实场景远达不到
                 return false;
             const int n = valid.size();
-            const int accept = 4 * n;
-            const int reject = 4 * n + 1;
+            // 末尾追加「或 ARP」分支（与 L2Endpoint_linux 完全一致）：所有 victim 源 MAC 失配后再看
+            // ethertype 是否 0x0806，是则也放行。**必须捕获 ARP**——反应式反制要靠捕获真网关自己
+            // 广播的 who-has(携带「网关在真 MAC」会把设备解毒)来立刻重投盖回(见 LanGateway
+            // frameReceived / ArpSpoofer::reassertNow)。ARP 低频，全收几乎零成本。
+            const int arpLd = 4 * n;       // ldh [12] ; A = ethertype
+            const int accept = 4 * n + 2;  // ret 0xffffffff
+            const int reject = 4 * n + 3;  // ret 0
             for (int i = 0; i < n; ++i) {
                 const auto *b = reinterpret_cast<const unsigned char *>(valid[i].constData());
                 const quint16 first2 = (quint16(b[0]) << 8) | b[1];
                 const quint32 last4 = (quint32(b[2]) << 24) | (quint32(b[3]) << 16)
                                     | (quint32(b[4]) << 8) | quint32(b[5]);
                 const int base = 4 * i;
-                const int failIdx = (i < n - 1) ? (4 * (i + 1)) : reject;
+                // 本块失配后的去处：不是最后一个 MAC → 下一块；最后一个 → ARP 判定块。
+                const int failIdx = (i < n - 1) ? (4 * (i + 1)) : arpLd;
                 // [base+0] A = offset 8 的 4 字节 = src[2..5]
                 code.push_back(BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 8));
                 // [base+1] 比 last4；不等跳失败目标
@@ -150,8 +162,10 @@ public:
                                         static_cast<u_char>(accept - (base + 3) - 1),
                                         static_cast<u_char>(failIdx - (base + 3) - 1)));
             }
-            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFFu)); // accept：整帧
-            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));           // reject
+            code.push_back(BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 12));            // arpLd
+            code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x0806, 0, 1)); // ==ARP→accept 否则→reject
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFFu));            // accept：整帧
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));                     // reject
         }
 
         struct bpf_program prog;
