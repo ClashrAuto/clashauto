@@ -253,8 +253,10 @@ void LanScanner::detectLocalTopology()
             LocalIface f;
             f.ip = ip.toString();
             f.mac = mac;
-            // 用 OS 级接口名 name()（Linux eth0 / mac en0 / Windows {GUID}）：二层层要用它绑定网卡
-            // （AF_PACKET SIOCGIFINDEX / BPF BIOCSETIF / Npcap \Device\NPF_{GUID}）。
+            // 用 OS 级接口名 name()：二层层要用它绑定网卡（AF_PACKET SIOCGIFINDEX / BPF
+            // BIOCSETIF / Windows 走 Npcap）。注意 Windows 上 Qt6 的 name() 是 **LUID 名**
+            // （"ethernet_32775"）而非适配器 GUID，Npcap 需要的 \Device\NPF_{GUID} 由
+            // L2Endpoint_win::adapterFor() 反查——这里不要想当然按 GUID 用。
             f.name = iface.name();
             f.mask = mask;
             f.base = ip32 & mask;

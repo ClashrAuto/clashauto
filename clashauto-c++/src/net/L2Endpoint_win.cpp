@@ -28,30 +28,125 @@
 
 namespace {
 
-// 由接口 GUID（QNetworkInterface::name()，形如 "{XXXX-...}"）取 6 字节 MAC。
-QByteArray macForGuid(const QString &guid)
+// —— wpcap.dll 运行时绑定 ——
+// 本文件**不与 wpcap 导入库链接**，全部 pcap_* 都在首次用到时 GetProcAddress 拿。
+// 理由：Npcap 是可选依赖，没装的机器上 Coast 必须照常启动（只是网关不可用）。原先靠 MSVC 的
+// /DELAYLOAD 实现这一点，但那段是 if(MSVC) 守卫的——MinGW 构建会把 wpcap.dll 写进导入表，
+// 没装 Npcap 的机器上进程直接 0xC0000135 起不来（本地开发构建长期如此）。运行时绑定对两种
+// 工具链都成立，也省掉 delayimp 依赖。
+// 函数指针类型一律用 decltype(&pcap_xxx) 从 pcap.h 推出来，签名不可能写歪。
+struct PcapApi
 {
-    QByteArray mac;
+    decltype(&pcap_open_live) open_live = nullptr;
+    decltype(&pcap_close) close = nullptr;
+    decltype(&pcap_setmintocopy) setmintocopy = nullptr;
+    decltype(&pcap_getevent) getevent = nullptr;
+    decltype(&pcap_sendpacket) sendpacket = nullptr;
+    decltype(&pcap_next_ex) next_ex = nullptr;
+    decltype(&pcap_compile) compile = nullptr;
+    decltype(&pcap_setfilter) setfilter = nullptr;
+    decltype(&pcap_freecode) freecode = nullptr;
+};
+
+// 加载并解析 wpcap.dll。返回 nullptr = 没装 Npcap（或版本太老、缺符号）。
+// 只做一次；DLL 句柄故意不释放（进程生命周期内一直要用）。
+const PcapApi *pcapApi()
+{
+    static bool tried = false;
+    static PcapApi api;
+    static bool ok = false;
+    if (tried)
+        return ok ? &api : nullptr;
+    tried = true;
+
+    // Npcap 的 DLL 装在 %SystemRoot%\System32\Npcap\，不在默认搜索路径上，先把它加进去。
+    // 用 AddDllDirectory 语义的 LOAD_LIBRARY_SEARCH_* 更干净，但那要求 LoadLibraryEx 带 flag
+    // 且系统支持；这里沿用 SetDllDirectory + LoadLibrary，行为与旧代码一致。
+    char sysdir[MAX_PATH] = {0};
+    if (GetSystemDirectoryA(sysdir, MAX_PATH)) {
+        const QByteArray npcapDir = QByteArray(sysdir) + "\\Npcap";
+        SetDllDirectoryA(npcapDir.constData());
+    }
+    HMODULE h = LoadLibraryA("wpcap.dll");
+    SetDllDirectoryA(nullptr); // 还原进程级 DLL 搜索路径，别留副作用给别的模块
+    if (!h)
+        return nullptr;
+
+    auto sym = [h](const char *name) { return GetProcAddress(h, name); };
+    api.open_live = reinterpret_cast<decltype(&pcap_open_live)>(sym("pcap_open_live"));
+    api.close = reinterpret_cast<decltype(&pcap_close)>(sym("pcap_close"));
+    api.setmintocopy = reinterpret_cast<decltype(&pcap_setmintocopy)>(sym("pcap_setmintocopy"));
+    api.getevent = reinterpret_cast<decltype(&pcap_getevent)>(sym("pcap_getevent"));
+    api.sendpacket = reinterpret_cast<decltype(&pcap_sendpacket)>(sym("pcap_sendpacket"));
+    api.next_ex = reinterpret_cast<decltype(&pcap_next_ex)>(sym("pcap_next_ex"));
+    api.compile = reinterpret_cast<decltype(&pcap_compile)>(sym("pcap_compile"));
+    api.setfilter = reinterpret_cast<decltype(&pcap_setfilter)>(sym("pcap_setfilter"));
+    api.freecode = reinterpret_cast<decltype(&pcap_freecode)>(sym("pcap_freecode"));
+
+    // 缺任何一个都当没装：宁可优雅降级，也不要半残地跑到一半崩。
+    ok = api.open_live && api.close && api.setmintocopy && api.getevent && api.sendpacket
+            && api.next_ex && api.compile && api.setfilter && api.freecode;
+    return ok ? &api : nullptr;
+}
+
+// 由 QNetworkInterface::name() 反查这张网卡的 Npcap 设备名与 MAC。
+//
+// ★ 这里有个足以让整个网关在 Windows 上永远打不开的坑：**Qt 6 的 QNetworkInterface::name()
+//   在 Windows 上返回的不是适配器 GUID**，而是 LUID 名（ConvertInterfaceLuidToNameW 的结果，
+//   形如 "ethernet_32775"）；只有取不到 LUID 名时才退回 IP_ADAPTER_ADDRESSES::AdapterName
+//   （那个才是 "{XXXXXXXX-....}"）。而 Npcap 的设备名固定是 \Device\NPF_{GUID}。
+//   直接把 name() 拼进设备名 ⇒ "\Device\NPF_ethernet_32775" ⇒ 必然打不开。
+//   （这个错误此前一直被 Npcap 的 AdminOnly「拒绝访问」挡在前面，看不出来。）
+// 所以按三种口径逐个比对，命中后一律用该适配器**真正的 AdapterName(GUID)** 拼设备名。
+struct AdapterInfo
+{
+    QByteArray npfName; // "\Device\NPF_{GUID}"
+    QByteArray mac;     // 6 字节；取不到则为空
+    bool ok = false;
+};
+
+AdapterInfo adapterFor(const QString &ifname)
+{
+    AdapterInfo out;
+    if (ifname.isEmpty())
+        return out;
+
     ULONG size = 0;
     if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
                              nullptr, nullptr, &size)
         != ERROR_BUFFER_OVERFLOW)
-        return mac;
+        return out;
     std::vector<char> buf(size);
     auto *addrs = reinterpret_cast<IP_ADAPTER_ADDRESSES *>(buf.data());
     if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
                              nullptr, addrs, &size)
         != NO_ERROR)
-        return mac;
-    const QByteArray want = guid.toLatin1();
+        return out;
+
     for (auto *a = addrs; a; a = a->Next) {
-        if (a->PhysicalAddressLength == 6
-            && want.compare(a->AdapterName, Qt::CaseInsensitive) == 0) {
-            mac = QByteArray(reinterpret_cast<const char *>(a->PhysicalAddress), 6);
-            break;
-        }
+        const QString guid = QString::fromLatin1(a->AdapterName);
+
+        wchar_t luidBuf[IF_MAX_STRING_SIZE + 1] = {0};
+        QString luidName;
+        if (ConvertInterfaceLuidToNameW(&a->Luid, luidBuf, IF_MAX_STRING_SIZE + 1) == NO_ERROR)
+            luidName = QString::fromWCharArray(luidBuf);
+
+        const QString friendly =
+                a->FriendlyName ? QString::fromWCharArray(a->FriendlyName) : QString();
+
+        const bool hit = ifname.compare(guid, Qt::CaseInsensitive) == 0
+                || (!luidName.isEmpty() && ifname.compare(luidName, Qt::CaseInsensitive) == 0)
+                || (!friendly.isEmpty() && ifname.compare(friendly, Qt::CaseInsensitive) == 0);
+        if (!hit)
+            continue;
+
+        out.npfName = QByteArray("\\Device\\NPF_") + guid.toLatin1();
+        if (a->PhysicalAddressLength == 6)
+            out.mac = QByteArray(reinterpret_cast<const char *>(a->PhysicalAddress), 6);
+        out.ok = !guid.isEmpty();
+        break;
     }
-    return mac;
+    return out;
 }
 
 class WinL2Endpoint final : public IL2Endpoint
@@ -62,23 +157,27 @@ public:
 
     bool open(const QString &ifname, QString *err) override
     {
-        // Npcap 的 wpcap.dll/Packet.dll 装在 %SystemRoot%\System32\Npcap\，且本程序对它们**延迟加载**
-        // (/DELAYLOAD)，故普通用户没装 Npcap 时 app 照常运行、仅网关不可用。这里先把 Npcap 目录加入
-        // DLL 搜索路径并试加载 wpcap.dll：加载不到 = 没装 Npcap → 返回 false（gatewayReady=false）。
-        char sysdir[MAX_PATH] = {0};
-        if (GetSystemDirectoryA(sysdir, MAX_PATH)) {
-            QByteArray npcapDir = QByteArray(sysdir) + "\\Npcap";
-            SetDllDirectoryA(npcapDir.constData());
-        }
-        if (!LoadLibraryA("wpcap.dll")) {
+        // wpcap.dll 运行时绑定（见上面的 pcapApi）：解析不到 = 没装 Npcap，优雅降级
+        // （gatewayReady=false），程序其余部分照常。
+        m_api = pcapApi();
+        if (!m_api) {
             if (err) *err = QStringLiteral("未检测到 Npcap（请安装 Npcap 驱动后重试）");
             return false;
         }
 
-        // ifname = 接口 GUID（QNetworkInterface::name()）；Npcap 设备名为 \Device\NPF_{GUID}。
-        const QByteArray dev = QByteArray("\\Device\\NPF_") + ifname.toLatin1();
+        // ifname 是 QNetworkInterface::name()，在 Win 上可能是 LUID 名而非 GUID —— 必须反查，
+        // 详见 adapterFor 的注释。
+        const AdapterInfo adapter = adapterFor(ifname);
+        if (!adapter.ok) {
+            if (err)
+                *err = QStringLiteral("系统里找不到网卡 %1（已按 LUID 名/友好名/GUID 三种口径查过）")
+                               .arg(ifname);
+            return false;
+        }
+
         char errbuf[PCAP_ERRBUF_SIZE] = {0};
-        m_pcap = pcap_open_live(dev.constData(), 65536, 1 /*promisc*/, 1 /*ms*/, errbuf);
+        m_pcap = m_api->open_live(adapter.npfName.constData(), 65536, 1 /*promisc*/, 1 /*ms*/,
+                                  errbuf);
         if (!m_pcap) {
             // errbuf 里是 Windows 本地化的系统错误文案（zh-CN 下是 GBK），fromLatin1 会拧成乱码。
             const QString raw = QString::fromLocal8Bit(errbuf);
@@ -110,10 +209,10 @@ public:
             }
             return false;
         }
-        pcap_setmintocopy(m_pcap, 1); // 有 1 字节就触发事件，降低延迟
-        m_localMac = macForGuid(ifname);
+        m_api->setmintocopy(m_pcap, 1); // 有 1 字节就触发事件，降低延迟
+        m_localMac = adapter.mac;
 
-        HANDLE h = pcap_getevent(m_pcap);
+        HANDLE h = m_api->getevent(m_pcap);
         if (!h) {
             if (err) *err = QStringLiteral("pcap_getevent 返回空句柄");
             close();
@@ -134,7 +233,7 @@ public:
             m_notifier = nullptr;
         }
         if (m_pcap) {
-            pcap_close(m_pcap);
+            m_api->close(m_pcap); // m_pcap 非空 ⇒ open 成功过 ⇒ m_api 必然有效
             m_pcap = nullptr;
         }
     }
@@ -143,8 +242,8 @@ public:
     bool send(const QByteArray &frame) override
     {
         return m_pcap
-               && pcap_sendpacket(m_pcap, reinterpret_cast<const u_char *>(frame.constData()),
-                                  frame.size())
+               && m_api->sendpacket(m_pcap, reinterpret_cast<const u_char *>(frame.constData()),
+                                    frame.size())
                       == 0;
     }
     QByteArray localMac() const override { return m_localMac; }
@@ -177,10 +276,10 @@ public:
 
         struct bpf_program prog;
         // optimize=1；netmask 用 PCAP_NETMASK_UNKNOWN（表达式里不含 ip broadcast，用不到掩码）。
-        if (pcap_compile(m_pcap, &prog, expr.constData(), 1, PCAP_NETMASK_UNKNOWN) < 0)
+        if (m_api->compile(m_pcap, &prog, expr.constData(), 1, PCAP_NETMASK_UNKNOWN) < 0)
             return false; // 编译失败：不装内核过滤，用户态照旧兜底
-        const int rc = pcap_setfilter(m_pcap, &prog);
-        pcap_freecode(&prog);
+        const int rc = m_api->setfilter(m_pcap, &prog);
+        m_api->freecode(&prog);
         return rc == 0;
     }
 
@@ -199,12 +298,13 @@ private:
         const u_char *data = nullptr;
         int r;
         // 1=拿到一帧；0=本轮无更多(超时)；<0=出错。循环取尽本次事件的所有帧。
-        while (m_pcap && (r = pcap_next_ex(m_pcap, &hdr, &data)) == 1) {
+        while (m_pcap && (r = m_api->next_ex(m_pcap, &hdr, &data)) == 1) {
             if (data && hdr)
                 emit frameReceived(QByteArray(reinterpret_cast<const char *>(data), hdr->caplen));
         }
     }
 
+    const PcapApi *m_api = nullptr; // open() 里解析；进程级单例，不属本对象所有
     pcap_t *m_pcap = nullptr;
     QWinEventNotifier *m_notifier = nullptr;
     QByteArray m_localMac;
