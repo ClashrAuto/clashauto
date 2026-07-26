@@ -73,6 +73,58 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
     connect(m_connTimer, &QTimer::timeout, this, &DevicesController::pollConnections);
 
     refreshModel();
+
+    // 重启后自动恢复代理。「代理网络」开关是**持久**的（devices.json），劫持是**运行时**的：
+    // 上次退出时 aboutToQuit→disableAll() 把 ARP 全还原了，新进程里没有任何东西把它们重新劫持，
+    // 于是开关明明还开着、设备却在走直连。而扫描/热更新只在设备页可见时才跑，用户不进那个页面
+    // 就永远不会恢复。这里在启动后主动扫一轮（只在确实有设备开着代理时才扫，别给普通用户平白
+    // 加一轮网段探测），拿到 IP/MAC/网关拓扑后由 onDiscovered → resumeProxies() 重新上劫持。
+    if (hasProxiedDevices()) {
+        QTimer::singleShot(2000, this, [this] {
+            if (m_active)
+                return; // 用户已经先一步进了设备页，那边已经扫过
+            scan();
+            m_livenessTimer->start(); // 之后跟着 IP/在线态变化持续补劫持
+        });
+    }
+}
+
+bool DevicesController::hasProxiedDevices() const
+{
+    if (!m_store)
+        return false;
+    for (const DeviceRecord &d : m_store->devices())
+        if (d.proxyEnabled)
+            return true;
+    return false;
+}
+
+void DevicesController::resumeProxies()
+{
+    if (!m_gateway)
+        return;
+    const QStringList active = m_gateway->activeDevices();
+    for (const DeviceRecord &d : m_store->devices()) {
+        if (!d.proxyEnabled || !d.proxyable() || !d.online || d.ip.isEmpty())
+            continue;
+        const bool armed = active.contains(d.mac);
+        if (armed && m_armedIp.value(d.mac) == d.ip)
+            continue; // 已在劫持，且还是同一个 IP —— 无事可做
+        if (armed)
+            m_gateway->disableDevice(d.mac); // IP 变了：按旧 IP 的劫持早已无效，拆了重上
+        QString err;
+        if (m_gateway->enableDevice(d.mac, d.ip, DeviceStore::socksUser(d.mac), &err)) {
+            m_armedIp.insert(d.mac, d.ip);
+            m_resumeErr.remove(d.mac);
+        } else {
+            m_armedIp.remove(d.mac);
+            // 每轮发现都会重试，同一条原因只报一次，免得 5s 刷一次提示条。
+            if (!err.isEmpty() && m_resumeErr.value(d.mac) != err) {
+                m_resumeErr.insert(d.mac, err);
+                emit gatewayError(err);
+            }
+        }
+    }
 }
 
 QString DevicesController::localIp() const { return m_scanner ? m_scanner->localIp() : QString(); }
@@ -144,6 +196,8 @@ void DevicesController::onDiscovered(const QVector<DeviceRecord> &devices)
         m_store->markOffline(mac);
     // 扫描后拓扑（含网关 MAC）已知 → 配置网关，使 gatewayReady 反映真实可用性。
     ensureGatewayConfigured();
+    // 台账里开着代理、当前却没在劫持的设备（重启后 / 换了 IP）在这里补上。
+    resumeProxies();
     // mergeDiscovered/markOffline 会 emit changed → refreshModel/rebuildSelected 已连；此处补拓扑通知。
     emit topologyChanged();
     emit overviewChanged();
@@ -178,8 +232,11 @@ void DevicesController::setActive(bool active)
         m_connTimer->start();
         m_clock.restart();
     } else {
-        m_livenessTimer->stop();
         m_connTimer->stop();
+        // 还有设备开着代理时，5s 的在线态热更新**不能停**：设备换 IP / 掉线再上线之后要靠它
+        // 触发 resumeProxies() 把劫持重新挂上。页面一关就停，等于代理只在设备页开着时才自愈。
+        if (!hasProxiedDevices())
+            m_livenessTimer->stop();
     }
 }
 
@@ -296,11 +353,18 @@ void DevicesController::setProxyEnabled(const QString &mac, bool on)
         ensureGatewayConfigured();
         if (on) {
             QString err;
-            if (!m_gateway->enableDevice(mac, ip, DeviceStore::socksUser(mac), &err)
-                && !err.isEmpty())
-                emit gatewayError(err);
+            if (m_gateway->enableDevice(mac, ip, DeviceStore::socksUser(mac), &err)) {
+                m_armedIp.insert(mac, ip); // 记住劫持所用的 IP（resumeProxies 据此发现 IP 变了）
+                m_resumeErr.remove(mac);
+            } else {
+                m_armedIp.remove(mac);
+                if (!err.isEmpty())
+                    emit gatewayError(err);
+            }
         } else {
             m_gateway->disableDevice(mac);
+            m_armedIp.remove(mac);
+            m_resumeErr.remove(mac);
         }
     }
     emit topologyChanged(); // gatewayReady 可能变化

@@ -94,6 +94,11 @@ private:
     void pollConnections();       // 拉 /connections → 聚合每设备流量 + 喂连接模型
     void aggregate(const QVariantList &conns);
     void ensureGatewayConfigured(); // 用当前扫描到的拓扑配置 LanGateway（每次开代理前确保）
+    // 把台账里「代理开着」但当前没在劫持的设备重新上劫持（幂等，每轮发现后调）。
+    // 两个场景：①重启 Coast——开关是持久的，劫持是运行时的，新进程里没人重新劫持；
+    // ②设备换了 IP（DHCP 续租）——按旧 IP 的劫持已经失效，得按新 IP 重上。
+    void resumeProxies();
+    bool hasProxiedDevices() const; // 台账里是否还有开着代理的设备
 
     DeviceStore *m_store = nullptr;
     ClashService *m_clash = nullptr;
@@ -123,6 +128,10 @@ private:
     bool m_firstScanDone = false;
     // 上一次已提示过的网关错误（LanGateway::deviceError）——每轮扫描都会重试 open，用它去重。
     QString m_lastGatewayErr;
+    // mac → 当前劫持所用的 IP。用来发现「设备换了 IP」（旧劫持已失效，需重上）。
+    QHash<QString, QString> m_armedIp;
+    // mac → 上次自动恢复劫持失败的原因。resumeProxies 每轮都会重试，同一条只提示一次。
+    QHash<QString, QString> m_resumeErr;
     // 上次全量扫描的时刻：进页面时用它去抖，避免来回切导航反复触发重扫（scan() 里 restart）。
     QElapsedTimer m_lastScan;
     static constexpr int kRescanMinIntervalMs = 30000;
