@@ -78,9 +78,13 @@ Rectangle {
             }
         }
 
-        // 名称 + 副标题
+        // 名称 + 副标题：**吃掉右侧信息区剩下的全部宽度**，放不下就 elide。
+        // minimumWidth 显式给 0：RowLayout 空间不够时是按各项可压缩余量一起压的，右侧那几列都
+        // 写了 minimumWidth = 自身宽度（刚性），这里给 0 就保证「该被挤的是名字」，而不是把右侧
+        // 挤窄——那会让不同行的右侧内容落在不同的 x 上。
         ColumnLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             spacing: 1
             Text {
                 Layout.fillWidth: true
@@ -99,28 +103,109 @@ Rectangle {
         }
 
         // ———————————————— 右侧信息区：徽章 + 今日 + 实时速率 + 代理开关 ————————————————
-        // **整块固定宽度，内部全部用 anchors 从右往左排**，不参与 RowLayout 的伸缩分配。
+        // **紧贴行的右边缘**，宽度只取自身内容：名称列 fillWidth 会把剩下的宽度全吃掉，所以这块
+        // 自然被顶到最右。用不上的东西直接 visible:false 收起来（不占位），把宽度让给名字。
         //
-        // 之前这四样是 RowLayout 里的四个独立项，各自给了固定的 preferredWidth，结果仍然对不齐：
-        // RowLayout 在空间不够时会按各项的可压缩余量**一起**压（不是只压 fillWidth 的名称列），
-        // 而每行副标题长短不同 → 每行压缩量不同 → 徽章和流量数字在不同的行落在不同的 x 上。
-        // 实测「网关」那行的徽章右边缘比「本机」那行早 39px。给每项补 minimumWidth 也没能治住，
-        // 索性把整块从布局系统里摘出来：一个宽度写死的 Item + 内部 anchors 手工定位，
-        // 每一行的右侧就必然逐像素一致。名称列吃掉剩下的全部宽度，长了就 elide。
-        Item {
-            Layout.preferredWidth: 64 + 8 + 82 + 8 + 76 + 8 + 38 // 徽章|今日|速率|开关 = 284
-            Layout.minimumWidth: Layout.preferredWidth
-            Layout.fillHeight: true
+        // 两条必须守住的规矩：
+        //  1) 每个子项都写死宽度并给 minimumWidth —— RowLayout 空间不够时是按各项可压缩余量
+        //     **一起**压的，不给最小宽的话，副标题长的行会把右侧几列压窄一截，同一列在不同行
+        //     落在不同的 x 上（实测「网关」行比「本机」行早 39px）。给了之后被挤的只会是名字。
+        //  2) 流量两列的显隐条件都挂在「今日有没有流量」上，而不是「此刻有没有速率」——
+        //     后者每一拍都在变，列一出一收就是整行左右抽搐。
+        RowLayout {
+            id: infoRow
+            // 今天传过东西的设备才显示流量两列；其余设备（绝大多数没开代理，流量根本不经 mihomo）
+            // 一整天都是 0，与其显示两行「0 B」噪音，不如把宽度让给名字。
+            readonly property bool hasTraffic: (root.todayDown + root.todayUp) > 0
+            Layout.alignment: Qt.AlignVCenter
+            spacing: 8
 
-            // 代理开关（最右）——本机/网关/跨网段的行不画，但**位置照占**，否则这些行右侧少一列。
+            // 本机 / 网关 / 其它网络（跨网段，劫持不到）——不可代理的原因徽章。
+            Rectangle {
+                visible: root.isSelf || root.isGateway || !root.proxyable
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: Math.min(64, protTxt.implicitWidth + 8)
+                Layout.minimumWidth: Layout.preferredWidth
+                Layout.preferredHeight: protTxt.implicitHeight + 3
+                radius: 3
+                color: Qt.rgba(0, 0, 0, 0.25)
+                Text {
+                    id: protTxt
+                    anchors.centerIn: parent
+                    width: Math.min(parent.width - 8, implicitWidth)
+                    elide: Text.ElideRight
+                    text: root.isSelf ? qsTr("本机")
+                        : root.isGateway ? qsTr("网关") : qsTr("其它网络")
+                    font.pixelSize: 9
+                    color: Theme.textSecondary
+                }
+            }
+
+            // 今日累计上/下行（也是列表的排序主键，见 DeviceListModel::buildTarget）。
+            // 用「今日」而不是「累计」：跨会话的历史总量对「谁在占带宽」没有参考价值。
+            ColumnLayout {
+                visible: infoRow.hasTraffic
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: 82
+                Layout.minimumWidth: 82
+                spacing: 0
+                Text {
+                    Layout.fillWidth: true
+                    text: "↓ " + Theme.fmtBytes(root.todayDown)
+                    font.pixelSize: 10
+                    color: Theme.textMuted
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignRight
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "↑ " + Theme.fmtBytes(root.todayUp)
+                    font.pixelSize: 10
+                    color: Theme.textMuted
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignRight
+                }
+            }
+
+            // 实时速率：跟着「今日有流量」占位，闲下来只是淡出（opacity），**位置不动**——
+            // 速率文字每一拍都在变宽变窄（"↓ 9.77 KB/s" ↔ "↓ 1.20 MB/s"），一收一放整行就在抖。
+            ColumnLayout {
+                visible: infoRow.hasTraffic
+                opacity: root.online && (root.rateDown > 0 || root.rateUp > 0) ? 1.0 : 0.0
+                Behavior on opacity { NumberAnimation { duration: 120 } }
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: 76
+                Layout.minimumWidth: 76
+                spacing: 0
+                Text {
+                    Layout.fillWidth: true
+                    text: "↓ " + Theme.fmtRate(root.rateDown)
+                    font.pixelSize: 10
+                    color: "#5bb44b"
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignRight
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: "↑ " + Theme.fmtRate(root.rateUp)
+                    font.pixelSize: 10
+                    color: "#b14a4a"
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignRight
+                }
+            }
+
+            // 代理开关。本机/网关/跨网段的行没有这个概念 → 直接收起来，让徽章顶到最右。
             Rectangle {
                 id: proxySwitch
                 readonly property bool canToggle: root.proxied || (root.proxyable && root.online)
-                readonly property bool applicable: root.proxyable || root.proxied
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
+                visible: root.proxyable || root.proxied
+                opacity: canToggle ? 1.0 : 0.4
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: 38
+                Layout.minimumWidth: 38
+                Layout.preferredHeight: 20
                 width: 38; height: 20; radius: 10
-                opacity: applicable ? (canToggle ? 1.0 : 0.4) : 0.0
                 color: root.proxied ? Theme.accent : Theme.switchTrackOff
                 Behavior on color { ColorAnimation { duration: 120 } }
                 Rectangle {
@@ -134,93 +219,9 @@ Rectangle {
                 // 既保证点开关不会连带选中整行，也保证在开关上按住拖动不会去拖窗口。
                 MouseArea {
                     anchors.fill: parent
-                    // 不适用时这块是看不见的占位：必须连带禁用，否则它白白吃掉那 38px 上的点击，
-                    // 本机/网关那几行的右端就点不中了。
-                    enabled: proxySwitch.applicable
                     hoverEnabled: true
                     cursorShape: proxySwitch.canToggle ? Qt.PointingHandCursor : Qt.ForbiddenCursor
                     onClicked: if (proxySwitch.canToggle) root.toggleProxy()
-                }
-            }
-
-            // 实时速率（在线且有流量时才「亮起来」）。用 opacity 而不是 visible 显隐：速率文字
-            // 每一拍都在变宽变窄（"↓ 9.77 KB/s" ↔ "↓ 1.20 MB/s"），位置必须钉死，否则一跑流量
-            // 整行数字就左右抽搐。
-            Column {
-                id: rateCol
-                anchors.right: proxySwitch.left
-                anchors.rightMargin: 8
-                anchors.verticalCenter: parent.verticalCenter
-                width: 76
-                spacing: 0
-                opacity: root.online && (root.rateDown > 0 || root.rateUp > 0) ? 1.0 : 0.0
-                Behavior on opacity { NumberAnimation { duration: 120 } }
-                Text {
-                    width: parent.width
-                    text: "↓ " + Theme.fmtRate(root.rateDown)
-                    font.pixelSize: 10
-                    color: "#5bb44b"
-                    elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignRight
-                }
-                Text {
-                    width: parent.width
-                    text: "↑ " + Theme.fmtRate(root.rateUp)
-                    font.pixelSize: 10
-                    color: "#b14a4a"
-                    elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
-
-            // 今日累计上/下行（也是列表的排序主键，见 DeviceListModel::buildTarget）。
-            // 用「今日」而不是「累计」：跨会话的历史总量对「谁在占带宽」没有参考价值。
-            // 一整天都是 0 的设备（没开代理 → 流量不经 mihomo，压根统计不到）不显示「0 B」噪音。
-            Column {
-                id: todayCol
-                anchors.right: rateCol.left
-                anchors.rightMargin: 8
-                anchors.verticalCenter: parent.verticalCenter
-                width: 82
-                spacing: 0
-                opacity: (root.todayDown + root.todayUp) > 0 ? 1.0 : 0.0
-                Text {
-                    width: parent.width
-                    text: "↓ " + Theme.fmtBytes(root.todayDown)
-                    font.pixelSize: 10
-                    color: Theme.textMuted
-                    elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignRight
-                }
-                Text {
-                    width: parent.width
-                    text: "↑ " + Theme.fmtBytes(root.todayUp)
-                    font.pixelSize: 10
-                    color: Theme.textMuted
-                    elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
-
-            // 本机 / 网关 / 其它网络（跨网段，劫持不到）——不可代理的原因徽章，右对齐。
-            Rectangle {
-                anchors.right: todayCol.left
-                anchors.rightMargin: 8
-                anchors.verticalCenter: parent.verticalCenter
-                visible: root.isSelf || root.isGateway || !root.proxyable
-                width: Math.min(64, protTxt.implicitWidth + 8)
-                height: protTxt.implicitHeight + 3
-                radius: 3
-                color: Qt.rgba(0, 0, 0, 0.25)
-                Text {
-                    id: protTxt
-                    anchors.centerIn: parent
-                    width: Math.min(parent.width - 8, implicitWidth)
-                    elide: Text.ElideRight
-                    text: root.isSelf ? qsTr("本机")
-                        : root.isGateway ? qsTr("网关") : qsTr("其它网络")
-                    font.pixelSize: 9
-                    color: Theme.textSecondary
                 }
             }
         }
