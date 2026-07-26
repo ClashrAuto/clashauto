@@ -1,9 +1,11 @@
 import QtQuick
+import QtQuick.Controls // ToolTip：徽章文字被 elide 时把完整文案挂在悬停提示上
 import QtQuick.Layouts
 import ClashAuto
 
-// 设备列表行：类型头像 + 名称/副标题（IP·厂商）+ 实时速率 + 代理开关。
-// 选中态整行高亮；离线行整体淡化。本机/网关不显示代理开关（改显「保护」徽章）。
+// 设备列表行：类型头像 + 名称/副标题（IP·厂商）+ 今日用量 + 实时速率 + 最右一列（代理开关，
+// 或者「本机/网关/其它网络」这类不可代理的原因徽章——两者互斥，共用同一个 38px 槽位）。
+// 选中态整行高亮；离线行整体淡化。
 Rectangle {
     id: root
     property string mac: ""
@@ -120,30 +122,6 @@ Rectangle {
             Layout.alignment: Qt.AlignVCenter
             spacing: 8
 
-            // 本机 / 网关 / 其它网络（跨网段，劫持不到）——不可代理的原因徽章。
-            // 「其它网络」只在设备**在线**时才敢下这个结论：inLanSubnet 不持久化（换了网络不能
-            // 沿用上次的判断），所以从台账加载出来、还没被本轮扫描确认的设备一律是 false ——
-            // 不加这个条件的话，刚进页面那一两秒每台离线设备都会被扣上「其它网络」的帽子。
-            Rectangle {
-                visible: root.isSelf || root.isGateway || (root.online && !root.proxyable)
-                Layout.alignment: Qt.AlignVCenter
-                Layout.preferredWidth: Math.min(64, protTxt.implicitWidth + 8)
-                Layout.minimumWidth: Layout.preferredWidth
-                Layout.preferredHeight: protTxt.implicitHeight + 3
-                radius: 3
-                color: Qt.rgba(0, 0, 0, 0.25)
-                Text {
-                    id: protTxt
-                    anchors.centerIn: parent
-                    width: Math.min(parent.width - 8, implicitWidth)
-                    elide: Text.ElideRight
-                    text: root.isSelf ? qsTr("本机")
-                        : root.isGateway ? qsTr("网关") : qsTr("其它网络")
-                    font.pixelSize: 9
-                    color: Theme.textSecondary
-                }
-            }
-
             // 今日累计上/下行（也是列表的排序主键，见 DeviceListModel::buildTarget）。
             // 用「今日」而不是「累计」：跨会话的历史总量对「谁在占带宽」没有参考价值。
             ColumnLayout {
@@ -198,33 +176,77 @@ Rectangle {
                 }
             }
 
-            // 代理开关。本机/网关/跨网段的行没有这个概念 → 直接收起来，让徽章顶到最右。
-            Rectangle {
-                id: proxySwitch
-                readonly property bool canToggle: root.proxied || (root.proxyable && root.online)
-                visible: root.proxyable || root.proxied
-                opacity: canToggle ? 1.0 : 0.4
+            // 最右一列：**开关和徽章共用同一个 38px 槽位**（一台设备要么能开代理、要么有一个
+            // 「为什么不能开」的理由，两者互斥）。槽位宽度写死 = 开关宽度，所以整列的左右边缘
+            // 在每一行都一样齐。
+            Item {
                 Layout.alignment: Qt.AlignVCenter
                 Layout.preferredWidth: 38
                 Layout.minimumWidth: 38
                 Layout.preferredHeight: 20
-                width: 38; height: 20; radius: 10
-                color: root.proxied ? Theme.accent : Theme.switchTrackOff
-                Behavior on color { ColorAnimation { duration: 120 } }
+
+                // 代理开关。
                 Rectangle {
-                    width: 16; height: 16; radius: 8
-                    y: 2
-                    x: root.proxied ? parent.width - width - 2 : 2
-                    color: "#ffffff"
-                    Behavior on x { NumberAnimation { duration: 120 } }
-                }
-                // 用 MouseArea 而非 TapHandler：它压在整行 MouseArea 之上，按下即独占 grab ——
-                // 既保证点开关不会连带选中整行，也保证在开关上按住拖动不会去拖窗口。
-                MouseArea {
+                    id: proxySwitch
+                    readonly property bool canToggle: root.proxied || (root.proxyable && root.online)
                     anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: proxySwitch.canToggle ? Qt.PointingHandCursor : Qt.ForbiddenCursor
-                    onClicked: if (proxySwitch.canToggle) root.toggleProxy()
+                    visible: root.proxyable || root.proxied
+                    opacity: canToggle ? 1.0 : 0.4
+                    radius: 10
+                    color: root.proxied ? Theme.accent : Theme.switchTrackOff
+                    Behavior on color { ColorAnimation { duration: 120 } }
+                    Rectangle {
+                        width: 16; height: 16; radius: 8
+                        y: 2
+                        x: root.proxied ? parent.width - width - 2 : 2
+                        color: "#ffffff"
+                        Behavior on x { NumberAnimation { duration: 120 } }
+                    }
+                    // 用 MouseArea 而非 TapHandler：它压在整行 MouseArea 之上，按下即独占 grab ——
+                    // 既保证点开关不会连带选中整行，也保证在开关上按住拖动不会去拖窗口。
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: proxySwitch.canToggle ? Qt.PointingHandCursor : Qt.ForbiddenCursor
+                        onClicked: if (proxySwitch.canToggle) root.toggleProxy()
+                    }
+                }
+
+                // 本机 / 网关 / 其它网络（跨网段，劫持不到）——不可代理的原因徽章，占开关的位置。
+                // 「其它网络」只在设备**在线**时才敢下这个结论：inLanSubnet 不持久化（换了网络不能
+                // 沿用上次的判断），所以从台账加载出来、还没被本轮扫描确认的设备一律是 false ——
+                // 不加这个条件的话，刚进页面那一两秒每台离线设备都会被扣上「其它网络」的帽子。
+                Rectangle {
+                    id: protBadge
+                    readonly property string label: root.isSelf ? qsTr("本机")
+                                                  : root.isGateway ? qsTr("网关") : qsTr("其它网络")
+                    visible: root.isSelf || root.isGateway || (root.online && !root.proxyable)
+                    // **和开关一样宽**（就是这个槽位的宽度），不按文字伸缩：右侧一列在每行都一样。
+                    // 12 种语言里总有塞不下的（德语 "Anderes Netzwerk"），塞不下就 elide，
+                    // 完整文案挂在悬停提示上，详情页也另有一整句解释。
+                    anchors.fill: parent
+                    height: protTxt.implicitHeight + 3
+                    radius: 3
+                    color: Qt.rgba(0, 0, 0, 0.25)
+                    Text {
+                        id: protTxt
+                        anchors.centerIn: parent
+                        width: parent.width - 4
+                        horizontalAlignment: Text.AlignHCenter
+                        // 槽位是死的 38px，文案却有 12 种语言：**先缩字号再说**（9→7px），
+                        // 比一上来就 elide 好——"Gateway" 只差一两个像素，截成 "Gate…" 太难看。
+                        // 7px 仍塞不下的才 elide，完整文案挂在下面的悬停提示上。
+                        fontSizeMode: Text.HorizontalFit
+                        minimumPixelSize: 7
+                        font.pixelSize: 9
+                        elide: Text.ElideRight
+                        text: protBadge.label
+                        color: Theme.textSecondary
+                    }
+                    HoverHandler { id: protHover }
+                    ToolTip.visible: protHover.hovered && protTxt.truncated
+                    ToolTip.text: protBadge.label
+                    ToolTip.delay: 300
                 }
             }
         }
