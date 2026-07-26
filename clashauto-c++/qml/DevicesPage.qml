@@ -285,6 +285,7 @@ Item {
                 }
 
                 ScrollView {
+                    id: detailScroll
                     anchors.fill: parent
                     visible: devices.selectedMac !== ""
                     clip: true
@@ -293,7 +294,12 @@ Item {
 
                     ColumnLayout {
                         id: detailCol
-                        width: parent.width
+                        width: detailScroll.availableWidth
+                        // 显式给高度（内容自然高 与 视口高 取大）：窗口拉高/全屏时多出来的高度会被
+                        // Layout 分配给唯一 fillHeight 的连接列表，让它跟着一起长；窗口矮的时候
+                        // 取内容高，ScrollView 照常滚动。（只写 implicitHeight 的话视口再高也没用，
+                        // 列表永远卡在自己那点固定高度上，下面一大片空白。）
+                        height: Math.max(implicitHeight, detailScroll.availableHeight)
                         spacing: 12
                         // 单一数据源：所有子项都引用 detailCol.dev.*（document-scoped id，稳当不受 Layout 重父影响）。
                         readonly property var dev: devices.selectedDevice
@@ -600,7 +606,12 @@ Item {
                         }
                         ListView {
                             Layout.fillWidth: true
+                            // 唯一吃掉剩余高度的项：窗口越高它越长（上限是内容本身的高度，别把
+                            // 一条连接撑成半屏空白），窗口矮时退回 220 的老行为并由外层滚动。
+                            Layout.fillHeight: true
                             Layout.preferredHeight: Math.min(contentHeight, 220)
+                            Layout.minimumHeight: 96
+                            Layout.maximumHeight: Math.max(120, contentHeight)
                             clip: true
                             interactive: contentHeight > height
                             model: devices.connModel

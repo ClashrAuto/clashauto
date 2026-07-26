@@ -101,14 +101,18 @@ QVector<DeviceListModel::Row> DeviceListModel::buildTarget() const
         }
         t.append(r);
     }
-    // 排序：在线优先 → 本机置顶 → 网关次之 → 速率降 → 名称升。稳定序，减少行跳动。
+    // 排序：在线优先 → 本机置顶 → 网关次之 → 名称升 → MAC（兜底定序）。
+    // **排序键里绝不能出现速率**：速率每一拍都在变，一旦拿它排序，只要有设备在跑流量，
+    // 每次刷新都会重新排列 → reconcile 的 beginMoveRows 把行搬来搬去，列表肉眼可见地抖。
+    // 这里的键全部是「身份/状态」类字段，只有设备真正上下线或改名才会换位置。
+    // MAC 兜底是为了同名设备（一堆 "未知设备"）也有确定次序，不随上游容器顺序漂移。
     std::stable_sort(t.begin(), t.end(), [](const Row &a, const Row &b) {
         if (a.online != b.online) return a.online > b.online;
         if (a.isSelf != b.isSelf) return a.isSelf > b.isSelf;
         if (a.isGateway != b.isGateway) return a.isGateway > b.isGateway;
-        const qint64 ra = a.rateUp + a.rateDown, rb = b.rateUp + b.rateDown;
-        if (ra != rb) return ra > rb;
-        return a.name.localeAwareCompare(b.name) < 0;
+        const int byName = a.name.localeAwareCompare(b.name);
+        if (byName != 0) return byName < 0;
+        return a.mac < b.mac;
     });
     return t;
 }

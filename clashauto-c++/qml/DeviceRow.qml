@@ -115,24 +115,31 @@ Rectangle {
             }
         }
 
-        // 实时速率（仅在线且有流量时显示）
+        // 实时速率（在线且有流量时才「亮起来」）。
+        // 这一列**固定宽度、常驻占位**，用 opacity 而不是 visible 来显隐：速率文字每一拍都在变宽变
+        // 窄（"↓ 9.77 KB/s" ↔ "↓ 1.20 MB/s"），若让它按内容伸缩，左边 fillWidth 的名称列每拍都要
+        // 重新分到不同宽度 → 设备一跑流量，整行文字就左右抽搐；visible 显隐则会让开关整个横跳一次。
         ColumnLayout {
-            visible: root.online && (root.rateDown > 0 || root.rateUp > 0)
+            opacity: root.online && (root.rateDown > 0 || root.rateUp > 0) ? 1.0 : 0.0
+            Behavior on opacity { NumberAnimation { duration: 120 } }
             spacing: 0
+            Layout.preferredWidth: 78
             Layout.alignment: Qt.AlignVCenter
             Text {
                 text: "↓ " + Theme.fmtRate(root.rateDown)
                 font.pixelSize: 10
                 color: "#5bb44b"
+                elide: Text.ElideRight
                 horizontalAlignment: Text.AlignRight
-                Layout.alignment: Qt.AlignRight
+                Layout.fillWidth: true
             }
             Text {
                 text: "↑ " + Theme.fmtRate(root.rateUp)
                 font.pixelSize: 10
                 color: "#b14a4a"
+                elide: Text.ElideRight
                 horizontalAlignment: Text.AlignRight
-                Layout.alignment: Qt.AlignRight
+                Layout.fillWidth: true
             }
         }
 

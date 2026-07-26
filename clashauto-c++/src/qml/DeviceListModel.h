@@ -69,7 +69,8 @@ private:
         }
     };
     static Row toRow(const DeviceRecord &d);
-    // 排序键：在线优先 → 本机/网关置顶 → 速率降 → 名称。返回已排序+过滤的目标行。
+    // 排序键：在线优先 → 本机/网关置顶 → 名称 → MAC（**不含速率**，否则跑流量时行会一直换位
+    // 置，列表抖个不停）。返回已排序+过滤的目标行。
     QVector<Row> buildTarget() const;
     void reconcile();
     void recomputeStats();
