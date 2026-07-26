@@ -111,6 +111,8 @@ struct GwNic {
     quint32 localIp4 = 0, netMask4 = 0, gatewayIp4 = 0;
     bool ready = false;      // ep 已打开且 netif 已挂上协议栈
     int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
+    int order = 0;           // configure 传入的 specs 次序（LanScanner 保证 index 0 = 主网卡）。
+                             // nicForIp 在多张同网段网卡里据此确定性选主卡，不再靠 QHash 无序遍历。
 };
 
 // GUI 线程只读的一份状态快照。工作线程每次改状态后写、GUI 读，都在这把互斥量下——
@@ -199,11 +201,18 @@ GwNic *GatewayWorker::nicForIp(const QString &ip) const
     const quint32 v = ipToU32(ip);
     if (!v)
         return nullptr;
+    // 多张网卡可能都命中同一网段(如一台机器有线+WiFi 接同一路由)。**必须确定性地选主网卡**——
+    // 否则 QHash 无序遍历可能选到 WiFi 那张,把 ARP 投毒发错网卡(经 WiFi 发的投毒常被 AP 隔离/
+    // 到不了有线侧设备),表现为「开了代理但设备没被劫持」。按 order(specs 次序,主网卡=0)取最小者。
+    // 真机联调实证:同网段双卡下选错卡 → 投毒无效;选对主卡 → 稳定劫持。
+    GwNic *best = nullptr;
     for (GwNic *n : m_nics) {
-        if (n->ready && n->netMask4 && (v & n->netMask4) == (n->localIp4 & n->netMask4))
-            return n;
+        if (!n->ready || !n->netMask4 || (v & n->netMask4) != (n->localIp4 & n->netMask4))
+            continue;
+        if (!best || n->order < best->order)
+            best = n;
     }
-    return nullptr;
+    return best;
 }
 
 bool GatewayWorker::availableLocal() const
@@ -286,7 +295,10 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
     }
 
     QSet<QString> seen;
+    int specIndex = -1;
     for (const LanGateway::NicSpec &spec : specs) {
+        ++specIndex; // specs 的次序即优先级：LanScanner.physicalNics() 把主网卡(带默认路由的那张)
+                     // 放在 index 0。多张同网段网卡时 nicForIp 据此选主卡。
         if (spec.ifname.isEmpty() || spec.localIp.isEmpty() || spec.localMac.isEmpty())
             continue;
         seen.insert(spec.ifname);
@@ -296,6 +308,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             n->spec = spec;
             m_nics.insert(spec.ifname, n);
         }
+        n->order = specIndex;
         // 拓扑数值每次都刷新（网关 MAC 常常是扫描几轮后才解析出来的）。
         n->spec = spec;
         n->localIp4 = ipToU32(spec.localIp);
