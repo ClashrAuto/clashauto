@@ -36,6 +36,8 @@
 #include <QQuickWindow>
 #include <QTimer>
 
+#include <cstdio>
+
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
@@ -206,6 +208,33 @@ int main(int argc, char *argv[])
     }
 
     QObject::connect(&app, &QCoreApplication::aboutToQuit, deviceStore, &DeviceStore::save);
+
+    // COAST_GATEWAY_TESTDEV=<ip>：headless 联调钩子——启动后激活设备控制器开始扫描，一旦发现
+    // 该 IP 的设备(在线、同网段、非本机)就自动给它开代理,无需 GUI 点击。仅用于 SSH/无显示环境
+    // 下验证透明网关(如树莓派上代理另一台设备)。默认不触发,对正式运行零影响。
+    if (qEnvironmentVariableIsSet("COAST_GATEWAY_TESTDEV")) {
+        const QString testIp = qEnvironmentVariable("COAST_GATEWAY_TESTDEV");
+        devicesCtrl->setActive(true); // 开始周期扫描/热更新
+        auto *testTimer = new QTimer(&app);
+        testTimer->setInterval(2000);
+        QObject::connect(testTimer, &QTimer::timeout, devicesCtrl,
+                         [devicesCtrl, deviceStore, testIp, testTimer]() {
+                             for (const DeviceRecord &d : deviceStore->devices()) {
+                                 if (d.ip != testIp || d.isSelf || !d.online)
+                                     continue;
+                                 std::fprintf(stderr,
+                                              "[TESTDEV] enabling proxy for %s (%s) inLan=%d\n",
+                                              d.ip.toLatin1().constData(),
+                                              d.mac.toLatin1().constData(), d.inLanSubnet ? 1 : 0);
+                                 std::fflush(stderr);
+                                 devicesCtrl->setProxyEnabled(d.mac, true);
+                                 testTimer->stop();
+                                 return;
+                             }
+                         });
+        testTimer->start();
+    }
+
     // 退出必须可靠还原所有被劫持设备的 ARP（否则设备断网）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, lanGateway, &LanGateway::disableAll);
     // 新设备提醒（蹭网检测）：首轮扫描后发现新设备 → 托盘气泡。

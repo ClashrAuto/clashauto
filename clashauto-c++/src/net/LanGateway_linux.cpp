@@ -50,6 +50,7 @@
 #include <QVector>
 
 #include <cstdio>
+#include <cstring>
 #include <memory>
 
 namespace {
@@ -172,7 +173,8 @@ private:
     std::shared_ptr<GwShared> m_shared;
     bool m_torndown = false;
     // 诊断计数（COAST_GATEWAY_DEBUG）：设备帧在 frameReceived 里各分支的去向。
-    long long m_dbgDropNonVictim = 0, m_dbgBypassLan = 0, m_dbgFedLwip = 0, m_dbgArpAnswered = 0;
+    long long m_dbgDropNonVictim = 0, m_dbgBypassLan = 0, m_dbgFedLwip = 0, m_dbgArpAnswered = 0,
+              m_dbgReassert = 0;
 };
 
 // 把「属于这张卡的」被劫持设备源 MAC 集合推给它的二层端点，装成内核态源 MAC 过滤（收方优化）。
@@ -338,6 +340,22 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             if (frame.size() < 12)
                 return;
             const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+            const bool isArp = frame.size() >= 14 && f[12] == 0x08 && f[13] == 0x06;
+            // ★ 反应式反制:真网关自己发的 ARP(它周期性广播 who-has,携带「网关 IP 在真 MAC」,
+            //   设备一收到就把投毒解掉)→ 立刻把所有 victim 重投一轮盖回去。这是「时通时不通」的
+            //   根治:周期重发跟网关的 ARP 刷新是 1:1 拉锯,必须一看到解毒就抢回(tcpdump 实证 UniFi
+            //   每 ~1s 广播一次 who-has victim tell 网关IP)。过滤器已放行 ARP,所以这里收得到。
+            if (isArp && n->arp) {
+                const QByteArray gwMac = macBytes(n->spec.gatewayMac);
+                if (gwMac.size() == 6 && std::memcmp(f + 6, gwMac.constData(), 6) == 0) {
+                    n->arp->reassertNow();
+                    if (gwDbgOn() && (m_dbgReassert++ % 20) == 0)
+                        std::fprintf(stderr, "[GW] reassert on gateway ARP (count=%lld)\n",
+                                     m_dbgReassert),
+                            std::fflush(stderr);
+                    return; // 网关帧不是设备流量,不喂 lwIP
+                }
+            }
             // 源 MAC 原地打包成 quint64 查表：不做 frame.mid(6, 6)，省掉每帧一次堆分配。
             if (!m_victimByMac.contains(macKey(f + 6))) {
                 // 帧到了这一层但源 MAC 不在被劫持名单里 → 这里丢弃。若「设备流量为 0」且这个
@@ -351,9 +369,9 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 return;
             }
             // ARP 抢答：被劫持设备一问「谁是网关?」就同步回「网关在本机 MAC」，赶在真网关前面。
-            // 这是「时通时不通」的针对性修复——周期重发压不住真网关的正确应答，必须一问就抢答。
+            // 与上面的网关侧反制互补：这条管设备主动问的场景,上面那条管网关主动广播的场景。
             // 抢答后仍把该 ARP 喂给 lwIP（它据此维护设备 MAC 映射，无副作用）。
-            if (frame.size() >= 14 && f[12] == 0x08 && f[13] == 0x06 && n->arp) {
+            if (isArp && n->arp) {
                 if (n->arp->answerGatewayArp(frame) && gwDbgOn()
                     && (m_dbgArpAnswered++ % 50) == 0)
                     std::fprintf(stderr, "[GW] answered gateway ARP (count=%lld)\n",

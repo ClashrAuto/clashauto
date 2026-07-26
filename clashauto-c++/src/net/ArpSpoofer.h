@@ -13,6 +13,7 @@
 // 本类**跨平台可编译**：只拼 QByteArray 以太帧并交给 IL2Endpoint::send()，不含任何系统调用。
 // 端点由外部持有（本类不拥有）。未配置（缺网关 MAC 等）时所有操作 no-op + qWarning。
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QObject>
 #include <QString>
@@ -45,6 +46,11 @@ public:
     // ARP 帧时调用（源 MAC 已由二层过滤限定为被劫持设备）。
     bool answerGatewayArp(const QByteArray &frame);
 
+    // 反应式反制:一看到真网关自己发的 ARP(它的广播 who-has 会携带「网关 IP 在真 MAC」把设备
+    // 解毒)就立刻把所有 victim 重投一轮,盖回「网关在本机」。这是「时通时不通」的根治——周期
+    // 重发跟 UniFi 的 ARP 刷新是 1:1 拉锯,必须一看到解毒就抢回。自带 ~50ms 节流防 ARP 风暴放大。
+    void reassertNow();
+
     QStringList victims() const; // 当前被劫持的 victim MAC 列表
 
 private:
@@ -68,6 +74,7 @@ private:
 
     IL2Endpoint *m_endpoint = nullptr; // 不拥有
     QTimer *m_timer = nullptr;
+    QElapsedTimer m_lastReassert; // reassertNow 节流(防网关 ARP 风暴时无限放大)
     QByteArray m_localMac;   // 6 字节（本机 = 冒充的“网关”）
     QByteArray m_gatewayIp;  // 4 字节
     QByteArray m_gatewayMac; // 6 字节（真实网关，heal 时用）

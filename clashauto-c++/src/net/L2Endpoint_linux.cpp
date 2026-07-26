@@ -330,16 +330,22 @@ public:
             if (valid.size() > 60)
                 return false;
             const int n = valid.size();
-            const int accept = 4 * n;
-            const int reject = 4 * n + 1;
+            // 末尾追加「或 ARP」分支:所有 victim 源 MAC 都失配后,再看 ethertype 是否 0x0806,是则
+            // 也放行。**必须捕获 ARP**——尤其真网关广播的 who-has(携带「网关在真 MAC」会把设备解毒),
+            // LanGateway 收到后立刻反制重投(reassertNow)。ARP 是低频帧,全收几乎零成本。
+            const int arpLd = 4 * n;       // ldh [12]   ; A = ethertype
+            const int arpJeq = 4 * n + 1;  // jeq 0x0806
+            const int accept = 4 * n + 2;  // ret 0xffffffff
+            const int reject = 4 * n + 3;  // ret 0
+            (void)arpJeq;
             for (int i = 0; i < n; ++i) {
                 const auto *b = reinterpret_cast<const unsigned char *>(valid[i].constData());
                 const quint16 first2 = (quint16(b[0]) << 8) | b[1];
                 const quint32 last4 = (quint32(b[2]) << 24) | (quint32(b[3]) << 16)
                                     | (quint32(b[4]) << 8) | quint32(b[5]);
                 const int base = 4 * i;
-                // 本块失配后的去处：不是最后一个 MAC → 下一块；最后一个 → reject。
-                const int failIdx = (i < n - 1) ? (4 * (i + 1)) : reject;
+                // 本块失配后的去处：不是最后一个 MAC → 下一块；最后一个 → ARP 判定块。
+                const int failIdx = (i < n - 1) ? (4 * (i + 1)) : arpLd;
                 code.push_back(BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 8));
                 code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, last4, 0,
                                         static_cast<__u8>(failIdx - (base + 1) - 1)));
@@ -348,8 +354,10 @@ public:
                                         static_cast<__u8>(accept - (base + 3) - 1),
                                         static_cast<__u8>(failIdx - (base + 3) - 1)));
             }
-            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFFu)); // accept：整帧
-            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));           // reject
+            code.push_back(BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 12));           // arpLd
+            code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x0806, 0, 1)); // ==ARP→accept 否则→reject
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFFu));            // accept：整帧
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));                     // reject
         }
 
         struct sock_fprog prog;

@@ -298,15 +298,19 @@ public:
             // 拿它当恒假条件——比 "len < 0" 之类更稳的合法 pcap 语法。
             expr = "ether src ff:ff:ff:ff:ff:ff";
         } else {
+            QByteArray macClause;
             for (const QByteArray &m : macs) {
                 if (m.size() != 6)
                     continue;
-                if (!expr.isEmpty())
-                    expr += " or ";
-                expr += "ether src " + macToText(m);
+                if (!macClause.isEmpty())
+                    macClause += " or ";
+                macClause += "ether src " + macToText(m);
             }
-            if (expr.isEmpty())
+            if (macClause.isEmpty())
                 return false; // 一个合法 MAC 都没有：不装，交用户态兜底
+            // 末尾「或 arp」:必须捕获 ARP——尤其真网关广播的 who-has(携带「网关在真 MAC」会把设备
+            // 解毒),LanGateway 收到后立刻反制重投。ARP 低频,全收几乎零成本。契约见 IL2Endpoint.h。
+            expr = "(" + macClause + ") or arp";
         }
 
         struct bpf_program prog;

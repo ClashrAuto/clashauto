@@ -105,6 +105,19 @@ bool ArpSpoofer::answerGatewayArp(const QByteArray &frame)
     return true;
 }
 
+void ArpSpoofer::reassertNow()
+{
+    if (!m_endpoint || !configured() || m_victims.isEmpty())
+        return;
+    // 节流:网关若短时间连发多条 ARP,别每条都重投一整轮(会把我们变成 ARP 风暴源)。50ms 一次
+    // 足以在设备解毒后立刻盖回,又不放大。
+    if (m_lastReassert.isValid() && m_lastReassert.elapsed() < 50)
+        return;
+    m_lastReassert.restart();
+    for (auto it = m_victims.constBegin(); it != m_victims.constEnd(); ++it)
+        sendSpoof(it.value());
+}
+
 void ArpSpoofer::healAll()
 {
     if (configured()) {
