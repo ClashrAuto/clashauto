@@ -77,11 +77,16 @@ Item {
                 Text { text: qsTr("代理中"); font.pixelSize: 12; color: Theme.textMuted }
                 Text { text: devices.proxiedCount; font.pixelSize: 12; color: Theme.accent }
             }
+            // 全部设备**今日**累计上/下行。以前这里放的是实时总速率，但那个数在状态页已经有一份
+            // （而且更完整——它是核心的全局速率，不受「能不能归属到某台设备」影响）；这里更该回答
+            // 的是「今天这个网络一共用了多少」。
             Row {
                 spacing: 8
-                Text { text: "↓ " + Theme.fmtRate(devices.totalRateDown)
+                Text { text: qsTr("今日"); font.pixelSize: 12; color: Theme.textMuted
+                       anchors.verticalCenter: parent.verticalCenter }
+                Text { text: "↓ " + Theme.fmtBytes(devices.totalTodayDown)
                        font.pixelSize: 12; color: "#5bb44b" }
-                Text { text: "↑ " + Theme.fmtRate(devices.totalRateUp)
+                Text { text: "↑ " + Theme.fmtBytes(devices.totalTodayUp)
                        font.pixelSize: 12; color: "#b14a4a" }
             }
             Item { Layout.fillWidth: true }

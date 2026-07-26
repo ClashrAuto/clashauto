@@ -38,6 +38,9 @@ class DevicesController final : public QObject
     Q_PROPERTY(int proxiedCount READ proxiedCount NOTIFY overviewChanged)
     Q_PROPERTY(double totalRateUp READ totalRateUp NOTIFY overviewChanged)
     Q_PROPERTY(double totalRateDown READ totalRateDown NOTIFY overviewChanged)
+    // 全部设备**今日**累计上/下行（概览条显示的就是这两个；实时总速率在状态页已经有了）。
+    Q_PROPERTY(double totalTodayUp READ totalTodayUp NOTIFY overviewChanged)
+    Q_PROPERTY(double totalTodayDown READ totalTodayDown NOTIFY overviewChanged)
     Q_PROPERTY(QString selectedMac READ selectedMac NOTIFY selectedChanged)
     Q_PROPERTY(QVariantMap selectedDevice READ selectedDevice NOTIFY selectedChanged)
     // 透明网关是否就绪（Linux 且有 CAP_NET_RAW/root 且网卡已配置）。QML 据此决定代理开关是否真正生效
@@ -60,6 +63,8 @@ public:
     int proxiedCount() const { return m_model.proxiedCount(); }
     double totalRateUp() const { return static_cast<double>(m_totalRateUp); }
     double totalRateDown() const { return static_cast<double>(m_totalRateDown); }
+    double totalTodayUp() const;   // 台账里所有设备 todayUp 之和
+    double totalTodayDown() const; // 同上，下行
     QString selectedMac() const { return m_selectedMac; }
     QVariantMap selectedDevice() const { return m_selectedDevice; }
     bool gatewayReady() const; // Linux 网关可用性（LanGateway::isAvailable）
