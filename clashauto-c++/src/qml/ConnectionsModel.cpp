@@ -32,6 +32,8 @@ QVariant ConnectionsModel::data(const QModelIndex &index, int role) const
         return c.id;
     case OfflineRole:
         return c.offline;
+    case ProcessRole:
+        return c.process;
     default:
         return {};
     }
@@ -47,6 +49,7 @@ QHash<int, QByteArray> ConnectionsModel::roleNames() const
         {UploadRole, "upload"},
         {ConnIdRole, "connId"},
         {OfflineRole, "offline"},
+        {ProcessRole, "process"},
     };
 }
 
@@ -63,6 +66,7 @@ void ConnectionsModel::setRaw(const QVariantList &conns)
         c.host = m.value("host").toString();
         c.chain = m.value("chain").toString();
         c.id = m.value("id").toString();
+        c.process = m.value("process").toString();
         c.download = m.value("download").toLongLong();
         c.upload = m.value("upload").toLongLong();
         c.offline = m.value("offline").toBool();
@@ -101,7 +105,9 @@ void ConnectionsModel::recompute()
             continue;
         if (!c.offline && !m_showOnline)
             continue;
-        if (!m_query.isEmpty() && !c.host.contains(m_query, Qt::CaseInsensitive))
+        // 搜索同时匹配域名和进程名——「看看 xxx.exe 在连哪」是这个窗口最常见的用法之一。
+        if (!m_query.isEmpty() && !c.host.contains(m_query, Qt::CaseInsensitive)
+            && !c.process.contains(m_query, Qt::CaseInsensitive))
             continue;
         targetIndex.insert(c.id, filtered.size());
         filtered.append(c);

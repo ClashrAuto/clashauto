@@ -477,6 +477,13 @@ void QmlBridge::refreshConnections()
             const QJsonArray chains = c.value("chains").toArray();
             const QString chain0 = chains.isEmpty() ? QStringLiteral("-") : chains.first().toString();
             const QString id = c.value("id").toString();
+            // 进程名（核心的 find-process-mode 填的）。**只对本机发起的连接有效**：局域网设备的
+            // 进程在别人机器上，本机套接字表里没有；而透明网关代理的连接从 127.0.0.1 进来，
+            // 查到的必然是 Coast 自己——按 inboundUser=dev-* 认出这类连接，宁可留空也不误标。
+            const QString inUser = meta.value("inboundUser").toString();
+            const QString process = inUser.startsWith(QStringLiteral("dev-"))
+                                        ? QString()
+                                        : meta.value("process").toString();
             const qlonglong dl = static_cast<qlonglong>(c.value("download").toInteger());
             const qlonglong ul = static_cast<qlonglong>(c.value("upload").toInteger());
 
@@ -489,6 +496,8 @@ void QmlBridge::refreshConnections()
                 m[QStringLiteral("download")] = dl;
                 m[QStringLiteral("upload")] = ul;
                 m[QStringLiteral("offline")] = false;
+                if (!process.isEmpty())
+                    m[QStringLiteral("process")] = process; // 迟到的进程名也补上，已有的不清空
             } else {
                 QVariantMap m;
                 m[QStringLiteral("type")] = type;
@@ -498,6 +507,7 @@ void QmlBridge::refreshConnections()
                 m[QStringLiteral("upload")] = ul;
                 m[QStringLiteral("id")] = id;
                 m[QStringLiteral("offline")] = false;
+                m[QStringLiteral("process")] = process;
                 m_seenConns.append(m);
                 idx.insert(id, m_seenConns.size() - 1);
             }

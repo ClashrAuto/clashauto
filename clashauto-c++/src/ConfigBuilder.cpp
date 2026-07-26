@@ -44,6 +44,12 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     }
     // 安全加固：默认关闭 allow-lan，混合端口只监听本机，避免暴露成开放代理
     yaml = setScalar(yaml, "allow-lan", "false");
+    // 进程归属：让核心把发起连接的进程名填进 metadata.process（连接窗口要显示它）。
+    // always 而不是 strict —— strict 由核心自行决定要不要查（没有 PROCESS-NAME 规则时它就不查了，
+    // 于是 UI 永远拿不到进程名）。代价是每条新连接多一次本机套接字表查询，核心内部有缓存。
+    // 注意：这只对**本机发起**的连接有意义；局域网设备的进程跑在别人机器上，本机表里查不到
+    //（网关代理的连接查到的会是 Coast 自己，所以 QmlBridge 那边按 inboundUser 把它丢掉）。
+    yaml = setScalar(yaml, "find-process-mode", "always");
     yaml = setNestedScalar(yaml, "tun", "enable", tunEnabled ? "true" : "false");
     yaml = ensureProxyServerNameserver(yaml);
     yaml = normalizeEmptyProxies(yaml);

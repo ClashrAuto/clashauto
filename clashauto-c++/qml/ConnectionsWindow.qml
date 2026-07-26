@@ -228,6 +228,14 @@ ApplicationWindow {
                             color: model.offline ? "#999999" : (Theme.dark ? "#eeeeee" : "#333333")
                         }
 
+                        // 发起连接的进程（核心的 find-process-mode 填的）。只有本机连接查得到，
+                        // 局域网设备的进程在别人机器上——那种情况留空，不占位。
+                        ConnBadge {
+                            visible: model.process !== ""
+                            label: model.process
+                            bg: Qt.rgba(70 / 255, 110 / 255, 168 / 255, 0.55)
+                            fg: "#ffffff"
+                        }
                         ConnBadge { glyph: String.fromCharCode(0xe6bc); label: model.chain; bg: Qt.rgba(0, 0, 0, 0.35); fg: "#ffffff" }
                         ConnBadge { glyph: String.fromCharCode(0xe6cd); label: model.download > 0 ? win.spd(model.download) : "-"; bg: Qt.rgba(0, 1, 0, 0.5); fg: "#333333" }
                         ConnBadge { glyph: String.fromCharCode(0xe6cc); label: model.upload > 0 ? win.spd(model.upload) : "-"; bg: Qt.rgba(1, 0, 0, 0.5); fg: "#333333" }

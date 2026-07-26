@@ -24,7 +24,8 @@ public:
         DownloadRole, // qlonglong 原始字节
         UploadRole,   // qlonglong 原始字节
         ConnIdRole,   // 连接 id（closeConnectionById 用）
-        OfflineRole
+        OfflineRole,
+        ProcessRole,  // 发起连接的进程名；**仅本机连接有值**（局域网设备的进程查不到，见 QmlBridge）
     };
 
     explicit ConnectionsModel(QObject *parent = nullptr);
@@ -51,13 +52,14 @@ private:
         QString host;
         QString chain;
         QString id;
+        QString process;
         qlonglong download = 0;
         qlonglong upload = 0;
         bool offline = false;
         // 除 id 外的可变字段是否一致（id 相同才会比较，用于判断是否需 dataChanged）
         bool sameFields(const Conn &o) const
         {
-            return type == o.type && host == o.host && chain == o.chain
+            return type == o.type && host == o.host && chain == o.chain && process == o.process
                    && download == o.download && upload == o.upload && offline == o.offline;
         }
     };
