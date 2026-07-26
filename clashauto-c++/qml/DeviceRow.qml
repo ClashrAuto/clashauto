@@ -121,8 +121,11 @@ Rectangle {
             spacing: 8
 
             // 本机 / 网关 / 其它网络（跨网段，劫持不到）——不可代理的原因徽章。
+            // 「其它网络」只在设备**在线**时才敢下这个结论：inLanSubnet 不持久化（换了网络不能
+            // 沿用上次的判断），所以从台账加载出来、还没被本轮扫描确认的设备一律是 false ——
+            // 不加这个条件的话，刚进页面那一两秒每台离线设备都会被扣上「其它网络」的帽子。
             Rectangle {
-                visible: root.isSelf || root.isGateway || !root.proxyable
+                visible: root.isSelf || root.isGateway || (root.online && !root.proxyable)
                 Layout.alignment: Qt.AlignVCenter
                 Layout.preferredWidth: Math.min(64, protTxt.implicitWidth + 8)
                 Layout.minimumWidth: Layout.preferredWidth

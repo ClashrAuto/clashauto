@@ -171,6 +171,21 @@ void DeviceStore::load()
         d.todayUp = o.value("todayUp").toVariant().toLongLong();
         d.todayDown = o.value("todayDown").toVariant().toLongLong();
         d.todayDate = o.value("todayDate").toString();
+        // —— 上次见到时的「长相」——
+        // 这些字段本来算运行时数据、只由扫描填，于是**没扫描完之前列表是一排没名字没 IP 的空行**
+        // （程序刚起、或刚点进设备页的头几秒）。存下来当作首屏：进页面立刻看到上次那份列表，
+        // 扫描回来再逐行覆盖成最新的。
+        d.ip = o.value("ip").toString();
+        d.autoName = o.value("autoName").toString();
+        d.model = o.value("model").toString();
+        d.vendor = o.value("vendor").toString();
+        d.autoType = typeFromKey(o.value("autoType").toString());
+        d.isSelf = o.value("isSelf").toBool();
+        d.isGateway = o.value("isGateway").toBool();
+        d.lastSeen = QDateTime::fromString(o.value("lastSeen").toString(), Qt::ISODate);
+        // online 与 inLanSubnet **故意不持久化**：前者要靠本轮探测才算数（存成 true 会让离线设备
+        // 一直显示在线），后者决定「能不能开代理」——换了网络还沿用上次的判断，会让用户对着一台
+        // 其实劫持不到的设备点开关。两者都留 false，等这一轮扫描说话。
         m_index.insert(d.mac, m_devices.size());
         m_devices.append(d);
     }
@@ -199,6 +214,15 @@ void DeviceStore::save()
         if (d.todayUp) o["todayUp"] = QString::number(d.todayUp);
         if (d.todayDown) o["todayDown"] = QString::number(d.todayDown);
         if (!d.todayDate.isEmpty()) o["todayDate"] = d.todayDate;
+        // 上次见到时的「长相」——下次启动拿它当首屏，别让用户对着一排空行等扫描（见 load()）。
+        if (!d.ip.isEmpty()) o["ip"] = d.ip;
+        if (!d.autoName.isEmpty()) o["autoName"] = d.autoName;
+        if (!d.model.isEmpty()) o["model"] = d.model;
+        if (!d.vendor.isEmpty()) o["vendor"] = d.vendor;
+        if (d.autoType != DeviceType::Unknown) o["autoType"] = typeKey(d.autoType);
+        if (d.isSelf) o["isSelf"] = true;
+        if (d.isGateway) o["isGateway"] = true;
+        if (d.lastSeen.isValid()) o["lastSeen"] = d.lastSeen.toString(Qt::ISODate);
         arr.append(o);
     }
     QFile f(m_path);
@@ -260,6 +284,14 @@ void DeviceStore::mergeDiscovered(const QVector<DeviceRecord> &found)
         DeviceRecord &d = m_devices[i];
         // 覆盖运行时/身份字段；保留用户编辑与累计流量。
         const bool wasOnline = d.online;
+        // 「长相」类字段现在是要落盘的（下次启动当首屏），变了就排一次保存。**只看这几个**：
+        // online/lastSeen 每 5s 热更新都在变，跟着它们存盘等于每 5s 写一次磁盘，纯浪费。
+        const bool looksChanged = (!f.ip.isEmpty() && f.ip != d.ip)
+                                  || (!f.autoName.isEmpty() && f.autoName != d.autoName)
+                                  || (!f.model.isEmpty() && f.model != d.model)
+                                  || (!f.vendor.isEmpty() && f.vendor != d.vendor)
+                                  || (f.autoType != DeviceType::Unknown && f.autoType != d.autoType)
+                                  || f.isSelf != d.isSelf || f.isGateway != d.isGateway;
         if (!f.ip.isEmpty())      d.ip = f.ip;
         if (!f.autoName.isEmpty()) d.autoName = f.autoName;
         if (!f.model.isEmpty())   d.model = f.model;
@@ -267,6 +299,8 @@ void DeviceStore::mergeDiscovered(const QVector<DeviceRecord> &found)
         if (f.autoType != DeviceType::Unknown) d.autoType = f.autoType;
         d.isSelf = f.isSelf;
         d.isGateway = f.isGateway;
+        if (looksChanged)
+            scheduleSave();
         d.inLanSubnet = f.inLanSubnet;
         d.online = f.online;
         if (f.lastSeen.isValid()) d.lastSeen = f.lastSeen;
