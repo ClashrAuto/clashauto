@@ -172,7 +172,7 @@ private:
     std::shared_ptr<GwShared> m_shared;
     bool m_torndown = false;
     // 诊断计数（COAST_GATEWAY_DEBUG）：设备帧在 frameReceived 里各分支的去向。
-    long long m_dbgDropNonVictim = 0, m_dbgBypassLan = 0, m_dbgFedLwip = 0;
+    long long m_dbgDropNonVictim = 0, m_dbgBypassLan = 0, m_dbgFedLwip = 0, m_dbgArpAnswered = 0;
 };
 
 // 把「属于这张卡的」被劫持设备源 MAC 集合推给它的二层端点，装成内核态源 MAC 过滤（收方优化）。
@@ -349,6 +349,16 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                                  f[6], f[7], f[8], f[9], f[10], f[11], m_dbgDropNonVictim),
                         std::fflush(stderr);
                 return;
+            }
+            // ARP 抢答：被劫持设备一问「谁是网关?」就同步回「网关在本机 MAC」，赶在真网关前面。
+            // 这是「时通时不通」的针对性修复——周期重发压不住真网关的正确应答，必须一问就抢答。
+            // 抢答后仍把该 ARP 喂给 lwIP（它据此维护设备 MAC 映射，无副作用）。
+            if (frame.size() >= 14 && f[12] == 0x08 && f[13] == 0x06 && n->arp) {
+                if (n->arp->answerGatewayArp(frame) && gwDbgOn()
+                    && (m_dbgArpAnswered++ % 50) == 0)
+                    std::fprintf(stderr, "[GW] answered gateway ARP (count=%lld)\n",
+                                 m_dbgArpAnswered),
+                        std::fflush(stderr);
             }
             // 同网段直连旁路：被劫持设备发往「本网段内（且非网关本身）」的 IPv4 帧不喂用户态栈，
             // 让它照常二层直达——设备回给本机 LAN IP 的包若被 lwIP 终结会触发 RST，导致本机无法

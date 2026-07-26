@@ -39,6 +39,12 @@ public:
     // 给所有被劫持设备发正确 ARP（heal）后清空集合、停表。退出/急停调用。
     void healAll();
 
+    // 抢答：若 frame 是被劫持设备发出的「谁是网关?」ARP 请求，立刻回一帧「网关 IP 在本机 MAC」。
+    // 周期重发（~1s）太慢——设备会被真网关的正确应答反复夺回，导致时通时不通；每次它一问就
+    // 同步抢答，才能把投毒压住。返回 true = 确实是问网关且已抢答。契约：调用方在收到该设备的
+    // ARP 帧时调用（源 MAC 已由二层过滤限定为被劫持设备）。
+    bool answerGatewayArp(const QByteArray &frame);
+
     QStringList victims() const; // 当前被劫持的 victim MAC 列表
 
 private:
