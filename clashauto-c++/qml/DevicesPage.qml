@@ -101,12 +101,15 @@ Item {
                    font.pixelSize: 11; color: Theme.textMuted }
         }
 
-        // ———————— 缺 Npcap 提示条（仅 Windows 未装时显示）————————
+        // ———————— Npcap 提示条（仅 Windows；未装 **或** 装了却被锁成仅管理员时显示）————————
         // 没有它透明网关根本起不来，而程序对 wpcap.dll 是延迟加载 —— 不提示的话用户只会看到
-        // 「开关打开了但没生效」。点右侧按钮打开安装窗（下载 + 验签 + 静默安装，全自动）。
+        // 「开关打开了但没生效」。两种病因两种解法：
+        //   · 没装 → 打开安装窗（下载 + 验签 + 静默安装，全自动）；
+        //   · 装了但驱动被限制为「仅管理员可访问」（Npcap 向导默认勾选，这是「打开网卡失败：
+        //     拒绝访问」的实际原因）→ 一键提权修复，不用重装也不用每次以管理员身份启动。
         Rectangle {
             Layout.fillWidth: true
-            visible: npcap.supported && !npcap.installed
+            visible: npcap.supported && (!npcap.installed || npcap.restricted)
             radius: 5
             color: Qt.rgba(198 / 255, 154 / 255, 84 / 255, 0.15)
             border.width: 1
@@ -124,21 +127,33 @@ Item {
                     wrapMode: Text.WordWrap
                     font.pixelSize: 11
                     color: "#c69a54"
-                    text: qsTr("未安装 Npcap 驱动 —— 「代理网络」开关不会真正接管设备流量。")
+                    text: npcap.restricted
+                          ? qsTr("Npcap 驱动被限制为「仅管理员可访问」—— 「代理网络」会一直报"
+                                 + "「打开网卡失败：拒绝访问」。点右侧一键解除（弹一次 UAC）。")
+                          : qsTr("未安装 Npcap 驱动 —— 「代理网络」开关不会真正接管设备流量。")
                 }
                 Rectangle {
                     Layout.preferredWidth: 96
                     Layout.preferredHeight: 26
                     radius: 4
-                    color: npcapBtnHover.hovered ? Theme.accentStrong : Theme.accent
+                    enabled: !npcap.busy
+                    opacity: enabled ? 1.0 : 0.5
+                    color: npcapBtnHover.hovered && enabled ? Theme.accentStrong : Theme.accent
                     Text {
                         anchors.centerIn: parent
-                        text: qsTr("安装 Npcap")
+                        text: npcap.busy ? qsTr("处理中…")
+                                         : npcap.restricted ? qsTr("修复权限") : qsTr("安装 Npcap")
                         font.pixelSize: 11
                         color: "#ffffff"
                     }
-                    HoverHandler { id: npcapBtnHover; cursorShape: Qt.PointingHandCursor }
-                    TapHandler { onTapped: npcapWindow.show(); }
+                    HoverHandler {
+                        id: npcapBtnHover
+                        cursorShape: parent.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    }
+                    TapHandler {
+                        enabled: !npcap.busy
+                        onTapped: npcap.restricted ? npcap.fixPermissions() : npcapWindow.show()
+                    }
                 }
             }
         }
@@ -654,7 +669,16 @@ Item {
         function onGatewayError(msg) { noticeBar.show(msg); }
     }
 
+    // 提示条上的「修复权限 / 安装 Npcap」跑完了要有回音 —— 那些流程的详细状态文字只在安装窗里
+    // 显示，从提示条一键触发的用户是看不到的，这里把结论转到浮动提示上。
+    Connections {
+        target: npcap
+        function onFinished(ok) { if (npcap.status.length > 0) noticeBar.show(npcap.status); }
+    }
+
     // 右下角浮动提示（导出成功 / 出错），3.5s 自动消失。
+    // 网关的报错可以很长（例如 Npcap 权限那条），所以固定最大宽度 + 换行：单行 Text 会顶着
+    // anchors.right 一路撑到窗口左边界外，长文案直接看不全。
     Rectangle {
         id: noticeBar
         property string msg: ""
@@ -664,16 +688,19 @@ Item {
         anchors.margins: 12
         radius: 5
         color: Qt.rgba(0, 0, 0, 0.78)
-        implicitWidth: noticeTxt.implicitWidth + 20
+        implicitWidth: noticeTxt.width + 20
         implicitHeight: noticeTxt.implicitHeight + 12
         Text {
             id: noticeTxt
             anchors.centerIn: parent
+            width: Math.min(implicitWidth, Math.max(160, page.width - 48))
             text: noticeBar.msg
+            wrapMode: Text.WordWrap
             color: "#ffffff"
             font.pixelSize: 12
         }
-        Timer { id: noticeTimer; interval: 3500; onTriggered: noticeBar.msg = "" }
+        // 长文案（网关报错常常两三行）3.5s 读不完，给到 6s。
+        Timer { id: noticeTimer; interval: 6000; onTriggered: noticeBar.msg = "" }
         function show(m) { msg = m; noticeTimer.restart(); }
     }
 

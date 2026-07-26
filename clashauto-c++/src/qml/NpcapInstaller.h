@@ -7,6 +7,11 @@
 // 用户完全看不出缺了什么。本类负责补上这条引导链：
 //   检测是否已装 → 取最新版下载地址 → 带进度条下载 → 验签 → 提权静默安装(/S) → 复检。
 //
+// 「装了却还是打不开网卡」这条岔路同样归本类管：Npcap 安装向导默认勾选
+// 「Restrict Npcap driver's access to Administrators only」，勾上后普通用户身份的 Coast
+// 每次 pcap_open_live 都是「拒绝访问」。restricted() 反映这个状态，fixPermissions() 提权
+// 把 AdminOnly 置 0 并重启驱动服务解除它。详见 src/net/NpcapStatus.h。
+//
 // 与 UpdateController 的下载/进度契约保持一致（progress / downloadSpeed / downloadedText /
 // totalText / cancel），QML 那边的进度条可以照抄同一套写法。
 //
@@ -31,6 +36,8 @@ class NpcapInstaller final : public QObject
     // 本平台是否需要/支持 Npcap（仅 Windows true）。QML 用它决定要不要显示整条引导。
     Q_PROPERTY(bool supported READ supported CONSTANT)
     Q_PROPERTY(bool installed READ installed NOTIFY installedChanged)
+    // 已装、但驱动被限制为「仅管理员可访问」、且本进程非提权 —— 网关必然打不开，且一键可修。
+    Q_PROPERTY(bool restricted READ restricted NOTIFY installedChanged)
     Q_PROPERTY(QString installedVersion READ installedVersion NOTIFY installedChanged)
     Q_PROPERTY(QString latestVersion READ latestVersion NOTIFY latestChanged)
     // busy = 下载中或安装中（按钮置灰）；downloading 单指下载阶段（进度条只在这时显示）。
@@ -47,6 +54,7 @@ public:
 
     bool supported() const;
     bool installed() const { return m_installed; }
+    bool restricted() const { return m_restricted; }
     QString installedVersion() const { return m_installedVersion; }
     QString latestVersion() const { return m_latestVersion; }
     bool busy() const { return m_downloading || m_installing; }
@@ -61,6 +69,9 @@ public:
     Q_INVOKABLE void refresh();
     // 一键：下载 → 验签 → 提权静默安装。
     Q_INVOKABLE void install();
+    // 一键解除「仅管理员可访问」限制：提权把 AdminOnly 置 0 并重启 npcap 驱动服务。
+    // 只在 restricted() 为真时有意义（QML 那边按此显示按钮）。
+    Q_INVOKABLE void fixPermissions();
     // 取消下载（安装阶段已交给系统安装器，无法取消）。
     Q_INVOKABLE void cancel();
     // 打开官网下载页（自动流程失败时的兜底）。
@@ -89,6 +100,9 @@ private:
     // 提权运行安装器；silent=true 传 /S。返回 false = 没起来（含用户拒绝 UAC）。
     bool runInstaller(const QString &path, bool silent);
     void onInstallerExited(const QString &path, bool wasSilent);
+    // driverRestarted = 提权命令里的 `net start npcap` 退出码为 0（注册表改了但驱动没能重启时，
+    // 限制要等重启电脑才真正解除——这两种情况必须分开告诉用户）。
+    void onFixExited(bool driverRestarted);
 #endif
 
     AppConfig m_config;
@@ -96,6 +110,7 @@ private:
     QNetworkAccessManager *m_nam = nullptr;
 
     bool m_installed = false;
+    bool m_restricted = false;
     QString m_installedVersion;
     QString m_latestVersion;
     QString m_latestUrl;   // 下载直链（GitHub asset 或官网兜底）

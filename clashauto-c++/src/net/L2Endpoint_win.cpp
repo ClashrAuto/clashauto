@@ -18,6 +18,7 @@
 #include <pcap.h>
 
 #include "IL2Endpoint.h"
+#include "NpcapStatus.h"
 
 #include <QByteArray>
 #include <QString>
@@ -79,8 +80,19 @@ public:
         char errbuf[PCAP_ERRBUF_SIZE] = {0};
         m_pcap = pcap_open_live(dev.constData(), 65536, 1 /*promisc*/, 1 /*ms*/, errbuf);
         if (!m_pcap) {
-            if (err) *err = QStringLiteral("pcap_open_live 失败(需装 Npcap): ")
-                            + QString::fromLatin1(errbuf);
+            // errbuf 里是 Windows 本地化的系统错误文案（zh-CN 下是 GBK），fromLatin1 会拧成乱码。
+            const QString raw = QString::fromLocal8Bit(errbuf);
+            // 走到这里 wpcap.dll 已经加载成功 = Npcap 装着的，所以旧文案那句「需装 Npcap」必然是
+            // 误导。真正最常见的原因是驱动被锁成「仅管理员可访问」（安装向导默认勾选），普通
+            // 用户身份下每次都是「拒绝访问(5)」——这条路可以一键修，别让用户去猜。
+            if (err) {
+                *err = npcapstatus::restricted()
+                        ? QStringLiteral("Npcap 驱动被限制为「仅管理员可访问」（安装时勾选了 "
+                                         "Restrict Npcap driver's access to Administrators only）"
+                                         "——请在设备页点「修复权限」一键解除。原始错误: ")
+                                + raw
+                        : QStringLiteral("打不开二层设备: ") + raw;
+            }
             return false;
         }
         pcap_setmintocopy(m_pcap, 1); // 有 1 字节就触发事件，降低延迟

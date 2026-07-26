@@ -50,6 +50,7 @@ set(BACKEND_SOURCES
     # 透明网关——跨平台可编译层。L2 工厂按平台各一份实现（Linux=AF_PACKET / mac=BPF /
     # Windows=Npcap待做，现桩 nullptr）；每个 .cpp 用 #if <os> 守卫，同一平台只有一个定义。
     src/net/IL2Endpoint.h
+    src/net/NpcapStatus.h    # Windows：Npcap 装没装 / 是否被锁成仅管理员（header-only）
     src/net/L2Endpoint_linux.cpp
     src/net/L2Endpoint_mac.cpp
     src/net/L2Endpoint_win.cpp

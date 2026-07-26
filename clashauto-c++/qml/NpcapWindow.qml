@@ -76,11 +76,14 @@ ApplicationWindow {
                     Text { text: qsTr("本机状态"); font.pixelSize: 12; color: Theme.textMuted }
                     Text {
                         Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
                         font.pixelSize: 12
-                        color: npcap.installed ? "#5bb44b" : "#c69a54"
-                        text: npcap.installed
-                              ? (qsTr("已安装") + (npcap.installedVersion ? " " + npcap.installedVersion : ""))
-                              : qsTr("未安装")
+                        // 「装了但被锁成仅管理员」和「没装」一样用不了网关，所以同样标成警示色。
+                        color: (npcap.installed && !npcap.restricted) ? "#5bb44b" : "#c69a54"
+                        text: !npcap.installed
+                              ? qsTr("未安装")
+                              : (qsTr("已安装") + (npcap.installedVersion ? " " + npcap.installedVersion : "")
+                                 + (npcap.restricted ? qsTr("（驱动被限制为仅管理员可访问）") : ""))
                     }
 
                     Text { text: qsTr("最新版本"); font.pixelSize: 12; color: Theme.textMuted }
@@ -103,7 +106,9 @@ ApplicationWindow {
                     text: qsTr("点「立即安装」后：自动下载官方安装包 → 校验数字签名 → 静默安装。\n"
                                + "· 安装驱动需要管理员权限，过程中会弹一次 UAC，请点「是」。\n"
                                + "· Npcap 免费版仅 OEM 授权允许静默安装；若静默被拒，会自动打开"
-                               + "安装向导，按提示点 Install 即可。")
+                               + "安装向导，按提示点 Install 即可 —— 向导里请**取消勾选**"
+                               + "「Restrict Npcap driver's access to Administrators only」，"
+                               + "否则 Coast 非管理员身份下会一直「打开网卡失败：拒绝访问」。")
                 }
 
                 Item { Layout.fillHeight: true }
@@ -217,6 +222,31 @@ ApplicationWindow {
                 }
                 HoverHandler { id: closeHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: win.close() }
+            }
+
+            // 已装但被锁成「仅管理员」时才出现：提权改 AdminOnly=0 + 重启驱动，不用重装。
+            Rectangle {
+                visible: npcap.restricted
+                Layout.preferredWidth: 96
+                Layout.preferredHeight: 30
+                radius: 5
+                enabled: !npcap.busy
+                opacity: enabled ? 1.0 : 0.5
+                color: fixHover.hovered && enabled ? Theme.accentStrong : Theme.accent
+                Text {
+                    anchors.centerIn: parent
+                    text: npcap.busy ? qsTr("处理中…") : qsTr("修复权限")
+                    font.pixelSize: 13
+                    color: "#ffffff"
+                }
+                HoverHandler {
+                    id: fixHover
+                    cursorShape: parent.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                }
+                TapHandler {
+                    enabled: !npcap.busy
+                    onTapped: npcap.fixPermissions()
+                }
             }
 
             Rectangle {

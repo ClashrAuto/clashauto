@@ -22,6 +22,9 @@
 #    define WIN32_LEAN_AND_MEAN
 #  endif
 #  include <windows.h>
+
+#  include "../net/NpcapStatus.h" // installed/adminOnly/processElevated（与二层端点同一套口径）
+
 #  include <wincrypt.h>  // CryptQueryObject / CertGetNameString（取签名者主体名）
 #  include <wintrust.h>  // WinVerifyTrust
 #  include <softpub.h>   // WINTRUST_ACTION_GENERIC_VERIFY_V2
@@ -213,16 +216,11 @@ void NpcapInstaller::applyDownloadProxy(QNetworkAccessManager *nam) const
 void NpcapInstaller::detectInstalled()
 {
 #if defined(Q_OS_WIN)
-    // 判定「已装」= %SystemRoot%\System32\Npcap\ 下的用户态库存在 —— 这正是 L2Endpoint_win.cpp
-    // 里 SetDllDirectory + LoadLibrary("wpcap.dll") 会去找的目录，判定口径与实际加载口径一致。
-    // 故意不认 System32\wpcap.dll：那可能是早已停更的 WinPcap，装了也开不了网关。
-    wchar_t sysdir[MAX_PATH] = {0};
-    bool found = false;
-    if (GetSystemDirectoryW(sysdir, MAX_PATH)) {
-        const QString sys = QString::fromWCharArray(sysdir);
-        found = QFile::exists(sys + QStringLiteral("\\Npcap\\wpcap.dll"))
-                || QFile::exists(sys + QStringLiteral("\\Npcap\\Packet.dll"));
-    }
+    // 判定口径见 src/net/NpcapStatus.h —— 和二层端点实际加载 wpcap.dll 的目录一致。
+    const bool found = npcapstatus::installed();
+    // 装了 ≠ 用得了：驱动可能被锁成「仅管理员可访问」，普通用户身份下 pcap_open_live 必然
+    // 「拒绝访问」。这才是设备页「总提示打开网卡失败」的实际形态，必须单独暴露给 UI。
+    const bool locked = found && npcapstatus::adminOnly() && !npcapstatus::processElevated();
     // 版本号取自卸载项（纯展示用；取不到不影响判定）。
     QString ver;
     QSettings reg(QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows"
@@ -230,14 +228,17 @@ void NpcapInstaller::detectInstalled()
                   QSettings::NativeFormat);
     ver = reg.value(QStringLiteral("DisplayVersion")).toString();
 
-    const bool changed = (found != m_installed) || (ver != m_installedVersion);
+    const bool changed =
+            (found != m_installed) || (locked != m_restricted) || (ver != m_installedVersion);
     m_installed = found;
+    m_restricted = locked;
     m_installedVersion = ver;
     if (changed) {
         emit installedChanged();
     }
 #else
     m_installed = false;
+    m_restricted = false;
     m_installedVersion.clear();
 #endif
 }
@@ -249,12 +250,22 @@ void NpcapInstaller::refresh()
         setStatus(QString::fromUtf8("当前平台不需要 Npcap（Linux 用 AF_PACKET，macOS 用 BPF）。"));
         return;
     }
-    if (m_installed) {
+    // 下载/安装/修复进行中一律不覆盖状态文字（那几条流程自己在写；窗口重新可见会再调一次 refresh）。
+    if (busy()) {
+        // 什么也不改
+    } else if (m_restricted) {
+        setStatus(QString::fromUtf8(
+                          "已安装 Npcap%1，但驱动被限制为「仅管理员可访问」—— 这正是设备页"
+                          "「打开网卡失败：拒绝访问」的原因。点「修复权限」解除（会弹一次 UAC），"
+                          "或以管理员身份运行 Coast。")
+                          .arg(m_installedVersion.isEmpty()
+                                       ? QString()
+                                       : QStringLiteral(" ") + m_installedVersion));
+    } else if (m_installed) {
         setStatus(m_installedVersion.isEmpty()
                       ? QString::fromUtf8("已安装 Npcap，透明网关可用。")
                       : QString::fromUtf8("已安装 Npcap %1，透明网关可用。").arg(m_installedVersion));
-    } else if (!busy()) {
-        // 下载/安装进行中不覆盖状态文字（窗口重新可见会再调一次 refresh）。
+    } else {
         setStatus(QString::fromUtf8("未安装 Npcap —— 设备页的「代理网络」需要它来接管局域网流量。"));
     }
     fetchLatest();
@@ -459,7 +470,14 @@ bool NpcapInstaller::runInstaller(const QString &path, bool silent)
     const std::wstring fileW = QDir::toNativeSeparators(path).toStdWString();
     // /S = NSIS 静默安装。注意：Npcap 免费版的许可只允许 OEM 版静默安装，免费版安装器可能
     // 忽略/拒绝 /S；因此静默跑完若仍未装上，onInstallerExited 会改用可见向导再跑一次。
-    const std::wstring paramsW = silent ? L"/S" : L"";
+    //
+    // admin_only=no 是**必须**带的：Npcap 向导里「Restrict Npcap driver's access to
+    // Administrators only」默认勾选，勾上后 Coast 以普通用户身份跑就永远打不开网卡（拒绝访问）。
+    // winpcap_mode=yes 顺带装上 WinPcap 兼容名，兼容性更好。这两个选项官方文档只保证静默模式
+    // 生效；可见向导里传过去多半被忽略，所以那条路上再用文案提醒用户手动取消勾选，并且装完
+    // 还有 fixPermissions() 兜底。
+    const std::wstring paramsW = silent ? L"/S /admin_only=no /winpcap_mode=yes"
+                                        : L"/admin_only=no /winpcap_mode=yes";
 
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
@@ -509,8 +527,11 @@ void NpcapInstaller::onInstallerExited(const QString &path, bool wasSilent)
     }
     if (wasSilent) {
         // 免费版安装器拒绝 /S 的典型表现：进程秒退、什么也没装。改用可见向导再来一次。
-        setStatus(QString::fromUtf8("静默安装未生效（Npcap 免费版仅 OEM 授权允许静默安装），"
-                                    "已打开安装向导，请按提示点「Install」完成。"));
+        setStatus(QString::fromUtf8(
+                "静默安装未生效（Npcap 免费版仅 OEM 授权允许静默安装），已打开安装向导，"
+                "请按提示点「Install」完成。**记得取消勾选「Restrict Npcap driver's access to "
+                "Administrators only」**，否则 Coast 需要管理员权限才能接管设备流量"
+                "（装完忘了取消也没关系，回设备页点「修复权限」即可）。"));
         if (!runInstaller(path, false)) {
             setInstalling(false);
             emit finished(false);
@@ -522,5 +543,93 @@ void NpcapInstaller::onInstallerExited(const QString &path, bool wasSilent)
     setProgress(0);
     setStatus(QString::fromUtf8("安装未完成（可能被取消）。可再试一次，或点「官网下载」手动安装。"));
     emit finished(false);
+}
+#endif // Q_OS_WIN
+
+// 解除「仅管理员可访问」：提权把 AdminOnly 置 0，再重启 npcap 驱动服务让它立即生效。
+// 这两件事都要管理员，所以整条命令用 ShellExecuteEx("runas") 交给一个隐藏的 cmd 去跑。
+void NpcapInstaller::fixPermissions()
+{
+#if defined(Q_OS_WIN)
+    if (busy()) {
+        return;
+    }
+    detectInstalled();
+    if (!m_installed) {
+        setStatus(QString::fromUtf8("还没装 Npcap —— 请先点「立即安装」。"));
+        return;
+    }
+    if (!m_restricted) {
+        setStatus(QString::fromUtf8("Npcap 驱动权限正常，无需修复。"));
+        return;
+    }
+
+    // 注册表路径里没有空格，所以整条命令不带引号——cmd /c 的引号剥离规则很容易踩坑，能不用就不用。
+    // 用 `&&` 串 reg→net stop：改不成注册表就别去动驱动；用 `&` 串 net start：stop 失败（驱动正
+    // 被占用）时也要把它重新拉起来，不能把用户的抓包驱动停在停止态。整条命令的退出码 = net start
+    // 的退出码，据此区分「已生效」和「要重启电脑才生效」。
+    static const wchar_t *kFixCmd =
+            L"/c reg add HKLM\\SYSTEM\\CurrentControlSet\\Services\\npcap\\Parameters "
+            L"/v AdminOnly /t REG_DWORD /d 0 /f && net stop npcap & net start npcap";
+
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = L"cmd.exe";
+    sei.lpParameters = kFixCmd;
+    sei.nShow = SW_HIDE; // 不闪黑框
+
+    if (!ShellExecuteExW(&sei) || !sei.hProcess) {
+        const DWORD e = GetLastError();
+        setStatus(e == ERROR_CANCELLED
+                          ? QString::fromUtf8("已取消：解除驱动限制需要管理员权限。")
+                          : QString::fromUtf8("提权失败（错误码 %1）—— 也可以直接以管理员身份"
+                                              "运行 Coast 来绕过该限制。")
+                                    .arg(e));
+        return;
+    }
+
+    setInstalling(true); // 复用 busy：期间按钮置灰
+    setStatus(QString::fromUtf8("正在解除 Npcap 的「仅管理员」限制…"));
+
+    HANDLE proc = sei.hProcess;
+    auto *notifier = new QWinEventNotifier(proc, this);
+    connect(notifier, &QWinEventNotifier::activated, this, [this, notifier, proc](HANDLE) {
+        notifier->setEnabled(false); // 句柄保持有信号态，先关掉避免反复触发
+        notifier->deleteLater();
+        DWORD code = 1;
+        if (!GetExitCodeProcess(proc, &code)) {
+            code = 1;
+        }
+        CloseHandle(proc);
+        onFixExited(code == 0);
+    });
+    notifier->setEnabled(true);
+#endif
+}
+
+#if defined(Q_OS_WIN)
+void NpcapInstaller::onFixExited(bool driverRestarted)
+{
+    detectInstalled();
+    setInstalling(false);
+    if (m_restricted) {
+        // 注册表都没改成 —— UAC 被拒或 reg 失败。
+        setStatus(QString::fromUtf8("未能解除限制（可能取消了 UAC）。可以再试一次，"
+                                    "或直接以管理员身份运行 Coast。"));
+        emit finished(false);
+        return;
+    }
+    if (!driverRestarted) {
+        // AdminOnly 已置 0，但驱动没能重启（多半是正被别的抓包程序占用）。限制要到下次
+        // 驱动加载才真正解除，这时候谎报成功只会让用户回设备页继续撞同一堵墙。
+        setStatus(QString::fromUtf8("限制已解除，但 npcap 驱动未能重启（可能正被其它抓包程序占用）"
+                                    "—— 重启电脑后「代理网络」即可使用。"));
+        emit finished(false);
+        return;
+    }
+    setStatus(QString::fromUtf8("已解除限制，透明网关现在可用。"));
+    emit finished(true); // main 里连着 → 触发一次重扫，重新 open 二层端点
 }
 #endif // Q_OS_WIN
