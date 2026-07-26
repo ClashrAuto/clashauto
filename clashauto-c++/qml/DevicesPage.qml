@@ -252,6 +252,8 @@ Item {
                         proxied: model.proxied
                         rateUp: model.rateUp
                         rateDown: model.rateDown
+                        todayUp: model.todayUp
+                        todayDown: model.todayDown
                         isSelf: model.isSelf
                         isGateway: model.isGateway
                         proxyable: model.proxyable

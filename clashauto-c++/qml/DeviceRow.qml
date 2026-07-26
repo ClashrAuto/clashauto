@@ -15,6 +15,8 @@ Rectangle {
     property bool proxied: false
     property real rateUp: 0
     property real rateDown: 0
+    property real todayUp: 0    // 今日累计上行字节
+    property real todayDown: 0  // 今日累计下行字节
     property bool isSelf: false
     property bool isGateway: false
     property bool proxyable: false // 能否开代理（非本机/网关 + 在主网卡网段内）
@@ -112,6 +114,34 @@ Rectangle {
                 elide: Text.ElideRight
                 font.pixelSize: 10
                 color: Theme.textMuted
+            }
+        }
+
+        // 今日累计上/下行——常驻显示（也是列表的排序主键，见 DeviceListModel::buildTarget）。
+        // 用「今日」而不是「累计」：跨会话的历史总量对「谁在占带宽」没有参考价值，今日才有。
+        // 同样固定宽度，避免数字变长变短时把左边的名称列挤来挤去。
+        ColumnLayout {
+            // 一整天都是 0 的设备（没开代理 → 流量不经 mihomo，压根统计不到）不显示「0 B」占位噪音；
+            // 和速率列同样用 opacity 而不是 visible —— 宽度照占，出现/消失时整行不会横跳。
+            opacity: (root.todayDown + root.todayUp) > 0 ? 1.0 : 0.0
+            spacing: 0
+            Layout.preferredWidth: 86
+            Layout.alignment: Qt.AlignVCenter
+            Text {
+                text: "↓ " + Theme.fmtBytes(root.todayDown)
+                font.pixelSize: 10
+                color: Theme.textMuted
+                elide: Text.ElideRight
+                horizontalAlignment: Text.AlignRight
+                Layout.fillWidth: true
+            }
+            Text {
+                text: "↑ " + Theme.fmtBytes(root.todayUp)
+                font.pixelSize: 10
+                color: Theme.textMuted
+                elide: Text.ElideRight
+                horizontalAlignment: Text.AlignRight
+                Layout.fillWidth: true
             }
         }
 

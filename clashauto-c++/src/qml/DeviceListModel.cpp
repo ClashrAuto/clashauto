@@ -1,5 +1,6 @@
 #include "DeviceListModel.h"
 
+#include <QHostAddress>
 #include <QSet>
 #include <algorithm>
 
@@ -25,6 +26,9 @@ QVariant DeviceListModel::data(const QModelIndex &index, int role) const
     case ProxiedRole:   return r.proxied;
     case RateUpRole:    return r.rateUp;
     case RateDownRole:  return r.rateDown;
+    // 与 rebuildSelected() 里的流量字段一致，统一以 double 交给 QML（那边 property 是 real）。
+    case TodayUpRole:   return static_cast<double>(r.todayUp);
+    case TodayDownRole: return static_cast<double>(r.todayDown);
     case IsSelfRole:    return r.isSelf;
     case IsGatewayRole: return r.isGateway;
     case ProxyableRole: return r.proxyable;
@@ -38,6 +42,7 @@ QHash<int, QByteArray> DeviceListModel::roleNames() const
         {MacRole, "mac"},         {IpRole, "ip"},           {NameRole, "name"},
         {TypeKeyRole, "typeKey"}, {VendorRole, "vendor"},   {OnlineRole, "online"},
         {ProxiedRole, "proxied"}, {RateUpRole, "rateUp"},   {RateDownRole, "rateDown"},
+        {TodayUpRole, "todayUp"}, {TodayDownRole, "todayDown"},
         {IsSelfRole, "isSelf"},   {IsGatewayRole, "isGateway"},
         {ProxyableRole, "proxyable"},
     };
@@ -58,6 +63,12 @@ DeviceListModel::Row DeviceListModel::toRow(const DeviceRecord &d)
     r.proxyable = d.proxyable();
     r.rateUp = d.rateUp;
     r.rateDown = d.rateDown;
+    r.todayUp = d.todayUp;
+    r.todayDown = d.todayDown;
+    // IP 排序按**数值**而不是字符串：".9" 必须排在 ".140" 前面，字符串比较会反过来。
+    const QHostAddress addr(d.ip);
+    r.ipKey = addr.protocol() == QAbstractSocket::IPv4Protocol ? addr.toIPv4Address()
+                                                               : 0xFFFFFFFFu; // 没 IP 的排最后
     return r;
 }
 
@@ -101,17 +112,17 @@ QVector<DeviceListModel::Row> DeviceListModel::buildTarget() const
         }
         t.append(r);
     }
-    // 排序：在线优先 → 本机置顶 → 网关次之 → 名称升 → MAC（兜底定序）。
-    // **排序键里绝不能出现速率**：速率每一拍都在变，一旦拿它排序，只要有设备在跑流量，
+    // 排序：在线优先 → 今日流量（MB 档位）降序 → IP 升序 → MAC（兜底定序）。
+    // **排序键里绝不能出现实时速率**：速率每一拍都在变，一旦拿它排序，只要有设备在跑流量，
     // 每次刷新都会重新排列 → reconcile 的 beginMoveRows 把行搬来搬去，列表肉眼可见地抖。
-    // 这里的键全部是「身份/状态」类字段，只有设备真正上下线或改名才会换位置。
-    // MAC 兜底是为了同名设备（一堆 "未知设备"）也有确定次序，不随上游容器顺序漂移。
+    // 今日流量是单调累加的，只会偶尔超车一次；再按 MB 取档（todayBucket）压掉最后一点
+    // 「两台用量相近的设备来回互超」的抖动。同档位内按 IP 数值排，同 IP（或都没 IP）按 MAC——
+    // 保证任何时候次序都是确定的，不随上游容器的遍历顺序漂移。
     std::stable_sort(t.begin(), t.end(), [](const Row &a, const Row &b) {
         if (a.online != b.online) return a.online > b.online;
-        if (a.isSelf != b.isSelf) return a.isSelf > b.isSelf;
-        if (a.isGateway != b.isGateway) return a.isGateway > b.isGateway;
-        const int byName = a.name.localeAwareCompare(b.name);
-        if (byName != 0) return byName < 0;
+        const qint64 ta = a.todayBucket(), tb = b.todayBucket();
+        if (ta != tb) return ta > tb;
+        if (a.ipKey != b.ipKey) return a.ipKey < b.ipKey;
         return a.mac < b.mac;
     });
     return t;
