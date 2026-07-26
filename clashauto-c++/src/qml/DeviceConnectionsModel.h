@@ -33,7 +33,10 @@ public:
 
     // 设置目标设备 IP（切换选中设备时调用；空则清空）。
     void setSourceIp(const QString &ip);
-    // 喂入全量连接原始表（含 sourceIP）。
+    // 设置目标设备的网关 SOCKS 用户名(dev-<mac>)。透明网关代理的连接 sourceIP 恒为 127.0.0.1,
+    // 只能靠 inboundUser 归属;与 sourceIp 取「或」匹配。切换选中设备时和 setSourceIp 一起调。
+    void setUser(const QString &user);
+    // 喂入全量连接原始表（含 sourceIP / inboundUser）。
     void setRaw(const QVariantList &conns);
 
 signals:
@@ -53,5 +56,6 @@ private:
 
     QVariantList m_raw;
     QString m_sourceIp;
+    QString m_user; // 目标设备的 dev-<mac> 用户名（网关代理连接靠它归属）
     QVector<Conn> m_rows;
 };

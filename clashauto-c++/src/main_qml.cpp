@@ -214,13 +214,16 @@ int main(int argc, char *argv[])
     // 下验证透明网关(如树莓派上代理另一台设备)。默认不触发,对正式运行零影响。
     if (qEnvironmentVariableIsSet("COAST_GATEWAY_TESTDEV")) {
         const QString testIp = qEnvironmentVariable("COAST_GATEWAY_TESTDEV");
-        devicesCtrl->setActive(true); // 开始周期扫描/热更新
         auto *testTimer = new QTimer(&app);
         testTimer->setInterval(2000);
         QObject::connect(testTimer, &QTimer::timeout, devicesCtrl,
-                         [devicesCtrl, deviceStore, testIp, testTimer]() {
+                         [devicesCtrl, deviceStore, testIp]() {
+                             // 持续 setActive(true):headless 下 QML 的设备页不是可见页,它的
+                             // onVisibleChanged 会 setActive(false) 把连接轮询关掉;每拍重新逼开,
+                             // 好让 pollConnections/aggregate 跑起来(仅联调用)。
+                             devicesCtrl->setActive(true);
                              for (const DeviceRecord &d : deviceStore->devices()) {
-                                 if (d.ip != testIp || d.isSelf || !d.online)
+                                 if (d.ip != testIp || d.isSelf || !d.online || d.proxyEnabled)
                                      continue;
                                  std::fprintf(stderr,
                                               "[TESTDEV] enabling proxy for %s (%s) inLan=%d\n",
@@ -228,7 +231,6 @@ int main(int argc, char *argv[])
                                               d.mac.toLatin1().constData(), d.inLanSubnet ? 1 : 0);
                                  std::fflush(stderr);
                                  devicesCtrl->setProxyEnabled(d.mac, true);
-                                 testTimer->stop();
                                  return;
                              }
                          });

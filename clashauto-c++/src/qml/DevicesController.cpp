@@ -6,6 +6,8 @@
 #include "../net/LanGateway.h"
 
 #include <QDateTime>
+
+#include <cstdio>
 #include <QFile>
 #include <QFileDialog>
 #include <QJsonArray>
@@ -188,6 +190,8 @@ void DevicesController::select(const QString &mac)
     m_selectedMac = mac;
     const DeviceRecord *d = m_store->find(mac);
     m_connModel.setSourceIp(d ? d->ip : QString());
+    // 网关代理的连接 sourceIP=127.0.0.1,还要靠 dev-<mac> 用户名归属(与 IP 取或)。
+    m_connModel.setUser(d ? DeviceStore::socksUser(d->mac) : QString());
     rebuildSelected();
     emit selectedChanged();
 }
@@ -326,11 +330,14 @@ void DevicesController::closeDeviceConnections(const QString &mac)
     if (!d || !m_clash)
         return;
     const QString ip = d->ip;
-    m_clash->fetchConnections([this, ip](QJsonArray arr) {
+    const QString user = DeviceStore::socksUser(mac); // 网关代理连接靠它归属(sourceIP=127.0.0.1)
+    m_clash->fetchConnections([this, ip, user](QJsonArray arr) {
         for (const QJsonValue &v : arr) {
-            const QJsonObject c = v.toObject();
-            if (c.value("metadata").toObject().value("sourceIP").toString() == ip)
-                m_clash->closeConnection(c.value("id").toString());
+            const QJsonObject meta = v.toObject().value("metadata").toObject();
+            const bool mine = meta.value("sourceIP").toString() == ip
+                              || (!user.isEmpty() && meta.value("inboundUser").toString() == user);
+            if (mine)
+                m_clash->closeConnection(v.toObject().value("id").toString());
         }
     });
 }
@@ -414,18 +421,38 @@ void DevicesController::aggregate(const QVariantList &conns)
     QHash<QString, QPair<qint64, qint64>> devDelta; // mac → (dDown,dUp) 本拍
     QHash<QString, int> devConn;                    // mac → 活动连接数
 
-    // ip → mac 映射（本拍）
+    // ip → mac、以及 dev-<mac> 用户名 → mac 两张映射（本拍）。
+    // 后者是透明网关代理设备**能看到流量速率的关键**:被代理设备的流量是
+    // 设备 → 用户态栈 → SOCKS(127.0.0.1:coast-gateway) → mihomo,故 mihomo 侧连接的 sourceIP
+    // 恒为 127.0.0.1(SOCKS 在本机),按 sourceIP 归类全落空;真实设备身份在 inboundUser
+    // (= dev-<去冒号mac>,见 ConfigBuilder 的 per-user listener + DeviceStore::socksUser)。
     QHash<QString, QString> ipToMac;
-    for (const DeviceRecord &d : m_store->devices())
+    QHash<QString, QString> userToMac;
+    for (const DeviceRecord &d : m_store->devices()) {
         if (!d.ip.isEmpty())
             ipToMac.insert(d.ip, d.mac);
+        const QString u = DeviceStore::socksUser(d.mac);
+        if (!u.isEmpty())
+            userToMac.insert(u, d.mac);
+    }
 
+    const bool dbg = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
+    int dbgByIp = 0, dbgByUser = 0, dbgUnattr = 0;
     for (const QVariant &v : conns) {
         const QVariantMap m = v.toMap();
         const QString ip = m.value("sourceIP").toString();
-        const QString mac = ipToMac.value(ip);
-        if (mac.isEmpty())
+        QString mac = ipToMac.value(ip);
+        if (!mac.isEmpty()) {
+            ++dbgByIp;
+        } else { // 网关代理:sourceIP=127.0.0.1 归不到设备 → 靠 inboundUser 归属
+            mac = userToMac.value(m.value("inboundUser").toString());
+            if (!mac.isEmpty())
+                ++dbgByUser;
+        }
+        if (mac.isEmpty()) {
+            ++dbgUnattr;
             continue;
+        }
         const QString id = m.value("id").toString();
         const qint64 down = m.value("download").toLongLong();
         const qint64 up = m.value("upload").toLongLong();
@@ -464,6 +491,11 @@ void DevicesController::aggregate(const QVariantList &conns)
         p.up += dUp;
         const qint64 rateDown = dt > 0 ? dDown * 1000 / dt : 0;
         const qint64 rateUp = dt > 0 ? dUp * 1000 / dt : 0;
+        if ((rateDown > 0 || rateUp > 0) && qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG"))
+            std::fprintf(stderr, "[DEV] %s rate down=%lld up=%lld conn=%d\n",
+                         mac.toLatin1().constData(), static_cast<long long>(rateDown),
+                         static_cast<long long>(rateUp), devConn.value(mac)),
+                std::fflush(stderr);
         m_store->applyTraffic(mac, p.up, p.down, rateUp, rateDown, devConn.value(mac));
         totalUp += rateUp;
         totalDown += rateDown;
@@ -474,6 +506,12 @@ void DevicesController::aggregate(const QVariantList &conns)
             m_store->applyTraffic(it.key(), it.value().up, it.value().down, 0, 0, 0);
         }
     }
+
+    // 有连接时才打印(避免空闲每秒刷屏):按 sourceIP / inboundUser 各归属了多少。
+    if (dbg && !conns.isEmpty())
+        std::fprintf(stderr, "[DEV] conns=%d 归属:byIp=%d byUser=%d 未归=%d\n",
+                     int(conns.size()), dbgByIp, dbgByUser, dbgUnattr),
+            std::fflush(stderr);
 
     m_totalRateUp = totalUp;
     m_totalRateDown = totalDown;

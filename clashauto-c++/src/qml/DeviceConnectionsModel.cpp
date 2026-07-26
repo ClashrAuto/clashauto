@@ -42,6 +42,14 @@ void DeviceConnectionsModel::setSourceIp(const QString &ip)
     recompute();
 }
 
+void DeviceConnectionsModel::setUser(const QString &user)
+{
+    if (user == m_user)
+        return;
+    m_user = user;
+    recompute();
+}
+
 void DeviceConnectionsModel::setRaw(const QVariantList &conns)
 {
     m_raw = conns;
@@ -50,13 +58,18 @@ void DeviceConnectionsModel::setRaw(const QVariantList &conns)
 
 void DeviceConnectionsModel::recompute()
 {
-    // 目标：m_raw 中 sourceIP==m_sourceIp 且在线的连接（离线的不在单设备实时列表里显示）。
+    // 目标：m_raw 中「sourceIP==m_sourceIp 或 inboundUser==m_user」且在线的连接。后者覆盖透明网关
+    // 代理的设备（其连接 sourceIP 恒为 127.0.0.1，只能靠 dev-<mac> 用户名归属）。
     QHash<QString, int> targetIndex;
     QVector<Conn> filtered;
-    if (!m_sourceIp.isEmpty()) {
+    if (!m_sourceIp.isEmpty() || !m_user.isEmpty()) {
         for (const QVariant &v : m_raw) {
             const QVariantMap m = v.toMap();
-            if (m.value("sourceIP").toString() != m_sourceIp)
+            const bool byIp = !m_sourceIp.isEmpty()
+                              && m.value("sourceIP").toString() == m_sourceIp;
+            const bool byUser = !m_user.isEmpty()
+                                && m.value("inboundUser").toString() == m_user;
+            if (!byIp && !byUser)
                 continue;
             if (m.value("offline").toBool())
                 continue;
