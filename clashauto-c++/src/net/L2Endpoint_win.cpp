@@ -24,7 +24,31 @@
 #include <QString>
 #include <QWinEventNotifier>
 
+#include <cstdarg>
+#include <cstdio>
 #include <vector>
+
+namespace {
+// COAST_GATEWAY_DEBUG=1 时把二层收发的关键节点打到 stderr。GUI 程序看不到 stderr，但
+// `Coast.exe 2> gw.txt` 能把它重定向到文件——排查「设备流量为 0」用它定位断点。
+bool dbgOn()
+{
+    static const bool on = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
+    return on;
+}
+void dbg(const char *fmt, ...)
+{
+    if (!dbgOn())
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    std::fprintf(stderr, "[WINL2] ");
+    std::vfprintf(stderr, fmt, ap);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+    va_end(ap);
+}
+} // namespace
 
 namespace {
 
@@ -185,6 +209,7 @@ public:
         //   ARP 请求也照收。开混杂只是白抓无用帧、还顺手坑了本机。
         //   应急开关：COAST_GATEWAY_PROMISC=1 可强制回到混杂模式（仅调试/排查用）。
         const int promisc = qEnvironmentVariableIsSet("COAST_GATEWAY_PROMISC") ? 1 : 0;
+        dbg("open dev=%s promisc=%d", adapter.npfName.constData(), promisc);
         char errbuf[PCAP_ERRBUF_SIZE] = {0};
         m_pcap = m_api->open_live(adapter.npfName.constData(), 65536, promisc, 1 /*ms*/, errbuf);
         if (!m_pcap) {
@@ -231,6 +256,7 @@ public:
         QObject::connect(m_notifier, &QWinEventNotifier::activated, this,
                          [this](HANDLE) { drain(); });
         m_notifier->setEnabled(true);
+        dbg("open ok, notifier armed, localMac=%s", m_localMac.toHex(':').constData());
         return true;
     }
 
@@ -285,10 +311,13 @@ public:
 
         struct bpf_program prog;
         // optimize=1；netmask 用 PCAP_NETMASK_UNKNOWN（表达式里不含 ip broadcast，用不到掩码）。
-        if (m_api->compile(m_pcap, &prog, expr.constData(), 1, PCAP_NETMASK_UNKNOWN) < 0)
+        if (m_api->compile(m_pcap, &prog, expr.constData(), 1, PCAP_NETMASK_UNKNOWN) < 0) {
+            dbg("filter compile FAILED expr=%s (回退用户态兜底)", expr.constData());
             return false; // 编译失败：不装内核过滤，用户态照旧兜底
+        }
         const int rc = m_api->setfilter(m_pcap, &prog);
         m_api->freecode(&prog);
+        dbg("filter set rc=%d expr=%s", rc, expr.constData());
         return rc == 0;
     }
 
@@ -308,8 +337,25 @@ private:
         int r;
         // 1=拿到一帧；0=本轮无更多(超时)；<0=出错。循环取尽本次事件的所有帧。
         while (m_pcap && (r = m_api->next_ex(m_pcap, &hdr, &data)) == 1) {
-            if (data && hdr)
+            if (data && hdr) {
+                // 诊断：过滤器已把「非被劫持设备」的帧挡在内核里，所以这里出现的每一帧都
+                // 应当来自某台被代理设备。前 20 帧逐帧打印源/目的 MAC + ethertype，之后每
+                // 200 帧报一次计数——用来判定「设备的帧到底有没有进到这一层」。
+                if (dbgOn() && hdr->caplen >= 14) {
+                    const u_char *f = data;
+                    if (m_rxLogged < 20) {
+                        ++m_rxLogged;
+                        dbg("rx#%lld len=%u dst=%02x:%02x:%02x:%02x:%02x:%02x "
+                            "src=%02x:%02x:%02x:%02x:%02x:%02x eth=%02x%02x",
+                            m_rxCount + 1, hdr->caplen, f[0], f[1], f[2], f[3], f[4], f[5],
+                            f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13]);
+                    } else if ((m_rxCount % 200) == 0) {
+                        dbg("rx total=%lld", m_rxCount + 1);
+                    }
+                }
+                ++m_rxCount;
                 emit frameReceived(QByteArray(reinterpret_cast<const char *>(data), hdr->caplen));
+            }
         }
     }
 
@@ -317,6 +363,8 @@ private:
     pcap_t *m_pcap = nullptr;
     QWinEventNotifier *m_notifier = nullptr;
     QByteArray m_localMac;
+    long long m_rxCount = 0; // 收到的帧总数（诊断用）
+    int m_rxLogged = 0;      // 已逐帧打印的条数（封顶 20）
 };
 
 } // namespace

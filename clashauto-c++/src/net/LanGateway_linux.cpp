@@ -49,7 +49,18 @@
 #include <QThread>
 #include <QVector>
 
+#include <cstdio>
 #include <memory>
+
+namespace {
+// COAST_GATEWAY_DEBUG=1 → 把「收到的设备帧走到哪一步」打到 stderr（配合 L2Endpoint 的 [WINL2]
+// 探针，定位「设备流量为 0」断在收包 / victim 过滤 / 同网段旁路 / 喂进 lwIP 的哪一环）。
+bool gwDbgOn()
+{
+    static const bool on = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
+    return on;
+}
+} // namespace
 
 namespace {
 // "aa:bb:cc:dd:ee:ff" → 6 字节（非法返回空）。
@@ -160,6 +171,8 @@ private:
     QHash<QString, QString> m_victimNic;     // ip → ifname（disable/持久化找回对应网卡）
     std::shared_ptr<GwShared> m_shared;
     bool m_torndown = false;
+    // 诊断计数（COAST_GATEWAY_DEBUG）：设备帧在 frameReceived 里各分支的去向。
+    long long m_dbgDropNonVictim = 0, m_dbgBypassLan = 0, m_dbgFedLwip = 0;
 };
 
 // 把「属于这张卡的」被劫持设备源 MAC 集合推给它的二层端点，装成内核态源 MAC 过滤（收方优化）。
@@ -326,8 +339,17 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 return;
             const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
             // 源 MAC 原地打包成 quint64 查表：不做 frame.mid(6, 6)，省掉每帧一次堆分配。
-            if (!m_victimByMac.contains(macKey(f + 6)))
+            if (!m_victimByMac.contains(macKey(f + 6))) {
+                // 帧到了这一层但源 MAC 不在被劫持名单里 → 这里丢弃。若「设备流量为 0」且这个
+                // 计数在涨，说明设备的帧收到了、但它的源 MAC 和台账里的 MAC 对不上（随机 MAC /
+                // 台账 MAC 有误），是 victim 匹配的问题，不是抓包的问题。
+                if (gwDbgOn() && (m_dbgDropNonVictim++ % 200) == 0)
+                    std::fprintf(stderr, "[GW] drop non-victim src=%02x:%02x:%02x:%02x:%02x:%02x "
+                                         "(count=%lld)\n",
+                                 f[6], f[7], f[8], f[9], f[10], f[11], m_dbgDropNonVictim),
+                        std::fflush(stderr);
                 return;
+            }
             // 同网段直连旁路：被劫持设备发往「本网段内（且非网关本身）」的 IPv4 帧不喂用户态栈，
             // 让它照常二层直达——设备回给本机 LAN IP 的包若被 lwIP 终结会触发 RST，导致本机无法
             // 直连该设备（SSH/网页/共享）；同理 LAN 内设备互访也不该被代理绕行。只有真正出网
@@ -338,10 +360,20 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
                                         | (quint32(f[32]) << 8) | quint32(f[33]);
                     const bool sameSubnet = (dst & n->netMask4) == (n->localIp4 & n->netMask4);
-                    if (sameSubnet && dst != n->gatewayIp4)
-                        return; // LAN 内直连，放行给系统
+                    if (sameSubnet && dst != n->gatewayIp4) {
+                        // 同网段直连,放行给系统,不进 lwIP。若设备只访问 LAN、没真出网,这里会涨。
+                        if (gwDbgOn() && (m_dbgBypassLan++ % 200) == 0)
+                            std::fprintf(stderr, "[GW] bypass LAN dst=%u.%u.%u.%u (count=%lld)\n",
+                                         f[30], f[31], f[32], f[33], m_dbgBypassLan),
+                                std::fflush(stderr);
+                        return;
+                    }
                 }
             }
+            // 走到这里 = 真出网 / 发往网关的帧 → 喂进用户态栈。这个计数在涨却仍「设备流量 0」,
+            // 那问题在 lwIP 之后(SOCKS/mihomo);它不涨,问题在它上面几道。
+            if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
+                std::fprintf(stderr, "[GW] -> lwIP fed=%lld\n", m_dbgFedLwip), std::fflush(stderr);
             m_net->inputFrame(n->ep, frame);
         });
         if (!n->arp) {
