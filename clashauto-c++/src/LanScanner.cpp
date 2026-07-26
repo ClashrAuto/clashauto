@@ -37,11 +37,17 @@ namespace {
 //  8009 Chromecast；5555 adb(Android)；9100 打印机 raw；554 RTSP(摄像头)；32469 DLNA。
 const quint16 kProbePorts[] = {80, 443, 445, 62078, 22, 8009, 5555, 9100, 554, 32469};
 constexpr quint16 kArpPort = 80;          // 阶段①：逼系统做 ARP 只需要连这一个端口
-// 同时在途 TCP 探测上限。曾经是 120——建/关 120 个 socket 的系统调用挤在同一次事件循环里，
-// 实测把 GUI 线程按住最长 1.8 秒（进设备页就是这么卡住的）。24 并发实测总耗时不变（瓶颈本来
-// 就不在并发度上），最长卡顿从 1846ms 掉到几十毫秒。
-constexpr int kMaxInFlight = 24;
-constexpr int kPumpSlice = 8;             // 每轮事件循环最多新建的 socket 数
+// 同时在途 TCP 探测上限 / 每轮事件循环最多新建的 socket 数。
+//
+// 这两个数管的是**两件不同的事**，曾经被混为一谈：卡顿来自「一次事件循环里建 120 个 socket」
+// （实测按住 GUI 线程 1846ms），治它的是 kPumpSlice —— 分摊到多轮事件循环去建；而 kMaxInFlight
+// 决定的是吞吐。当时把 120 一路压到 24，等于顺手把扫描拖慢了 5 倍：网段里绝大多数 IP 是空的，
+// 每个都要等满 kProbeTimeoutMs 才收口，阶段①的墙上时间 ≈ ceil(253/并发) × 1.2s ——
+// 24 并发要 12.7s，列表就得干等这么久才刷出来（「设备列表刷新很慢」正是它）。
+// 现在：并发拉回 128（/24 两批 ≈ 2.4s 探完），建 socket 仍按每轮 16 个切片摊开（≈8ms/轮）。
+// 改这里前先想清楚：要顺滑就调 kPumpSlice，要快就调 kMaxInFlight，别再用后者去治前者的病。
+constexpr int kMaxInFlight = 128;
+constexpr int kPumpSlice = 16;
 constexpr int kNbnsSlice = 32;            // 每轮事件循环最多发的 NBNS 查询数
 constexpr int kProbeTimeoutMs = 1200;
 constexpr int kSettleMs = 2500;           // 探测发完后等收 ARP/名称回包的静默期
@@ -1087,19 +1093,24 @@ void LanScanner::scanFull()
     sendSsdpQuery();
     sendNbnsQueriesSliced(hosts); // 253 个 UDP 一口气发要占住 GUI 线程 20~50ms，切片发
 
-    if (hosts.isEmpty()) {
-        // 大网段/无网段：只读一次 ARP 表后收口。
-        readArpTable([this] { m_settleTimer->start(kSettleMs); });
-        return;
-    }
-
-    // 阶段①：整段网段每台主机只连 **一个** 端口，目的仅是逼系统做 ARP 解析。
-    // 收口后读 ARP 表，再进阶段②只给真实存在的主机做端口指纹（见 startFingerprintPhase）。
-    QVector<QPair<quint32, quint16>> arpJobs;
-    arpJobs.reserve(hosts.size());
-    for (quint32 ip : hosts)
-        arpJobs.append({ip, kArpPort});
-    runProbes(std::move(arpJobs), [this] { readArpTable([this] { startFingerprintPhase(); }); });
+    // 阶段⓪：先把系统 ARP 缓存里**已经有**的设备立刻出一版（一次 `arp -a`，几十毫秒）。
+    // 点「刷新」后列表马上就有反应，不用干等阶段①把整段网段探完；平时在网里说话的设备
+    // 系统早就解析过了，绝大多数会在这一版里直接出现。名称/类型等后面的快照再补。
+    readArpTable([this, hosts] {
+        emitSnapshot(false);
+        if (hosts.isEmpty()) {
+            // 大网段/无网段：没法逐台探，直接进静默期收尾。
+            m_settleTimer->start(kSettleMs);
+            return;
+        }
+        // 阶段①：整段网段每台主机只连 **一个** 端口，目的仅是逼系统做 ARP 解析。
+        // 收口后读 ARP 表，再进阶段②只给真实存在的主机做端口指纹（见 startFingerprintPhase）。
+        QVector<QPair<quint32, quint16>> arpJobs;
+        arpJobs.reserve(hosts.size());
+        for (quint32 ip : hosts)
+            arpJobs.append({ip, kArpPort});
+        runProbes(std::move(arpJobs), [this] { readArpTable([this] { startFingerprintPhase(); }); });
+    });
 
     // 兜底：万一某一阶段的收口计数异常（回调链断了），超时后也强制读表 + assemble，
     // 避免扫描永久停在「扫描中」。两阶段都算上，给足余量。

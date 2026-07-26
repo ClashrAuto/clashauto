@@ -9,6 +9,7 @@
 #include "ClashService.h"
 #include "CoreController.h"
 #include "DeviceStore.h"
+#include "LanScanner.h" // COAST_SCAN_SELFTEST 的扫描耗时自检
 #include "IssueReporter.h"
 #include "SubscriptionStore.h"
 #include "TrayController.h"
@@ -34,6 +35,7 @@
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QElapsedTimer>
 #include <QTimer>
 
 #include <cstdio>
@@ -98,6 +100,53 @@ int main(int argc, char *argv[])
         uiFont.setHintingPreference(QFont::PreferNoHinting);
         uiFont.setStyleStrategy(QFont::PreferAntialias);
         app.setFont(uiFont);
+    }
+
+    // 扫描耗时自检（COAST_SCAN_SELFTEST=1）：只跑一轮局域网发现，把每一版快照的时刻/设备数
+    // 打到 stdout 后退出，不建 GUI、不起核心。设备页「刷新很慢」是可测的：阶段①的墙上时间
+    // ≈ ceil(网段主机数 / kMaxInFlight) × kProbeTimeoutMs —— 谁再把并发调小（曾经 120→24，
+    // 首版快照从 ~2.5s 拖到 ~12.7s），这里的数字立刻变难看。本项目没有单测框架，沿用
+    // COAST_GATEWAY_SELFTEST / COAST_ISSUE_SELFTEST 那套 env 自检钩子的惯例。
+    if (qEnvironmentVariableIsSet("COAST_SCAN_SELFTEST")) {
+        auto *scanner = new LanScanner(&app);
+        auto *clock = new QElapsedTimer;
+        auto *snap = new int(0);
+        // 顺滑度：16ms 心跳，量事件循环最长被按住多久。扫描是在 GUI 线程上跑的，这个数就是
+        // 「设备页会不会卡住」的直接指标（当年一次性建 120 个 socket 实测按住 1846ms）。
+        auto *beat = new QElapsedTimer;
+        auto *worstStallMs = new qint64(0);
+        auto *beatTimer = new QTimer(&app);
+        beatTimer->setInterval(16);
+        QObject::connect(beatTimer, &QTimer::timeout, &app, [beat, worstStallMs] {
+            if (!beat->isValid()) {
+                beat->start();
+                return;
+            }
+            const qint64 late = beat->restart();
+            if (late > *worstStallMs)
+                *worstStallMs = late;
+        });
+        beatTimer->start();
+        QObject::connect(scanner, &LanScanner::discovered, &app,
+                         [clock, snap](const QVector<DeviceRecord> &devs) {
+                             std::printf("[scan] snapshot#%d t=%lldms devices=%d\n", ++(*snap),
+                                         static_cast<long long>(clock->elapsed()), int(devs.size()));
+                             std::fflush(stdout);
+                         });
+        QObject::connect(scanner, &LanScanner::scanningChanged, &app,
+                         [clock, worstStallMs](bool scanning) {
+                             if (scanning)
+                                 return;
+                             std::printf("[scan] done t=%lldms worst-event-loop-stall=%lldms\n",
+                                         static_cast<long long>(clock->elapsed()),
+                                         static_cast<long long>(*worstStallMs));
+                             std::fflush(stdout);
+                             QCoreApplication::quit();
+                         });
+        clock->start();
+        scanner->scanFull();
+        QTimer::singleShot(90000, &app, &QCoreApplication::quit); // 卡死也别挂着不退
+        return app.exec();
     }
 
     // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 载入配置；资源已内嵌 qrc，不再找 Clashr-Auto）。
