@@ -35,6 +35,7 @@
 #include "IL2Endpoint.h"
 #include "NetStack.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QHash>
@@ -61,6 +62,10 @@ bool gwDbgOn()
     static const bool on = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
     return on;
 }
+// 空闲阈值：某 victim 超过这么久没发过帧、又忽然来帧 = 视为「唤醒」。它多半刚把网关重新解析过
+// （或即将解析），触发 ArpSpoofer 的高频重投窗口抢在真网关前钉回投毒。取 8s：短于常见的邻居缓存
+// 老化（Linux base_reachable_time≈30s、Win/mac NUD 类似量级），足以覆盖「表项刚老化就来流量」。
+constexpr qint64 kWakeIdleMs = 8000;
 } // namespace
 
 namespace {
@@ -172,6 +177,7 @@ private:
     QHash<quint64, QString> m_victimByMac;   // src MAC 打包键 → ip（帧过滤 + 记账）
     QHash<QString, QString> m_victimMacStr;  // ip → mac 串（disable 用）
     QHash<QString, QString> m_victimNic;     // ip → ifname（disable/持久化找回对应网卡）
+    QHash<quint64, qint64> m_lastSeenMs;     // src MAC 打包键 → 上次见到该 victim 帧的时刻（唤醒沿检测）
     std::shared_ptr<GwShared> m_shared;
     bool m_torndown = false;
     // 诊断计数（COAST_GATEWAY_DEBUG）：设备帧在 frameReceived 里各分支的去向。
@@ -370,7 +376,8 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 }
             }
             // 源 MAC 原地打包成 quint64 查表：不做 frame.mid(6, 6)，省掉每帧一次堆分配。
-            if (!m_victimByMac.contains(macKey(f + 6))) {
+            const quint64 vkey = macKey(f + 6);
+            if (!m_victimByMac.contains(vkey)) {
                 // 帧到了这一层但源 MAC 不在被劫持名单里 → 这里丢弃。若「设备流量为 0」且这个
                 // 计数在涨，说明设备的帧收到了、但它的源 MAC 和台账里的 MAC 对不上（随机 MAC /
                 // 台账 MAC 有误），是 victim 匹配的问题，不是抓包的问题。
@@ -380,6 +387,23 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                                  f[6], f[7], f[8], f[9], f[10], f[11], m_dbgDropNonVictim),
                         std::fflush(stderr);
                 return;
+            }
+            // 唤醒沿检测（item 2/3）：某 victim 空闲 >kWakeIdleMs 后又发帧 —— 它的邻居缓存多半刚老化、
+            // 正在/即将重新解析网关。立刻让 ArpSpoofer 进高频重投窗口，抢在真网关的解析应答前把「网关
+            // 在本机」钉回去，治「空闲后首次访问先失败、再走真路由、再代理」的过渡。该 victim 的 who-has
+            // 广播源 MAC 也走这条路（在下面 answerGatewayArp 之前），所以主动解析场景一并覆盖。
+            // 每帧成本：一次时钟读 + 一次 QHash 查改；startBoost 只在稀有的唤醒沿才真正调用。
+            {
+                const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                qint64 &last = m_lastSeenMs[vkey];
+                if (last != 0 && nowMs - last > kWakeIdleMs && n->arp) {
+                    n->arp->startBoost();
+                    if (gwDbgOn())
+                        std::fprintf(stderr, "[GW] wake edge (idle %llds) -> boost\n",
+                                     static_cast<long long>((nowMs - last) / 1000)),
+                            std::fflush(stderr);
+                }
+                last = nowMs;
             }
             // ARP 抢答：被劫持设备一问「谁是网关?」就同步回「网关在本机 MAC」，赶在真网关前面。
             // 与上面的网关侧反制互补：这条管设备主动问的场景,上面那条管网关主动广播的场景。
@@ -511,6 +535,7 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     m_victimByMac.remove(key);
     m_victimMacStr.remove(ip);
     m_victimNic.remove(ip);
+    m_lastSeenMs.remove(key);
     if (n)
         pushMacFilter(n); // 该卡移除一台设备：重推内核过滤（可能变回「全丢」）
     if (m_victimMacStr.isEmpty())
@@ -540,6 +565,7 @@ void GatewayWorker::disableAllLocal()
     m_victimByMac.clear();
     m_victimMacStr.clear();
     m_victimNic.clear();
+    m_lastSeenMs.clear();
     // 所有设备清空后，每张卡都重推（现在集合都空了 → 全部装「全丢」，收方彻底静默）。
     for (GwNic *n : m_nics)
         pushMacFilter(n);

