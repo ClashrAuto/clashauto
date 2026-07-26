@@ -139,6 +139,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     endif()
     target_sources(clashauto-qml PRIVATE
         src/net/NetStack.cpp src/net/NetStack.h
+        src/net/NdpSpoofer.cpp src/net/NdpSpoofer.h  # IPv6 的 ICMPv6/NDP 投毒器（ArpSpoofer 的 v6 对应物）
         src/net/LanGateway_linux.cpp
         ${LWIP_DIR}/core/init.c        ${LWIP_DIR}/core/def.c
         ${LWIP_DIR}/core/dns.c         ${LWIP_DIR}/core/inet_chksum.c
@@ -152,6 +153,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         ${LWIP_DIR}/core/ipv4/etharp.c ${LWIP_DIR}/core/ipv4/icmp.c
         ${LWIP_DIR}/core/ipv4/ip4.c    ${LWIP_DIR}/core/ipv4/ip4_addr.c
         ${LWIP_DIR}/core/ipv4/ip4_frag.c ${LWIP_DIR}/core/ipv4/acd.c
+        # —— IPv6 双栈：与 ipv4/ 对称的一套核心文件。ip6.c 有 accept-all 补丁、nd6.c 有静态邻居补丁。
+        #   受 lwipopts 开关保护的文件（mld6/ip6_frag 在本移植关着）仍要编——它们内部按宏自缩成近空。
+        ${LWIP_DIR}/core/ipv6/ip6.c    ${LWIP_DIR}/core/ipv6/ip6_addr.c
+        ${LWIP_DIR}/core/ipv6/ip6_frag.c ${LWIP_DIR}/core/ipv6/nd6.c
+        ${LWIP_DIR}/core/ipv6/icmp6.c  ${LWIP_DIR}/core/ipv6/ethip6.c
+        ${LWIP_DIR}/core/ipv6/mld6.c   ${LWIP_DIR}/core/ipv6/inet6.c
         ${LWIP_DIR}/netif/ethernet.c
     )
     target_include_directories(clashauto-qml PRIVATE

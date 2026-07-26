@@ -33,6 +33,7 @@
 
 #include "ArpSpoofer.h"
 #include "IL2Endpoint.h"
+#include "NdpSpoofer.h"
 #include "NetStack.h"
 
 #include <QDateTime>
@@ -106,14 +107,94 @@ quint32 ipToU32(const QString &ip)
     const quint32 v = QHostAddress(ip).toIPv4Address(&ok);
     return ok ? v : 0;
 }
+
+// —— IPv6 帧判定小工具（p6 指向 IPv6 头首字节，即以太头之后；仅在已确认 ethertype=0x86DD 时用）——
+// 是否 NDP（ICMPv6 的 RS/RA/NS/NA，type 133~136）——NDP 由 NdpSpoofer 接管，不喂 lwIP。
+inline bool ip6IsNdp(const uchar *p6, int ip6Len)
+{
+    if (ip6Len < 41)          // 40 头 + 至少 1 字节 ICMPv6 type
+        return false;
+    if (p6[6] != 58)          // next header = ICMPv6（NDP 无扩展头）
+        return false;
+    const quint8 t = p6[40];  // ICMPv6 type
+    return t >= 133 && t <= 136;
+}
+inline bool ip6IsNs(const uchar *p6, int ip6Len)
+{
+    return ip6Len >= 41 && p6[6] == 58 && p6[40] == 135;
+}
+// 目的地址是「链路本地(fe80::/10) 或 组播(ff00::/8)」——本地链路流量/NDP，不出网，不喂 lwIP。
+inline bool ip6DstIsLocalOrMulticast(const uchar *p6, int ip6Len)
+{
+    if (ip6Len < 40)
+        return true; // 头都不全，当作不出网丢弃
+    const uchar *dst = p6 + 24;
+    if (dst[0] == 0xFF)                                   // 组播
+        return true;
+    if (dst[0] == 0xFE && (dst[1] & 0xC0) == 0x80)        // 链路本地
+        return true;
+    return false;
+}
+// 源地址是否「可作为设备的可路由身份」——即全局单播 / 唯一本地(ULA fc00::/7)，用于回程静态邻居。
+// 排除链路本地、组播、未指定(::)。src 指向 16 字节源地址。
+inline bool ip6SrcIsRoutable(const uchar *src)
+{
+    if (src[0] == 0xFF)                              // 组播
+        return false;
+    if (src[0] == 0xFE && (src[1] & 0xC0) == 0x80)   // 链路本地
+        return false;
+    bool allZero = true;
+    for (int i = 0; i < 16; ++i)
+        if (src[i] != 0) { allZero = false; break; }
+    return !allZero;
+}
+// 解析 "2408:xxxx::/64" → 网络 16 字节 + 前缀长度。失败返回 false。
+bool parseV6Prefix(const QString &cidr, QByteArray *netOut, int *lenOut)
+{
+    const int slash = cidr.indexOf('/');
+    if (slash < 0)
+        return false;
+    bool ok = false;
+    const int len = cidr.mid(slash + 1).toInt(&ok);
+    if (!ok || len < 0 || len > 128)
+        return false;
+    QHostAddress a(cidr.left(slash));
+    if (a.isNull() || a.protocol() != QAbstractSocket::IPv6Protocol)
+        return false;
+    const Q_IPV6ADDR v6 = a.toIPv6Address();
+    *netOut = QByteArray(reinterpret_cast<const char *>(v6.c), 16);
+    *lenOut = len;
+    return true;
+}
+// dst16（16 字节）是否落在 (net,plen) 前缀内。net 为 16 字节网络部分。
+bool ip6InPrefix(const uchar *dst16, const QByteArray &net, int plen)
+{
+    if (net.size() != 16 || plen < 0)
+        return false;
+    const uchar *n = reinterpret_cast<const uchar *>(net.constData());
+    int fullBytes = plen / 8;
+    for (int i = 0; i < fullBytes; ++i)
+        if (dst16[i] != n[i])
+            return false;
+    const int rem = plen % 8;
+    if (rem) {
+        const uchar mask = static_cast<uchar>(0xFF << (8 - rem));
+        if ((dst16[fullBytes] & mask) != (n[fullBytes] & mask))
+            return false;
+    }
+    return true;
+}
 } // namespace
 
-// 一张物理网卡的运行时套件：二层端点 + ARP 投毒器 + 该卡的拓扑数值。（活在工作线程上。）
+// 一张物理网卡的运行时套件：二层端点 + ARP 投毒器 + NDP(v6) 投毒器 + 该卡的拓扑数值。（活在工作线程上。）
 struct GwNic {
     LanGateway::NicSpec spec;
     IL2Endpoint *ep = nullptr;
     ArpSpoofer *arp = nullptr;
+    NdpSpoofer *ndp = nullptr; // IPv6 邻居发现投毒器；v6 拓扑缺失时 configure 后自身 no-op
     quint32 localIp4 = 0, netMask4 = 0, gatewayIp4 = 0;
+    QByteArray prefix6Net;     // v6 前缀网络部分（16 字节；空=未知，则不做 v6 同网段旁路）
+    int prefix6Len = -1;       // v6 前缀长度（bit 数；<0=未知）
     bool ready = false;      // ep 已打开且 netif 已挂上协议栈
     int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
     int order = 0;           // configure 传入的 specs 次序（LanScanner 保证 index 0 = 主网卡）。
@@ -178,6 +259,9 @@ private:
     QHash<QString, QString> m_victimMacStr;  // ip → mac 串（disable 用）
     QHash<QString, QString> m_victimNic;     // ip → ifname（disable/持久化找回对应网卡）
     QHash<quint64, qint64> m_lastSeenMs;     // src MAC 打包键 → 上次见到该 victim 帧的时刻（唤醒沿检测）
+    QHash<quint64, QString> m_victimUserByMac; // src MAC 打包键 → mihomo 身份 user（v6 学习时补登记要用）
+    QHash<quint64, QSet<QString>> m_victimV6ByMac; // src MAC 打包键 → 已学到并登记的设备 v6 地址集（去重/回收）
+    void learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame); // 从设备 v6 帧学它的地址
     std::shared_ptr<GwShared> m_shared;
     bool m_torndown = false;
     // 诊断计数（COAST_GATEWAY_DEBUG）：设备帧在 frameReceived 里各分支的去向。
@@ -221,6 +305,34 @@ GwNic *GatewayWorker::nicForIp(const QString &ip) const
     return best;
 }
 
+// 从设备发出的一帧 IPv6 里学它的可路由地址（全局/ULA），登记成 lwIP 的 nd6 静态邻居 + mihomo 身份。
+// v6 地址是被动学来的（不做主动扫描），因为一台设备可能有多个（全局 + 若干隐私地址），且随时间轮换。
+// 幂等 + 去重：每个 (mac, v6) 只登记一次；设备换隐私地址会新增一条，旧的留到 disable 时统一摘除。
+void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame)
+{
+    if (!m_net || frame.size() < 14 + 40)
+        return;
+    const uchar *src = f + 14 + 8; // IPv6 源地址
+    if (!ip6SrcIsRoutable(src))
+        return;
+    const quint64 vkey = macKey(f + 6);
+    QSet<QString> &set = m_victimV6ByMac[vkey];
+    // 上限兜底：隐私地址轮换极端情况下别让一台设备把 nd6 表（64 条）吃光。到顶就不再学新的。
+    if (set.size() >= 16)
+        return;
+    Q_IPV6ADDR raw;
+    std::memcpy(raw.c, src, 16);
+    const QString ip6 = QHostAddress(raw).toString();
+    if (set.contains(ip6))
+        return;
+    const QByteArray mb(reinterpret_cast<const char *>(f + 6), 6);
+    m_net->addDeviceV6(n->ep, ip6, mb, m_victimUserByMac.value(vkey));
+    set.insert(ip6);
+    if (gwDbgOn())
+        std::fprintf(stderr, "[GW] learned device v6 %s\n", ip6.toLatin1().constData()),
+            std::fflush(stderr);
+}
+
 bool GatewayWorker::availableLocal() const
 {
     if (!m_net)
@@ -254,6 +366,8 @@ void GatewayWorker::persist() const
             o["localMac"] = n->spec.localMac;
             o["gatewayIp"] = n->spec.gatewayIp;
             o["gatewayMac"] = n->spec.gatewayMac;
+            o["routerLL6"] = n->spec.routerLinkLocal6;   // v6 崩溃恢复：还原 NDP 要用
+            o["routerMac6"] = n->spec.routerMac6;
         }
         arr.append(o);
     }
@@ -320,8 +434,18 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         n->localIp4 = ipToU32(spec.localIp);
         n->gatewayIp4 = ipToU32(spec.gatewayIp);
         n->netMask4 = ipToU32(spec.netmask);
+        n->prefix6Net.clear();
+        n->prefix6Len = -1;
+        if (!spec.prefix6.isEmpty())
+            parseV6Prefix(spec.prefix6, &n->prefix6Net, &n->prefix6Len); // 失败则保持未知（不旁路）
         if (n->arp)
             n->arp->configure(spec.localMac, spec.gatewayIp, spec.gatewayMac);
+        // v6 投毒器同样每轮刷新拓扑（路由器 LL/MAC 常是扫描几轮后才解析出来）。routerMac6 缺省用
+        // v4 网关 MAC（同一路由器 v4/v6 常共用一个 NIC MAC）。routerLinkLocal6 为空 → configure 后
+        // NdpSpoofer 自动 no-op，v6 劫持不生效但绝不影响 v4。
+        if (n->ndp)
+            n->ndp->configure(spec.localMac, spec.routerLinkLocal6,
+                              spec.routerMac6.isEmpty() ? spec.gatewayMac : spec.routerMac6);
 
         if (n->ready)
             continue; // 已就绪：只刷新拓扑，不重建（重建会断掉这张卡上的活动劫持）
@@ -375,6 +499,17 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     return; // 网关帧不是设备流量,不喂 lwIP
                 }
             }
+            // v6 反制（与上面 ARP 反制对称）：真路由器自己发的 NA/RA 会把设备的 v6 邻居缓存解毒 →
+            // 立刻把所有 victim 重投一轮盖回。路由器 MAC 优先用 routerMac6，缺则回落到 v4 网关 MAC
+            //（同一台路由器 v4/v6 通常共用一个物理 NIC MAC）。它不是 victim 帧，必须在 victim 过滤前处理。
+            if (n->ndp && NdpSpoofer::isRouterAdvertOrNa(frame)) {
+                const QByteArray rmac = macBytes(
+                    n->spec.routerMac6.isEmpty() ? n->spec.gatewayMac : n->spec.routerMac6);
+                if (rmac.size() == 6 && std::memcmp(f + 6, rmac.constData(), 6) == 0) {
+                    n->ndp->reassertNow();
+                    return; // 路由器帧不是设备流量，不喂 lwIP
+                }
+            }
             // 源 MAC 原地打包成 quint64 查表：不做 frame.mid(6, 6)，省掉每帧一次堆分配。
             const quint64 vkey = macKey(f + 6);
             if (!m_victimByMac.contains(vkey)) {
@@ -396,14 +531,50 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             {
                 const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
                 qint64 &last = m_lastSeenMs[vkey];
-                if (last != 0 && nowMs - last > kWakeIdleMs && n->arp) {
-                    n->arp->startBoost();
+                if (last != 0 && nowMs - last > kWakeIdleMs) {
+                    if (n->arp)
+                        n->arp->startBoost();
+                    if (n->ndp)
+                        n->ndp->startBoost(); // v6 邻居缓存唤醒沿同样要抢在真路由器前钉回
                     if (gwDbgOn())
                         std::fprintf(stderr, "[GW] wake edge (idle %llds) -> boost\n",
                                      static_cast<long long>((nowMs - last) / 1000)),
                             std::fflush(stderr);
                 }
                 last = nowMs;
+            }
+            // ———————————————— IPv6 数据路径（与下面 v4 的抢答/旁路/喂栈一一对应）————————————————
+            // 走到这里 = 帧确来自被劫持设备。若是 v6 帧，整条 v6 逻辑在此闭环并 return，不落到 v4 代码。
+            {
+                const bool isV6 = frame.size() >= 14 && f[12] == 0x86 && f[13] == 0xDD;
+                if (isV6) {
+                    const uchar *p6 = f + 14;
+                    const int ip6Len = int(frame.size()) - 14;
+                    // NDP（NS/NA/RS/RA）：投毒器接管，绝不喂 lwIP（避免 lwIP 自己应答邻居发现）。
+                    // 设备主动问「路由器 LL 在哪」→ 立刻抢答（对应 v4 的 answerGatewayArp）。
+                    if (ip6IsNdp(p6, ip6Len)) {
+                        if (ip6IsNs(p6, ip6Len) && n->ndp)
+                            n->ndp->answerNeighborSolicit(frame);
+                        return;
+                    }
+                    // 学习设备的可路由 v6 地址 → 登记回程静态邻居 + mihomo 身份（幂等去重）。
+                    learnDeviceV6(n, f, frame);
+                    // 旁路：链路本地/组播目的不出网（本地链路通信 / 残余 NDP），不喂用户态栈——
+                    // 与 v4「同网段直连旁路」同精神：只有真出网（全局单播目的）才进 lwIP。
+                    if (ip6DstIsLocalOrMulticast(p6, ip6Len))
+                        return;
+                    // 同前缀（同一 /64 内的另一台 LAN 设备的全局地址）也旁路——否则本机会把设备间的
+                    // LAN 内 v6 直连也终结掉。仅在前缀已知时生效；未知时无法判定，只能放行进栈
+                    //（记录在案：prefix6 发现失败的少见情况下，全局-到-全局的 LAN 内 v6 会被误代理）。
+                    if (n->prefix6Len >= 0 && ip6Len >= 40
+                        && ip6InPrefix(p6 + 24, n->prefix6Net, n->prefix6Len))
+                        return;
+                    if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
+                        std::fprintf(stderr, "[GW] -> lwIP fed(v6)=%lld\n", m_dbgFedLwip),
+                            std::fflush(stderr);
+                    m_net->inputFrame(n->ep, frame);
+                    return;
+                }
             }
             // ARP 抢答：被劫持设备一问「谁是网关?」就同步回「网关在本机 MAC」，赶在真网关前面。
             // 与上面的网关侧反制互补：这条管设备主动问的场景,上面那条管网关主动广播的场景。
@@ -445,6 +616,11 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             n->arp = new ArpSpoofer(n->ep, this);
             n->arp->configure(spec.localMac, spec.gatewayIp, spec.gatewayMac);
         }
+        if (!n->ndp) {
+            n->ndp = new NdpSpoofer(n->ep, this);
+            n->ndp->configure(spec.localMac, spec.routerLinkLocal6,
+                              spec.routerMac6.isEmpty() ? spec.gatewayMac : spec.routerMac6);
+        }
         n->ready = true;
         // 刚就绪、还没劫持任何设备：先装「全丢」内核过滤，避免混杂模式下整段流量白白进用户态。
         pushMacFilter(n);
@@ -469,6 +645,8 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         }
         if (n->arp)
             delete n->arp;
+        if (n->ndp)
+            delete n->ndp; // NdpSpoofer 析构会 healAll（还原 v6 邻居缓存）
         m_nics.remove(ifn);
         delete n;
     }
@@ -503,10 +681,14 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
 
     m_net->addDevice(ip, mb, socksUser);
     n->arp->startSpoof(mac, ip);
+    if (n->ndp)
+        n->ndp->startSpoof(mac); // v6 投毒只需 MAC（设备 v6 地址随后从实帧里被动学到）
     ++n->victims;
-    m_victimByMac.insert(macKey(mb), ip);
+    const quint64 vkey = macKey(mb);
+    m_victimByMac.insert(vkey, ip);
     m_victimMacStr.insert(ip, mac);
     m_victimNic.insert(ip, n->spec.ifname);
+    m_victimUserByMac.insert(vkey, socksUser); // v6 学习登记时补 mihomo 身份要用
     pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
     persist();
     publishSnapshot();
@@ -527,15 +709,24 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     if (n) {
         if (n->arp)
             n->arp->stopSpoof(mac); // 内部会 heal（还原 ARP）
+        if (n->ndp)
+            n->ndp->stopSpoof(mac); // 内部会 heal（还原 v6 邻居缓存）
         if (n->victims > 0)
             --n->victims;
     }
-    if (m_net)
+    if (m_net) {
         m_net->removeDevice(ip);
+        // 摘掉这台设备学到的所有 v6 地址（nd6 静态邻居 + devices 表 + v6 UDP 会话）。
+        const QSet<QString> v6s = m_victimV6ByMac.value(key);
+        for (const QString &ip6 : v6s)
+            m_net->removeDeviceV6(ip6);
+    }
     m_victimByMac.remove(key);
     m_victimMacStr.remove(ip);
     m_victimNic.remove(ip);
     m_lastSeenMs.remove(key);
+    m_victimUserByMac.remove(key);
+    m_victimV6ByMac.remove(key);
     if (n)
         pushMacFilter(n); // 该卡移除一台设备：重推内核过滤（可能变回「全丢」）
     if (m_victimMacStr.isEmpty())
@@ -555,17 +746,24 @@ void GatewayWorker::disableAllLocal()
     for (GwNic *n : m_nics) {
         if (n->arp)
             n->arp->healAll();
+        if (n->ndp)
+            n->ndp->healAll(); // 还原每台设备的 v6 邻居缓存（同 ARP，漏掉就 v6 断网）
         n->victims = 0;
     }
     if (m_net) {
         const QStringList ips = m_victimMacStr.keys();
         for (const QString &ip : ips)
             m_net->removeDevice(ip);
+        for (auto it = m_victimV6ByMac.constBegin(); it != m_victimV6ByMac.constEnd(); ++it)
+            for (const QString &ip6 : it.value())
+                m_net->removeDeviceV6(ip6);
     }
     m_victimByMac.clear();
     m_victimMacStr.clear();
     m_victimNic.clear();
     m_lastSeenMs.clear();
+    m_victimUserByMac.clear();
+    m_victimV6ByMac.clear();
     // 所有设备清空后，每张卡都重推（现在集合都空了 → 全部装「全丢」，收方彻底静默）。
     for (GwNic *n : m_nics)
         pushMacFilter(n);
@@ -608,9 +806,17 @@ void GatewayWorker::recoverLocal()
         if (ep && ep->open(ifname, nullptr)) {
             ArpSpoofer healer(ep, this);
             healer.configure(field("localMac"), field("gatewayIp"), field("gatewayMac"));
+            // v6 也要还原：上次投毒过设备的 v6 邻居缓存，不还原同样会让设备 v6 断网。routerLL6 为空
+            //（上次没有 v6 拓扑）→ NdpSpoofer no-op，heal 自然跳过。routerMac6 缺则回落 gatewayMac。
+            NdpSpoofer ndpHealer(ep, this);
+            const QString rmac6 = field("routerMac6").isEmpty() ? field("gatewayMac")
+                                                                : field("routerMac6");
+            ndpHealer.configure(field("localMac"), field("routerLL6"), rmac6);
             for (const QJsonObject &o : group) {
                 healer.startSpoof(o["mac"].toString(), o["ip"].toString());
                 healer.stopSpoof(o["mac"].toString()); // startSpoof 建档、stopSpoof 立刻 heal
+                ndpHealer.startSpoof(o["mac"].toString());
+                ndpHealer.stopSpoof(o["mac"].toString());
             }
         }
         // 同步 delete（工作线程上），把临时端点的通知器一并在本线程销毁；不用 deleteLater 免得
@@ -636,6 +842,8 @@ void GatewayWorker::teardownLocal()
         }
         if (n->arp)
             delete n->arp; // ArpSpoofer 的 QTimer 在工作线程析构
+        if (n->ndp)
+            delete n->ndp; // NdpSpoofer 同理（析构 healAll 还原 v6）
         delete n;
     }
     m_nics.clear();

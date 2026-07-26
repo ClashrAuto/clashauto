@@ -76,6 +76,11 @@ u16_t nd6_get_destination_mtu(const ip6_addr_t *ip6addr, struct netif *netif);
 void nd6_reachability_hint(const ip6_addr_t *ip6addr);
 #endif /* LWIP_ND6_TCP_REACHABILITY_HINTS */
 void nd6_cleanup_netif(struct netif *netif);
+/* Coast 透明网关补丁：静态邻居项 API（IPv4 的 etharp_add_static_entry / _remove 的对应物）。
+   为被劫持设备预置「v6 地址 → MAC」固定映射，lwIP 回包直接用其 MAC、且把该目的当 on-link，
+   不发 NS 也不老化。lladdr 长度按 netif->hwaddr_len（以太网 = 6）。返回 ERR_OK / ERR_MEM。 */
+err_t nd6_add_static_neighbor_entry(const ip6_addr_t *ip6addr, struct netif *netif, const u8_t *lladdr);
+void  nd6_remove_static_neighbor_entry(const ip6_addr_t *ip6addr, struct netif *netif);
 #if LWIP_IPV6_MLD
 void nd6_adjust_mld_membership(struct netif *netif, s8_t addr_idx, u8_t new_state);
 #endif /* LWIP_IPV6_MLD */

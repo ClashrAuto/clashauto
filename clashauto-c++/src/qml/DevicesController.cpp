@@ -173,6 +173,10 @@ void DevicesController::ensureGatewayConfigured()
         s.gatewayIp = n.gatewayIp;
         s.gatewayMac = n.gatewayMac;
         s.netmask = n.netmask;
+        s.routerLinkLocal6 = n.routerLinkLocal6; // IPv6 拓扑（可空 → 该卡 v6 劫持 no-op）
+        s.routerMac6 = n.routerMac6;
+        s.localGlobal6 = n.localGlobal6;
+        s.prefix6 = n.prefix6;
         specs.append(s);
     }
     m_gateway->configure(specs, DeviceStore::kGatewayPort);

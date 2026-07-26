@@ -27,7 +27,8 @@ public:
     explicit Socks5Tcp(QObject *parent = nullptr);
     ~Socks5Tcp() override;
 
-    // 经 127.0.0.1:socksPort 向 mihomo 发起 CONNECT 到 dstHost:dstPort（dstHost 可为 IP 或域名）。
+    // 经 127.0.0.1:socksPort 向 mihomo 发起 CONNECT 到 dstHost:dstPort。
+    // dstHost 可为 IPv4 字面量（ATYP 0x01）、IPv6 字面量（ATYP 0x04，透明网关的 v6 连接走这条）或域名（0x03）。
     void connectTo(quint16 socksPort, const QString &dstHost, quint16 dstPort,
                    const QString &user);
     void write(const QByteArray &data); // 隧道建立后写入上行字节
@@ -78,7 +79,7 @@ public:
 
     // 建立 UDP ASSOCIATE 会话（经 127.0.0.1:socksPort）。ready() 后可 sendTo()。
     void associate(quint16 socksPort, const QString &user);
-    // 发一个 UDP 载荷到 dstIp:dstPort（IPv4）。
+    // 发一个 UDP 载荷到 dstIp:dstPort（按 dstIp 协议自动选 ATYP：IPv4=0x01 / IPv6=0x04）。
     void sendTo(const QHostAddress &dstIp, quint16 dstPort, const QByteArray &payload);
     void closeSession();
     bool isReady() const;

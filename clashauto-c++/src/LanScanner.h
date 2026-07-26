@@ -70,6 +70,11 @@ public:
         QString netmask;    // 点分
         QString gatewayIp;  // 该卡的默认网关
         QString gatewayMac; // 本轮 ARP 表里查到的网关 MAC（未解析出来则为空）
+        // —— IPv6（Linux 尽力发现；mac/win 目前留空 → 该卡 v6 劫持自动 no-op）——
+        QString routerLinkLocal6; // v6 默认路由器链路本地地址（`ip -6 route show default` 的 via）
+        QString routerMac6;       // v6 路由器 MAC（`ip -6 neigh` 查 routerLinkLocal6）
+        QString localGlobal6;     // 本机在该卡上的全局 v6（诊断/展示）
+        QString prefix6;          // 该卡 v6 前缀（诊断/展示，如 "2408:xxxx::/64"）
     };
     // 全部可用物理网卡（第 0 个是主网卡）。缺 IP/MAC/掩码的会被剔除。
     QVector<NicInfo> physicalNics() const;
@@ -152,7 +157,14 @@ private:
         QString mac;
         QString gatewayIp;          // 这张卡自己的默认网关（多网卡各不相同）
         quint32 base = 0, mask = 0; // 网段（主机序）
+        // —— IPv6（Linux 尽力发现）——
+        QString gatewayLL6;         // v6 默认路由器链路本地地址
+        QString gatewayMac6;        // v6 路由器 MAC
+        QString global6;            // 本机在该卡上的全局 v6
+        QString prefix6;            // 该卡 v6 前缀
     };
+    // Linux 尽力发现 IPv6 拓扑（填 m_physIfaces 的 v6 字段）；其它平台为空实现。
+    void detectIpv6Topology();
 
     bool m_scanning = false;
     QString m_localIp, m_localMac, m_gatewayIp, m_ifaceName; // 主网卡

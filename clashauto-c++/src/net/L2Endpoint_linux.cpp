@@ -215,6 +215,20 @@ public:
             return false;
         }
 
+        // ★ 混杂模式（IPv6 网关的硬要求）：IPv6 的邻居发现 NS/NA/RS/RA 走的是**组播**（solicited-node
+        //   / all-nodes / all-routers），不像 IPv4 ARP 那样是广播。网卡硬件默认只收「本机 MAC + 广播 +
+        //   已订阅的组播组」，会把被劫持设备发出的组播 NS、真路由器周期广播的 RA 直接在硬件层丢掉——
+        //   于是 NdpSpoofer 既抢答不到设备的 NS（首解析/老化后重解析时无法把「路由器在本机」钉住），
+        //   也反制不到路由器的 RA。开混杂让这些组播 NDP 帧进到本 socket，再交由下面的 cBPF 在内核态
+        //   按「源 MAC=victim 或 ethertype=ARP/ICMPv6-NDP」筛掉无关帧（userspace 只拿到该拿的）。
+        //   用 PACKET_ADD_MEMBERSHIP(PACKET_MR_PROMISC) 而非 SIOCSIFFLAGS：随 socket 关闭内核自动撤销，
+        //   进程崩溃也不会把网卡永久留在混杂态。IPv4 侧本不需要（ARP 是广播），开着无害。
+        struct packet_mreq mreq;
+        std::memset(&mreq, 0, sizeof(mreq));
+        mreq.mr_ifindex = idx;
+        mreq.mr_type = PACKET_MR_PROMISC;
+        ::setsockopt(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mreq, sizeof(mreq)); // 失败无妨，BPF 仍在
+
         // 非阻塞：回退路径（drainSocket）靠它循环 recv 到 EAGAIN，绝不在无数据时阻塞事件循环。
         int flags = ::fcntl(fd, F_GETFL, 0);
         if (flags < 0)
@@ -330,21 +344,30 @@ public:
             if (valid.size() > 60)
                 return false;
             const int n = valid.size();
-            // 末尾追加「或 ARP」分支:所有 victim 源 MAC 都失配后,再看 ethertype 是否 0x0806,是则
-            // 也放行。**必须捕获 ARP**——尤其真网关广播的 who-has(携带「网关在真 MAC」会把设备解毒),
-            // LanGateway 收到后立刻反制重投(reassertNow)。ARP 是低频帧,全收几乎零成本。
-            const int arpLd = 4 * n;       // ldh [12]   ; A = ethertype
-            const int arpJeq = 4 * n + 1;  // jeq 0x0806
-            const int accept = 4 * n + 2;  // ret 0xffffffff
-            const int reject = 4 * n + 3;  // ret 0
-            (void)arpJeq;
+            // 末尾追加两条放行分支（都在所有 victim 源 MAC 失配之后，各自最终跳到 accept/reject）：
+            //  · ethertype=ARP(0x0806)：捕获真网关广播的 who-has（携带「网关在真 MAC」会把设备解毒），
+            //    LanGateway 据此 reassertNow。
+            //  · ethertype=IPv6(0x86DD) 且 next-header=ICMPv6(58)：捕获 IPv6 邻居发现（NS/NA/RS/RA）。
+            //    IPv6 无广播，路由器的 RA、设备的 NS 全是**组播**——靠上面的混杂让它们进 socket，这里放行，
+            //    NdpSpoofer 才能抢答设备 NS、反制路由器 RA（v4 侧 ARP 分支的 v6 对应物）。低频帧，全收近零成本。
+            // 指令布局（n 个 victim 块之后）：
+            //   [4n]   arpLd : ldh [12]              ; A = ethertype
+            //   [4n+1] jeq 0x0806 → accept，否则落下
+            //   [4n+2] jeq 0x86DD → 落下查 next-header，否则 → reject
+            //   [4n+3] ldb [20]                      ; A = IPv6 next header（14 以太 + 6）
+            //   [4n+4] jeq 58(ICMPv6) → accept，否则 → reject
+            //   [4n+5] accept: ret 0xffffffff
+            //   [4n+6] reject: ret 0
+            const int arpLd  = 4 * n;      // ldh [12]
+            const int accept = 4 * n + 5;  // ret 0xffffffff
+            const int reject = 4 * n + 6;  // ret 0
             for (int i = 0; i < n; ++i) {
                 const auto *b = reinterpret_cast<const unsigned char *>(valid[i].constData());
                 const quint16 first2 = (quint16(b[0]) << 8) | b[1];
                 const quint32 last4 = (quint32(b[2]) << 24) | (quint32(b[3]) << 16)
                                     | (quint32(b[4]) << 8) | quint32(b[5]);
                 const int base = 4 * i;
-                // 本块失配后的去处：不是最后一个 MAC → 下一块；最后一个 → ARP 判定块。
+                // 本块失配后的去处：不是最后一个 MAC → 下一块；最后一个 → ARP/NDP 判定块。
                 const int failIdx = (i < n - 1) ? (4 * (i + 1)) : arpLd;
                 code.push_back(BPF_STMT(BPF_LD | BPF_W | BPF_ABS, 8));
                 code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, last4, 0,
@@ -354,10 +377,17 @@ public:
                                         static_cast<__u8>(accept - (base + 3) - 1),
                                         static_cast<__u8>(failIdx - (base + 3) - 1)));
             }
-            code.push_back(BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 12));           // arpLd
-            code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x0806, 0, 1)); // ==ARP→accept 否则→reject
-            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFFu));            // accept：整帧
-            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));                     // reject
+            code.push_back(BPF_STMT(BPF_LD | BPF_H | BPF_ABS, 12));            // [4n]   A = ethertype
+            code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x0806,
+                                    static_cast<__u8>(accept - (4 * n + 1) - 1), 0)); // [4n+1] ARP→accept 否则落下
+            code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 0x86DD,
+                                    0, static_cast<__u8>(reject - (4 * n + 2) - 1))); // [4n+2] IPv6→查下条 否则→reject
+            code.push_back(BPF_STMT(BPF_LD | BPF_B | BPF_ABS, 20));            // [4n+3] A = IPv6 next header
+            code.push_back(BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, 58,
+                                    static_cast<__u8>(accept - (4 * n + 4) - 1),
+                                    static_cast<__u8>(reject - (4 * n + 4) - 1)));    // [4n+4] ICMPv6→accept 否则→reject
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0xFFFFFFFFu));            // [4n+5] accept：整帧
+            code.push_back(BPF_STMT(BPF_RET | BPF_K, 0));                      // [4n+6] reject
         }
 
         struct sock_fprog prog;

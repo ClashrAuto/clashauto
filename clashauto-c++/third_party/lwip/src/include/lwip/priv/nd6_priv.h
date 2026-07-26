@@ -82,6 +82,10 @@ struct nd6_neighbor_cache_entry {
 #endif /* LWIP_ND6_QUEUEING */
   u8_t state;
   u8_t isrouter;
+  /* Coast 透明网关补丁：静态邻居项标志。置 1 = 由 nd6_add_static_neighbor_entry 装入的
+     「设备 v6 ↔ 设备 MAC」固定映射（IPv4 侧 etharp_add_static_entry 的对应物）。nd6_tmr 对它
+     完全跳过（不老化、不发 NS 探测），nd6_get_next_hop_entry 视其目的为 on-link 直接命中。 */
+  u8_t static_entry;
   union {
     u32_t reachable_time; /* in seconds */
     u32_t delay_time;     /* ticks (ND6_TMR_INTERVAL) */

@@ -34,6 +34,11 @@ public:
         QString gatewayIp;  // 这张卡的默认网关
         QString gatewayMac;
         QString netmask;    // 该卡子网掩码；空/非法则这张卡不启用（出方向没法定路由）
+        // —— IPv6 拓扑（可选；缺项则这张卡的 v6 劫持自动 no-op，不影响 v4）——
+        QString routerLinkLocal6; // v6 默认路由器的链路本地地址（fe80::…）——NdpSpoofer 投毒的目标
+        QString routerMac6;       // v6 路由器 MAC（通常同 gatewayMac；单列以防路由器 v4/v6 用不同 NIC）
+        QString localGlobal6;     // 本机在该卡上的全局 v6（仅诊断/展示用，数据路径不依赖）
+        QString prefix6;          // 该卡的 v6 前缀（如 "2408:xxxx::/64"，仅诊断/展示用）
     };
 
     explicit LanGateway(QObject *parent = nullptr);

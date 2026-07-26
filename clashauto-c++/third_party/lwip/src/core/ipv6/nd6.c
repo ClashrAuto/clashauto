@@ -120,6 +120,8 @@ static union ra_options nd6_ra_buffer;
 
 /* Forward declarations. */
 static s8_t nd6_find_neighbor_cache_entry(const ip6_addr_t *ip6addr);
+/* Coast 补丁：找一条匹配 ip6addr（且 netif 相符）的**静态**邻居项，找到返回其下标，否则 -1。 */
+static s8_t nd6_find_static_neighbor(const ip6_addr_t *ip6addr, struct netif *netif);
 static s8_t nd6_new_neighbor_cache_entry(void);
 static void nd6_free_neighbor_cache_entry(s8_t i);
 static s16_t nd6_find_destination_cache_entry(const ip6_addr_t *ip6addr);
@@ -978,10 +980,14 @@ nd6_tmr(void)
 
   /* Process neighbor entries. */
   for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
+    /* Coast 补丁：静态邻居项永不老化、不发探测——它的 MAC 是我们从设备实帧里学到的固定值。 */
+    if (neighbor_cache[i].static_entry) {
+      continue;
+    }
     switch (neighbor_cache[i].state) {
     case ND6_INCOMPLETE:
       if ((neighbor_cache[i].counter.probes_sent >= LWIP_ND6_MAX_MULTICAST_SOLICIT) &&
-          (!neighbor_cache[i].isrouter)) {
+          (!neighbor_cache[i].isrouter) && (!neighbor_cache[i].static_entry)) {
         /* Retries exceeded. */
         nd6_free_neighbor_cache_entry(i);
       } else {
@@ -1017,7 +1023,7 @@ nd6_tmr(void)
       break;
     case ND6_PROBE:
       if ((neighbor_cache[i].counter.probes_sent >= LWIP_ND6_MAX_MULTICAST_SOLICIT) &&
-          (!neighbor_cache[i].isrouter)) {
+          (!neighbor_cache[i].isrouter) && (!neighbor_cache[i].static_entry)) {
         /* Retries exceeded. */
         nd6_free_neighbor_cache_entry(i);
       } else {
@@ -1465,7 +1471,7 @@ nd6_new_neighbor_cache_entry(void)
   /* Next, try to find a Stale entry. */
   for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
     if ((neighbor_cache[i].state == ND6_STALE) &&
-        (!neighbor_cache[i].isrouter)) {
+        (!neighbor_cache[i].isrouter) && (!neighbor_cache[i].static_entry)) {
       nd6_free_neighbor_cache_entry(i);
       return i;
     }
@@ -1474,7 +1480,7 @@ nd6_new_neighbor_cache_entry(void)
   /* Next, try to find a Probe entry. */
   for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
     if ((neighbor_cache[i].state == ND6_PROBE) &&
-        (!neighbor_cache[i].isrouter)) {
+        (!neighbor_cache[i].isrouter) && (!neighbor_cache[i].static_entry)) {
       nd6_free_neighbor_cache_entry(i);
       return i;
     }
@@ -1483,7 +1489,7 @@ nd6_new_neighbor_cache_entry(void)
   /* Next, try to find a Delayed entry. */
   for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
     if ((neighbor_cache[i].state == ND6_DELAY) &&
-        (!neighbor_cache[i].isrouter)) {
+        (!neighbor_cache[i].isrouter) && (!neighbor_cache[i].static_entry)) {
       nd6_free_neighbor_cache_entry(i);
       return i;
     }
@@ -1494,7 +1500,7 @@ nd6_new_neighbor_cache_entry(void)
   j = -1;
   for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
     if ((neighbor_cache[i].state == ND6_REACHABLE) &&
-        (!neighbor_cache[i].isrouter)) {
+        (!neighbor_cache[i].isrouter) && (!neighbor_cache[i].static_entry)) {
       if (neighbor_cache[i].counter.reachable_time < time) {
         j = i;
         time = neighbor_cache[i].counter.reachable_time;
@@ -1513,7 +1519,7 @@ nd6_new_neighbor_cache_entry(void)
     if (
         (neighbor_cache[i].q == NULL) &&
         (neighbor_cache[i].state == ND6_INCOMPLETE) &&
-        (!neighbor_cache[i].isrouter)) {
+        (!neighbor_cache[i].isrouter) && (!neighbor_cache[i].static_entry)) {
       if (neighbor_cache[i].counter.probes_sent >= time) {
         j = i;
         time = neighbor_cache[i].counter.probes_sent;
@@ -1530,7 +1536,7 @@ nd6_new_neighbor_cache_entry(void)
   j = -1;
   for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
     if ((neighbor_cache[i].state == ND6_INCOMPLETE) &&
-        (!neighbor_cache[i].isrouter)) {
+        (!neighbor_cache[i].isrouter) && (!neighbor_cache[i].static_entry)) {
       if (neighbor_cache[i].counter.probes_sent >= time) {
         j = i;
         time = neighbor_cache[i].counter.probes_sent;
@@ -1571,9 +1577,67 @@ nd6_free_neighbor_cache_entry(s8_t i)
 
   neighbor_cache[i].state = ND6_NO_ENTRY;
   neighbor_cache[i].isrouter = 0;
+  neighbor_cache[i].static_entry = 0; /* Coast 补丁：连静态标志一并清掉 */
   neighbor_cache[i].netif = NULL;
   neighbor_cache[i].counter.reachable_time = 0;
   ip6_addr_set_zero(&(neighbor_cache[i].next_hop_address));
+}
+
+/* ————————————————— Coast 透明网关补丁：静态邻居项 ————————————————— */
+/* IPv4 侧 etharp_add_static_entry / _remove 的 IPv6 对应物。被劫持设备的「v6 地址 → MAC」是我们
+   从它发出的实帧里学到的固定映射，用它做回程二层寻址：nd6_get_next_hop_entry 把有静态项的目的当
+   on-link（next_hop = 目的自身），随后在 neighbor cache 里命中这条 REACHABLE 的静态项直接拿 MAC，
+   既不发 NS 也不被 nd6_tmr 老化（见 nd6_tmr 顶部的 static_entry 跳过）。 */
+
+static s8_t
+nd6_find_static_neighbor(const ip6_addr_t *ip6addr, struct netif *netif)
+{
+  s8_t i;
+  for (i = 0; i < LWIP_ND6_NUM_NEIGHBORS; i++) {
+    if (neighbor_cache[i].static_entry &&
+        (netif == NULL || neighbor_cache[i].netif == netif) &&
+        ip6_addr_eq(ip6addr, &(neighbor_cache[i].next_hop_address))) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+err_t
+nd6_add_static_neighbor_entry(const ip6_addr_t *ip6addr, struct netif *netif, const u8_t *lladdr)
+{
+  s8_t i;
+
+  if ((ip6addr == NULL) || (netif == NULL) || (lladdr == NULL)) {
+    return ERR_ARG;
+  }
+
+  /* 已有同址项（可能是动态解析出来的，也可能是旧静态项）→ 原地升级为静态 + 覆盖 MAC。 */
+  i = nd6_find_neighbor_cache_entry(ip6addr);
+  if (i < 0) {
+    i = nd6_new_neighbor_cache_entry(); /* 空槽或回收一条非静态项 */
+    if (i < 0) {
+      return ERR_MEM;
+    }
+    ip6_addr_set(&(neighbor_cache[i].next_hop_address), ip6addr);
+  }
+  neighbor_cache[i].netif = netif;
+  MEMCPY(neighbor_cache[i].lladdr, lladdr, netif->hwaddr_len);
+  neighbor_cache[i].state = ND6_REACHABLE; /* 送包路径见 REACHABLE 就直接发 */
+  neighbor_cache[i].isrouter = 0;
+  neighbor_cache[i].static_entry = 1;
+  neighbor_cache[i].counter.reachable_time = 0xfffffffful; /* 冗余：tmr 已整体跳过静态项 */
+  return ERR_OK;
+}
+
+void
+nd6_remove_static_neighbor_entry(const ip6_addr_t *ip6addr, struct netif *netif)
+{
+  s8_t i = nd6_find_static_neighbor(ip6addr, netif);
+  if (i >= 0) {
+    neighbor_cache[i].static_entry = 0; /* 先摘静态保护，free 才肯回收 */
+    nd6_free_neighbor_cache_entry(i);
+  }
 }
 
 /**
@@ -2002,8 +2066,13 @@ nd6_get_next_hop_entry(const ip6_addr_t *ip6addr, struct netif *netif)
       ip6_addr_set(&dest->destination_addr, ip6addr);
 
       /* Now find the next hop. is it a neighbor? */
+      /* Coast 补丁：若该目的已有一条**静态邻居项**（被劫持设备的 v6 → MAC，由
+         nd6_add_static_neighbor_entry 预置），一律当作 on-link——next_hop 就是目的自身，随后在
+         neighbor cache 里命中那条静态项、直接拿到 MAC。这让「设备用全局 v6 地址」的回程无需 netif
+         上配任何全局前缀、也无需真发 NS，与 IPv4 的静态 ARP 行为完全对称。 */
       if (ip6_addr_islinklocal(ip6addr) ||
-          nd6_is_prefix_in_netif(ip6addr, netif)) {
+          nd6_is_prefix_in_netif(ip6addr, netif) ||
+          nd6_find_static_neighbor(ip6addr, netif) >= 0) {
         /* Destination in local link. */
         dest->pmtu = netif_mtu6(netif);
         ip6_addr_copy(dest->next_hop_addr, dest->destination_addr);

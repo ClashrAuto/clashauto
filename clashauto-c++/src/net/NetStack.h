@@ -51,6 +51,14 @@ public:
     void addDevice(const QString &ip, const QByteArray &mac6, const QString &socksUser);
     void removeDevice(const QString &ip);
 
+    // IPv6 版：登记设备的某个 v6 地址（从它发出的实帧里学到的，一台设备可能有多个：链路本地 +
+    // 一或多个全局/隐私地址，每个都调一次）。装一条 nd6 **静态邻居**项（v6↔mac，回程二层寻址靠它，
+    // 见 nd6.c 的 Coast 补丁）+ 记录 mihomo 身份。from = 学到该帧的网卡端点（决定装到哪个 netif）。
+    // 幂等：同址重复调用只刷新。
+    void addDeviceV6(IL2Endpoint *from, const QString &ip6, const QByteArray &mac6,
+                     const QString &socksUser);
+    void removeDeviceV6(const QString &ip6);
+
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。
     // from = 收到该帧的二层端点，用来定位注入哪个 netif（也决定 UDP 回程从哪张卡发出）。
     void inputFrame(IL2Endpoint *from, const QByteArray &frame);
@@ -65,6 +73,9 @@ private:
     // NAT 粒度是「每个设备源端口一条独立的 SOCKS UDP 关联」，所以回程不需要（也无法）靠
     // (fromIp,fromPort) 反查设备端口——vport 由「回包从哪条关联进来」直接给出。细节见 .cpp。
     void handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl);
+    // IPv6 UDP NAT：与 v4 版结构对称，复用同一套 UdpFlow/LRU/老化机制；帧封装与校验和用 v6 伪首部。
+    void handleUdpFrame6(Nic *nic, const QByteArray &frame);
+    // v4/v6 共用：回程 UDP 到设备。按会话记录的 v4/v6 走对应的封包/校验和。
     void onUdpResponse(const QString &victimIp, quint16 vport, const QHostAddress &fromIp,
                        quint16 fromPort, const QByteArray &payload);
 

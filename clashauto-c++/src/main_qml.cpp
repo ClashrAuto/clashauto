@@ -44,6 +44,14 @@
 
 #include <cstdio>
 
+#if defined(Q_OS_UNIX)
+#include <QSocketNotifier>
+#include <csignal>
+#include <cstring>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
@@ -505,5 +513,33 @@ int main(int argc, char *argv[])
         // 本地测 UI 时 COAST_NO_AUTOSTART=1 跳过（本机已有实例，避免端口/代理/TUN 冲突）。
         QTimer::singleShot(600, &bridge, &QmlBridge::autoStartCore);
     }
+
+#if defined(Q_OS_UNIX)
+    // 优雅退出：systemctl stop / kill / Ctrl+C 都发 SIGTERM/SIGINT。Qt 默认**不**把它们转成
+    // aboutToQuit —— 于是进程被直接杀掉，上面挂在 aboutToQuit 上的清理链（LanGateway::disableAll
+    // 还原被劫持设备的 ARP/NDP、CoreController::stopCore、DeviceStore/History 落盘）全都不跑：设备的
+    // v4/v6 邻居缓存留在本机 MAC 上 → 断网，只能等下次启动 recoverFromCrash 才还原。对一个可无 GUI
+    // 常驻（headless/服务化）的网关来说，这个还原必须在收到终止信号时就发生。
+    // 用**自管道(self-pipe)**把异步信号安全地转进 Qt 事件循环：信号处理器只做一次 write（
+    // async-signal-safe 的极少数操作之一），QSocketNotifier 在事件循环里读到后调 quit() → 正常
+    // 走完 aboutToQuit 清理链。绝不在信号处理器里直接碰 Qt（非异步信号安全，会死锁/崩溃）。
+    static int s_sigFd[2] = {-1, -1};
+    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, s_sigFd) == 0) {
+        auto *sn = new QSocketNotifier(s_sigFd[1], QSocketNotifier::Read, &app);
+        QObject::connect(sn, &QSocketNotifier::activated, &app, [] { QCoreApplication::quit(); });
+        struct sigaction sa;
+        std::memset(&sa, 0, sizeof(sa));
+        sa.sa_handler = [](int) {
+            const char c = 1;
+            ssize_t r = ::write(s_sigFd[0], &c, 1); // 唯一动作：写一字节唤醒事件循环
+            (void)r;
+        };
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_RESTART;
+        ::sigaction(SIGTERM, &sa, nullptr);
+        ::sigaction(SIGINT, &sa, nullptr);
+    }
+#endif
+
     return app.exec();
 }

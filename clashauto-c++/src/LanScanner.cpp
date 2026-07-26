@@ -330,6 +330,122 @@ void LanScanner::detectLocalTopology()
             m_gatewayIps.insert(f.gatewayIp);
     }
     m_gatewayIp = m_physIfaces.isEmpty() ? QString() : m_physIfaces.constFirst().gatewayIp;
+
+    // 5) IPv6 拓扑（尽力）：每张物理网卡的 v6 路由器 LL/MAC、本机全局 v6/前缀。缺了不影响 v4。
+    detectIpv6Topology();
+}
+
+#ifdef Q_OS_LINUX
+namespace {
+// 同步跑一条命令收全部 stdout（短超时；失败/超时返回空）。仅供 v6 拓扑发现这类轻量只读命令用。
+QString runCmd(const QString &program, const QStringList &args)
+{
+    QProcess p;
+    p.start(program, args);
+    if (!p.waitForStarted(1500))
+        return {};
+    if (!p.waitForFinished(2000)) {
+        p.kill();
+        p.waitForFinished(500);
+        return {};
+    }
+    return QString::fromLocal8Bit(p.readAllStandardOutput());
+}
+// /proc/net/if_inet6 里 32 位十六进制地址串（无冒号）→ 规范化 v6 串（"2408:...")。
+QString hex32ToV6(const QString &hex32)
+{
+    if (hex32.size() != 32)
+        return {};
+    Q_IPV6ADDR raw;
+    bool ok = true;
+    for (int i = 0; i < 16; ++i) {
+        raw[i] = static_cast<quint8>(hex32.mid(i * 2, 2).toUInt(&ok, 16));
+        if (!ok)
+            return {};
+    }
+    return QHostAddress(raw).toString();
+}
+} // namespace
+#endif
+
+// Linux：用 `ip -6 route`/`ip -6 neigh` + /proc/net/if_inet6 尽力填 v6 字段；解析失败留空（v6 no-op）。
+// 其它平台暂不实现（留空即安全降级）：mac 可日后用 `netstat -rn -f inet6`/`ndp -an`，win 用
+// GetIpForwardTable2/GetIpNetTable2，结构留在此处一目了然。
+void LanScanner::detectIpv6Topology()
+{
+#ifdef Q_OS_LINUX
+    // (a) 每张网卡的 v6 默认路由器链路本地地址：`ip -6 route show default`
+    //     形如：default via fe80::1 dev eth0 proto ra metric 1024 ...
+    {
+        const QString out = runCmd(QStringLiteral("ip"),
+                                   {QStringLiteral("-6"), QStringLiteral("route"),
+                                    QStringLiteral("show"), QStringLiteral("default")});
+        const QStringList lines = out.split('\n', Qt::SkipEmptyParts);
+        for (const QString &ln : lines) {
+            const QStringList tok = ln.split(' ', Qt::SkipEmptyParts);
+            const int viaIdx = tok.indexOf(QStringLiteral("via"));
+            const int devIdx = tok.indexOf(QStringLiteral("dev"));
+            if (viaIdx < 0 || devIdx < 0 || viaIdx + 1 >= tok.size() || devIdx + 1 >= tok.size())
+                continue;
+            const QString via = tok.at(viaIdx + 1);
+            const QString dev = tok.at(devIdx + 1);
+            for (LocalIface &f : m_physIfaces)
+                if (f.name == dev && f.gatewayLL6.isEmpty())
+                    f.gatewayLL6 = via;
+        }
+    }
+    // (b) 路由器 MAC：`ip -6 neigh` 形如：fe80::1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE
+    {
+        const QString out = runCmd(QStringLiteral("ip"),
+                                   {QStringLiteral("-6"), QStringLiteral("neigh")});
+        const QStringList lines = out.split('\n', Qt::SkipEmptyParts);
+        for (const QString &ln : lines) {
+            const QStringList tok = ln.split(' ', Qt::SkipEmptyParts);
+            if (tok.size() < 5)
+                continue;
+            const QString addr = tok.at(0);
+            const int devIdx = tok.indexOf(QStringLiteral("dev"));
+            const int llIdx = tok.indexOf(QStringLiteral("lladdr"));
+            if (devIdx < 0 || llIdx < 0 || llIdx + 1 >= tok.size())
+                continue;
+            const QString dev = tok.at(devIdx + 1);
+            const QString mac = DeviceStore::normalizeMac(tok.at(llIdx + 1));
+            for (LocalIface &f : m_physIfaces)
+                if (f.name == dev && f.gatewayLL6.compare(addr, Qt::CaseInsensitive) == 0)
+                    f.gatewayMac6 = mac;
+        }
+    }
+    // (c) 本机全局 v6 + 前缀长度：/proc/net/if_inet6
+    //     每行：<32hex addr> <ifindex> <prefixlen hex> <scope hex> <flags hex> <ifname>
+    //     scope 00 = 全局。取每张卡的第一个全局地址。
+    {
+        QFile f(QStringLiteral("/proc/net/if_inet6"));
+        if (f.open(QIODevice::ReadOnly)) {
+            const QStringList lines = QString::fromLatin1(f.readAll()).split('\n', Qt::SkipEmptyParts);
+            f.close();
+            for (const QString &ln : lines) {
+                const QStringList tok = ln.split(' ', Qt::SkipEmptyParts);
+                if (tok.size() < 6)
+                    continue;
+                if (tok.at(3) != QStringLiteral("00")) // 仅全局作用域
+                    continue;
+                const QString dev = tok.at(5);
+                const QString v6 = hex32ToV6(tok.at(0));
+                bool okp = false;
+                const int plen = tok.at(2).toInt(&okp, 16);
+                if (v6.isEmpty())
+                    continue;
+                for (LocalIface &lf : m_physIfaces) {
+                    if (lf.name == dev && lf.global6.isEmpty()) {
+                        lf.global6 = v6;
+                        if (okp)
+                            lf.prefix6 = v6 + QStringLiteral("/") + QString::number(plen);
+                    }
+                }
+            }
+        }
+    }
+#endif
 }
 
 QSet<QString> LanScanner::gatewayMacs() const
@@ -389,6 +505,10 @@ QVector<LanScanner::NicInfo> LanScanner::physicalNics() const
         n.netmask = QHostAddress(f.mask).toString();
         n.gatewayIp = f.gatewayIp;
         n.gatewayMac = m_arp.value(f.gatewayIp); // 扫过一轮后才有值；网关配置每轮刷新
+        n.routerLinkLocal6 = f.gatewayLL6;
+        n.routerMac6 = f.gatewayMac6;
+        n.localGlobal6 = f.global6;
+        n.prefix6 = f.prefix6;
         out.append(n);
     }
     return out;

@@ -4,8 +4,10 @@
 // 运行模式：NO_SYS=1（无操作系统/单线程），仅 raw API，由 Qt 事件循环驱动：
 //   · IL2Endpoint 收到帧 → 交 NetStack 包成 pbuf → netif->input(ethernet_input)。
 //   · lwIP 需要出网时 → netif->linkoutput → 序列化成以太帧 → IL2Endpoint::send。
-//   · 定时器：QTimer 周期调用 sys_check_timeouts()（TCP 重传/超时等）。
-// 只做 IPv4 + TCP + UDP；不启用 DHCP/DNS/IPv6/socket/netconn。
+//   · 定时器：QTimer 周期调用 sys_check_timeouts()（TCP 重传/超时/ND6 老化等）。
+// 做 IPv4 **和 IPv6** 双栈 + TCP + UDP；不启用 DHCP/DNS/socket/netconn。
+// IPv6 与 IPv4 完全对称：ip6.c 有和 ip4.c 同样的 accept-all 补丁，nd6.c 有和 etharp 静态项
+// 对应的「静态邻居」补丁（见本文件末尾 IPv6 段与 third_party/lwip 里的 Coast 补丁注释）。
 
 // —— 系统模式 ——
 #define NO_SYS                          1
@@ -148,10 +150,28 @@
 // → 相对上一版 **净增 ≈ 8.4 MiB 的 BSS**：其中 ≈8.3 MiB 是「窗口从 60 KiB 提到 128 KiB 之后，
 //   为了不让并发连接容量回退而同步扩的池子」，64 KiB 是 SACK 的 rcv_sacks 数组。
 //   BSS 惰性提交，实际 RSS 仍按真实用量增长。
+//
+// —— IPv6 追加的静态内存（本次双栈改造新增，未实测，按结构大小估）——
+//   ND6 三张表都是 nd6.c 里的全局静态数组：
+//     neighbor_cache[64]      ≈ 64 × ~56  ≈ 3.6 KiB（ip6_addr + netif* + lladdr + 计数联合）
+//     destination_cache[64]   ≈ 64 × ~44  ≈ 2.8 KiB
+//     prefix_list[8] / router_list[8]      < 1 KiB
+//     MEMP_NUM_ND6_QUEUE 16 × sizeof(nd6_q_entry)          ≈ 0.3 KiB
+//   合计 ND6 三张表 v6 追加 **< 10 KiB**。
+//   另有一处**跟着开 v6 变大的**：ip_addr_t 从「4 字节 v4」变成「v4/v6 联合体 + 类型标签」≈20 字节，
+//   每个 tcp_pcb 有 local_ip/remote_ip 两个 → 单个 tcp_pcb 约 +32 字节，2048 条 ≈ +64 KiB；
+//   TCP_SEG/PBUF/PBUF_POOL 不含 ip_addr_t，不变。v4/v6 连接共用同一批 tcp_pcb/tcp_seg/pbuf 池
+//   （一条 v6 连接和一条 v4 的各占一条，不是两套池）。
+//   → 双栈相对纯 v4 的 BSS 净增 ≈ **75 KiB**（ND6 表 <10K + tcp_pcb 增量 ~64K），相对 20 MiB 是噪声。
+//   ★ 这些数字**没有实测**（本机无工具链）：改动此文件的 v6 项后若能在真机 size -A 复核更稳妥。
 
 // —— 协议开关 ——
 #define LWIP_IPV4                       1
-#define LWIP_IPV6                       0
+// ★ IPv6 双栈：双栈设备的 v6 流量以前直接走真 v6 路由、完全绕过代理（既不进 mihomo、也不在设备页
+//   出现），网络 v6 上游一坏就「时通时不通」。打开后 v6 与 v4 走**完全对称**的路径：NdpSpoofer 投毒
+//   设备的邻居缓存（把默认路由指到本机 MAC）→ ip6.c 的 accept-all 补丁让 lwIP 终结发往任意公网 v6 的
+//   连接 → Socks5 用 ATYP=0x04 拨 mihomo。详细开关见本节下方「IPv6 细调」。
+#define LWIP_IPV6                       1
 #define LWIP_ARP                        1
 #define LWIP_ETHERNET                   1
 // 为每台被劫持设备预置静态 ARP(ip↔mac)，lwIP 回包直接用其 MAC，不发 ARP 请求（默认关，必须打开）。
@@ -169,9 +189,49 @@
 #define IP_REASSEMBLY                   1
 #define IP_FRAG                         1
 
-// Coast 透明网关补丁开关：让 ip4_input 接收「目的 IP 不属于本机」的单播包（见 ip4.c 补丁），
-// 用户态栈据此为被劫持设备终结发往任意公网 IP 的连接。
+// Coast 透明网关补丁开关：让 ip4_input / ip6_input 接收「目的 IP 不属于本机」的单播包
+//（见 ip4.c、ipv6/ip6.c 补丁），用户态栈据此为被劫持设备终结发往任意公网 IP 的连接。
+// 同一个开关同时管 v4/v6 两个补丁：关掉它这两处代码就完全不改变原生 lwIP 行为。
 #define LWIP_ACCEPT_ALL_UNICAST         1
+
+// —— IPv6 细调（与上面 IPv4 段对称；只列与 opt.h 默认值不同或必须钉死的项）——
+// 邻居发现（ND6）必开——v6 没有 ARP，「设备 MAC ↔ v6 地址」的解析全靠它，也是投毒/被投毒的载体。
+#define LWIP_IPV6_ND                    1
+#define LWIP_ICMP6                      1
+// 关掉地址作用域（zone）：本移植只有一张逻辑链路视角，被劫持设备的目的绝大多数是全局单播（无 zone），
+// 静态邻居项的存/取用的是同一个地址。关掉 zone 后 ip6_addr_eq 退化成纯地址比较、ZONECHECK 变 no-op，
+// 省掉「link-local 地址必须带正确 netif zone 才相等」这一整类易错逻辑（NetStack 因此无需给地址 assign
+// zone）。代价：不支持「同一 link-local 前缀跨多张卡」的严格区分——本网关用不到。
+#define LWIP_IPV6_SCOPES                0
+// MLD（组播侦听）：本移植用不到——被劫持流量是单播，accept-all 补丁直接把无主单播收到 inp 上；
+// 组播（含 solicited-node）由 ip6_input 的非-MLD 回退分支按 netif 自身地址处理即可。关掉省内存。
+#define LWIP_IPV6_MLD                   0
+// 不做 v6 分片/重组：TCP 段被两端 MSS 协商钳住（设备侧按自己 v6 MTU 算出 ≤1440 的发送 MSS，不会
+// 造出需要分片的段）；UDP 由 NetStack 手工 NAT，根本不进 lwIP。与 IPv4 段「UDP 分片被上面截走」同理，
+// 省下 ip6_frag 的重组缓冲。极少数带扩展头/超 MTU 的 v6 分片包会被丢（首个版本可接受）。
+#define LWIP_IPV6_FRAG                  0
+#define LWIP_IPV6_REASS                 0
+#define LWIP_IPV6_FORWARD               0
+// 无状态地址自动配置 / DHCPv6 / 路由器请求：一律不要。netif 只需要一个 **link-local** 当自己的
+// v6 身份（作为我们发 NS/NA 的源、以及 nd6 内部一致性）；全局地址不配——被劫持设备的 v6 目的是
+// 「任意公网地址」，由 accept-all 补丁 + nd6 静态邻居补丁接管，不依赖本机有没有全局 v6。
+#define LWIP_IPV6_AUTOCONFIG            0
+#define LWIP_IPV6_DHCP6                 0
+#define LWIP_IPV6_SEND_ROUTER_SOLICIT   0
+// 跳过重复地址检测（DAD）：我们给 netif 的 link-local 是本机 MAC 派生、且这条抓包链路上不会有别人
+// 抢它；关掉 DAD 免得启动时先发一轮 NS 等待，netif 的 v6 地址即刻可用（PREFERRED）。
+#define LWIP_IPV6_DUP_DETECT_ATTEMPTS   0
+
+// ND6 表容量：与 ARP_TABLE_SIZE(64) 对齐——十几台设备各占一条静态邻居项（nd6.c 的 Coast 静态
+// 邻居补丁装的），加上路由器/目的缓存，默认的 10 太小会互相挤掉（表现为某台设备 v6 莫名不通）。
+#define LWIP_ND6_NUM_NEIGHBORS          64
+#define LWIP_ND6_NUM_DESTINATIONS       64
+#define LWIP_ND6_NUM_PREFIXES           8
+#define LWIP_ND6_NUM_ROUTERS            8
+// ND6 出站待解析队列：被劫持设备都由 addDevice6 预置**静态邻居**，出站几乎从不排队等解析
+//（和 IPv4 的静态 ARP 同理）。保持一个小值即可。
+#define LWIP_ND6_QUEUEING               1
+#define MEMP_NUM_ND6_QUEUE              16
 
 // —— TCP 调参 ——（桌面高吞吐）
 #define LWIP_TCP                        1
@@ -289,6 +349,9 @@
 #define CHECKSUM_CHECK_TCP              0
 #define CHECKSUM_CHECK_UDP              0
 #define CHECKSUM_CHECK_ICMP             0
+// ICMPv6（含 ND6 的 NS/NA/RS/RA）也只生成不校验，理由同 ICMP。
+#define CHECKSUM_GEN_ICMP6              1
+#define CHECKSUM_CHECK_ICMP6            0
 
 // —— 统计/调试 ——
 // 只开 **memp/mem 池统计**，协议计数器全关。

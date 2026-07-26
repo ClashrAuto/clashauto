@@ -4,6 +4,8 @@
 #include <QTcpSocket>
 #include <QUdpSocket>
 
+#include <cstring>
+
 // 说明：这里手写 SOCKS5（RFC1928 + 用户名/密码认证 RFC1929）。之所以不用 QNetworkProxy，是因为
 // 我们要「每设备唯一用户名」认证（user=dev-<mac>，密码恒 "coast"），让 mihomo 侧靠 IN-USER 规则
 // 做每设备分流/流量归属——QNetworkProxy 的凭据模型套不进这套自定义握手，且我们要拿到裸字节管道
@@ -223,7 +225,10 @@ public:
         }
     }
 
-    // 组装 CONNECT 请求：dstHost 能解析为 IPv4 → ATYP 0x01 + 4 裸字节；否则按域名 ATYP 0x03。
+    // 组装 CONNECT 请求：dstHost 能解析为 IPv4 → ATYP 0x01 + 4 裸字节；解析为 IPv6 → ATYP 0x04 +
+    // 16 裸字节（透明网关终结出的 v6 连接走这条：lwIP accept 里把设备想访问的 v6 服务器地址
+    // ipaddr_ntoa 成串传进来，形如 "2606:...."，必须按 v6 字面量编码，否则会被当域名交给 mihomo
+    // 去做一次没有意义的 DNS）；两者皆非 → 按域名 ATYP 0x03。
     void sendConnect()
     {
         QByteArray req;
@@ -238,6 +243,10 @@ public:
             req.append(char((ip >> 16) & 0xFF));
             req.append(char((ip >> 8) & 0xFF));
             req.append(char(ip & 0xFF));
+        } else if (addr.setAddress(dstHost) && addr.protocol() == QAbstractSocket::IPv6Protocol) {
+            const Q_IPV6ADDR v6 = addr.toIPv6Address(); // c[0..15] 已是网络序（大端）
+            req.append(char(0x04));
+            req.append(reinterpret_cast<const char *>(v6.c), 16);
         } else {
             const QByteArray host = dstHost.toUtf8();
             req.append(char(0x03));
@@ -540,21 +549,39 @@ public:
         while (udp && udp->hasPendingDatagrams()) {
             const QNetworkDatagram dg = udp->receiveDatagram();
             const QByteArray buf = dg.data();
-            // SOCKS UDP 头：RSV(2) FRAG(1) ATYP(1) ADDR PORT(2) 之后才是载荷。仅支持 IPv4(0x01)。
-            if (buf.size() < 10) {
+            // SOCKS UDP 头：RSV(2) FRAG(1) ATYP(1) ADDR PORT(2) 之后才是载荷。
+            // 支持 IPv4(0x01,4B) 与 IPv6(0x04,16B)；域名(0x03) 回程本客户端用不到，跳过。
+            if (buf.size() < 4) {
                 continue;
             }
             const quint8 atyp = quint8(buf.at(3));
-            if (atyp != 0x01) {
-                continue; // 非 IPv4 回程直接跳过（本客户端只处理 v4）
+            QHostAddress srcAddr;
+            int portOff = 0;
+            if (atyp == 0x01) {
+                if (buf.size() < 10) {
+                    continue;
+                }
+                const quint32 ip = (quint32(quint8(buf.at(4))) << 24)
+                                 | (quint32(quint8(buf.at(5))) << 16)
+                                 | (quint32(quint8(buf.at(6))) << 8)
+                                 | quint32(quint8(buf.at(7)));
+                srcAddr = QHostAddress(ip);
+                portOff = 8;
+            } else if (atyp == 0x04) {
+                if (buf.size() < 22) {
+                    continue;
+                }
+                Q_IPV6ADDR v6;
+                memcpy(v6.c, buf.constData() + 4, 16); // 网络序，直接喂 QHostAddress
+                srcAddr = QHostAddress(v6);
+                portOff = 20;
+            } else {
+                continue; // 非 IPv4/IPv6 回程跳过
             }
-            const quint32 ip = (quint32(quint8(buf.at(4))) << 24)
-                             | (quint32(quint8(buf.at(5))) << 16)
-                             | (quint32(quint8(buf.at(6))) << 8)
-                             | quint32(quint8(buf.at(7)));
-            const quint16 port = quint16((quint8(buf.at(8)) << 8) | quint8(buf.at(9)));
-            const QByteArray payload = buf.mid(10);
-            emit q->datagramReceived(QHostAddress(ip), port, payload);
+            const quint16 port =
+                quint16((quint8(buf.at(portOff)) << 8) | quint8(buf.at(portOff + 1)));
+            const QByteArray payload = buf.mid(portOff + 2);
+            emit q->datagramReceived(srcAddr, port, payload);
         }
     }
 
@@ -621,16 +648,22 @@ void Socks5Udp::sendTo(const QHostAddress &dstIp, quint16 dstPort, const QByteAr
     if (!d->ready || !d->udp) {
         return; // 未就绪前丢弃（DNS/UDP 会重试，无需缓冲）
     }
-    const quint32 ip = dstIp.toIPv4Address();
     QByteArray dg;
     dg.append(char(0x00)); // RSV
     dg.append(char(0x00));
     dg.append(char(0x00)); // FRAG=0（不分片）
-    dg.append(char(0x01)); // ATYP=IPv4
-    dg.append(char((ip >> 24) & 0xFF));
-    dg.append(char((ip >> 16) & 0xFF));
-    dg.append(char((ip >> 8) & 0xFF));
-    dg.append(char(ip & 0xFF));
+    if (dstIp.protocol() == QAbstractSocket::IPv6Protocol) {
+        const Q_IPV6ADDR v6 = dstIp.toIPv6Address(); // 网络序
+        dg.append(char(0x04)); // ATYP=IPv6
+        dg.append(reinterpret_cast<const char *>(v6.c), 16);
+    } else {
+        const quint32 ip = dstIp.toIPv4Address();
+        dg.append(char(0x01)); // ATYP=IPv4
+        dg.append(char((ip >> 24) & 0xFF));
+        dg.append(char((ip >> 16) & 0xFF));
+        dg.append(char((ip >> 8) & 0xFF));
+        dg.append(char(ip & 0xFF));
+    }
     dg.append(be16(dstPort));
     dg.append(payload);
     d->udp->writeDatagram(dg, d->relayAddr, d->relayPort);

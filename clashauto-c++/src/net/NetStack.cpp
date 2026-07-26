@@ -16,8 +16,11 @@
 
 extern "C" {
 #include "lwip/etharp.h"
+#include "lwip/ethip6.h"
 #include "lwip/init.h"
+#include "lwip/ip_addr.h"
 #include "lwip/memp.h"
+#include "lwip/nd6.h"
 #include "lwip/netif.h"
 #include "lwip/stats.h"
 #include "lwip/tcp.h"
@@ -110,7 +113,8 @@ struct UdpFlow {
     quint16 vport = 0;                 // 设备源端口：回程包的目的端口就是它
     bool ready = false;                // associate 完成
     struct Pending {
-        quint32 dstIp = 0;
+        quint32 dstIp = 0;      // v4 目的（v6 会话不用）
+        QByteArray dst6;        // v6 目的（16 字节；v4 会话为空）
         quint16 dport = 0;
         QByteArray payload;
     };
@@ -125,11 +129,14 @@ struct UdpFlow {
 };
 
 // 一台设备的 UDP 上下文（含 DNS）：一堆按源端口索引的流。
+// v4/v6 各自一个会话（key = 源 IP 串，v4/v6 串天然不冲突）：一台双栈设备会有两个 UdpSess。
 struct UdpSess {
     QByteArray mac6;
     QString victimIp;
     NetStack::Nic *nic = nullptr;      // 该设备所在网卡：回程包从这张卡、用这张卡的 MAC 发
     QHash<quint16, UdpFlow *> flows;   // 设备源端口 → 流
+    bool v6 = false;                   // 该会话是 IPv6（回程走 onUdpResponse 的 v6 分支）
+    QByteArray victimAddr;             // 设备地址原始字节：v4=4B / v6=16B（回程封包 dst 用）
 };
 
 // 空闲超时。选值理由：
@@ -209,8 +216,9 @@ struct NetStack::Impl {
     NetStack *owner = nullptr;
     struct tcp_pcb *listener = nullptr;
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的 netif 上下文
-    QHash<QString, DeviceInfo> devices;      // 设备 IP → {mac,user}
-    QHash<QString, UdpSess *> udp;           // 设备 IP → UDP 会话
+    QHash<QString, DeviceInfo> devices;      // 设备 IP（v4 或 v6 串）→ {mac,user}
+    QHash<QString, Nic *> deviceV6Nic;       // 设备 v6 串 → 其所在网卡（removeDeviceV6 摘 nd6 静态项用）
+    QHash<QString, UdpSess *> udp;           // 设备 IP（v4 或 v6 串）→ UDP 会话
     UdpLru udpLruShort;                      // 短档(DNS 类)流的 LRU
     UdpLru udpLruLong;                       // 长档(一般 UDP)流的 LRU
     int udpFlowCount = 0;                    // 全局流数（对上限用，省得遍历）
@@ -341,8 +349,11 @@ err_t lwipNetifInit(struct netif *netif)
 {
     netif->name[0] = 'c';
     netif->name[1] = 't';
-    netif->output = etharp_output;      // IP 出口经 ARP（静态表已填，不会真发 ARP 请求）
-    netif->linkoutput = lwipLinkOutput; // 二层出口
+    netif->output = etharp_output;      // IPv4 出口经 ARP（静态表已填，不会真发 ARP 请求）
+#if LWIP_IPV6
+    netif->output_ip6 = ethip6_output;  // IPv6 出口经 nd6（静态邻居已填，见 nd6.c 补丁）
+#endif
+    netif->linkoutput = lwipLinkOutput; // 二层出口（L3 无关，v4/v6 共用）
     netif->mtu = 1500;
     netif->hwaddr_len = 6;
     if (NetStack::Nic *nic = nicOf(netif))
@@ -689,7 +700,17 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
 
     const QString serverIp = QString::fromLatin1(ipaddr_ntoa(&newpcb->local_ip));
     const quint16 serverPort = newpcb->local_port;
-    const QString victimIp = QString::fromLatin1(ipaddr_ntoa(&newpcb->remote_ip));
+    QString victimIp = QString::fromLatin1(ipaddr_ntoa(&newpcb->remote_ip));
+    // ★ v6 键规范化：lwIP 的 ip6addr_ntoa 输出**大写** hex（"2001:DB8:C0A::239"），而 addDeviceV6
+    //   存进 devices 表的键来自 QHostAddress::toString()（**小写**，"2001:db8:c0a::239"）。不统一
+    //   会导致 userForIp 落空 → v6 连接以空 user 拨 7899（每设备 listener 需 dev-<mac> 认证）→ 认证失败、
+    //   且 /connections 无法按 inboundUser 归属到设备。经 QHostAddress 往返统一成小写规范形（v4 是恒等，
+    //   无副作用）。放在冷路径的 accept 里，开销可忽略。
+    if (victimIp.contains(QLatin1Char(':'))) {
+        const QString canon = QHostAddress(victimIp).toString();
+        if (!canon.isEmpty())
+            victimIp = canon;
+    }
     const QString user = g_impl ? g_impl->userForIp(victimIp) : QString();
     if (g_debug)
         std::fprintf(stderr, "NETSTACK ACCEPT server=%s:%u victim=%s user=%s\n",
@@ -831,6 +852,69 @@ quint16 ipChecksum(const uchar *data, int len)
     return static_cast<quint16>(~sum);
 }
 
+// 手工封 IPv6/UDP/以太 回程包发给设备（v4 版 onUdpResponse 尾段的 v6 对应物）。
+// s->victimAddr 是设备 16 字节 v6 地址，fromIp 是服务器（回包源）。UDP 校验和在 v6 里**强制**，
+// 用 v6 伪首部计算；结果为 0 时按 RFC 2460 置 0xFFFF。
+void sendUdpResponse6(UdpSess *s, quint16 vport, const QHostAddress &fromIp, quint16 fromPort,
+                      const QByteArray &payload)
+{
+    if (!s->nic || !s->nic->ep || s->victimAddr.size() != 16)
+        return;
+    const Q_IPV6ADDR src6 = fromIp.toIPv6Address(); // 服务器地址（网络序）
+    const uchar *dst6 = reinterpret_cast<const uchar *>(s->victimAddr.constData());
+    const int udpLen = 8 + payload.size();
+    const int ipLen = 40 + udpLen;
+
+    QByteArray frame(14 + ipLen, char(0));
+    uchar *b = reinterpret_cast<uchar *>(frame.data());
+    // 以太头
+    std::memcpy(b, s->mac6.constData(), 6);               // dst = 设备
+    std::memcpy(b + 6, s->nic->localMac6.constData(), 6); // src = 本机在该卡上的 MAC
+    b[12] = 0x86;
+    b[13] = 0xDD;
+    // IPv6 头
+    uchar *ip = b + 14;
+    ip[0] = 0x60;
+    ip[4] = (udpLen >> 8) & 0xFF; // payload length
+    ip[5] = udpLen & 0xFF;
+    ip[6] = 17;                   // next header = UDP
+    ip[7] = 64;                   // hop limit
+    std::memcpy(ip + 8, src6.c, 16);
+    std::memcpy(ip + 24, dst6, 16);
+    // UDP 头
+    uchar *u = ip + 40;
+    u[0] = (fromPort >> 8) & 0xFF;
+    u[1] = fromPort & 0xFF;
+    u[2] = (vport >> 8) & 0xFF;
+    u[3] = vport & 0xFF;
+    u[4] = (udpLen >> 8) & 0xFF;
+    u[5] = udpLen & 0xFF;
+    u[6] = 0;
+    u[7] = 0;
+    std::memcpy(u + 8, payload.constData(), payload.size());
+    // 校验和（v6 伪首部：src(16)+dst(16)+upper-len(4)+zero(3)+nexthdr(1=17)）
+    QByteArray pseudo;
+    pseudo.reserve(40 + udpLen);
+    pseudo.append(reinterpret_cast<const char *>(src6.c), 16);
+    pseudo.append(reinterpret_cast<const char *>(dst6), 16);
+    pseudo.append(char((udpLen >> 24) & 0xFF));
+    pseudo.append(char((udpLen >> 16) & 0xFF));
+    pseudo.append(char((udpLen >> 8) & 0xFF));
+    pseudo.append(char(udpLen & 0xFF));
+    pseudo.append(char(0));
+    pseudo.append(char(0));
+    pseudo.append(char(0));
+    pseudo.append(char(17));
+    pseudo.append(reinterpret_cast<const char *>(u), udpLen);
+    quint16 uck = ipChecksum(reinterpret_cast<const uchar *>(pseudo.constData()), pseudo.size());
+    if (uck == 0)
+        uck = 0xFFFF;
+    u[6] = (uck >> 8) & 0xFF;
+    u[7] = uck & 0xFF;
+
+    s->nic->ep->send(frame);
+}
+
 } // namespace
 
 // ———————————————————————————— NetStack ————————————————————————————
@@ -870,16 +954,19 @@ bool NetStack::init(QString *err)
 
     lwip_init();
 
-    // catch-all TCP 监听：绑任意 IP + 端口 0（配合 tcp_in.c 补丁通配任意目的端口）。
-    // 监听是全局的、与网卡无关：哪张卡进来的 SYN 都命中它，accept 里再按设备 IP 查身份。
-    struct tcp_pcb *pcb = tcp_new();
+    // catch-all TCP 监听：绑**双栈任意 IP**（IP_ANY_TYPE）+ 端口 0（配合 tcp_in.c 补丁通配任意目的
+    // 端口）。监听是全局的、与网卡无关：哪张卡进来的 v4/v6 SYN 都命中它，accept 里再按设备 IP 查身份。
+    // ★ 必须用 tcp_new_ip_type(IPADDR_TYPE_ANY) + IP_ANY_TYPE，不能用旧的 tcp_new()+IP_ADDR_ANY：
+    //   后者的 pcb 类型是 IPv4，tcp_in.c 的监听匹配里 v6 SYN 走不到「ANY_TYPE 通配」那条分支，会被
+    //   IP 版本精确匹配挡掉 → v6 SYN 无人 accept。ANY_TYPE 让同一个监听器同时收 v4/v6。
+    struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
     if (!pcb) {
         g_impl = nullptr;
         if (err)
             *err = QStringLiteral("tcp_new 失败");
         return false;
     }
-    tcp_bind(pcb, IP_ADDR_ANY, 0); // 绑任意 IP + 端口 0（配合 tcp_in.c 补丁通配任意目的端口）
+    tcp_bind(pcb, IP_ANY_TYPE, 0);
     d->listener = tcp_listen_with_backlog(pcb, TCP_DEFAULT_LISTEN_BACKLOG);
     if (!d->listener) {
         tcp_close(pcb);
@@ -957,6 +1044,14 @@ bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QStrin
         netif_set_default(&nic->nif); // ip4_route 无匹配时的兜底出口
     netif_set_up(&nic->nif);
     netif_set_link_up(&nic->nif);
+#if LWIP_IPV6
+    // 给这张卡一个 IPv6 链路本地地址（本机 MAC 派生）。它只当我们发 NS/NA 的源地址与 nd6 内部
+    // 一致性用；不配任何全局 v6——被劫持设备的 v6 目的是「任意公网地址」，由 ip6.c 的 accept-all
+    // 补丁接管，回程由 nd6 静态邻居项（addDeviceV6）直连设备 MAC，都不依赖本机有没有全局 v6。
+    // DAD 已在 lwipopts 关（LWIP_IPV6_DUP_DETECT_ATTEMPTS=0）→ 该地址即刻 PREFERRED，无需等待。
+    // 不设 ip6_autoconfig_enabled：LWIP_IPV6_AUTOCONFIG=0 时该字段根本不存在，且我们本就不做 SLAAC。
+    netif_create_ip6_linklocal_address(&nic->nif, 1);
+#endif
     d->nics.insert(ep, nic);
     return true;
 }
@@ -976,6 +1071,13 @@ void NetStack::removeNic(IL2Endpoint *ep)
             d->udp.remove(ip);
             destroyUdpSess(d, s);
         }
+    }
+    // 指向本卡的 v6 静态邻居索引也清掉（netif_remove 已把 nd6 项随 netif 带走；这里只是别让
+    // deviceV6Nic 留下悬垂的 Nic*，否则之后 removeDeviceV6 会 use-after-free）。
+    const QStringList v6keys = d->deviceV6Nic.keys();
+    for (const QString &ip6 : v6keys) {
+        if (d->deviceV6Nic.value(ip6) == nic)
+            d->deviceV6Nic.remove(ip6);
     }
     delete nic;
 }
@@ -1013,6 +1115,48 @@ void NetStack::removeDevice(const QString &ip)
     }
 }
 
+void NetStack::addDeviceV6(IL2Endpoint *from, const QString &ip6, const QByteArray &mac6,
+                           const QString &socksUser)
+{
+    if (ip6.isEmpty() || mac6.size() != 6)
+        return;
+    // 与 v4 共用 devices 表：key 是 v6 地址串，和 v4 的点分串天然不冲突。lwipTcpAccept 里
+    // userForIp(victimIp) 用的就是这张表，v6 连接的 victimIp 是 v6 串，正好命中。
+    d->devices.insert(ip6, DeviceInfo{mac6, socksUser});
+    if (!d->inited)
+        return;
+    Nic *nic = d->nics.value(from);
+    if (!nic)
+        return;
+#if LWIP_IPV6
+    ip6_addr_t a;
+    if (!ip6addr_aton(ip6.toLatin1().constData(), &a))
+        return;
+    // 预置静态邻居：lwIP 回包给设备时直接用其 MAC，把该 v6 目的当 on-link，不发 NS（见 nd6.c 补丁）。
+    // LWIP_IPV6_SCOPES=0 → 无需给地址 assign zone。
+    nd6_add_static_neighbor_entry(&a, &nic->nif,
+                                  reinterpret_cast<const u8_t *>(mac6.constData()));
+    d->deviceV6Nic.insert(ip6, nic);
+#endif
+}
+
+void NetStack::removeDeviceV6(const QString &ip6)
+{
+    d->devices.remove(ip6);
+    if (auto *s = d->udp.take(ip6))
+        destroyUdpSess(d, s);
+    Nic *nic = d->deviceV6Nic.take(ip6);
+#if LWIP_IPV6
+    if (d->inited && nic) {
+        ip6_addr_t a;
+        if (ip6addr_aton(ip6.toLatin1().constData(), &a))
+            nd6_remove_static_neighbor_entry(&a, &nic->nif);
+    }
+#else
+    Q_UNUSED(nic);
+#endif
+}
+
 void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
 {
     if (!d->inited || frame.size() < 14)
@@ -1028,8 +1172,28 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
                      nic->localIp.toLatin1().constData(), int(frame.size()), ethType, proto);
     }
 
-    // 仅处理 IPv4；ARP 等不喂 lwIP（ARP 投毒由 ArpSpoofer 负责，避免 lwIP 误答）。
-    if (ethType != 0x0800)
+    // ARP/NDP 等不喂 lwIP（投毒由 Arp/NdpSpoofer 负责，避免 lwIP 误答）。LanGateway 已在上游把
+    // ARP 与 ICMPv6-NDP(NS/NA/RS/RA) 截走不喂进来；这里只按 ethertype 分 v4/v6 两条数据路径。
+    if (ethType == 0x86DD) { // IPv6
+        if (frame.size() < 14 + 40)
+            return;
+        // NDP 从不带扩展头；这里只看紧邻的 next header。有扩展头的（罕见）会当作「非 UDP」喂给
+        // lwIP，lwIP 处理不了就丢——首个版本可接受（TCP 被 MSS 钳住不分片、UDP 无扩展头）。
+        const quint8 nexthdr = f[14 + 6];
+        if (nexthdr == 17) { // UDP：手工拦截转发（含 DNS）
+            handleUdpFrame6(nic, frame);
+            return;
+        }
+        // TCP/ICMPv6-echo 等交给 lwIP（accept-all v6 补丁把无主单播收到 inp 上）。
+        struct pbuf *p6 = pbuf_alloc(PBUF_RAW, static_cast<u16_t>(frame.size()), PBUF_POOL);
+        if (!p6)
+            return;
+        pbuf_take(p6, frame.constData(), static_cast<u16_t>(frame.size()));
+        if (nic->nif.input(p6, &nic->nif) != ERR_OK)
+            pbuf_free(p6);
+        return;
+    }
+    if (ethType != 0x0800) // 只剩 IPv4
         return;
     if (frame.size() < 14 + 20)
         return;
@@ -1148,7 +1312,105 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
     if (flow->ready) {
         flow->socks->sendTo(QHostAddress(dstIpV4), dport, payload);
     } else if (flow->pending.size() < kMaxUdpPendingPerFlow) {
-        flow->pending.append(UdpFlow::Pending{dstIpV4, dport, payload});
+        flow->pending.append(UdpFlow::Pending{dstIpV4, QByteArray(), dport, payload});
+    }
+}
+
+// ———————————————————————————— UDP 拦截（IPv6）————————————————————————————
+// 与 v4 版 handleUdpFrame 结构对称，复用同一套 UdpFlow/LRU/老化/上限机制；只有地址宽度、封包、
+// 校验和不同。会话按设备 v6 源地址串建（与 v4 会话不冲突）。
+void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
+{
+    const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+    const uchar *ip = f + 14;                 // IPv6 头（40 字节固定）
+    const uchar *udp = ip + 40;
+    if (14 + 40 + 8 > frame.size())
+        return;
+    Q_IPV6ADDR sraw, draw;
+    std::memcpy(sraw.c, ip + 8, 16);          // 设备源地址
+    std::memcpy(draw.c, ip + 24, 16);         // 目的（公网服务器）
+    const QHostAddress srcAddr(sraw);
+    const QHostAddress dstAddr(draw);
+    const QString srcIp = srcAddr.toString();
+    const quint16 sport = (quint16(udp[0]) << 8) | udp[1];
+    const quint16 dport = (quint16(udp[2]) << 8) | udp[3];
+    const int ulen = (quint16(udp[4]) << 8) | udp[5]; // v6 UDP 头的 length 含 8 字节头
+    if (ulen < 8 || 14 + 40 + ulen > frame.size())
+        return;
+    // ★ 深拷贝，理由同 v4 版（frame 是 Linux TPACKET_v3 收环视图，返回即失效）。
+    const QByteArray payload = frame.mid(14 + 40 + 8, ulen - 8);
+
+    const DeviceInfo dev = d->devices.value(srcIp);
+    if (dev.mac6.size() != 6)
+        return;
+
+    UdpSess *s = d->udp.value(srcIp);
+    if (!s) {
+        s = new UdpSess;
+        s->mac6 = dev.mac6;
+        s->victimIp = srcIp;
+        s->nic = nic;
+        s->v6 = true;
+        s->victimAddr = QByteArray(reinterpret_cast<const char *>(sraw.c), 16);
+        d->udp.insert(srcIp, s);
+    }
+
+    UdpFlow *flow = s->flows.value(sport);
+    if (!flow) {
+        reapUdpFlows(d);
+        if (s->flows.size() >= kMaxUdpFlowsPerDevice)
+            evictOldestFlowOfDevice(d, s);
+        while (d->udpFlowCount >= kMaxUdpFlowsTotal
+               && (d->udpLruShort.tail || d->udpLruLong.tail))
+            evictGlobalOldestFlow(d);
+
+        flow = new UdpFlow;
+        flow->sess = s;
+        flow->vport = sport;
+        flow->idleMs = isShortLivedUdpPort(dport) ? kUdpDnsIdleMs : kUdpIdleMs;
+        // v6 的来源校验：peers 用的是 QSet<quint32>（v4 地址），装不下 v6。直接退化成全锥
+        //（不校验来源），记录在案的取舍——v6 UDP（QUIC/DNS64 等）以此为代价换实现简单。
+        flow->coneOpen = true;
+        flow->socks = new Socks5Udp(this);
+        s->flows.insert(sport, flow);
+        d->udpFlowCount++;
+
+        UdpFlow *nf = flow;
+        connect(nf->socks, &Socks5Udp::ready, this, [nf]() {
+            nf->ready = true;
+            for (const UdpFlow::Pending &pk : std::as_const(nf->pending)) {
+                Q_IPV6ADDR d6;
+                std::memcpy(d6.c, pk.dst6.constData(), 16);
+                nf->socks->sendTo(QHostAddress(d6), pk.dport, pk.payload);
+            }
+            nf->pending.clear();
+        });
+        connect(nf->socks, &Socks5Udp::datagramReceived, this,
+                [this, srcIp, sport](const QHostAddress &fromIp, quint16 fromPort,
+                                     const QByteArray &data) {
+                    onUdpResponse(srcIp, sport, fromIp, fromPort, data);
+                });
+        connect(nf->socks, &Socks5Udp::failed, this, [this, nf](const QString &) {
+            destroyUdpFlow(d, nf);
+        });
+        connect(nf->socks, &Socks5Udp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
+
+        nf->socks->associate(d->socksPort, dev.socksUser);
+    }
+
+    if (!isShortLivedUdpPort(dport))
+        flow->idleMs = kUdpIdleMs;
+    flow->lastUsed = monoMs();
+    lruPushFront(flow->idleMs == kUdpDnsIdleMs ? &d->udpLruShort : &d->udpLruLong, flow);
+
+    if (flow->ready) {
+        flow->socks->sendTo(dstAddr, dport, payload);
+    } else if (flow->pending.size() < kMaxUdpPendingPerFlow) {
+        UdpFlow::Pending pk;
+        pk.dport = dport;
+        pk.payload = payload;
+        pk.dst6 = QByteArray(reinterpret_cast<const char *>(draw.c), 16);
+        flow->pending.append(pk);
     }
 }
 
@@ -1162,9 +1424,16 @@ void NetStack::onUdpResponse(const QString &victimIp, quint16 vport, const QHost
     if (!f)
         return; // 流已被老化/淘汰：迟到的回包直接丢
     // 来源校验只比对 IP、不比对端口：保留老代码「没见过的来源就丢」的严格度（地址限制型 NAT），
-    // 又不至于误杀 TFTP/部分 STUN 那种「换个端口回你」的服务器。
+    // 又不至于误杀 TFTP/部分 STUN 那种「换个端口回你」的服务器。v6 会话 coneOpen 恒真，跳过。
     if (!f->coneOpen && !f->peers.contains(fromIp.toIPv4Address()))
         return;
+    if (s->v6) {
+        // 下行续命（同 v4 分支）：QUIC 大文件下载这类上行稀疏 ACK 的流别被误判空闲。
+        f->lastUsed = monoMs();
+        lruTouch(f);
+        sendUdpResponse6(s, vport, fromIp, fromPort, payload);
+        return;
+    }
     // 下行也续命：QUIC 大文件下载这类「上行只有稀疏 ACK」的流，光靠上行续命可能被误判为空闲。
     f->lastUsed = monoMs();
     lruTouch(f);

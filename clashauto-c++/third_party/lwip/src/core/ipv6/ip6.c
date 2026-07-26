@@ -679,6 +679,18 @@ netif_found:
     goto ip6_input_cleanup;
   }
 
+  /* Coast 透明网关补丁（tun2socks 式 accept-all，IPv6 版，与 ip4.c 的补丁一一对应）：
+     被劫持设备把发往任意公网 v6 地址的包发到我们（其邻居缓存的默认路由被 NdpSpoofer 投毒指向本机
+     MAC），这些包的目的 v6 不属于本机任何 netif，lwIP 默认会当「不是给我们的」丢弃/转发。此处把
+     「无匹配 netif 的**单播**包」收到输入 netif 上，使 lwIP 为其终结 TCP/UDP 连接（再由上层桥接到
+     mihomo）。仅当 lwipopts 打开 LWIP_ACCEPT_ALL_UNICAST 时生效；组播照旧按上面的规则处理（不抢），
+     "::"（DAD）源包已在上面被单独丢弃，走不到这里。 */
+#if LWIP_ACCEPT_ALL_UNICAST
+  if (netif == NULL && !ip6_addr_ismulticast(ip6_current_dest_addr())) {
+    netif = inp;
+  }
+#endif /* LWIP_ACCEPT_ALL_UNICAST */
+
   /* packet not for us? */
   if (netif == NULL) {
     /* packet not for us, route or discard */
