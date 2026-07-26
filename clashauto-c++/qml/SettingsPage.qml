@@ -574,9 +574,10 @@ Item {
                                     ToolTip.text: qsTr("填了才是真正的全自动提交。建议只勾 public_repo 权限；"
                                                        + "令牌明文保存在本机设置里。")
                                 }
+                                // 这一片的 PillButton 都不设 implicitWidth：让它按文本自适应。
+                                // 定宽的话长译文会被 elide 成省略号（见 PillButton 的注释）。
                                 PillButton {
                                     text: qsTr("保存")
-                                    implicitWidth: 84
                                     onClicked: { issues.setToken(issueTokenField.text); issueTokenField.text = "" }
                                 } }
                             CardDivider {}
@@ -588,20 +589,17 @@ Item {
                                 }
                                 PillButton {
                                     text: qsTr("预览")
-                                    implicitWidth: 84
                                     enabled: issues.pendingCount > 0
                                     onClicked: { issuePreview.text = issues.preview(); issuePreview.open() }
                                 }
                                 PillButton {
                                     text: issues.submitting ? qsTr("提交中…") : qsTr("立即上报")
                                     primary: true
-                                    implicitWidth: 96
                                     enabled: issues.pendingCount > 0 && !issues.submitting
                                     onClicked: issues.submit()
                                 }
                                 PillButton {
                                     text: qsTr("忽略")
-                                    implicitWidth: 84
                                     enabled: issues.pendingCount > 0
                                     onClicked: issues.discard()
                                 } }

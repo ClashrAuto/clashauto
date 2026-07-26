@@ -227,13 +227,14 @@ ApplicationWindow {
             // 已装但被锁成「仅管理员」时才出现：提权改 AdminOnly=0 + 重启驱动，不用重装。
             Rectangle {
                 visible: npcap.restricted
-                Layout.preferredWidth: 96
+                Layout.preferredWidth: Math.max(96, fixTxt.implicitWidth + 24)
                 Layout.preferredHeight: 30
                 radius: 5
                 enabled: !npcap.busy
                 opacity: enabled ? 1.0 : 0.5
                 color: fixHover.hovered && enabled ? Theme.accentStrong : Theme.accent
                 Text {
+                    id: fixTxt
                     anchors.centerIn: parent
                     text: npcap.busy ? qsTr("处理中…") : qsTr("修复权限")
                     font.pixelSize: 13
@@ -250,13 +251,15 @@ ApplicationWindow {
             }
 
             Rectangle {
-                Layout.preferredWidth: 110
+                // 同上：德文 "Jetzt installieren" 比 110px 还宽，定宽会溢出。
+                Layout.preferredWidth: Math.max(110, instTxt.implicitWidth + 24)
                 Layout.preferredHeight: 30
                 radius: 5
                 enabled: !npcap.busy && !npcap.installed
                 opacity: enabled ? 1.0 : 0.5
                 color: instHover.hovered && enabled ? Theme.accentStrong : Theme.accent
                 Text {
+                    id: instTxt
                     anchors.centerIn: parent
                     text: npcap.installed ? qsTr("已安装")
                                           : npcap.busy ? qsTr("处理中…") : qsTr("立即安装")

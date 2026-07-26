@@ -133,13 +133,16 @@ Item {
                           : qsTr("未安装 Npcap 驱动 —— 「代理网络」开关不会真正接管设备流量。")
                 }
                 Rectangle {
-                    Layout.preferredWidth: 96
+                    // 随文本伸缩：「安装 Npcap」/「修复权限」的英德俄译文比中文长不少，
+                    // 定宽会把字撑到按钮外（自绘 Rectangle，没有 Button 的 elide 兜底）。
+                    Layout.preferredWidth: Math.max(96, npcapBtnTxt.implicitWidth + 20)
                     Layout.preferredHeight: 26
                     radius: 4
                     enabled: !npcap.busy
                     opacity: enabled ? 1.0 : 0.5
                     color: npcapBtnHover.hovered && enabled ? Theme.accentStrong : Theme.accent
                     Text {
+                        id: npcapBtnTxt
                         anchors.centerIn: parent
                         text: npcap.busy ? qsTr("处理中…")
                                          : npcap.restricted ? qsTr("修复权限") : qsTr("安装 Npcap")

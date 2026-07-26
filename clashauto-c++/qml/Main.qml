@@ -459,25 +459,28 @@ ApplicationWindow {
                            + "上报到 %2 的 issue 区帮助修复吗？可在设置里随时关闭或先预览内容。")
                       .arg(issues.pendingCount).arg(issues.repo)
             }
+            // 两个按钮都按文本实际宽度伸缩：中文「开启上报」四个字，英文 "Enable reporting"、
+            // 德文 "Melden aktivieren" 长得多，定宽会直接把字撑出按钮外（这里是自绘 Rectangle，
+            // 没有 Button 的 elide 兜底）。
             Rectangle {
-                Layout.preferredWidth: 76
+                Layout.preferredWidth: Math.max(64, consentNoTxt.implicitWidth + 20)
                 Layout.preferredHeight: 26
                 radius: 4
                 color: Theme.dark ? "#252525" : "#eeeeee"
                 border.width: 1
                 border.color: Theme.divider
-                Text { anchors.centerIn: parent; text: qsTr("不用了"); font.pixelSize: 11
-                       color: Theme.textSecondary }
+                Text { id: consentNoTxt; anchors.centerIn: parent; text: qsTr("不用了")
+                       font.pixelSize: 11; color: Theme.textSecondary }
                 HoverHandler { cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: { issues.markAsked(); issueConsent.dismissed = true } }
             }
             Rectangle {
-                Layout.preferredWidth: 76
+                Layout.preferredWidth: Math.max(64, consentOkTxt.implicitWidth + 20)
                 Layout.preferredHeight: 26
                 radius: 4
                 color: consentOkHover.hovered ? Theme.accentStrong : Theme.accent
-                Text { anchors.centerIn: parent; text: qsTr("开启上报"); font.pixelSize: 11
-                       color: "#ffffff" }
+                Text { id: consentOkTxt; anchors.centerIn: parent; text: qsTr("开启上报")
+                       font.pixelSize: 11; color: "#ffffff" }
                 HoverHandler { id: consentOkHover; cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: { issues.enabled = true; issues.markAsked() } }
             }
