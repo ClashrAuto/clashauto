@@ -175,9 +175,18 @@ public:
             return false;
         }
 
+        // ★ 非混杂模式打开（promisc=0）。这是「开代理后本机+设备一起断网」的根因修复：
+        //   混杂模式下网卡把**所有**帧上交，Windows 自己的网络栈也会看到我们**单播发给
+        //   设备/网关的 ARP 欺骗应答**（sha=本机MAC, spa=网关IP），于是把本机 ARP 缓存也更新成
+        //   「网关 → 本机MAC」——本机自投毒，出网流量指回自己 → 本机断网；mihomo 替设备转发
+        //   也走同一条已中毒的默认路由 → 被代理设备一起断。两台物理机确定性复现，正是这个。
+        //   而这套「先投毒、再抓设备发来的帧」的透明网关**根本不需要混杂**：设备被投毒后，
+        //   它发往「网关」的帧目的 MAC 就是本机 MAC，本机网卡与 Npcap 都会正常收到；广播的
+        //   ARP 请求也照收。开混杂只是白抓无用帧、还顺手坑了本机。
+        //   应急开关：COAST_GATEWAY_PROMISC=1 可强制回到混杂模式（仅调试/排查用）。
+        const int promisc = qEnvironmentVariableIsSet("COAST_GATEWAY_PROMISC") ? 1 : 0;
         char errbuf[PCAP_ERRBUF_SIZE] = {0};
-        m_pcap = m_api->open_live(adapter.npfName.constData(), 65536, 1 /*promisc*/, 1 /*ms*/,
-                                  errbuf);
+        m_pcap = m_api->open_live(adapter.npfName.constData(), 65536, promisc, 1 /*ms*/, errbuf);
         if (!m_pcap) {
             // errbuf 里是 Windows 本地化的系统错误文案（zh-CN 下是 GBK），fromLatin1 会拧成乱码。
             const QString raw = QString::fromLocal8Bit(errbuf);
