@@ -29,6 +29,10 @@ Rectangle {
     signal clicked()
     signal toggleProxy()
 
+    // 行窄到放不下速率两列时（窗口拖到很小），把它收起来只留头像/名字/开关——右侧那几列是
+    // 定宽的，不收就只能溢出到行外面去。名字列 fillWidth，剩多少用多少。
+    readonly property bool compact: width < 250
+
     // 60 而不是原来的 52：多了「最后访问」一行。**所有行等高**（有没有那行都一样），
     // 高度随内容变的话，列表每来一条新连接就会自己长高一格，滚动位置跟着跳。
     height: 60
@@ -150,6 +154,7 @@ Rectangle {
             // 变窄（"↓ 9.77 KB/s" ↔ "↓ 1.20 MB/s"），列宽跟着变整行就在抖。
             // 闲着的时候只是淡下去（**位置和占位都不变**），不再像以前那样整列收起来。
             ColumnLayout {
+                visible: !root.compact
                 opacity: root.rateDown > 0 || root.rateUp > 0 ? 1.0 : 0.45
                 Behavior on opacity { NumberAnimation { duration: 120 } }
                 Layout.alignment: Qt.AlignVCenter

@@ -14,23 +14,51 @@ Item {
     function syncActive() { devices.setActive(page.visible || detailWindow.visible); }
     onVisibleChanged: page.syncActive()
 
+    // —— 概览条的自适应：窄了就按优先级把次要项收起来（收起顺序：今日 → 网关 → 提醒文字 → 导出）——
+    // 断点**不写死像素**，拿各项自己的 implicitWidth 现算：同一句话在 12 种语言里宽度能差一倍
+    // （德语 "Neues-Gerät-Hinweis" 比中文长一大截），写死的数字必然在某个语言上翻车——
+    // 900px 窗口下英文的「Gateway 192.168.20.1」就正好被切掉，中文却看着好好的。
+    // 读的都是**叶子 Text / 常显 Row** 的 implicitWidth：它们不随自己的 visible 变化，
+    // 所以不会形成「宽度 → 显隐 → 宽度」的绑定环。
+    readonly property real ovSpacing: 16
+    readonly property real ovAvail: width - 20 // 减掉 ColumnLayout 的左右内距
+    readonly property real ovBase: ovTitle.implicitWidth + ovOnline.implicitWidth
+                                   + ovProxied.implicitWidth + 34 /* 提醒开关本体 */
+                                   + ovSpacing * 3 + 5
+    readonly property real ovNeedExport: ovBase + ovSpacing + ovExport.implicitWidth
+    readonly property real ovNeedAlert: ovNeedExport + 5 + ovAlertTxt.implicitWidth
+    readonly property real ovNeedGateway: ovNeedAlert + ovSpacing + ovGateway.implicitWidth
+    readonly property real ovNeedToday: ovNeedGateway + ovSpacing + ovToday.implicitWidth
+    readonly property bool showExport: ovAvail >= ovNeedExport
+    readonly property bool showAlertLabel: ovAvail >= ovNeedAlert
+    readonly property bool showGateway: ovAvail >= ovNeedGateway
+    readonly property bool showToday: ovAvail >= ovNeedToday
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 10
         spacing: 10
 
         // —————————————————— 概览条 ——————————————————
+        // **必须显式 Layout.minimumWidth: 0**。RowLayout 里 fillWidth 为 false 的子项是「定宽」的，
+        // 它们的宽度会原样计进这个 RowLayout 的最小宽度；而外层 ColumnLayout 布局子项时是按
+        // max(自身宽度, 子项最小宽度) 给宽的——一旦概览条的最小宽超过页面宽度，整列（包括
+        // fillWidth 的设备列表）就被撑到那个宽度，列表右半边连同代理开关一起被挤出窗口。
+        // 给 0 之后：页面再窄，列表也只跟随内容区宽度；概览条自己按上面的断点收起次要项。
         RowLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             spacing: 16
-            Text { text: qsTr("设备"); font.pixelSize: 18; color: Theme.textPrimary }
+            Text { id: ovTitle; text: qsTr("设备"); font.pixelSize: 18; color: Theme.textPrimary }
             Row {
+                id: ovOnline
                 spacing: 4
                 Text { text: qsTr("在线"); font.pixelSize: 12; color: Theme.textMuted }
                 Text { text: devices.onlineCount + "/" + devices.deviceCount
                        font.pixelSize: 12; color: Theme.textSecondary }
             }
             Row {
+                id: ovProxied
                 spacing: 4
                 Text { text: qsTr("代理中"); font.pixelSize: 12; color: Theme.textMuted }
                 Text { text: devices.proxiedCount; font.pixelSize: 12; color: Theme.accent }
@@ -39,7 +67,9 @@ Item {
             // （而且更完整——它是核心的全局速率，不受「能不能归属到某台设备」影响）；这里更该回答
             // 的是「今天这个网络一共用了多少」。（单台设备的用量在详情窗里，行里不再显示。）
             Row {
+                id: ovToday
                 spacing: 8
+                visible: page.showToday
                 Text { text: qsTr("今日"); font.pixelSize: 12; color: Theme.textMuted
                        anchors.verticalCenter: parent.verticalCenter }
                 Text { text: "↓ " + Theme.fmtBytes(devices.totalTodayDown)
@@ -51,7 +81,9 @@ Item {
             // 新设备提醒（蹭网检测）开关
             Row {
                 spacing: 5
-                Text { text: qsTr("新设备提醒"); font.pixelSize: 11; color: Theme.textMuted
+                Text { id: ovAlertTxt
+                       text: qsTr("新设备提醒"); font.pixelSize: 11; color: Theme.textMuted
+                       visible: page.showAlertLabel
                        anchors.verticalCenter: parent.verticalCenter }
                 Rectangle {
                     width: 34; height: 18; radius: 9
@@ -70,12 +102,16 @@ Item {
             }
             // 导出 CSV
             Text {
+                id: ovExport
                 text: qsTr("导出")
+                visible: page.showExport
                 font.pixelSize: 11; color: Theme.accent
                 HoverHandler { cursorShape: Qt.PointingHandCursor }
                 TapHandler { onTapped: devices.exportCsv() }
             }
-            Text { text: qsTr("网关 ") + (devices.gatewayIp || "-")
+            Text { id: ovGateway
+                   text: qsTr("网关 ") + (devices.gatewayIp || "-")
+                   visible: page.showGateway
                    font.pixelSize: 11; color: Theme.textMuted }
         }
 
@@ -87,6 +123,7 @@ Item {
         //     拒绝访问」的实际原因）→ 一键提权修复，不用重装也不用每次以管理员身份启动。
         Rectangle {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0 // 同概览条：定宽的「安装 Npcap」按钮不能反过来撑宽整页
             visible: npcap.supported && (!npcap.installed || npcap.restricted)
             radius: 5
             color: Qt.rgba(198 / 255, 154 / 255, 84 / 255, 0.15)
@@ -142,10 +179,12 @@ Item {
         // —————————————————— 搜索 / 仅在线 / 重扫 ——————————————————
         RowLayout {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0 // 同上：两个 28px 方钮不能把整页顶宽
             spacing: 6
             TextField {
                 id: search
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 Layout.preferredHeight: 28
                 placeholderText: qsTr("搜索设备 / IP / 厂商")
                 color: Theme.textPrimary

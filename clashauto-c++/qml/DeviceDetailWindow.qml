@@ -320,7 +320,9 @@ ApplicationWindow {
                         title: qsTr("下载")
                         lineColor: "#5bb44b"
                     }
-                    RowLayout {
+                    // 会话/今日/累计三块用 Flow 而不是 RowLayout：这三块是定宽的（内容多宽就多宽），
+                    // 放 RowLayout 里窗口一窄就整排溢出到卡片外；Flow 放不下会自动折行。
+                    Flow {
                         Layout.fillWidth: true
                         spacing: 16
                         Column {
@@ -341,7 +343,6 @@ ApplicationWindow {
                                          + "  ↑" + Theme.fmtBytes(win.dev.totalUp)
                                    font.pixelSize: 12; color: Theme.textSecondary }
                         }
-                        Item { Layout.fillWidth: true }
                     }
                 }
             }
