@@ -271,16 +271,17 @@ void NdpSpoofer::healOne(const QByteArray &victimMac6)
 {
     if (!m_endpoint)
         return;
-    // 把设备的网关表项从「本机 MAC」还原回「真实路由器 MAC」——**尽力而为**的一帧。
-    // ★ 诚实说明 NDP 的固有限制（实测于 Linux victim）：设备**只认「对自己主动发出的 NS 的应答」**
-    //   那条 NA（这正是投毒能落地的原因——coast 抢答设备的 NS）。对设备**没主动问**却发来的 NA，无论
-    //   unsolicited/solicited、override、单播/组播、eth-src 用谁，Linux 一律**不改**其网关邻居表项
-    //   （这也反过来让投毒一旦坐实就很稳——真路由器的非请求 NA 同样撼不动它）。所以「主动 heal」在
-    //   Linux 上无法强制生效。真正可靠的还原是：**coast 一停止投毒（disableAll 停表），真实网络的
-    //   路由器会用它周期的 RA + 设备表项老化后的重新解析把设备收回**（与所有 ARP/NDP 中间人释放目标
-    //   的方式一致）。本帧对**非 Linux 设备（Win/mac/iOS，通常不那么严格）**与 **STALE 表项**仍能即时
-    //   生效，故保留：单播 solicited+override 到设备链路本地地址（eth-src 用本机真实 MAC、TLLA=真路由器
-    //   MAC），未记到设备 LL 时退回组播 override。
+    // 把设备的网关表项从「本机 MAC」还原回「真实路由器 MAC」——发一条**非请求 override NA**
+    //（target=路由器 LL、TLLA=真实路由器 MAC、O 置位）。这是 v4 侧无偿 ARP heal 的 v6 对应物：带
+    //   Override 的 NA 会被内核当权威更新，直接把邻居缓存那条改回真路由器 MAC，**即使表项当前是
+    //   REACHABLE**。真机实测（真路由器 + REACHABLE 投毒态）两大客户端族都**即时翻回、无死 MAC 窗口**：
+    //     · macOS（BSD 邻居栈）：单播 solicited+override 到设备 LL → 直接 REACHABLE，实测 +0.24s 翻回；
+    //     · Linux 6.8（Android 同内核）：组播(L2 单播 victim) override(S=0) → 先落 STALE（下一包即用真
+    //       路由器 MAC、零中断），设备一用就 DELAY→REACHABLE，实测 +0.20s 翻回。
+    //   ★ 早先「Linux 撼不动 REACHABLE、heal 只能尽力而为」的结论是**合成台架的假象**（假路由器无真
+    //   响应者 + 混杂/内核本地直投等坑），非内核铁律——真路由器 + 真客户端上不成立。
+    //   记到设备 LL（抢答过它 NS）时优先单播 solicited+override（最强、直接 REACHABLE）；否则退回组播
+    //   (L2 单播 victim) override。eth-src 用本机真实 MAC（NDP 只按载荷校验，与 eth 源无关）。
     const QByteArray ll = m_victimLL.value(victimMac6);
     const QByteArray na = (ll.size() == 16)
             ? buildNa(victimMac6, m_localMac, m_routerLL, ll, m_routerLL, m_routerMac,
