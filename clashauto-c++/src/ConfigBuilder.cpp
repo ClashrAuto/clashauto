@@ -62,6 +62,7 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = applyCustomRules(yaml);
     yaml = applyDevicePolicies(yaml);
     yaml = applySniffer(yaml);
+    yaml = applyProfilePersistence(yaml);
 
     const QString fullPath = QDir(m_config.configDir).filePath("full.yaml");
     writeText(fullPath, yaml);
@@ -560,6 +561,34 @@ QString ConfigBuilder::applySniffer(QString yaml) const
         QStringLiteral("(?m)^sniffer:\\n(?:(?:  |\\t)[^\\n]*(?:\\n|$))+"));
     if (snifferBlock.match(yaml).hasMatch()) {
         yaml.replace(snifferBlock, block);
+    } else {
+        if (!yaml.endsWith('\n')) {
+            yaml.append('\n');
+        }
+        yaml.append('\n').append(block);
+    }
+    return yaml;
+}
+
+// 顶层 profile:——让核心把「fake-ip↔域名」映射和「各选择组当前选中节点」持久化到工作目录 cache
+//（-d userDir 下的 cache），扛住 coast 每次改设置/规则/订阅/设备开关触发的热重载(PUT /configs)：
+//   · 无 store-fake-ip：重载即清空 fake-ip 表 → 设备 DNS 缓存里的旧 fake-ip(198.18.x) 成孤儿 → 核心
+//     认不出 → 解析不出目标、也无法按域名分流 → 「找不到 ip 无法走代理」（真机复现：重载前该 fake-ip
+//     访问 200，重载后同一个 fake-ip 变 000，要等设备 DNS 缓存过期重解析才恢复）。
+//   · 无 store-selected：重载把每个选择组重置回配置默认 → 用户手选的节点被冲掉（「设备/本机不走我
+//     设的节点」）。
+// 生成在代码里而非放进 default.yaml 种子：种子首次复制到用户目录后再改无效（同 sniffer/listeners），
+// 所以每次生成 full.yaml 都整块重写一次。种子里那个 cfw-conn-break-strategy.profile 是 2 空格缩进的
+// 嵌套键，与这里的顶层 profile: 不是一回事，^profile: 锚点不会误匹配它。
+QString ConfigBuilder::applyProfilePersistence(QString yaml) const
+{
+    QString block = "profile:\n";
+    block += "  store-selected: true\n";
+    block += "  store-fake-ip: true\n";
+    const QRegularExpression profileBlock(
+        QStringLiteral("(?m)^profile:\\n(?:(?:  |\\t)[^\\n]*(?:\\n|$))+"));
+    if (profileBlock.match(yaml).hasMatch()) {
+        yaml.replace(profileBlock, block);
     } else {
         if (!yaml.endsWith('\n')) {
             yaml.append('\n');

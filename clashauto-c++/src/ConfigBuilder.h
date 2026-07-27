@@ -39,6 +39,7 @@ private:
     QString applyCustomRules(QString yaml) const;
     QString applyDevicePolicies(QString yaml) const; // 设备台账(coast.db device 表) → 网关 SOCKS listener + IN-USER 规则
     QString applySniffer(QString yaml) const;        // 顶层 sniffer: 块——从 TLS SNI/HTTP Host 还原域名
+    QString applyProfilePersistence(QString yaml) const; // 顶层 profile: 块——持久化 fake-ip 映射与节点选择，扛住热重载
     QString addToFirstGroup(QString yaml, const QStringList &names) const;
     QString replaceTopLevelProxies(QString yaml, const QString &proxyBlock) const;
     QString replaceProxyListAt(QString yaml, qsizetype proxiesKey, const QStringList &values) const;
