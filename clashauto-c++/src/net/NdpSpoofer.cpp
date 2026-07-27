@@ -35,6 +35,22 @@ static constexpr quint8 kNaSolicited = 0x40;
 static constexpr quint8 kNaOverride = 0x20;
 
 namespace {
+// 6 字节 MAC → "aa:bb:cc:dd:ee:ff"（macToBytes 的逆；RA 学习把解析出的 MAC 交回给上层用串表示，
+// 与 NicSpec/configure 的既有约定一致）。长度不对返回空串。
+QString macToStr(const QByteArray &mac)
+{
+    if (mac.size() != 6)
+        return {};
+    QString out;
+    out.reserve(17);
+    for (int i = 0; i < 6; ++i) {
+        if (i)
+            out += QLatin1Char(':');
+        out += QString("%1").arg(quint8(mac[i]), 2, 16, QLatin1Char('0'));
+    }
+    return out;
+}
+
 // 16 位反码校验和（与 NetStack::ipChecksum 同实现）。
 quint16 onesComplement(const uchar *data, int len)
 {
@@ -84,9 +100,22 @@ void NdpSpoofer::configure(const QString &localMac, const QString &routerLinkLoc
     m_localMac = macToBytes(localMac);
     m_routerLL = ip6ToBytes(routerLinkLocal);
     m_routerMac = macToBytes(routerMac);
-    if (!configured())
-        qWarning() << "NdpSpoofer: 配置无效，v6 投毒将 no-op" << localMac << routerLinkLocal
-                   << routerMac;
+    // ★ 只在**状态翻转**时说一次。configure 被每轮扫描调用（真机实测每 ~5s、每网卡一次），
+    //   原来无条件 qWarning 让一条 70 秒的日志里刷了 30 遍同样的话，把真正有信息的行淹掉。
+    //   措辞也一并改：绝大多数情况根本不是「配置无效」，而是**本机没有 v6 默认路由**
+    //   （典型：net.ipv6.conf.<if>.accept_ra=0，真机实证过），这时链路上可能照样有 v6 路由器 ——
+    //   所以现在会先等 RA 学（见 LanGateway 的 learnRouterFromRa），学到就自动转好。
+    const bool ok = configured();
+    if (ok != m_lastConfigOk || !m_configLogged) {
+        m_lastConfigOk = ok;
+        m_configLogged = true;
+        if (ok)
+            qInfo() << "NdpSpoofer: v6 拓扑就绪，投毒启用" << routerLinkLocal << routerMac;
+        else
+            qWarning() << "NdpSpoofer: 无可用 v6 路由器，该卡 v6 劫持停用（等待从线上 RA 学到）"
+                       << "local=" << localMac << "routerLL=" << routerLinkLocal
+                       << "routerMac=" << routerMac;
+    }
 }
 
 void NdpSpoofer::startSpoof(const QString &victimMac)
@@ -237,6 +266,80 @@ bool NdpSpoofer::isRouterAdvertOrNa(const QByteArray &frame)
         return false;
     const quint8 t = f[kOffIcmp6Type];
     return t == kIcmp6TypeRa || t == kIcmp6TypeNa;
+}
+
+bool NdpSpoofer::isRouterAdvert(const QByteArray &frame)
+{
+    if (frame.size() < kOffIcmp6Type + 1)
+        return false;
+    const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+    return f[kOffEthType] == 0x86 && f[kOffEthType + 1] == 0xDD
+        && f[kOffIp6NextHdr] == kNextHdrIcmp6 && f[kOffIcmp6Type] == kIcmp6TypeRa;
+}
+
+bool NdpSpoofer::parseRouterAdvert(const QByteArray &frame, QString *routerLL, QString *routerMac,
+                                   QByteArray *prefixNet, int *prefixLen)
+{
+    if (prefixLen)
+        *prefixLen = -1;
+    if (!isRouterAdvert(frame))
+        return false;
+    // RA 固定部分：type(1) code(1) cksum(2) curHopLimit(1) flags(1) routerLifetime(2)
+    //              reachableTime(4) retransTimer(4) = 16 字节，之后是选项。
+    static constexpr int kRaFixedLen = 16;
+    static constexpr int kOffIp6HopLimit = kEthLen + 7;
+    static constexpr int kOffRaLifetime = kOffIcmp6Type + 6;
+    if (frame.size() < kOffIcmp6Type + kRaFixedLen)
+        return false;
+    const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+
+    // NDP 强制 hop limit 255：跨网段伪造的 RA 到这里必然 <255，直接拒（RFC 4861 §6.1.2）。
+    if (f[kOffIp6HopLimit] != 255)
+        return false;
+    // Router Lifetime==0 = 「我不是默认路由器」（只来发前缀/MTU 信息）。拿它当投毒目标会把设备的
+    // 默认路由指向一台根本不转发的机器 —— 比不投毒还糟。
+    const quint16 lifetime = (quint16(f[kOffRaLifetime]) << 8) | f[kOffRaLifetime + 1];
+    if (lifetime == 0)
+        return false;
+    // 源地址必须是链路本地：投毒 NA 的 target 就是它，写全局地址设备不会拿它当默认路由器。
+    if (f[kOffIp6Src] != 0xFE || (f[kOffIp6Src + 1] & 0xC0) != 0x80)
+        return false;
+
+    if (routerLL) {
+        Q_IPV6ADDR raw;
+        std::memcpy(raw.c, f + kOffIp6Src, 16);
+        *routerLL = QHostAddress(raw).toString();
+    }
+    // 默认路由器 MAC：先回落到以太源 MAC（RA 由路由器自己发出，源 MAC 就是它），
+    // 若带 SLLA 选项则以选项为准（更权威：跨网桥/中继时以太源 MAC 可能被改写）。
+    if (routerMac)
+        *routerMac = macToStr(QByteArray(reinterpret_cast<const char *>(f) + 6, 6));
+
+    // 走选项链：每项 type(1) len(1，单位 8 字节) + 数据。len==0 非法（会死循环），必须拒。
+    int p = kOffIcmp6Type + kRaFixedLen;
+    while (p + 2 <= frame.size()) {
+        const int type = f[p];
+        const int len8 = f[p + 1];
+        if (len8 == 0)
+            break;
+        const int optLen = len8 * 8;
+        if (p + optLen > frame.size())
+            break; // 选项越界：后面的不可信，用已解析到的收工
+        if (type == 1 && optLen >= 8 && routerMac) { // Source Link-Layer Address
+            *routerMac = macToStr(QByteArray(reinterpret_cast<const char *>(f) + p + 2, 6));
+        } else if (type == 3 && optLen >= 32 && prefixNet && prefixLen) { // Prefix Information
+            const int plen = f[p + 2];
+            const quint8 flags = f[p + 3];
+            // 只取 on-link(L) 位的前缀：它才代表「这个前缀内的地址在本链路上直连可达」，
+            // 也正是 LAN 内 v6 直连旁路要的判据。只有 A(autonomous) 没有 L 的前缀不算。
+            if ((flags & 0x80) && plen > 0 && plen <= 128) {
+                *prefixNet = QByteArray(reinterpret_cast<const char *>(f) + p + 16, 16);
+                *prefixLen = plen;
+            }
+        }
+        p += optLen;
+    }
+    return true;
 }
 
 QStringList NdpSpoofer::victims() const

@@ -197,6 +197,28 @@ struct GwNic {
     quint32 localIp4 = 0, netMask4 = 0, gatewayIp4 = 0;
     QByteArray prefix6Net;     // v6 前缀网络部分（16 字节；空=未知，则不做 v6 同网段旁路）
     int prefix6Len = -1;       // v6 前缀长度（bit 数；<0=未知）
+    // ★ 从线上 RA 学到的 v6 拓扑，**必须与 spec 分开存**：configureLocal 每轮都 `n->spec = spec`
+    //   （扫描每 ~5s 一轮），学到的值若写进 spec 会被下一轮原样抹掉。取用时以 spec 为先、这里兜底
+    //   （见 effectiveRouterLL6/Mac6）：扫描能拿到就用扫描的，拿不到（本机 accept_ra=0 等）才用
+    //   从 RA 学的 —— 修的正是「本机没配上 v6 就以为链路上没有 v6」这个错误判据。
+    QString learnedRouterLL6;
+    QString learnedRouterMac6;
+    QByteArray learnedPrefix6Net;
+    int learnedPrefix6Len = -1;
+    // v6 拓扑的**唯一取用口径**：扫描（本机路由表）优先，缺则用从 RA 学到的。
+    // routerMac6 再缺则回落 v4 网关 MAC（同一路由器 v4/v6 常共用一个 NIC MAC）。
+    QString effectiveRouterLL6() const
+    {
+        return spec.routerLinkLocal6.isEmpty() ? learnedRouterLL6 : spec.routerLinkLocal6;
+    }
+    QString effectiveRouterMac6() const
+    {
+        if (!spec.routerMac6.isEmpty())
+            return spec.routerMac6;
+        if (!learnedRouterMac6.isEmpty())
+            return learnedRouterMac6;
+        return spec.gatewayMac;
+    }
     bool ready = false;      // ep 已打开且 netif 已挂上协议栈
     int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
     int order = 0;           // configure 传入的 specs 次序（LanScanner 保证 index 0 = 主网卡）。
@@ -264,6 +286,8 @@ private:
     QHash<quint64, QString> m_victimUserByMac; // src MAC 打包键 → mihomo 身份 user（v6 学习时补登记要用）
     QHash<quint64, QSet<QString>> m_victimV6ByMac; // src MAC 打包键 → 已学到并登记的设备 v6 地址集（去重/回收）
     void learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame); // 从设备 v6 帧学它的地址
+    // 从线上观察到的 RA 学 v6 路由器（不依赖本机 accept_ra / 路由表）。详见实现处的说明。
+    void learnRouterFromRa(GwNic *n, const QByteArray &frame);
     std::shared_ptr<GwShared> m_shared;
     bool m_torndown = false;
     // 诊断计数（COAST_GATEWAY_DEBUG）：设备帧在 frameReceived 里各分支的去向。
@@ -310,6 +334,66 @@ GwNic *GatewayWorker::nicForIp(const QString &ip) const
 // 从设备发出的一帧 IPv6 里学它的可路由地址（全局/ULA），登记成 lwIP 的 nd6 静态邻居 + mihomo 身份。
 // v6 地址是被动学来的（不做主动扫描），因为一台设备可能有多个（全局 + 若干隐私地址），且随时间轮换。
 // 幂等 + 去重：每个 (mac, v6) 只登记一次；设备换隐私地址会新增一条，旧的留到 disable 时统一摘除。
+// 从线上观察到的 Router Advertisement 学 v6 路由器（LL + MAC + on-link 前缀）。
+//
+// 为什么不能只靠 LanScanner 交上来的 spec：那份是解析**本机**的 `ip -6 route show default` 得到的，
+// 而本机拿不拿得到 v6 默认路由取决于本机的 accept_ra。真机实证（这台树莓派网关）：
+//   net.ipv6.conf.eth0.accept_ra = 0  → 本机永远没有 v6 默认路由 → routerLinkLocal6 恒空
+//   → NdpSpoofer no-op → 被劫持设备照样通过 RA 拿到全局 v6 并直连出网，**整段绕过代理且无声**。
+// 而 RA 本来就流经这条抓包链路（混杂模式 + BPF 放行全部 ICMPv6，本是给反制解毒用的），
+// 直接从中学最可靠：它反映的是**链路上的事实**，与本机怎么配无关。
+//
+// 幂等 + 只在有变化时才动：RA 是周期广播（几十秒到几分钟一次），不能每来一条就重配一次投毒器。
+void GatewayWorker::learnRouterFromRa(GwNic *n, const QByteArray &frame)
+{
+    if (!n || !n->ndp)
+        return;
+    QString ll, mac;
+    QByteArray pfx;
+    int pfxLen = -1;
+    if (!NdpSpoofer::parseRouterAdvert(frame, &ll, &mac, &pfx, &pfxLen))
+        return; // 不是可用的 RA（hop limit≠255 / lifetime==0 / 源地址非 LL 等，判据见解析函数）
+    if (ll.isEmpty() || mac.isEmpty())
+        return;
+
+    // 记进 learned*（**不写 spec**：spec 每轮被扫描结果覆盖，见 GwNic 里的说明）。
+    if (pfxLen > 0 && pfx.size() == 16) {
+        n->learnedPrefix6Net = pfx;
+        n->learnedPrefix6Len = pfxLen;
+        if (n->prefix6Len < 0) { // 扫描没给前缀 → 这条立刻生效（v6 LAN 内直连旁路要用）
+            n->prefix6Net = pfx;
+            n->prefix6Len = pfxLen;
+            qInfo() << "网关: 从 RA 学到 v6 前缀" << n->spec.ifname << pfxLen;
+        }
+    }
+
+    // 取用口径没变 → 到此为止。绝大多数 RA（周期广播）走这条，零动作、不重配、不刷日志。
+    const QString beforeLL = n->effectiveRouterLL6();
+    const QString beforeMac = n->effectiveRouterMac6();
+    n->learnedRouterLL6 = ll;
+    n->learnedRouterMac6 = mac;
+    const QString nowLL = n->effectiveRouterLL6();
+    const QString nowMac = n->effectiveRouterMac6();
+    if (beforeLL.compare(nowLL, Qt::CaseInsensitive) == 0
+        && beforeMac.compare(nowMac, Qt::CaseInsensitive) == 0)
+        return;
+
+    const bool wasUnconfigured = beforeLL.isEmpty();
+    n->ndp->configure(n->spec.localMac, nowLL, nowMac);
+    qInfo() << "网关: 从 RA 学到 v6 路由器" << n->spec.ifname << nowLL << nowMac
+            << (wasUnconfigured ? "(本机无 v6 默认路由，此前 v6 劫持一直是停用的)"
+                                : "(拓扑变化，已重配)");
+
+    // ★ 补投：学到之前 startSpoof 是被忽略的（NdpSpoofer 未配置时直接 return + 告警），
+    //   所以这张卡上已经在劫持的设备必须在这里重新挂上 v6 投毒，否则要等到下次 enableDevice 才生效。
+    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it) {
+        if (m_victimNic.value(it.key()) == n->spec.ifname)
+            n->ndp->startSpoof(it.value());
+    }
+    // 拓扑变了要重写崩溃恢复清单，否则异常退出后按旧（空）拓扑还原不了 v6。
+    persist();
+}
+
 void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame)
 {
     if (!m_net || frame.size() < 14 + 40)
@@ -368,8 +452,11 @@ void GatewayWorker::persist() const
             o["localMac"] = n->spec.localMac;
             o["gatewayIp"] = n->spec.gatewayIp;
             o["gatewayMac"] = n->spec.gatewayMac;
-            o["routerLL6"] = n->spec.routerLinkLocal6;   // v6 崩溃恢复：还原 NDP 要用
-            o["routerMac6"] = n->spec.routerMac6;
+            // v6 崩溃恢复：还原 NDP 要用。**写 effective 而不是 spec** —— 本机没有 v6 默认路由
+            // 时 spec 恒空，只有从 RA 学到的那份才是真的；写空的话崩溃后就还原不了 v6 邻居缓存，
+            // 被劫持设备的 v6 会一直指着本机（断网）直到表项老化。
+            o["routerLL6"] = n->effectiveRouterLL6();
+            o["routerMac6"] = n->effectiveRouterMac6();
         }
         arr.append(o);
     }
@@ -440,14 +527,17 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         n->prefix6Len = -1;
         if (!spec.prefix6.isEmpty())
             parseV6Prefix(spec.prefix6, &n->prefix6Net, &n->prefix6Len); // 失败则保持未知（不旁路）
+        if (n->prefix6Len < 0 && n->learnedPrefix6Len > 0) {
+            n->prefix6Net = n->learnedPrefix6Net; // 扫描没给 → 用从 RA 学到的（别被本轮清空抹掉）
+            n->prefix6Len = n->learnedPrefix6Len;
+        }
         if (n->arp)
             n->arp->configure(spec.localMac, spec.gatewayIp, spec.gatewayMac);
-        // v6 投毒器同样每轮刷新拓扑（路由器 LL/MAC 常是扫描几轮后才解析出来）。routerMac6 缺省用
-        // v4 网关 MAC（同一路由器 v4/v6 常共用一个 NIC MAC）。routerLinkLocal6 为空 → configure 后
-        // NdpSpoofer 自动 no-op，v6 劫持不生效但绝不影响 v4。
+        // v6 投毒器同样每轮刷新拓扑（路由器 LL/MAC 常是扫描几轮后才解析出来）。
+        // 取用走 effectiveRouterLL6/Mac6：扫描拿不到时用从线上 RA 学到的，两者都没有才 no-op
+        //（v6 劫持不生效，但绝不影响 v4）。
         if (n->ndp)
-            n->ndp->configure(spec.localMac, spec.routerLinkLocal6,
-                              spec.routerMac6.isEmpty() ? spec.gatewayMac : spec.routerMac6);
+            n->ndp->configure(spec.localMac, n->effectiveRouterLL6(), n->effectiveRouterMac6());
 
         if (n->ready)
             continue; // 已就绪：只刷新拓扑，不重建（重建会断掉这张卡上的活动劫持）
@@ -504,6 +594,12 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             // v6 反制（与上面 ARP 反制对称）：真路由器自己发的 NA/RA 会把设备的 v6 邻居缓存解毒 →
             // 立刻把所有 victim 重投一轮盖回。路由器 MAC 优先用 routerMac6，缺则回落到 v4 网关 MAC
             //（同一台路由器 v4/v6 通常共用一个物理 NIC MAC）。它不是 victim 帧，必须在 victim 过滤前处理。
+            // ★ 先学再反制：RA 是「链路上到底有没有 v6 路由器」的**第一手事实**，而本机的
+            //   `ip -6 route` 只是二手（还受本机 accept_ra 影响，真机上就是 0）。这一步必须在
+            //   下面的「源 MAC 是不是已知路由器」判断**之前**——不然在还没学到路由器 MAC 时，
+            //   RA 会被那个判断挡掉，永远学不到，成死锁。
+            if (NdpSpoofer::isRouterAdvert(frame))
+                learnRouterFromRa(n, frame);
             if (n->ndp && NdpSpoofer::isRouterAdvertOrNa(frame)) {
                 const QByteArray rmac = macBytes(
                     n->spec.routerMac6.isEmpty() ? n->spec.gatewayMac : n->spec.routerMac6);
@@ -643,8 +739,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         }
         if (!n->ndp) {
             n->ndp = new NdpSpoofer(n->ep, this);
-            n->ndp->configure(spec.localMac, spec.routerLinkLocal6,
-                              spec.routerMac6.isEmpty() ? spec.gatewayMac : spec.routerMac6);
+            n->ndp->configure(spec.localMac, n->effectiveRouterLL6(), n->effectiveRouterMac6());
         }
         n->ready = true;
         // 刚就绪、还没劫持任何设备：先装「全丢」内核过滤，避免混杂模式下整段流量白白进用户态。

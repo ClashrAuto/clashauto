@@ -6,6 +6,7 @@
 
 #include "../DeviceStore.h"
 #include "IL2Endpoint.h"
+#include "NdpSpoofer.h"
 #include "NetStack.h"
 
 #include <QByteArray>
@@ -275,4 +276,172 @@ int runGatewaySelfTest()
     return qApp->exec();
 }
 
-#endif // Q_OS_LINUX
+// ———————————— NdpSpoofer::parseRouterAdvert 的纯解析自测（说明见头文件）————————————
+// 这里手工拼 RA 字节流，不碰网络、不需要 root。Linux/mac 都编（解析器本身是跨平台纯字节操作）。
+namespace {
+
+// 拼一帧可配置的 RA。默认值是一条**合法**的 RA，各用例只改自己要测的那一项。
+struct RaSpec {
+    quint8 hopLimit = 255;        // NDP 强制 255
+    quint16 routerLifetime = 1800; // 0 = 「我不是默认路由器」
+    QByteArray srcIp6;            // 空 = 用默认的 fe80::1
+    QByteArray ethSrcMac = QByteArray::fromHex("aabbccddeeff");
+    bool withSlla = true;         // 带 Source Link-Layer Address 选项（MAC 与 ethSrc 故意不同）
+    QByteArray sllaMac = QByteArray::fromHex("112233445566");
+    bool withPrefix = true;
+    quint8 prefixLen = 64;
+    quint8 prefixFlags = 0x80;    // bit7 = on-link(L)
+    bool zeroLenOption = false;   // 构造 len==0 的畸形选项（必须被拒且不死循环）
+};
+
+QByteArray buildRa(const RaSpec &s)
+{
+    QByteArray f;
+    f.append(QByteArray::fromHex("333300000001"));                  // dst MAC（ff02::1 的组播 MAC）
+    f.append(s.ethSrcMac);
+    f.append(QByteArray::fromHex("86dd"));                          // ethertype
+    // IPv6 头（40）：version/tc/fl(4) payloadLen(2) nextHdr(1) hopLimit(1) src(16) dst(16)
+    f.append(QByteArray::fromHex("60000000"));
+    f.append(QByteArray::fromHex("0000"));                          // payload len（解析器不校验）
+    f.append(char(58));                                             // next header = ICMPv6
+    f.append(char(s.hopLimit));
+    QByteArray src = s.srcIp6;
+    if (src.isEmpty()) {
+        src = QByteArray(16, char(0));
+        src[0] = char(0xFE);
+        src[1] = char(0x80);
+        src[15] = char(0x01);                                       // fe80::1
+    }
+    f.append(src);
+    QByteArray dst(16, char(0));
+    dst[0] = char(0xFF);
+    dst[1] = char(0x02);
+    dst[15] = char(0x01);                                           // ff02::1
+    f.append(dst);
+    // RA 固定部分（16）：type code cksum curHopLimit flags routerLifetime reachable retrans
+    f.append(char(134));
+    f.append(char(0));
+    f.append(QByteArray::fromHex("0000"));                          // checksum（解析器不校验）
+    f.append(char(64));                                             // curHopLimit
+    f.append(char(0));                                              // flags
+    f.append(char((s.routerLifetime >> 8) & 0xFF));
+    f.append(char(s.routerLifetime & 0xFF));
+    f.append(QByteArray::fromHex("00000000"));                      // reachable time
+    f.append(QByteArray::fromHex("00000000"));                      // retrans timer
+    if (s.zeroLenOption) {
+        f.append(char(1));
+        f.append(char(0)); // len=0 → 非法，解析器必须停下而不是原地打转
+        f.append(QByteArray(6, char(0)));
+        return f;
+    }
+    if (s.withSlla) {
+        f.append(char(1));  // type = Source Link-Layer Address
+        f.append(char(1));  // len = 1 × 8 字节
+        f.append(s.sllaMac);
+    }
+    if (s.withPrefix) {
+        f.append(char(3));  // type = Prefix Information
+        f.append(char(4));  // len = 4 × 8 = 32 字节
+        f.append(char(s.prefixLen));
+        f.append(char(s.prefixFlags));
+        f.append(QByteArray::fromHex("00278d00"));                  // valid lifetime
+        f.append(QByteArray::fromHex("00093a80"));                  // preferred lifetime
+        f.append(QByteArray::fromHex("00000000"));                  // reserved
+        QByteArray pfx(16, char(0));
+        pfx[0] = char(0x24);
+        pfx[1] = char(0x08);                                        // 2408:: 之类的运营商前缀
+        f.append(pfx);
+    }
+    return f;
+}
+
+int g_fail = 0;
+void check(bool ok, const char *what)
+{
+    if (!ok) {
+        ++g_fail;
+        std::fprintf(stderr, "NDP-RA-SELFTEST: FAIL — %s\n", what);
+    }
+}
+
+} // namespace
+
+int runNdpRaSelfTest()
+{
+    g_fail = 0;
+
+    // 1) 正常 RA：LL 从 IPv6 源地址取，MAC 以 SLLA 选项为准（**不是**以太源 MAC），前缀取到。
+    {
+        QString ll, mac;
+        QByteArray pfx;
+        int plen = -1;
+        const bool ok = NdpSpoofer::parseRouterAdvert(buildRa({}), &ll, &mac, &pfx, &plen);
+        check(ok, "合法 RA 应解析成功");
+        check(ll == QStringLiteral("fe80::1"), "routerLL 应取 IPv6 源地址");
+        check(mac == QStringLiteral("11:22:33:44:55:66"), "routerMac 应优先取 SLLA 选项");
+        check(plen == 64, "前缀长度应为 64");
+        check(pfx.size() == 16 && quint8(pfx[0]) == 0x24 && quint8(pfx[1]) == 0x08, "前缀内容不对");
+    }
+    // 2) 没有 SLLA 选项 → 回落到以太源 MAC。
+    {
+        RaSpec s;
+        s.withSlla = false;
+        QString ll, mac;
+        check(NdpSpoofer::parseRouterAdvert(buildRa(s), &ll, &mac, nullptr, nullptr), "无 SLLA 也应成功");
+        check(mac == QStringLiteral("aa:bb:cc:dd:ee:ff"), "无 SLLA 时应回落以太源 MAC");
+    }
+    // 3) 非 on-link 前缀（L 位为 0）不采纳 —— 它不代表「本链路直连可达」，拿来做旁路判据是错的。
+    {
+        RaSpec s;
+        s.prefixFlags = 0x40; // 只有 A(autonomous)，没有 L(on-link)
+        QByteArray pfx;
+        int plen = -1;
+        check(NdpSpoofer::parseRouterAdvert(buildRa(s), nullptr, nullptr, &pfx, &plen), "应仍解析成功");
+        check(plen == -1, "非 on-link 前缀不应被采纳");
+    }
+    // 4) 四个必须拒绝的用例。
+    {
+        RaSpec s;
+        s.hopLimit = 64; // 跨网段伪造的 RA 到达时 hop limit 必然 <255
+        check(!NdpSpoofer::parseRouterAdvert(buildRa(s), nullptr, nullptr, nullptr, nullptr),
+              "hop limit != 255 必须拒绝");
+    }
+    {
+        RaSpec s;
+        s.routerLifetime = 0; // 「我不是默认路由器」
+        check(!NdpSpoofer::parseRouterAdvert(buildRa(s), nullptr, nullptr, nullptr, nullptr),
+              "Router Lifetime == 0 必须拒绝");
+    }
+    {
+        RaSpec s;
+        s.srcIp6 = QByteArray(16, char(0));
+        s.srcIp6[0] = char(0x24);
+        s.srcIp6[1] = char(0x08); // 全局单播，不是 fe80::/10
+        check(!NdpSpoofer::parseRouterAdvert(buildRa(s), nullptr, nullptr, nullptr, nullptr),
+              "源地址非链路本地必须拒绝");
+    }
+    {
+        RaSpec s;
+        s.zeroLenOption = true;
+        QString ll;
+        // 畸形选项：解析本身仍算成功（固定部分是好的），关键是**不能死循环**、也不能读越界。
+        check(NdpSpoofer::parseRouterAdvert(buildRa(s), &ll, nullptr, nullptr, nullptr),
+              "len==0 选项不应让解析崩掉");
+        check(ll == QStringLiteral("fe80::1"), "len==0 选项前已解析出的字段应保留");
+    }
+    // 5) 截断帧不得越界（逐字节截断跑一遍，主要靠 ASAN/崩溃暴露问题）。
+    {
+        const QByteArray full = buildRa({});
+        for (int n = 0; n < full.size(); ++n)
+            NdpSpoofer::parseRouterAdvert(full.left(n), nullptr, nullptr, nullptr, nullptr);
+    }
+
+    if (g_fail == 0)
+        std::fprintf(stderr, "NDP-RA-SELFTEST: PASS（解析 + SLLA 优先 + on-link 判据 + 4 个拒绝用例 + 截断）\n");
+    else
+        std::fprintf(stderr, "NDP-RA-SELFTEST: %d 个断言失败\n", g_fail);
+    std::fflush(stderr);
+    return g_fail == 0 ? 0 : 1;
+}
+
+#endif // Q_OS_LINUX || Q_OS_MACOS

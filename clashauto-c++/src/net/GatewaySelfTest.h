@@ -11,3 +11,13 @@
 // 配套脚本 validate/gateway_selftest.sh 负责建 TAP、配路由/静态邻居、跑 curl、断言。
 // 返回码：0=通过，1=超时/失败，3=环境错误（TAP/栈初始化失败）。
 int runGatewaySelfTest();
+
+// NdpSpoofer::parseRouterAdvert 的纯解析自测（COAST_NDP_RA_SELFTEST=1 触发）。
+//
+// 为什么单独给它一个钩子：从 RA 学 v6 路由器这条路，在**没有 IPv6 的网络上永远跑不到**
+//（真机实证：本项目的树莓派测试台整条 LAN 一条 RA 都没有，主动发 RS 也没人应答），
+// 而它又恰恰是「双栈设备 v6 漏代理」这一类静默故障的唯一防线 —— 没有自测就等于没有覆盖。
+// 本钩子用手工拼的 RA 字节流覆盖：正常解析（LL/MAC/前缀）、SLLA 选项优先于以太源 MAC、
+// 以及四个必须拒绝的用例（hop limit≠255 / Router Lifetime==0 / 源地址非链路本地 / 选项长度为 0）。
+// 不需要 root、不碰网络、毫秒级完成。返回 0=全部通过，1=有断言失败。
+int runNdpRaSelfTest();

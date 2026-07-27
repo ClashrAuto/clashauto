@@ -73,6 +73,10 @@ int main(int argc, char *argv[])
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
     if (qEnvironmentVariableIsSet("COAST_GATEWAY_SELFTEST"))
         return runGatewaySelfTest();
+    // RA 解析自测：纯字节解析，不碰网络、不需要 root、毫秒级。单列一个钩子是因为「从 RA 学 v6
+    // 路由器」这条路在没有 IPv6 的网络上永远跑不到（本项目的测试台就是如此），没有它等于零覆盖。
+    if (qEnvironmentVariableIsSet("COAST_NDP_RA_SELFTEST"))
+        return runNdpRaSelfTest();
 #endif
 
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报

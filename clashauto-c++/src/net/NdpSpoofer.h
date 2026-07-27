@@ -58,6 +58,30 @@ public:
     // 给所有被劫持设备发还原 NA 后清空集合、停表。退出/急停调用。
     void healAll();
 
+    // ———————————— 从线上观察到的 RA 学 v6 路由器 ————————————
+    // 为什么需要：本机的 v6 默认路由**不能**当作「链路上有没有 v6 路由器」的判据。真机实证
+    // （树莓派网关）：`net.ipv6.conf.eth0.accept_ra = 0` 时本机永远拿不到 v6 默认路由，于是
+    // LanScanner 交上来的 routerLinkLocal6 恒为空 → 本类 no-op；而被劫持设备照样通过 RA 拿到
+    // 全局地址和 v6 默认路由，它的 v6 流量**整段绕过代理，且完全无声**。这正是 v6 劫持要根治的
+    // 那类「时通时不通」。网关本来就开着混杂模式、BPF 也已放行全部 ICMPv6（反制解毒要用），
+    // **RA 本来就流经抓包链路** —— 直接从中学，就彻底不依赖本机的 accept_ra / 路由表了。
+    //
+    // 解析一帧 RA，成功返回 true 并填出参（任一出参可为 nullptr）：
+    //   routerLL  —— 路由器的**链路本地**地址串（取自 IPv6 源地址；非 fe80::/10 一律拒绝）
+    //   routerMac —— 路由器 MAC：优先取 RA 里的 Source Link-Layer Address 选项(type 1)，
+    //                缺失则回落到以太头源 MAC
+    //   prefixNet/prefixLen —— Prefix Information 选项(type 3) 里的**on-link** 前缀（供 LAN 内
+    //                v6 直连旁路用）。没有该选项时不填（prefixLen 置 -1），不影响前两项。
+    // 拒绝条件（按 RFC 4861 的安全要求 + 本用途的语义）：
+    //   · 不是 RA / 帧太短 / 选项越界；
+    //   · IPv6 跳数限制 != 255（NDP 强制，防跨网段伪造）；
+    //   · Router Lifetime == 0 —— 这台只提供前缀信息、**不是默认路由器**，拿它当投毒目标是错的。
+    static bool parseRouterAdvert(const QByteArray &frame, QString *routerLL, QString *routerMac,
+                                  QByteArray *prefixNet, int *prefixLen);
+
+    // 只判「是不是 RA」（parseRouterAdvert 的轻量前置判据，避免对每个 NA 都走完整解析）。
+    static bool isRouterAdvert(const QByteArray &frame);
+
     // 抢答：若 frame 是被劫持设备发出的「路由器 LL 在哪?」邻居请求 NS，立刻回一帧 solicited NA
     //（路由器 LL 在本机 MAC）。返回 true = 确实是问路由器且已抢答。契约同 ArpSpoofer::answerGatewayArp
     //（源 MAC 已由二层过滤限定为被劫持设备）。
@@ -102,6 +126,9 @@ private:
     QTimer *m_boostTimer = nullptr;
     int m_boostRemaining = 0;
     QElapsedTimer m_lastReassert;
+    // configure() 的日志去重：只在「配好↔没配好」翻转时说一句（它每轮扫描都会被调用）。
+    bool m_lastConfigOk = false;
+    bool m_configLogged = false;
     QByteArray m_localMac;    // 6 字节（本机 = 冒充的“路由器”）
     QByteArray m_routerLL;    // 16 字节（v6 默认路由器的链路本地地址）
     QByteArray m_routerMac;   // 6 字节（真实路由器 MAC，heal 时用）
