@@ -79,6 +79,9 @@ struct DeviceRecord {
     int connCount = 0;      // 当前活动连接数
     qint64 sessionUp = 0;   // 本次会话（本次程序运行内）累计
     qint64 sessionDown = 0;
+    // 最近一次新建连接的目标（域名，没嗅探到域名时是目标 IP）。设备列表最下面那行显示的就是它。
+    // 只活在内存里：重启后为空，等设备再发起一条连接就有了。
+    QString lastHost;
     bool isSelf = false;    // 本机（任一本机网卡的 MAC）
     bool isGateway = false; // 网关（任一默认路由的网关 IP/MAC）
     // 是否位于「可劫持网段」= 用于二层收发的主物理网卡的子网。同时连两个网络时，另一张网卡
@@ -127,6 +130,9 @@ public:
     // 用「本次会话累计值」更新运行时速率与会话/累计流量；delta 部分并入 today/total。
     void applyTraffic(const QString &mac, qint64 sessionUp, qint64 sessionDown,
                       qint64 rateUp, qint64 rateDown, int connCount);
+    // 「最后访问的地址」——聚合器发现该设备新建了一条连接时调用。与 applyTraffic 同样不发
+    // changed()（每秒都可能变，统一由控制器聚合完刷一次模型），也不落盘。
+    void setLastHost(const QString &mac, const QString &host);
 
     // 立刻落盘（防抖后由定时器触发；退出时也强制存一次）。
     void save();

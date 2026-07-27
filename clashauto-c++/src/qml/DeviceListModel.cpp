@@ -32,8 +32,20 @@ QVariant DeviceListModel::data(const QModelIndex &index, int role) const
     case IsSelfRole:    return r.isSelf;
     case IsGatewayRole: return r.isGateway;
     case ProxyableRole: return r.proxyable;
+    case LastHostRole:  return r.lastHost;
+    case RateUpHistRole:   return histList(m_hist.value(r.mac).up);
+    case RateDownHistRole: return histList(m_hist.value(r.mac).down);
     default:            return {};
     }
+}
+
+QVariantList DeviceListModel::histList(const QVector<qint64> &v) const
+{
+    QVariantList out;
+    out.reserve(v.size());
+    for (qint64 x : v)
+        out.append(static_cast<double>(x));
+    return out;
 }
 
 QHash<int, QByteArray> DeviceListModel::roleNames() const
@@ -44,7 +56,8 @@ QHash<int, QByteArray> DeviceListModel::roleNames() const
         {ProxiedRole, "proxied"}, {RateUpRole, "rateUp"},   {RateDownRole, "rateDown"},
         {TodayUpRole, "todayUp"}, {TodayDownRole, "todayDown"},
         {IsSelfRole, "isSelf"},   {IsGatewayRole, "isGateway"},
-        {ProxyableRole, "proxyable"},
+        {ProxyableRole, "proxyable"}, {LastHostRole, "lastHost"},
+        {RateUpHistRole, "rateUpHist"}, {RateDownHistRole, "rateDownHist"},
     };
 }
 
@@ -65,6 +78,7 @@ DeviceListModel::Row DeviceListModel::toRow(const DeviceRecord &d)
     r.rateDown = d.rateDown;
     r.todayUp = d.todayUp;
     r.todayDown = d.todayDown;
+    r.lastHost = d.lastHost;
     // IP 排序按**数值**而不是字符串：".9" 必须排在 ".140" 前面，字符串比较会反过来。
     const QHostAddress addr(d.ip);
     r.ipKey = addr.protocol() == QAbstractSocket::IPv4Protocol ? addr.toIPv4Address()
@@ -83,7 +97,53 @@ void DeviceListModel::setDevices(const QVector<DeviceRecord> &devices)
     m_all.reserve(devices.size());
     for (const DeviceRecord &d : devices)
         m_all.append(toRow(d));
+
+    // 速率历史按真实时间节流采样（见头文件注释）：这一次调用算不算「一拍」。
+    const bool tick = !m_histClock.isValid() || m_histClock.elapsed() >= kHistMinIntervalMs;
+    if (tick) {
+        m_histClock.restart();
+        sampleHistory(devices);
+    }
+
     reconcile();
+
+    // 历史不在 Row 里（不参与 sameFields/排序），reconcile 不会为它发通知——速率一直是 0 的
+    // 设备（被代理但此刻闲着）行内容逐字节没变，图却要继续往左滚，所以这里单独补一次。
+    // 只发给显示图的行（proxied），别让整表每秒重算一遍绑定。
+    if (tick) {
+        const QVector<int> roles{RateUpHistRole, RateDownHistRole};
+        for (int i = 0; i < m_rows.size(); ++i)
+            if (m_rows.at(i).proxied)
+                emit dataChanged(index(i), index(i), roles);
+    }
+}
+
+// 每设备追加一个速率样本，超长弹出最旧的；新设备一上来就补满 kHistPoints 个 0，
+// 图从一开始就是满宽的（否则新设备的曲线会从左边一格一格「长」出来）。
+void DeviceListModel::sampleHistory(const QVector<DeviceRecord> &devices)
+{
+    QSet<QString> alive;
+    alive.reserve(devices.size());
+    for (const DeviceRecord &d : devices) {
+        alive.insert(d.mac);
+        Hist &h = m_hist[d.mac];
+        if (h.up.isEmpty()) {
+            h.up.fill(0, kHistPoints);
+            h.down.fill(0, kHistPoints);
+        }
+        h.up.append(d.rateUp);
+        h.down.append(d.rateDown);
+        while (h.up.size() > kHistPoints)
+            h.up.removeFirst();
+        while (h.down.size() > kHistPoints)
+            h.down.removeFirst();
+    }
+    for (auto it = m_hist.begin(); it != m_hist.end();) {
+        if (alive.contains(it.key()))
+            ++it;
+        else
+            it = m_hist.erase(it);
+    }
 }
 
 void DeviceListModel::setFilter(const QString &query, bool onlineOnly)

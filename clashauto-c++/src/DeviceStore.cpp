@@ -534,6 +534,15 @@ void DeviceStore::applyTraffic(const QString &mac, qint64 sessionUp, qint64 sess
     // 不发 changed()：流量每秒刷新、频率高，由控制器聚合后统一刷新模型，避免每设备各触发一次全表重建。
 }
 
+void DeviceStore::setLastHost(const QString &mac, const QString &host)
+{
+    if (host.isEmpty())
+        return;
+    DeviceRecord *d = find(mac);
+    if (d)
+        d->lastHost = host;
+}
+
 const DeviceRecord *DeviceStore::findByIp(const QString &ip) const
 {
     if (ip.isEmpty())

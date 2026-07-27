@@ -3,9 +3,11 @@ import QtQuick.Controls // ToolTip：徽章文字被 elide 时把完整文案挂
 import QtQuick.Layouts
 import ClashAuto
 
-// 设备列表行：类型头像 + 名称/副标题（IP·厂商）+ 今日用量 + 实时速率 + 最右一列（代理开关，
+// 设备列表行：类型头像 + 名称/副标题（IP·厂商）/最后访问的地址 + 实时速率 + 最右一列（代理开关，
 // 或者「本机/网关/其它网络」这类不可代理的原因徽章——两者互斥，共用同一个 38px 槽位）。
+// 被代理的设备行整行背景是一张实时上/下行流量图（DeviceTrafficBg）。
 // 选中态整行高亮；离线行整体淡化。
+// 详细信息（策略、历史用量、连接、常用域名…）不在行里，点行打开 DeviceDetailWindow。
 Rectangle {
     id: root
     property string mac: ""
@@ -17,8 +19,9 @@ Rectangle {
     property bool proxied: false
     property real rateUp: 0
     property real rateDown: 0
-    property real todayUp: 0    // 今日累计上行字节
-    property real todayDown: 0  // 今日累计下行字节
+    property string lastHost: ""   // 最后访问的地址（域名，没嗅探到就是目标 IP）
+    property var rateUpHist: []    // 背景流量图的数据（近 N 拍速率，模型侧采样）
+    property var rateDownHist: []
     property bool isSelf: false
     property bool isGateway: false
     property bool proxyable: false // 能否开代理（非本机/网关 + 在主网卡网段内）
@@ -26,11 +29,23 @@ Rectangle {
     signal clicked()
     signal toggleProxy()
 
-    height: 52
+    // 60 而不是原来的 52：多了「最后访问」一行。**所有行等高**（有没有那行都一样），
+    // 高度随内容变的话，列表每来一条新连接就会自己长高一格，滚动位置跟着跳。
+    height: 60
     radius: 5
     color: selected ? Qt.rgba(72 / 255, 151 / 255, 248 / 255, 0.22)
                     : (rowMouse.containsMouse ? Theme.hover : Theme.nodeRowBg)
     opacity: online ? 1.0 : 0.5
+
+    // 背景实时流量图（压在所有内容之下）。只有被代理的设备才有：其余设备的流量不经核心，
+    // 画出来永远是贴底的 0 线。速率是 0 也照画——那正是「已接管、此刻闲着」的样子。
+    DeviceTrafficBg {
+        anchors.fill: parent
+        visible: root.proxied
+        corner: root.radius
+        up: root.proxied ? root.rateUpHist : []
+        down: root.proxied ? root.rateDownHist : []
+    }
 
     // 整行用 MouseArea 而不是 TapHandler：TapHandler 只拿「被动 grab」，按下的一瞬间 Main.qml
     // 那个铺满窗口的背景 DragHandler 就能接管 → 按住列表往下拖会把**整个窗口**拖走（实测：拖一次
@@ -80,13 +95,16 @@ Rectangle {
             }
         }
 
-        // 名称 + 副标题：**吃掉右侧信息区剩下的全部宽度**，放不下就 elide。
+        // 名称 + 副标题 + 最后访问：**吃掉右侧信息区剩下的全部宽度**，放不下就 elide。
         // minimumWidth 显式给 0：RowLayout 空间不够时是按各项可压缩余量一起压的，右侧那几列都
         // 写了 minimumWidth = 自身宽度（刚性），这里给 0 就保证「该被挤的是名字」，而不是把右侧
         // 挤窄——那会让不同行的右侧内容落在不同的 x 上。
+        // 垂直居中（而不是让 Layout 把三行拉开铺满行高）：没有「最后访问」那行的设备，
+        // 剩下两行也该在行的正中间。
         ColumnLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
+            Layout.alignment: Qt.AlignVCenter
             spacing: 1
             Text {
                 Layout.fillWidth: true
@@ -102,57 +120,37 @@ Rectangle {
                 font.pixelSize: 10
                 color: Theme.textMuted
             }
+            // 最后访问的地址：设备最近新建的那条连接的目标。没有就整行收起（不占位）——
+            // 大多数设备没开代理，流量不经核心，这里永远没有值。
+            Text {
+                Layout.fillWidth: true
+                visible: root.lastHost !== ""
+                text: "→ " + root.lastHost
+                elide: Text.ElideRight
+                font.pixelSize: 10
+                color: Theme.textSecondary
+            }
         }
 
-        // ———————————————— 右侧信息区：徽章 + 今日 + 实时速率 + 代理开关 ————————————————
+        // ———————————————— 右侧信息区：实时速率 + 代理开关/徽章 ————————————————
         // **紧贴行的右边缘**，宽度只取自身内容：名称列 fillWidth 会把剩下的宽度全吃掉，所以这块
         // 自然被顶到最右。用不上的东西直接 visible:false 收起来（不占位），把宽度让给名字。
         //
-        // 两条必须守住的规矩：
-        //  1) 每个子项都写死宽度并给 minimumWidth —— RowLayout 空间不够时是按各项可压缩余量
-        //     **一起**压的，不给最小宽的话，副标题长的行会把右侧几列压窄一截，同一列在不同行
-        //     落在不同的 x 上（实测「网关」行比「本机」行早 39px）。给了之后被挤的只会是名字。
-        //  2) 流量两列的显隐条件都挂在「今日有没有流量」上，而不是「此刻有没有速率」——
-        //     后者每一拍都在变，列一出一收就是整行左右抽搐。
+        // 必须守住的规矩：每个子项都写死宽度并给 minimumWidth —— RowLayout 空间不够时是按各项
+        // 可压缩余量**一起**压的，不给最小宽的话，副标题长的行会把右侧几列压窄一截，同一列在
+        // 不同行落在不同的 x 上（实测「网关」行比「本机」行早 39px）。给了之后被挤的只会是名字。
+        //
+        // 「今日/累计用量」两列已经从行里拿掉了——那是详情窗（DeviceDetailWindow）的内容；
+        // 行里只留「此刻在跑多快」，配合背景那张流量图。
         RowLayout {
-            id: infoRow
-            // 今天传过东西的设备才显示流量两列；其余设备（绝大多数没开代理，流量根本不经 mihomo）
-            // 一整天都是 0，与其显示两行「0 B」噪音，不如把宽度让给名字。
-            readonly property bool hasTraffic: (root.todayDown + root.todayUp) > 0
             Layout.alignment: Qt.AlignVCenter
             spacing: 8
 
-            // 今日累计上/下行（也是列表的排序主键，见 DeviceListModel::buildTarget）。
-            // 用「今日」而不是「累计」：跨会话的历史总量对「谁在占带宽」没有参考价值。
+            // 实时速率：**常驻显示，0 也显示**（"↓ 0 B/s"）。宽度写死：速率文字每一拍都在变宽
+            // 变窄（"↓ 9.77 KB/s" ↔ "↓ 1.20 MB/s"），列宽跟着变整行就在抖。
+            // 闲着的时候只是淡下去（**位置和占位都不变**），不再像以前那样整列收起来。
             ColumnLayout {
-                visible: infoRow.hasTraffic
-                Layout.alignment: Qt.AlignVCenter
-                Layout.preferredWidth: 82
-                Layout.minimumWidth: 82
-                spacing: 0
-                Text {
-                    Layout.fillWidth: true
-                    text: "↓ " + Theme.fmtBytes(root.todayDown)
-                    font.pixelSize: 10
-                    color: Theme.textMuted
-                    elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignRight
-                }
-                Text {
-                    Layout.fillWidth: true
-                    text: "↑ " + Theme.fmtBytes(root.todayUp)
-                    font.pixelSize: 10
-                    color: Theme.textMuted
-                    elide: Text.ElideRight
-                    horizontalAlignment: Text.AlignRight
-                }
-            }
-
-            // 实时速率：跟着「今日有流量」占位，闲下来只是淡出（opacity），**位置不动**——
-            // 速率文字每一拍都在变宽变窄（"↓ 9.77 KB/s" ↔ "↓ 1.20 MB/s"），一收一放整行就在抖。
-            ColumnLayout {
-                visible: infoRow.hasTraffic
-                opacity: root.online && (root.rateDown > 0 || root.rateUp > 0) ? 1.0 : 0.0
+                opacity: root.rateDown > 0 || root.rateUp > 0 ? 1.0 : 0.45
                 Behavior on opacity { NumberAnimation { duration: 120 } }
                 Layout.alignment: Qt.AlignVCenter
                 Layout.preferredWidth: 76

@@ -283,5 +283,9 @@
   "GeoIP 数据库": "GeoIP database",
   "说明": "About",
   "更新中…": "Updating…",
-  "Country.mmdb 是「按 IP 归属地区分流」所用的地理数据库（来源 MetaCubeX/meta-rules-dat）。\n\n点击「更新」下载最新数据库到用户目录与资源目录，重启核心后生效。": "Country.mmdb is the geolocation database used for routing by IP region (from MetaCubeX/meta-rules-dat).\n\nClick \"Update\" to download the latest database into the user and resource directories; it takes effect after the core restarts."
+  "Country.mmdb 是「按 IP 归属地区分流」所用的地理数据库（来源 MetaCubeX/meta-rules-dat）。\n\n点击「更新」下载最新数据库到用户目录与资源目录，重启核心后生效。": "Country.mmdb is the geolocation database used for routing by IP region (from MetaCubeX/meta-rules-dat).\n\nClick \"Update\" to download the latest database into the user and resource directories; it takes effect after the core restarts.",
+
+  "设备详情": "Device details",
+  "未选择设备": "No device selected",
+  "近 7 天": "Last 7 days"
 }

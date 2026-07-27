@@ -6,7 +6,10 @@
 #include "../DeviceStore.h"
 
 #include <QAbstractListModel>
+#include <QElapsedTimer>
+#include <QHash>
 #include <QString>
+#include <QVariantList>
 #include <QVector>
 
 class DeviceListModel final : public QAbstractListModel
@@ -31,7 +34,10 @@ public:
         TodayDownRole, // 今日累计下行字节
         IsSelfRole,
         IsGatewayRole,
-        ProxyableRole, // 能否开代理（非本机/网关 + 在可劫持网段内）
+        ProxyableRole,  // 能否开代理（非本机/网关 + 在可劫持网段内）
+        LastHostRole,   // 最后访问的地址（行最下面那行）
+        RateUpHistRole, // 近 kHistPoints 拍的上/下行速率（行背景那张实时流量图）
+        RateDownHistRole,
     };
 
     explicit DeviceListModel(QObject *parent = nullptr);
@@ -58,7 +64,7 @@ signals:
 private:
     // 一行的展示快照 + 变更比对。
     struct Row {
-        QString mac, ip, name, typeKey, vendor;
+        QString mac, ip, name, typeKey, vendor, lastHost;
         bool online = false, proxied = false, isSelf = false, isGateway = false;
         bool proxyable = false;
         qint64 rateUp = 0, rateDown = 0;
@@ -70,7 +76,8 @@ private:
                    && online == o.online && proxied == o.proxied && isSelf == o.isSelf
                    && isGateway == o.isGateway && proxyable == o.proxyable
                    && rateUp == o.rateUp && rateDown == o.rateDown
-                   && todayUp == o.todayUp && todayDown == o.todayDown;
+                   && todayUp == o.todayUp && todayDown == o.todayDown
+                   && lastHost == o.lastHost;
         }
         // 排序用的今日流量档位：今日上下行之和按 MB 取整。用档位而不是精确字节，是为了不让
         // 两台用量相近的设备每来一拍就互相超车换位（列表又会抖）；档位每涨 1MB 才可能换一次位。
@@ -83,10 +90,25 @@ private:
     void reconcile();
     void recomputeStats();
 
+    // —— 每设备的实时速率历史（行背景那张图）——
+    // 每台设备一条定长（kHistPoints）环形缓冲，**存在模型里而不是委托里**：ListView 会回收/销毁
+    // 滚出视口的委托，历史挂在委托上滚一下就没了。setDevices 每次被调用不一定是「一拍」——
+    // 台账任何变化（改别名、扫描结果）都会走到这里，所以按 kHistMinIntervalMs 节流，
+    // 保证大致每秒一个样本，图的横轴才是时间。
+    struct Hist {
+        QVector<qint64> up, down;
+    };
+    void sampleHistory(const QVector<DeviceRecord> &devices);
+    QVariantList histList(const QVector<qint64> &v) const;
+
     QVector<Row> m_all;     // 全量（未过滤）
     QVector<Row> m_rows;    // 可见行
     QString m_query;
     bool m_onlineOnly = false;
     int m_onlineCount = 0;
     int m_proxiedCount = 0;
+    QHash<QString, Hist> m_hist; // mac → 速率历史
+    QElapsedTimer m_histClock;
+    static constexpr int kHistPoints = 40;
+    static constexpr int kHistMinIntervalMs = 800;
 };

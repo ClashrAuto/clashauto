@@ -585,6 +585,11 @@ void DevicesController::aggregate(const QVariantList &conns)
         const qint64 down = m.value("download").toLongLong();
         const qint64 up = m.value("upload").toLongLong();
         seen.insert(id);
+        // 「最后访问的地址」：本拍才第一次见到这个连接 id = 设备刚发起的连接。用「新建」而不是
+        // 「字节最多」来定义最后访问——后者会被一条挂着的大下载长期霸屏，看不到设备在访问什么。
+        // （不额外解析 metadata.start：新 id 就是最新，省掉每秒几百次 RFC3339 解析。）
+        if (!connBytes.contains(id))
+            m_store->setLastHost(mac, m.value("host").toString());
         const QPair<qint64, qint64> last = connBytes.value(id, {0, 0});
         const qint64 dd = down >= last.first ? down - last.first : down;   // 新连接=全量；回退=当前值
         const qint64 du = up >= last.second ? up - last.second : up;

@@ -301,5 +301,9 @@
   "下载源：npcap.com（官方）": "Source : npcap.com (officiel)",
   "官网下载": "Téléchargement officiel",
   "处理中…": "Traitement…",
-  "立即安装": "Installer maintenant"
+  "立即安装": "Installer maintenant",
+
+  "设备详情": "Détails de l'appareil",
+  "未选择设备": "Aucun appareil sélectionné",
+  "近 7 天": "7 derniers jours"
 }
