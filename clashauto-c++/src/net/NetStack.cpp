@@ -8,6 +8,7 @@
 #include <QList>
 #include <QSet>
 #include <QTimer>
+#include <QUdpSocket>
 
 #include <chrono>
 #include <cstdio>
@@ -148,6 +149,11 @@ struct UdpSess {
 // O(1) 的尾部回收会被一条长档流挡住，短档形同虚设。
 constexpr qint64 kUdpIdleMs = 120000;
 constexpr qint64 kUdpDnsIdleMs = 15000;
+
+// DNS 劫持目标端口：mihomo 的 dns.listen（ConfigBuilder 同步写 `dns.listen: 127.0.0.1:1053`）。
+// 被劫持设备的 UDP :53 查询不再原样中继到「设备配置的 DNS（常是网关/路由器 IP，经用户态栈中继到
+// 它走不通 → 名字解析时断时通）」，而是转投 mihomo 自己的 fake-ip DNS，走它的国内外分流后再回封给设备。
+constexpr quint16 kDnsHijackPort = 1053;
 
 // 容量兜底：句柄和 mihomo 侧的关联数都是有限资源。BT/DHT 这类应用通常共用一个源端口广撒（对本
 // 方案友好），但「源端口也乱换」的极端情况必须挡住，不能让一台设备把整个进程的 fd 吃光。
@@ -915,6 +921,59 @@ void sendUdpResponse6(UdpSess *s, quint16 vport, const QHostAddress &fromIp, qui
     s->nic->ep->send(frame);
 }
 
+// 手工封 IPv4/UDP/以太 回程包发给设备（从 onUdpResponse 抽出，DNS 劫持回程也复用）。
+// src = 服务器(fromIp:fromPort)，dst = 设备(s->victimIp:vport)。不依赖 UdpFlow，只需要 UdpSess 的
+// mac6/nic/victimIp —— 所以 DNS 劫持（不建 flow）也能直接调它把 mihomo 的应答封回设备。
+void sendUdpResponse4(UdpSess *s, quint16 vport, const QHostAddress &fromIp, quint16 fromPort,
+                      const QByteArray &payload)
+{
+    if (!s->nic || !s->nic->ep)
+        return;
+    const quint32 srcIp = fromIp.toIPv4Address();                    // 服务器
+    const quint32 dstIp = QHostAddress(s->victimIp).toIPv4Address(); // 设备
+    const int udpLen = 8 + payload.size();
+    const int ipLen = 20 + udpLen;
+
+    QByteArray frame(14 + ipLen, char(0));
+    uchar *b = reinterpret_cast<uchar *>(frame.data());
+    std::memcpy(b, s->mac6.constData(), 6);               // dst = 设备
+    std::memcpy(b + 6, s->nic->localMac6.constData(), 6); // src = 本机在该卡上的 MAC
+    b[12] = 0x08; b[13] = 0x00;
+    uchar *ip = b + 14;
+    ip[0] = 0x45; ip[1] = 0x00;
+    ip[2] = (ipLen >> 8) & 0xFF; ip[3] = ipLen & 0xFF;
+    ip[4] = 0; ip[5] = 0;
+    ip[6] = 0x40; ip[7] = 0; // DF
+    ip[8] = 64;  ip[9] = 17; // ttl, proto=UDP
+    ip[10] = 0;  ip[11] = 0;
+    ip[12] = (srcIp >> 24) & 0xFF; ip[13] = (srcIp >> 16) & 0xFF;
+    ip[14] = (srcIp >> 8) & 0xFF;  ip[15] = srcIp & 0xFF;
+    ip[16] = (dstIp >> 24) & 0xFF; ip[17] = (dstIp >> 16) & 0xFF;
+    ip[18] = (dstIp >> 8) & 0xFF;  ip[19] = dstIp & 0xFF;
+    const quint16 ipck = ipChecksum(ip, 20);
+    ip[10] = (ipck >> 8) & 0xFF; ip[11] = ipck & 0xFF;
+    uchar *u = ip + 20;
+    u[0] = (fromPort >> 8) & 0xFF; u[1] = fromPort & 0xFF;
+    u[2] = (vport >> 8) & 0xFF;    u[3] = vport & 0xFF;
+    u[4] = (udpLen >> 8) & 0xFF;   u[5] = udpLen & 0xFF;
+    u[6] = 0; u[7] = 0;
+    std::memcpy(u + 8, payload.constData(), payload.size());
+    QByteArray pseudo;
+    pseudo.append(char((srcIp >> 24) & 0xFF)); pseudo.append(char((srcIp >> 16) & 0xFF));
+    pseudo.append(char((srcIp >> 8) & 0xFF));  pseudo.append(char(srcIp & 0xFF));
+    pseudo.append(char((dstIp >> 24) & 0xFF)); pseudo.append(char((dstIp >> 16) & 0xFF));
+    pseudo.append(char((dstIp >> 8) & 0xFF));  pseudo.append(char(dstIp & 0xFF));
+    pseudo.append(char(0)); pseudo.append(char(17));
+    pseudo.append(char((udpLen >> 8) & 0xFF)); pseudo.append(char(udpLen & 0xFF));
+    pseudo.append(reinterpret_cast<const char *>(u), udpLen);
+    quint16 uck = ipChecksum(reinterpret_cast<const uchar *>(pseudo.constData()), pseudo.size());
+    if (uck == 0)
+        uck = 0xFFFF;
+    u[6] = (uck >> 8) & 0xFF; u[7] = uck & 0xFF;
+
+    s->nic->ep->send(frame);
+}
+
 } // namespace
 
 // ———————————————————————————— NetStack ————————————————————————————
@@ -1250,6 +1309,14 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         d->udp.insert(srcIp, s);
     }
 
+    // ★ DNS 劫持：设备的 :53 查询转投 mihomo 的 fake-ip DNS（见 kDnsHijackPort / hijackDns），
+    //   不建 UdpFlow、不原样中继到「设备配置的 DNS」（常是网关/路由器 IP，经用户态栈中继到它走不通
+    //   → 名字解析时断时通）。回封的源地址伪装成设备原本查询的那个 DNS（dstIpV4:53），设备才收。
+    if (dport == 53) {
+        hijackDns(srcIp, sport, QHostAddress(dstIpV4), payload, false);
+        return;
+    }
+
     // 一个设备源端口一条流（= 一个独立 Socks5Udp）。回程靠「从哪条关联进来」定位设备端口，
     // 不再靠 (dstIp,dport) 反查——那正是老代码串包的根因，见文件上方的方案说明。
     UdpFlow *flow = s->flows.value(sport);
@@ -1355,6 +1422,12 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
         d->udp.insert(srcIp, s);
     }
 
+    // DNS 劫持（v6，与 v4 同）：设备 :53 转投 mihomo 的 DNS，回封源伪装成设备查询的那个 v6 DNS。
+    if (dport == 53) {
+        hijackDns(srcIp, sport, dstAddr, payload, true);
+        return;
+    }
+
     UdpFlow *flow = s->flows.value(sport);
     if (!flow) {
         reapUdpFlows(d);
@@ -1437,55 +1510,37 @@ void NetStack::onUdpResponse(const QString &victimIp, quint16 vport, const QHost
     // 下行也续命：QUIC 大文件下载这类「上行只有稀疏 ACK」的流，光靠上行续命可能被误判为空闲。
     f->lastUsed = monoMs();
     lruTouch(f);
+    // v4 回封（逻辑已抽到 sendUdpResponse4，与 DNS 劫持回程共用）。
+    sendUdpResponse4(s, vport, fromIp, fromPort, payload);
+}
 
-    // 手工封 UDP/IP/以太 回程包发给设备。
-    const quint32 srcIp = fromIp.toIPv4Address();     // 服务器
-    QHostAddress va(victimIp);
-    const quint32 dstIp = va.toIPv4Address();          // 设备
-    const int udpLen = 8 + payload.size();
-    const int ipLen = 20 + udpLen;
-
-    QByteArray frame(14 + ipLen, char(0));
-    uchar *b = reinterpret_cast<uchar *>(frame.data());
-    // 以太头
-    std::memcpy(b, s->mac6.constData(), 6);                 // dst = 设备
-    std::memcpy(b + 6, s->nic->localMac6.constData(), 6);   // src = 本机在该设备那张卡上的 MAC
-    b[12] = 0x08; b[13] = 0x00;
-    // IP 头
-    uchar *ip = b + 14;
-    ip[0] = 0x45; ip[1] = 0x00;
-    ip[2] = (ipLen >> 8) & 0xFF; ip[3] = ipLen & 0xFF;
-    ip[4] = 0; ip[5] = 0;
-    ip[6] = 0x40; ip[7] = 0; // DF
-    ip[8] = 64;  ip[9] = 17; // ttl, proto=UDP
-    ip[10] = 0;  ip[11] = 0; // checksum 占位
-    ip[12] = (srcIp >> 24) & 0xFF; ip[13] = (srcIp >> 16) & 0xFF;
-    ip[14] = (srcIp >> 8) & 0xFF;  ip[15] = srcIp & 0xFF;
-    ip[16] = (dstIp >> 24) & 0xFF; ip[17] = (dstIp >> 16) & 0xFF;
-    ip[18] = (dstIp >> 8) & 0xFF;  ip[19] = dstIp & 0xFF;
-    const quint16 ipck = ipChecksum(ip, 20);
-    ip[10] = (ipck >> 8) & 0xFF; ip[11] = ipck & 0xFF;
-    // UDP 头
-    uchar *u = ip + 20;
-    u[0] = (fromPort >> 8) & 0xFF; u[1] = fromPort & 0xFF;   // sport = 服务器端口
-    u[2] = (vport >> 8) & 0xFF;    u[3] = vport & 0xFF;      // dport = 设备源端口
-    u[4] = (udpLen >> 8) & 0xFF;   u[5] = udpLen & 0xFF;
-    u[6] = 0; u[7] = 0; // checksum
-    std::memcpy(u + 8, payload.constData(), payload.size());
-    // UDP 校验和（含伪首部）
-    QByteArray pseudo;
-    pseudo.append(char((srcIp >> 24) & 0xFF)); pseudo.append(char((srcIp >> 16) & 0xFF));
-    pseudo.append(char((srcIp >> 8) & 0xFF));  pseudo.append(char(srcIp & 0xFF));
-    pseudo.append(char((dstIp >> 24) & 0xFF)); pseudo.append(char((dstIp >> 16) & 0xFF));
-    pseudo.append(char((dstIp >> 8) & 0xFF));  pseudo.append(char(dstIp & 0xFF));
-    pseudo.append(char(0)); pseudo.append(char(17));
-    pseudo.append(char((udpLen >> 8) & 0xFF)); pseudo.append(char(udpLen & 0xFF));
-    pseudo.append(reinterpret_cast<const char *>(u), udpLen);
-    quint16 uck = ipChecksum(reinterpret_cast<const uchar *>(pseudo.constData()), pseudo.size());
-    if (uck == 0)
-        uck = 0xFFFF;
-    u[6] = (uck >> 8) & 0xFF; u[7] = uck & 0xFF;
-
-    if (s->nic->ep)
-        s->nic->ep->send(frame);
+// DNS 劫持：把设备的一条 DNS 查询发给 mihomo 的 DNS(127.0.0.1:kDnsHijackPort)，应答原样回封给设备、
+// 源地址伪装成设备原本查询的那个 DNS 服务器(origServer:53)——对设备完全透明，于是设备拿到的是 mihomo
+// 的 fake-ip 结果，随后连 fake-ip 又经网关回到 mihomo，按国内外分流。用一次性 QUdpSocket（一问一答，
+// 5s 兜底回收），不建 UdpFlow。应答到达时按 victimIp **重新查** UdpSess（防设备中途被摘除留下的悬垂）。
+void NetStack::hijackDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
+                         const QByteArray &query, bool v6)
+{
+    auto *ds = new QUdpSocket(this);
+    connect(ds, &QUdpSocket::readyRead, this, [this, ds, victimIp, vport, origServer, v6]() {
+        while (ds->hasPendingDatagrams()) {
+            QByteArray resp;
+            resp.resize(int(ds->pendingDatagramSize()));
+            const qint64 n = ds->readDatagram(resp.data(), resp.size());
+            if (n < 0)
+                break;
+            resp.truncate(int(n));
+            UdpSess *s = d->udp.value(victimIp);
+            if (s && s->nic) {
+                if (v6)
+                    sendUdpResponse6(s, vport, origServer, 53, resp);
+                else
+                    sendUdpResponse4(s, vport, origServer, 53, resp);
+            }
+        }
+        ds->deleteLater(); // 一问一答即弃
+    });
+    ds->writeDatagram(query, QHostAddress(QStringLiteral("127.0.0.1")), kDnsHijackPort);
+    // 无应答兜底回收（mihomo 没起 / 解析失败）：5s 后无论如何删掉 socket，防泄漏。
+    QTimer::singleShot(5000, ds, [ds] { ds->deleteLater(); });
 }

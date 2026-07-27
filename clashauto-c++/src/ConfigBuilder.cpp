@@ -52,6 +52,11 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = setScalar(yaml, "find-process-mode", "always");
     yaml = setNestedScalar(yaml, "tun", "enable", tunEnabled ? "true" : "false");
     yaml = ensureProxyServerNameserver(yaml);
+    // DNS 劫持配套：开 mihomo 的 DNS 监听端口。透明网关把被劫持设备的 UDP :53 查询转投到这里，而不是
+    // 原样中继到「设备配置的 DNS」——后者常是网关/路由器 IP，经用户态栈中继到它走不通，导致名字解析
+    // 时断时通（现象：直连 IP 通、换公共 DNS 通、用路由器当 DNS 全超时）。转投后设备拿到 mihomo 的
+    // fake-ip 结果，连 fake-ip 再经网关回到核心做国内外分流。端口须与 NetStack::kDnsHijackPort 一致(1053)。
+    yaml = setNestedScalar(yaml, "dns", "listen", "127.0.0.1:1053");
     yaml = normalizeEmptyProxies(yaml);
     yaml = applySubscriptions(yaml, readSubscriptions());
     yaml = applyCustomRules(yaml);

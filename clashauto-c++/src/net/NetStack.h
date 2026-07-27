@@ -78,6 +78,10 @@ private:
     // v4/v6 共用：回程 UDP 到设备。按会话记录的 v4/v6 走对应的封包/校验和。
     void onUdpResponse(const QString &victimIp, quint16 vport, const QHostAddress &fromIp,
                        quint16 fromPort, const QByteArray &payload);
+    // DNS 劫持：把设备的 :53 查询转投 mihomo 的 DNS(127.0.0.1:1053) 而非原样中继到设备配置的 DNS
+    //（常是网关/路由器 IP，经用户态栈中继到它走不通 → 名字解析时断时通）。见 .cpp。v6=true 按 v6 回封。
+    void hijackDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
+                   const QByteArray &query, bool v6);
 
     Impl *d;
 };
