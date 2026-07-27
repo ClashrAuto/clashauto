@@ -220,7 +220,10 @@ Item {
                 border.width: 1; border.color: Theme.inputBorder
                 Text {
                     anchors.centerIn: parent
-                    text: "" // refresh-line
+                    // remixicon 的码点在 Unicode 私用区（U+E000–U+F8FF）。**写 \uXXXX 转义、不写字面字符**：
+                    // 字面的私用区字符在整文件改写 / 复制粘贴 / 换编码时会被悄无声息地吃掉，编译照过、
+                    // 按钮变成一片空白，很难查。（StatusPage.qml 的同一个图标也是这个写法。）
+                    text: "\uF064" // refresh-line
                     font.family: Theme.riFont
                     font.pixelSize: 15
                     color: Theme.accent

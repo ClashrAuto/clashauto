@@ -501,7 +501,7 @@ ApplicationWindow {
                         Text { text: "↑" + Theme.fmtBytes(model.upload)
                                font.pixelSize: 10; color: "#b14a4a" }
                         Text {
-                            text: "" // close-fill
+                            text: "\uEB99" // close-fill（同 StatusPage：私用区码点写转义）
                             font.family: Theme.riFont
                             font.pixelSize: 12; color: Theme.textMuted
                             MouseArea {
