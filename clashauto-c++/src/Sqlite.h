@@ -25,6 +25,11 @@ QString databasePath(const QString &configDir);
 QSqlDatabase open(const QString &connName, const QString &configDir);
 
 // 关闭并注销连接（析构里调；先释放 QSqlDatabase 引用再 removeDatabase，否则 Qt 会警告）。
+// 注销那一步在「QCoreApplication 已析构」时会被跳过——原因与实证见 .cpp 里的长注释。
+//
+// ★ 使用规矩：**真正的写库动作必须挂 aboutToQuit 或更早，不能放在析构里**。
+//   QApplication 的子对象是在 ~QObject 里被删的，那已经排在 ~QCoreApplication 之后，
+//   属于 Qt 明确不支持使用 QtSql 的时点（驱动插件随时可能已卸载）。
 void close(QSqlDatabase &db, const QString &connName);
 
 // 绑定用：null QString 绑出来是 SQL NULL，撞上列的 NOT NULL 会让整批写入失败（空 mac、
