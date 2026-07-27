@@ -28,6 +28,29 @@
 // COAST_HAVE_TPACKET_V3 编译期摘掉。CI 要出 x64 和 arm64 两个 Linux 包、用户内核版本不可控，
 // 这条回退不能省。
 //
+// ——————————————————— 发方：加大 SO_SNDBUF + 积压队列（别再静默丢帧）———————————————————
+//
+// 收方做到了零拷贝批处理，发方却长期是「一次 ::sendto，失败就 return false」——而这个 false
+// 一路无人理会：NetStack 的 lwipLinkOutput 忽略返回值、恒回 ERR_OK，于是 lwIP 认为帧已发出。
+// 结果是**本机→设备方向的静默丢包**，而且完全不可见（LINK_STATS 也是关的）。
+//
+// sendto 什么时候会失败：AF_PACKET 的发方走 sock_alloc_send_skb，按 SO_SNDBUF 记账，且记的是
+// skb 的 truesize（比帧长大不少）。默认 SO_SNDBUF 取自 net.core.wmem_default（多数发行版
+// 212992 B），折算下来只排得下几十个满长帧 —— lwIP 一条连接的拥塞窗口就能填满（TCP_SND_BUF
+// 是 128 KiB），网卡/qdisc 一旦短时拥塞（WiFi 客户端慢、千兆口突发）就立刻 ENOBUFS/EAGAIN。
+//
+// 丢了之后的代价被 lwIP 的定时器粒度放大：重传由 tcp_slowtmr 驱动，恢复要几百毫秒起步。
+// 表现就是「被代理设备访问什么都慢、偶尔打不开」——**与目标在国内还是国外无关**，因为丢的是
+// 本机→设备这条所有流量共用的腿。
+//
+// 所以发方补两层：
+//   1) SO_SNDBUF 抬到 kTxSndBufBytes（优先 SO_SNDBUFFORCE，网关本就以 root 跑，可越过
+//      net.core.wmem_max 的钳制）；
+//   2) 仍然 EAGAIN/ENOBUFS 时把帧**排进积压队列**，挂 QSocketNotifier(Write) 等可写再发，
+//      而不是丢掉。队列有字节上限，真顶满了才丢并计数（那时链路确实喂不进去，继续囤只会变成
+//      缓冲膨胀，交给 lwIP 重传更划算）。
+//   3) 丢帧（发方队列溢出 / 收方内核环溢出）一律计数并节流打日志 —— 这类故障不可见才是最贵的。
+//
 // 权限：需要 CAP_NET_RAW / root，否则 socket() 直接 EPERM。open() 失败时置 *err 并清理半开 fd。
 //
 // 本文件在所有平台都参与编译：非 Linux 时只保留一个返回 nullptr 的工厂（LanGateway 据此判不可用）。
@@ -54,9 +77,12 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
+#include <deque>
 #include <vector>
 
 #include <QByteArray>
+#include <QDateTime>
+#include <QDebug>
 #include <QSocketNotifier>
 #include <QVector>
 
@@ -152,6 +178,25 @@ constexpr std::size_t kRingBytes = std::size_t(kRingBlockSize) * kRingBlockNr;  
 constexpr unsigned kRingRetireTovMs = 1u;
 #endif // COAST_HAVE_TPACKET_V3
 
+// —— 发方参数（理由见文件头「发方」一节）——
+//
+// ★ 定容量的判据是「盖住突发」，**不是**「越大越好」。这两个数就是排队时延的上限，而排队时延
+//   必须明显小于 lwIP 的重传下限（lwipopts.h 里算过：TCP_TMR_INTERVAL=100ms 时 rto_min ≈ 0.6s）。
+//   排得比 0.6s 还久，对端已经重传过一轮了我们才把陈旧帧发出去 —— 那是拿丢包换缓冲膨胀，白折腾。
+//   ★ 注意内核会把 SO_SNDBUF **翻倍**记账（sock_setsockopt: sk_sndbuf = val * 2），算账时别忘。
+//   按「网卡把队列排空的速率」折算，下面这组取值的实际缓冲是 内核 2 MiB + 用户态 1 MiB = 3 MiB：
+//     千兆有线   3 MiB ≈  25 ms
+//     百兆/WiFi  3 MiB ≈ 250 ms   ← 本机自己接在 WiFi 上的最坏情形，仍安全落在 0.6 s 以内
+//   相对原来那个默认 208 KB 有 15 倍余量，足以吃下「lwIP 一次 tcp_output 把整个拥塞窗口刷出来」
+//   这种突发。要再往上加之前，先回头看一眼上面那条「必须短于 rto_min」的判据。
+constexpr int kTxSndBufBytes = 1 * 1024 * 1024; // 内核记 2 MiB
+// 用户态积压：内核那层满了之后再兜一层。这层的时延同样计进上面的总账。
+constexpr qint64 kTxBacklogMaxBytes = 1 * 1024 * 1024;
+// 丢帧日志节流：链路一旦喂不进去就是每帧都丢，不节流会刷屏。
+constexpr qint64 kDropReportMinIntervalMs = 30000;
+// 内核收方丢包计数（PACKET_STATISTICS）的采样间隔。读一次即清零，故按固定间隔累加。
+constexpr qint64 kRxStatsPollIntervalMs = 5000;
+
 // Linux 二层端点：一张网卡一个 AF_PACKET 原始套接字。
 // 注意：本类不加 Q_OBJECT——它不声明新信号/槽，只重写基类虚函数并 emit 基类的 frameReceived，
 // 且用 functor 版 connect 绑定 Notifier，因此无需 moc（避免在 .cpp 里 #include ".moc"）。
@@ -229,7 +274,21 @@ public:
         mreq.mr_type = PACKET_MR_PROMISC;
         ::setsockopt(fd, SOL_PACKET, PACKET_ADD_MEMBERSHIP, &mreq, sizeof(mreq)); // 失败无妨，BPF 仍在
 
+        // ★ 抬高发送缓冲（理由见文件头「发方」一节）。先试 SO_SNDBUFFORCE：它需要 CAP_NET_ADMIN，
+        //   而网关本来就以 root 跑，好处是**越过 net.core.wmem_max 的钳制**（发行版默认常是
+        //   212992，普通 SO_SNDBUF 会被悄悄砍回去，看起来设了其实没设）。没权限再退回 SO_SNDBUF，
+        //   由内核钳到系统上限。两者都失败也不致命——积压队列还兜着一层。
+        //   SO_SNDBUFFORCE 的数值是**按架构定义**的，不能硬写常量兜底；头文件没有就只走普通路径。
+        int snd = kTxSndBufBytes;
+        bool sndSet = false;
+#ifdef SO_SNDBUFFORCE
+        sndSet = ::setsockopt(fd, SOL_SOCKET, SO_SNDBUFFORCE, &snd, sizeof(snd)) == 0;
+#endif
+        if (!sndSet)
+            ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
+
         // 非阻塞：回退路径（drainSocket）靠它循环 recv 到 EAGAIN，绝不在无数据时阻塞事件循环。
+        // 发方同样依赖它：满了要拿到 EAGAIN/ENOBUFS 才能转去排队，而不是把工作线程堵死。
         int flags = ::fcntl(fd, F_GETFL, 0);
         if (flags < 0)
             flags = 0;
@@ -250,6 +309,12 @@ public:
         // Qt6 的 activated 只剩 (QSocketDescriptor, Type) 一个重载，取地址无歧义；
         // 用零参 lambda 转发（尾随实参可丢弃）。
         connect(m_notifier, &QSocketNotifier::activated, this, [this]() { onReadable(); });
+
+        // 写就绪通知器：常态**关闭**（fd 绝大多数时候可写，开着就是每轮事件循环空转一次），
+        // 只在 enqueueTx 排进第一帧时打开、drainTx 排空后关掉。
+        m_txNotifier = new QSocketNotifier(m_fd, QSocketNotifier::Write, this);
+        m_txNotifier->setEnabled(false);
+        connect(m_txNotifier, &QSocketNotifier::activated, this, [this]() { drainTx(); });
         return true;
     }
 
@@ -259,6 +324,12 @@ public:
             delete m_notifier; // 先删 Notifier，停止对 fd 的监听，再拆环、关 fd
             m_notifier = nullptr;
         }
+        if (m_txNotifier) {
+            delete m_txNotifier;
+            m_txNotifier = nullptr;
+        }
+        m_txQueue.clear();
+        m_txQueuedBytes = 0;
 #ifdef COAST_HAVE_TPACKET_V3
         if (m_ring) {
             // 先 munmap 再 close：环页由内核持有，socket 关闭时才真正释放；反过来做会在
@@ -280,23 +351,25 @@ public:
 
     bool isOpen() const override { return m_fd >= 0; }
 
+    // 发一帧。缓冲满时**排队重试**而不是丢（理由见文件头「发方」一节）。
+    // 返回 false 只在「参数非法 / 端点没开 / 队列也满了」——调用方（lwipLinkOutput）历来忽略它，
+    // 这里也不指望它去处理；真正的可观测性在 m_txDropped 的节流日志上。
     bool send(const QByteArray &frame) override
     {
         if (m_fd < 0 || frame.size() < 14) // 至少要够以太头
             return false;
 
-        // 发送地址结构：内核按 sll_ifindex 选口，sll_halen/sll_addr 给目的 MAC（= 帧头前 6 字节）。
-        // 注意发方**不走环**（我们只装了 RX_RING，没装 TX_RING）——sendto 语义一如既往。
-        struct sockaddr_ll sll;
-        std::memset(&sll, 0, sizeof(sll));
-        sll.sll_family = AF_PACKET;
-        sll.sll_ifindex = m_ifIndex;
-        sll.sll_halen = 6;
-        std::memcpy(sll.sll_addr, frame.constData(), 6); // dst MAC
+        // 队列非空 = 内核正堵着，必须排到队尾，否则新帧插队会把同一条 TCP 流的段序打乱
+        // （乱序在对端表现为丢包重传，等于自己给自己制造损伤）。
+        if (!m_txQueue.empty())
+            return enqueueTx(frame);
 
-        const ssize_t n = ::sendto(m_fd, frame.constData(), static_cast<size_t>(frame.size()), 0,
-                                   reinterpret_cast<struct sockaddr *>(&sll), sizeof(sll));
-        return n == static_cast<ssize_t>(frame.size());
+        const int r = rawSend(frame);
+        if (r > 0)
+            return true;
+        if (r == 0)
+            return enqueueTx(frame); // EAGAIN/ENOBUFS：缓冲满，等可写
+        return false;                // 其它 errno：这一帧真发不出去（网卡 down 等）
     }
 
     QByteArray localMac() const override { return m_localMac; }
@@ -401,6 +474,110 @@ public:
     }
 
 private:
+    // —————————————————————————— 发方 ——————————————————————————
+    // 裸发一帧。返回 1 = 已发出；0 = 内核缓冲满（EAGAIN/ENOBUFS/EINTR，可重试）；-1 = 真错误。
+    int rawSend(const QByteArray &frame)
+    {
+        // 发送地址结构：内核按 sll_ifindex 选口，sll_halen/sll_addr 给目的 MAC（= 帧头前 6 字节）。
+        // 注意发方**不走环**（我们只装了 RX_RING，没装 TX_RING）——sendto 语义一如既往。
+        struct sockaddr_ll sll;
+        std::memset(&sll, 0, sizeof(sll));
+        sll.sll_family = AF_PACKET;
+        sll.sll_ifindex = m_ifIndex;
+        sll.sll_halen = 6;
+        std::memcpy(sll.sll_addr, frame.constData(), 6); // dst MAC
+
+        for (;;) {
+            const ssize_t n = ::sendto(m_fd, frame.constData(),
+                                       static_cast<size_t>(frame.size()), 0,
+                                       reinterpret_cast<struct sockaddr *>(&sll), sizeof(sll));
+            if (n == static_cast<ssize_t>(frame.size()))
+                return 1;
+            if (n >= 0)
+                return -1; // 部分发送：数据报 socket 上不该发生，当错误处理
+            if (errno == EINTR)
+                continue;  // 被信号打断，原样重来（不消耗队列名额）
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
+                return 0;
+            return -1;
+        }
+    }
+
+    // 排进积压队列，并确保写就绪通知器是开着的。队列满则丢最新的一帧并计数。
+    // 丢**新**而不是丢旧：旧帧已经排在同一条流的前面，丢它会造成空洞，让对端进入更贵的
+    // 乱序/重传恢复；丢队尾等价于「链路此刻的容量就到这了」，对 TCP 是最温和的信号。
+    bool enqueueTx(const QByteArray &frame)
+    {
+        if (m_txQueuedBytes + frame.size() > kTxBacklogMaxBytes) {
+            ++m_txDropped;
+            reportDropsThrottled();
+            return false;
+        }
+        // ★ 这里存的是 QByteArray 的**隐式共享副本**，不是深拷贝——对 fromRawData 造出来的视图
+        //   等于存了个裸指针。所以 send() 的入参契约是「必须是自有内存的 QByteArray」。
+        //   现状成立：唯一的调用方 lwipLinkOutput 传的是 pbufToBytes() 新分配的缓冲；
+        //   ArpSpoofer/NdpSpoofer 传的也是自己拼出来的。将来若有人想把收环里的帧直接回注，
+        //   必须在这之前 deep-copy（QByteArray(f.constData(), f.size())）。
+        m_txQueue.push_back(frame);
+        m_txQueuedBytes += frame.size();
+        if (m_txNotifier && !m_txNotifier->isEnabled())
+            m_txNotifier->setEnabled(true);
+        return true;
+    }
+
+    // fd 可写 → 把积压尽量灌进内核；空了就关掉写通知器（不关会在可写时空转烧 CPU）。
+    void drainTx()
+    {
+        while (!m_txQueue.empty()) {
+            const QByteArray &f = m_txQueue.front();
+            const int r = rawSend(f);
+            if (r == 0)
+                return; // 又满了，等下一次可写
+            if (r < 0) {
+                ++m_txDropped; // 发不出去的帧不能永远堵住队头
+                reportDropsThrottled();
+            }
+            m_txQueuedBytes -= m_txQueue.front().size();
+            m_txQueue.pop_front();
+        }
+        if (m_txNotifier)
+            m_txNotifier->setEnabled(false);
+    }
+
+    // 收方内核丢包计数。PACKET_STATISTICS 是「读即清零」，所以按固定间隔采样累加。
+    // tp_drops 涨 = 环被写满、内核来不及交付（用户态处理不过来 / 事件循环被别的活堵住）——
+    // 这是设备**上行**方向的静默丢包，和发方的 m_txDropped 互为镜像。
+    void pollRxDrops(qint64 nowMs)
+    {
+        if (nowMs - m_lastRxStatsMs < kRxStatsPollIntervalMs)
+            return;
+        m_lastRxStatsMs = nowMs;
+        struct tpacket_stats st;
+        std::memset(&st, 0, sizeof(st));
+        socklen_t len = sizeof(st);
+        if (::getsockopt(m_fd, SOL_PACKET, PACKET_STATISTICS, &st, &len) < 0)
+            return;
+        if (st.tp_drops == 0)
+            return;
+        m_rxDropped += st.tp_drops;
+        reportDropsThrottled();
+    }
+
+    // 两个方向的丢包共用一条节流日志。丢包不可见是这条链路最贵的故障模式（lwIP 只会在几百
+    // 毫秒后重传，用户看到的只是「慢」），所以宁可吵一点也要报出来。
+    void reportDropsThrottled()
+    {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - m_lastDropReportMs < kDropReportMinIntervalMs)
+            return; // 节流：基线不动，攒到下个窗口一起报
+        m_lastDropReportMs = now;
+        qWarning().noquote()
+            << "L2Endpoint: 二层丢帧 —— 发方积压溢出" << m_txDropped << "帧, 内核收方丢弃"
+            << m_rxDropped << "帧 (当前积压" << m_txQueuedBytes
+            << "字节)。发方涨 = 网卡/链路喂不进去(WiFi 慢客户端、qdisc 拥塞)；"
+               "收方涨 = 用户态处理不过来。两者都会让被代理设备「什么都慢」。";
+    }
+
     // Notifier 就绪回调的统一入口：走环或走回退路径，并做一层重入保护。
     // 为什么要防重入：槽里会一路跑到 lwIP / SOCKS，理论上不该转事件循环，但万一某天有人在下游
     // 引入了嵌套事件循环，level-triggered 的 QSocketNotifier 会在同一个 fd 上再次触发，
@@ -410,6 +587,7 @@ private:
         if (m_inDrain)
             return;
         m_inDrain = true;
+        pollRxDrops(QDateTime::currentMSecsSinceEpoch()); // 内部自带 5s 间隔，常态直接 return
 #ifdef COAST_HAVE_TPACKET_V3
         if (m_ring)
             drainRing();
@@ -560,6 +738,14 @@ private:
     QByteArray m_localMac;
     QSocketNotifier *m_notifier = nullptr;
     bool m_inDrain = false;
+    // 发方积压（见文件头「发方」一节）。写通知器**常态是关的**，只在队列非空期间打开。
+    QSocketNotifier *m_txNotifier = nullptr;
+    std::deque<QByteArray> m_txQueue;
+    qint64 m_txQueuedBytes = 0;
+    qint64 m_txDropped = 0;
+    qint64 m_rxDropped = 0;
+    qint64 m_lastDropReportMs = -kDropReportMinIntervalMs;
+    qint64 m_lastRxStatsMs = 0;
 #ifdef COAST_HAVE_TPACKET_V3
     unsigned char *m_ring = nullptr; // mmap 起点（= 第 0 块）；nullptr = 没建成环，走回退路径
     unsigned m_blockIdx = 0;         // 下一个要消费的块号，必须和内核队首严格同步

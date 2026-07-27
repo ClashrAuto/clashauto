@@ -8,6 +8,11 @@
 //  - open() 绑定到指定网卡，成功后 frameReceived() 会在 Qt 事件循环线程发出**每一个**收到的完整
 //    以太帧（含 14 字节以太头；不含 FCS）。用 QSocketNotifier 驱动读取，切勿轮询/阻塞。
 //  - send() 发送一个完整以太帧（调用方负责填好 dst/src MAC 与 ethertype）。
+//    · **frame 必须是自有内存的 QByteArray**，不能是 fromRawData 的视图：内核发送缓冲满时
+//      实现会把它排进积压队列（等 fd 可写再发），队列里存的是隐式共享副本 = 底层同一块内存，
+//      要活到下一次事件循环。需要回注收到的帧时请先深拷贝。
+//    · 返回 false = 这一帧最终没发出去（积压也满了 / 网卡出错）。调用方**可以**忽略它——
+//      本机→设备方向的丢帧由 TCP 重传兜底，实现侧自带计数与节流告警。
 //  - localMac() 返回本网卡 6 字节 MAC；ifIndex() 返回接口索引（AF_PACKET sll_ifindex 用）。
 //  - 需要 CAP_NET_RAW / root。open() 失败（权限/网卡不存在）时置 *err 并返回 false。
 #include <QByteArray>

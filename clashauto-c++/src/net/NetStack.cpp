@@ -155,6 +155,11 @@ constexpr qint64 kUdpDnsIdleMs = 15000;
 // 它走不通 → 名字解析时断时通）」，而是转投 mihomo 自己的 fake-ip DNS，走它的国内外分流后再回封给设备。
 constexpr quint16 kDnsHijackPort = 1053;
 
+// lwIP 定时器泵的周期，以及「UDP 流老化 + 内存池诊断」相对它的分频比（详见 NetStack::init）。
+// 25ms × 8 = 200ms，老化/诊断的实际节奏与改动前一致。
+constexpr int kLwipPumpIntervalMs = 25;
+constexpr int kHousekeepEveryTicks = 8;
+
 // 容量兜底：句柄和 mihomo 侧的关联数都是有限资源。BT/DHT 这类应用通常共用一个源端口广撒（对本
 // 方案友好），但「源端口也乱换」的极端情况必须挡住，不能让一台设备把整个进程的 fd 吃光。
 constexpr int kMaxUdpFlowsPerDevice = 128;
@@ -229,6 +234,7 @@ struct NetStack::Impl {
     UdpLru udpLruLong;                       // 长档(一般 UDP)流的 LRU
     int udpFlowCount = 0;                    // 全局流数（对上限用，省得遍历）
     QTimer *timer = nullptr;
+    int pumpTick = 0; // 泵的拍数计数器，给「老化 + 池诊断」分频用（见 init() 里的说明）
     bool inited = false;
 
     QString userForIp(const QString &ip) const { return devices.value(ip).socksUser; }
@@ -338,6 +344,13 @@ QByteArray pbufToBytes(struct pbuf *p)
 
 // netif linkoutput：lwIP 要发一帧 → 序列化 → 从**该 netif 自己的**二层端点发出
 //（dst MAC 已由静态 ARP 填好）。多网卡就靠这里分流：绝不能回到某个全局端点上。
+//
+// ★ 恒返回 ERR_OK、**故意**忽略 send() 的返回值。这不是偷懒，但也曾经是个坑：
+//   端点侧原本「内核缓冲一满就把帧丢掉并 return false」，配上这里的忽略，就成了完全无声的
+//   本机→设备丢包（LINK_STATS 也是关的），只能靠 lwIP 几百毫秒后的重传兜底 —— 被代理设备的
+//   现象是「访问什么都慢、偶尔打不开」。现在端点自己带积压队列 + 丢帧计数（见
+//   L2Endpoint_linux.cpp / L2Endpoint_mac.cpp 的「发方」一节），send() 返回 false 已经意味着
+//   「链路真的喂不进去了」，此时最合理的处置恰好就是交给 TCP 重传，所以这里保持不变。
 err_t lwipLinkOutput(struct netif *netif, struct pbuf *p)
 {
     NetStack::Nic *nic = nicOf(netif);
@@ -1038,15 +1051,25 @@ bool NetStack::init(QString *err)
     tcp_accept(d->listener, lwipTcpAccept);
 
     // lwIP 定时器泵（TCP 重传/超时/ARP 老化）+ UDP 流老化 + 内存池诊断。
-    // 老化和诊断都搭这趟车而不是各自再开定时器：reapUdpFlows 只看两条 LRU 链的链尾，
-    // pollLwipPoolStats 只做十来次 u16 比较，200ms 一次的代价可以忽略；
-    // 绝不能在这里扫全表——GUI 线程刚治完卡顿。
+    //
+    // ★ 泵的周期必须**明显细于** lwIP 自己的 TCP 定时器周期（TCP_TMR_INTERVAL，见 lwipopts.h），
+    //   否则每一拍都要等下一次泵才跑得到，实际周期被拉长到「泵周期与 TCP 周期的公倍数量级」。
+    //   老值 200ms 配 lwIP 默认的 250ms 就是这个毛病：tcp_fasttmr（延迟 ACK）实际约 400ms 一次、
+    //   tcp_slowtmr（**重传**）约 600ms 一次 —— 本机→设备方向一旦丢一帧，恢复要大半秒起步。
+    //   被代理设备的表现就是「访问什么都慢、偶尔打不开」，且与目标在国内还是国外无关。
+    //   现在 TCP_TMR_INTERVAL 降到 100ms、泵降到 25ms（1/4 周期，留足抖动余量）。
+    // 成本：空转一拍就是「读一次时钟 + 比一次链表头」，40 次/秒可以忽略；且这个定时器只在网关
+    //   开着时存在，跑在 LanGateway 的工作线程上，不碰 GUI 线程。
+    // 老化和诊断**不跟着提频**：它们本来就是 200ms 一次的量级，没必要 8 倍频，按拍数分频即可。
     d->timer = new QTimer(this);
-    d->timer->setInterval(200);
+    d->timer->setInterval(kLwipPumpIntervalMs);
     connect(d->timer, &QTimer::timeout, this, [this] {
         sys_check_timeouts();
-        reapUdpFlows(d);
-        pollLwipPoolStats();
+        if (++d->pumpTick >= kHousekeepEveryTicks) {
+            d->pumpTick = 0;
+            reapUdpFlows(d);
+            pollLwipPoolStats();
+        }
     });
     d->timer->start();
 

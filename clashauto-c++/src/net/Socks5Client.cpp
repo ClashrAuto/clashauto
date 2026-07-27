@@ -307,7 +307,16 @@ void Socks5Tcp::connectTo(quint16 socksPort, const QString &dstHost, quint16 dst
     // 在本进程里额外滞留的上限。
     d->sock->setReadBufferSize(64 * 1024);
     // 用 this 作 context：本对象析构时自动断开这些连接，回调里安全访问 d。
-    connect(d->sock, &QTcpSocket::connected, this, [this] { d->onConnected(); });
+    connect(d->sock, &QTcpSocket::connected, this, [this] {
+        // 关 Nagle。这条 socket 是**纯转发管道**：写进来的每一段都是设备那边已经决定要发出去
+        // 的字节（TLS 记录、HTTP 请求头…），再攒一手毫无意义 —— 攒的判据（「有未确认数据且这
+        // 次不足一个 MSS」）在握手往返里真的会命中，白白给每次请求叠一次延迟。设备侧那条 TCP
+        // 在 lwIP 里也是关 Nagle 的（NetStack 的 tcp_nagle_disable），两头对齐。
+        // ★ 必须放在 connected 里：Qt6 的 QAbstractSocket::setSocketOption 在 socketEngine 还
+        //   没建起来时**直接 return**，connectToHost 之前调等于没调。
+        d->sock->setSocketOption(QAbstractSocket::LowDelayOption, 1);
+        d->onConnected();
+    });
     connect(d->sock, &QTcpSocket::readyRead, this, [this] { d->onReadyRead(); });
     // 上行排空进度：转发出去给上层做「按量归还 lwIP 接收窗口」。握手包(greeting/auth/connect)
     // 也会触发一次，上层只是重新评估一下水位，无副作用。

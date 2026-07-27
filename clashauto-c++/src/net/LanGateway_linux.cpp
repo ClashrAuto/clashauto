@@ -595,6 +595,24 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 if (ethType == 0x0800) { // IPv4
                     const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
                                         | (quint32(f[32]) << 8) | quint32(f[33]);
+                    // 广播 / 组播旁路（v6 侧早就有对应的 ip6DstIsLocalOrMulticast，v4 一直漏着）：
+                    //   255.255.255.255（DHCP 续租、部分 SSDP/NetBIOS）与 224.0.0.0/4
+                    //   （mDNS 224.0.0.251、SSDP 239.255.255.250、LLMNR、IGMP…）
+                    // 都不是「出网」流量，代理不了也不该代理。以前它们会一路喂进 NetStack：
+                    //   · 每个源端口建一条 UdpFlow → 一次 SOCKS5 UDP ASSOCIATE（含一条到 mihomo 的
+                    //     TCP 控制连接），而每设备只有 kMaxUdpFlowsPerDevice=128 个名额 —— 一台爱
+                    //     嚷嚷的设备光靠 LAN 发现就能把名额挤掉，把正在用的 QUIC 流顶出去；
+                    //   · 对 policy=global 的设备还会命中 IN-USER 规则，把 LAN 发现包**发到代理节点**上。
+                    // 这些帧本身是泛洪的、真交换机照样送到该去的地方，我们只是别再多此一举。
+                    const bool bcastOrMcast = (dst == 0xFFFFFFFFu) || ((dst >> 28) == 0xE);
+                    if (bcastOrMcast) {
+                        if (gwDbgOn() && (m_dbgBypassLan++ % 200) == 0)
+                            std::fprintf(stderr,
+                                         "[GW] bypass bcast/mcast dst=%u.%u.%u.%u (count=%lld)\n",
+                                         f[30], f[31], f[32], f[33], m_dbgBypassLan),
+                                std::fflush(stderr);
+                        return;
+                    }
                     const bool sameSubnet = (dst & n->netMask4) == (n->localIp4 & n->netMask4);
                     if (sameSubnet && dst != n->gatewayIp4) {
                         // 同网段直连,放行给系统,不进 lwIP。若设备只访问 LAN、没真出网,这里会涨。

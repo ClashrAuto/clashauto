@@ -11,11 +11,14 @@
 #include "../MacHelperClient.h" // M3.5：非 root 时经 root helper 拿 bpf fd
 
 #include <QByteArray>
+#include <QDateTime>
+#include <QDebug>
 #include <QSocketNotifier>
 #include <QVector>
 
 #include <cerrno>
 #include <cstring>
+#include <deque>
 #include <vector>
 
 #include <fcntl.h>
@@ -29,6 +32,12 @@
 #include <unistd.h>
 
 namespace {
+
+// 发方积压队列上限与丢帧日志节流间隔，取值与 Linux 端一致（定容量的判据见 L2Endpoint_linux.cpp
+// 里 kTxBacklogMaxBytes 那段：排队时延必须明显短于 lwIP 的重传下限 ≈0.6s，不是越大越好）。
+// bpf 没有 SO_SNDBUF 那种旋钮，所以这层就是 mac 上唯一能自己控制的缓冲。
+constexpr qint64 kTxBacklogMaxBytes = 1 * 1024 * 1024;
+constexpr qint64 kDropReportMinIntervalMs = 30000;
 
 // BPF 读缓冲里每个包前有 struct bpf_hdr，包间按 BPF_WORDALIGN 对齐。
 class MacL2Endpoint final : public IL2Endpoint
@@ -95,19 +104,46 @@ public:
         m_localMac = readMac(ifname);
         m_notifier = new QSocketNotifier(m_fd, QSocketNotifier::Read, this);
         QObject::connect(m_notifier, &QSocketNotifier::activated, this, [this] { drain(); });
+        // 写就绪通知器：常态关闭，只在积压非空期间打开（理由同 Linux 端，见下面 send()）。
+        m_txNotifier = new QSocketNotifier(m_fd, QSocketNotifier::Write, this);
+        m_txNotifier->setEnabled(false);
+        QObject::connect(m_txNotifier, &QSocketNotifier::activated, this, [this] { drainTx(); });
         return true;
     }
 
     void close() override
     {
         if (m_notifier) { delete m_notifier; m_notifier = nullptr; }
+        if (m_txNotifier) { delete m_txNotifier; m_txNotifier = nullptr; }
+        m_txQueue.clear();
+        m_txQueuedBytes = 0;
         if (m_fd >= 0) { ::close(m_fd); m_fd = -1; }
     }
     bool isOpen() const override { return m_fd >= 0; }
 
+    // 发一帧。fd 是**非阻塞**的，bpf 的写缓冲/网卡发送队列一满就返回 ENOBUFS/EAGAIN ——
+    // 老写法在这里直接 return false 把帧丢掉，而上层（NetStack 的 lwipLinkOutput）忽略返回值、
+    // 恒回 ERR_OK，于是变成「本机→设备方向的静默丢包」，只能等 lwIP 几百毫秒后重传。
+    // 与 Linux 端同治：满了就排队等可写，队列顶满才丢并计数。详细论证见 L2Endpoint_linux.cpp
+    // 文件头「发方」一节（那边还多一层 SO_SNDBUF 抬高，bpf 没有对应的旋钮）。
     bool send(const QByteArray &frame) override
     {
-        return m_fd >= 0 && ::write(m_fd, frame.constData(), frame.size()) == frame.size();
+        if (m_fd < 0 || frame.size() < 14)
+            return false;
+        if (!m_txQueue.empty()) {
+            // ★ 先机会性排空一次，别只指望写通知器：XNU 的 bpf 字符设备历来只在**读**方向做
+            //   select/kqueue 唤醒，写方向能不能拿到就绪事件不保证。真拿不到的话，队列就只能靠
+            //   后续每次 send() 来推进——所以这一下必须有，否则积压会一直囤到上限才开始丢。
+            drainTx();
+            if (!m_txQueue.empty())
+                return enqueueTx(frame); // 仍有积压：必须排队尾，插队会打乱同一条流的段序
+        }
+        const int r = rawSend(frame);
+        if (r > 0)
+            return true;
+        if (r == 0)
+            return enqueueTx(frame);
+        return false;
     }
     QByteArray localMac() const override { return m_localMac; }
     int ifIndex() const override { return 0; }
@@ -218,10 +254,75 @@ private:
         return mac;
     }
 
+    // 裸写一帧：1 = 已发出；0 = 缓冲满（可重试）；-1 = 真错误。
+    int rawSend(const QByteArray &frame)
+    {
+        for (;;) {
+            const ssize_t n = ::write(m_fd, frame.constData(), size_t(frame.size()));
+            if (n == ssize_t(frame.size()))
+                return 1;
+            if (n >= 0)
+                return -1;
+            if (errno == EINTR)
+                continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
+                return 0;
+            return -1;
+        }
+    }
+
+    bool enqueueTx(const QByteArray &frame)
+    {
+        if (m_txQueuedBytes + frame.size() > kTxBacklogMaxBytes) {
+            ++m_txDropped;
+            reportDropsThrottled();
+            return false;
+        }
+        m_txQueue.push_back(frame);
+        m_txQueuedBytes += frame.size();
+        if (m_txNotifier && !m_txNotifier->isEnabled())
+            m_txNotifier->setEnabled(true);
+        return true;
+    }
+
+    void drainTx()
+    {
+        while (!m_txQueue.empty()) {
+            const int r = rawSend(m_txQueue.front());
+            if (r == 0)
+                return; // 又满了，等下一次可写
+            if (r < 0) {
+                ++m_txDropped; // 发不出去的帧不能永远堵住队头
+                reportDropsThrottled();
+            }
+            m_txQueuedBytes -= m_txQueue.front().size();
+            m_txQueue.pop_front();
+        }
+        if (m_txNotifier)
+            m_txNotifier->setEnabled(false);
+    }
+
+    void reportDropsThrottled()
+    {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - m_lastDropReportMs < kDropReportMinIntervalMs)
+            return;
+        m_lastDropReportMs = now;
+        qWarning().noquote() << "L2Endpoint(bpf): 发方积压溢出丢帧" << m_txDropped
+                             << "帧 (当前积压" << m_txQueuedBytes
+                             << "字节)。链路喂不进去会让被代理设备「什么都慢」。";
+    }
+
     int m_fd = -1;
     int m_bufLen = 32768;
     QByteArray m_localMac;
     QSocketNotifier *m_notifier = nullptr;
+    // 发方积压（见 send()）。写通知器常态关闭，只在队列非空期间打开。
+    QSocketNotifier *m_txNotifier = nullptr;
+    std::deque<QByteArray> m_txQueue;
+    qint64 m_txQueuedBytes = 0;
+    qint64 m_txDropped = 0;
+    qint64 m_lastDropReportMs = -kDropReportMinIntervalMs;
 };
 
 } // namespace

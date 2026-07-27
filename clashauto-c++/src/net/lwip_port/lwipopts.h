@@ -237,6 +237,27 @@
 #define LWIP_TCP                        1
 #define TCP_MSS                         1460
 
+// ★ TCP 定时器周期。默认 250ms → tcp_fasttmr(延迟 ACK/快重传的发送时机) 250ms 一拍、
+//   tcp_slowtmr(**超时重传**、persist、keepalive) 500ms 一拍。这个粒度是给嵌入式设备定的，
+//   放在本网关上偏粗得离谱：lwIP 这条 TCP 的对端是**同一个局域网里的设备**，RTT 是 0.3~30ms，
+//   而丢一帧要等半秒才重传 —— 等待时间比 RTT 高两个数量级，恢复期间该连接完全停摆。
+//   叠加 NetStack 那边的泵周期（改前 200ms，与 250ms 不整除）后实测节奏更差：fasttmr ≈400ms、
+//   slowtmr ≈600ms。用户侧的现象就是「被代理设备访问什么都慢、偶尔打不开」，**与目标是国内
+//   还是国外无关**——丢的是本机↔设备这条所有流量共用的腿。
+//   降到 100ms：fasttmr 100ms / slowtmr 200ms。RTO 由 lwIP 按毫秒换算成 slowtmr 拍数
+//   （tcp.c 的 LWIP_TCP_RTO_TIME/TCP_SLOW_INTERVAL），所以**初始** RTO 仍是 3s，不受影响；
+//   真正变的是**收敛后的下限**：VJ 估计器在局域网上（实测 RTT 恒 < 1 拍 → m=0）会让 sa→0、
+//   sv 收敛到 3（sv<4 时 sv>>2 == 0，不再下降），于是 rto_min = (sa>>3)+sv = 3 拍 ——
+//     · 旧值 250ms：slowtmr 500ms × 3 = **1.5 秒**才重传第一次；
+//     · 新值 100ms：slowtmr 200ms × 3 = **0.6 秒**。
+//   即：本机→设备方向丢一帧的代价从 1.5s 降到 0.6s。（还想更低就得改 lwIP 的估计器本身，
+//   那是另一码事；本网关真正的大头是「别丢帧」，见 L2Endpoint_linux.cpp 发方那一节。）
+//   代价：tcp_slowtmr 走一遍 tcp_active_pcbs 单链表的频率从 2 次/秒变 5 次/秒。按本文件
+//   MEMP_NUM_TCP_PCB 那段的实测量级（2048 项 ≈ 0.1ms/遍），合计 0.5ms/秒，可忽略。
+//   ★ 改这个值必须同步看 NetStack::init 里的泵周期 kLwipPumpIntervalMs——它要保持在本值的
+//     1/4 左右，否则定时器要等下一次泵才跑得到，等于白改。
+#define TCP_TMR_INTERVAL                100
+
 // ★ 窗口缩放（RFC 7323）。**先把收益口径说清楚，别当成「翻数倍吞吐」的银弹**：
 // 本网关是**终结式（split-TCP）代理** —— 被劫持设备的 TCP 连接就在 lwIP 里终结，去上游的
 // 那条连接由 mihomo 另开。所以 lwIP 这条 TCP 的 RTT 是「设备 ↔ 本机」的**局域网 RTT**，
