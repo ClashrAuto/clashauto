@@ -9,6 +9,7 @@
 #if defined(Q_OS_MACOS)
 
 #include "../MacHelperClient.h" // M3.5：非 root 时经 root helper 拿 bpf fd
+#include "GatewayDiag.h"       // 数据面计数（热路径上就是一条 inc）
 
 #include <QByteArray>
 #include <QDateTime>
@@ -216,6 +217,7 @@ public:
 private:
     void drain()
     {
+        ++GatewayDiag::c.rxWakes;
         QByteArray buf(m_bufLen, char(0));
         for (;;) {
             const ssize_t n = ::read(m_fd, buf.data(), m_bufLen);
@@ -228,6 +230,8 @@ private:
                 const int cap = bh->bh_caplen;
                 if (hdr <= 0 || cap < 0 || p + hdr + cap > n)
                     break;
+                ++GatewayDiag::c.rxFrames;
+                GatewayDiag::c.rxBytes += cap;
                 emit frameReceived(QByteArray(buf.constData() + p + hdr, cap));
                 p += BPF_WORDALIGN(hdr + cap);
             }
@@ -259,8 +263,11 @@ private:
     {
         for (;;) {
             const ssize_t n = ::write(m_fd, frame.constData(), size_t(frame.size()));
-            if (n == ssize_t(frame.size()))
+            if (n == ssize_t(frame.size())) {
+                ++GatewayDiag::c.txFrames;
+                GatewayDiag::c.txBytes += frame.size();
                 return 1;
+            }
             if (n >= 0)
                 return -1;
             if (errno == EINTR)
@@ -274,12 +281,15 @@ private:
     bool enqueueTx(const QByteArray &frame)
     {
         if (m_txQueuedBytes + frame.size() > kTxBacklogMaxBytes) {
-            ++m_txDropped;
+            ++GatewayDiag::c.txDropped;
             reportDropsThrottled();
             return false;
         }
+        ++GatewayDiag::c.txDeferred; // 还没丢，但内核已经喂不进去了——拥塞的**早期**信号
         m_txQueue.push_back(frame);
         m_txQueuedBytes += frame.size();
+        if (m_txQueuedBytes > GatewayDiag::c.txBacklogPeak)
+            GatewayDiag::c.txBacklogPeak = m_txQueuedBytes;
         if (m_txNotifier && !m_txNotifier->isEnabled())
             m_txNotifier->setEnabled(true);
         return true;
@@ -292,7 +302,7 @@ private:
             if (r == 0)
                 return; // 又满了，等下一次可写
             if (r < 0) {
-                ++m_txDropped; // 发不出去的帧不能永远堵住队头
+                ++GatewayDiag::c.txDropped; // 发不出去的帧不能永远堵住队头
                 reportDropsThrottled();
             }
             m_txQueuedBytes -= m_txQueue.front().size();
@@ -308,7 +318,7 @@ private:
         if (now - m_lastDropReportMs < kDropReportMinIntervalMs)
             return;
         m_lastDropReportMs = now;
-        qWarning().noquote() << "L2Endpoint(bpf): 发方积压溢出丢帧" << m_txDropped
+        qWarning().noquote() << "L2Endpoint(bpf): 发方积压溢出丢帧" << GatewayDiag::c.txDropped
                              << "帧 (当前积压" << m_txQueuedBytes
                              << "字节)。链路喂不进去会让被代理设备「什么都慢」。";
     }
@@ -321,7 +331,7 @@ private:
     QSocketNotifier *m_txNotifier = nullptr;
     std::deque<QByteArray> m_txQueue;
     qint64 m_txQueuedBytes = 0;
-    qint64 m_txDropped = 0;
+    // 丢帧累计数放 GatewayDiag::c，好让它一起进采样日志（与 Linux 端一致）。
     qint64 m_lastDropReportMs = -kDropReportMinIntervalMs;
 };
 

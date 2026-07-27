@@ -49,6 +49,8 @@
 #include <QStandardPaths>
 #include <QStringList>
 #include <QThread>
+
+#include "GatewayDiag.h" // 帧分流计数（落盘采样；与 gwDbgOn 的 stderr 抽样打印互补）
 #include <QVector>
 
 #include <cstdio>
@@ -516,6 +518,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 // 帧到了这一层但源 MAC 不在被劫持名单里 → 这里丢弃。若「设备流量为 0」且这个
                 // 计数在涨，说明设备的帧收到了、但它的源 MAC 和台账里的 MAC 对不上（随机 MAC /
                 // 台账 MAC 有误），是 victim 匹配的问题，不是抓包的问题。
+                ++GatewayDiag::c.dropNonVictim;
                 if (gwDbgOn() && (m_dbgDropNonVictim++ % 200) == 0)
                     std::fprintf(stderr, "[GW] drop non-victim src=%02x:%02x:%02x:%02x:%02x:%02x "
                                          "(count=%lld)\n",
@@ -569,6 +572,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     if (n->prefix6Len >= 0 && ip6Len >= 40
                         && ip6InPrefix(p6 + 24, n->prefix6Net, n->prefix6Len))
                         return;
+                    ++GatewayDiag::c.fedLwip;
                     if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
                         std::fprintf(stderr, "[GW] -> lwIP fed(v6)=%lld\n", m_dbgFedLwip),
                             std::fflush(stderr);
@@ -606,6 +610,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     // 这些帧本身是泛洪的、真交换机照样送到该去的地方，我们只是别再多此一举。
                     const bool bcastOrMcast = (dst == 0xFFFFFFFFu) || ((dst >> 28) == 0xE);
                     if (bcastOrMcast) {
+                        ++GatewayDiag::c.bypassBcast;
                         if (gwDbgOn() && (m_dbgBypassLan++ % 200) == 0)
                             std::fprintf(stderr,
                                          "[GW] bypass bcast/mcast dst=%u.%u.%u.%u (count=%lld)\n",
@@ -615,6 +620,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     }
                     const bool sameSubnet = (dst & n->netMask4) == (n->localIp4 & n->netMask4);
                     if (sameSubnet && dst != n->gatewayIp4) {
+                        ++GatewayDiag::c.bypassLan;
                         // 同网段直连,放行给系统,不进 lwIP。若设备只访问 LAN、没真出网,这里会涨。
                         if (gwDbgOn() && (m_dbgBypassLan++ % 200) == 0)
                             std::fprintf(stderr, "[GW] bypass LAN dst=%u.%u.%u.%u (count=%lld)\n",
@@ -626,6 +632,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             }
             // 走到这里 = 真出网 / 发往网关的帧 → 喂进用户态栈。这个计数在涨却仍「设备流量 0」,
             // 那问题在 lwIP 之后(SOCKS/mihomo);它不涨,问题在它上面几道。
+            ++GatewayDiag::c.fedLwip;
             if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
                 std::fprintf(stderr, "[GW] -> lwIP fed=%lld\n", m_dbgFedLwip), std::fflush(stderr);
             m_net->inputFrame(n->ep, frame);
@@ -987,6 +994,10 @@ void LanGateway::disableAll()
     // 必须同步完成才返回（挂在 aboutToQuit 上，还原 ARP 要在进程退出前真正发出去，constraint 2）。
     QMetaObject::invokeMethod(d->worker, [w = d->worker] { w->disableAllLocal(); },
                               Qt::BlockingQueuedConnection);
+    // ★ 这里**不**写诊断日志的收尾。disableAll 跑在 GUI 线程上，而工作线程的事件循环和 NetStack
+    //   的泵此刻仍活着（disableAllLocal 只是撤了投毒，没有停线程）—— 在这里调 GatewayDiag::flush
+    //   会和泵里的 sample() 并发碰同一批计数器/文件，正好违反 GatewayDiag 的单线程前提。
+    //   收尾放在 NetStack 的析构里（那是在工作线程上跑的，见本文件的线程模型）。
 }
 
 void LanGateway::recoverFromCrash()

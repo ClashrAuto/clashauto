@@ -64,6 +64,9 @@ set(BACKEND_SOURCES
     src/net/ArpSpoofer.cpp   src/net/ArpSpoofer.h
     src/net/Socks5Client.cpp src/net/Socks5Client.h
     src/net/LanGateway.h
+    # 数据面诊断日志（<userDir>/logs/gateway-diag.log）。跨平台编译：main_qml.cpp 要调 setLogDir，
+    # 而计数器只有 POSIX 上的网关才真的往里写。
+    src/net/GatewayDiag.cpp  src/net/GatewayDiag.h
 )
 
 # QML 绑定胶水（新增的薄适配层）

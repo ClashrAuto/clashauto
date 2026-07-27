@@ -396,7 +396,15 @@
 #define IPFRAG_STATS                    0
 #define ICMP_STATS                      0
 #define UDP_STATS                       0
-#define TCP_STATS                       0
+// ★ TCP_STATS 打开：给诊断日志（NetStack.cpp 的 lwipStatsLine → gateway-diag.log）提供
+// xmit / recv / drop / memerr 四个量，用来判断「TCP 这一层在不在异常」。
+// **说明白它给不了什么**：lwIP 的 struct stats_proto 里**没有重传计数器**，tcp_out.c 的三个
+// 重传入口一个计数都不加 —— 所以拿不到「重传了几次」这个最想要的数。目前只能用 xmit 相对
+// 设备侧应有段数偏高来间接判断；要精确值得往 vendored lwIP 打一个 Coast 补丁（同 accept-all /
+// nd6 静态邻居的路数），留待以后。
+// 代价：几处 u16 自增 + 一个 struct stats_proto（约 24 B），可忽略。
+// 注意 LWIP_STATS_LARGE=0 → 计数器是 u16_t 会回绕；采样器用 u16 运算算增量，回绕一次仍正确。
+#define TCP_STATS                       1
 #define LWIP_STATS_DISPLAY              0   // 需要 printf，保持关
 #define LWIP_DEBUG                      0
 // 联调时可临时改回 1 并打开 IP_DEBUG/TCP_INPUT_DEBUG/ETHARP_DEBUG=LWIP_DBG_ON，让 lwIP 打印丢包原因。

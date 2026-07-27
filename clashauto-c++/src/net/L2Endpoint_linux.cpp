@@ -58,6 +58,8 @@
 
 #if defined(Q_OS_LINUX)
 
+#include "GatewayDiag.h" // 数据面计数（热路径上就是一条 inc，见该头文件的开销说明）
+
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>     // mmap/munmap（RX 环）
@@ -491,8 +493,11 @@ private:
             const ssize_t n = ::sendto(m_fd, frame.constData(),
                                        static_cast<size_t>(frame.size()), 0,
                                        reinterpret_cast<struct sockaddr *>(&sll), sizeof(sll));
-            if (n == static_cast<ssize_t>(frame.size()))
+            if (n == static_cast<ssize_t>(frame.size())) {
+                ++GatewayDiag::c.txFrames;
+                GatewayDiag::c.txBytes += frame.size();
                 return 1;
+            }
             if (n >= 0)
                 return -1; // 部分发送：数据报 socket 上不该发生，当错误处理
             if (errno == EINTR)
@@ -509,10 +514,11 @@ private:
     bool enqueueTx(const QByteArray &frame)
     {
         if (m_txQueuedBytes + frame.size() > kTxBacklogMaxBytes) {
-            ++m_txDropped;
+            ++GatewayDiag::c.txDropped;
             reportDropsThrottled();
             return false;
         }
+        ++GatewayDiag::c.txDeferred; // 还没丢，但内核已经喂不进去了——拥塞的**早期**信号
         // ★ 这里存的是 QByteArray 的**隐式共享副本**，不是深拷贝——对 fromRawData 造出来的视图
         //   等于存了个裸指针。所以 send() 的入参契约是「必须是自有内存的 QByteArray」。
         //   现状成立：唯一的调用方 lwipLinkOutput 传的是 pbufToBytes() 新分配的缓冲；
@@ -520,6 +526,8 @@ private:
         //   必须在这之前 deep-copy（QByteArray(f.constData(), f.size())）。
         m_txQueue.push_back(frame);
         m_txQueuedBytes += frame.size();
+        if (m_txQueuedBytes > GatewayDiag::c.txBacklogPeak)
+            GatewayDiag::c.txBacklogPeak = m_txQueuedBytes; // 本窗口高水位（采样后清零）
         if (m_txNotifier && !m_txNotifier->isEnabled())
             m_txNotifier->setEnabled(true);
         return true;
@@ -534,7 +542,7 @@ private:
             if (r == 0)
                 return; // 又满了，等下一次可写
             if (r < 0) {
-                ++m_txDropped; // 发不出去的帧不能永远堵住队头
+                ++GatewayDiag::c.txDropped; // 发不出去的帧不能永远堵住队头
                 reportDropsThrottled();
             }
             m_txQueuedBytes -= m_txQueue.front().size();
@@ -559,7 +567,7 @@ private:
             return;
         if (st.tp_drops == 0)
             return;
-        m_rxDropped += st.tp_drops;
+        GatewayDiag::c.rxKernelDrops += st.tp_drops;
         reportDropsThrottled();
     }
 
@@ -572,8 +580,9 @@ private:
             return; // 节流：基线不动，攒到下个窗口一起报
         m_lastDropReportMs = now;
         qWarning().noquote()
-            << "L2Endpoint: 二层丢帧 —— 发方积压溢出" << m_txDropped << "帧, 内核收方丢弃"
-            << m_rxDropped << "帧 (当前积压" << m_txQueuedBytes
+            << "L2Endpoint: 二层丢帧 —— 发方积压溢出" << GatewayDiag::c.txDropped
+            << "帧, 内核收方丢弃" << GatewayDiag::c.rxKernelDrops
+            << "帧 (当前积压" << m_txQueuedBytes
             << "字节)。发方涨 = 网卡/链路喂不进去(WiFi 慢客户端、qdisc 拥塞)；"
                "收方涨 = 用户态处理不过来。两者都会让被代理设备「什么都慢」。";
     }
@@ -587,6 +596,7 @@ private:
         if (m_inDrain)
             return;
         m_inDrain = true;
+        ++GatewayDiag::c.rxWakes; // 与 rxFrames 之比 = 收环的批处理效率（掉到 1 = 退化成逐帧唤醒）
         pollRxDrops(QDateTime::currentMSecsSinceEpoch()); // 内部自带 5s 间隔，常态直接 return
 #ifdef COAST_HAVE_TPACKET_V3
         if (m_ring)
@@ -607,6 +617,8 @@ private:
         for (;;) {
             const ssize_t n = ::recv(m_fd, buf, sizeof(buf), 0);
             if (n > 0) {
+                ++GatewayDiag::c.rxFrames;
+                GatewayDiag::c.rxBytes += n;
                 emit frameReceived(QByteArray(buf, static_cast<int>(n)));
             } else if (n < 0) {
                 if (errno == EINTR)
@@ -699,6 +711,8 @@ private:
                     //   合法性依赖两条契约（见 IL2Endpoint.h）：帧仅在槽内有效；连接必须是直连。
                     //   本块要到下面 __atomic_store_n 把它还给内核之后才可能被覆写，而那一步在
                     //   本循环结束之后——所以槽执行期间指针一定有效。
+                    ++GatewayDiag::c.rxFrames;
+                    GatewayDiag::c.rxBytes += caplen;
                     emit frameReceived(QByteArray::fromRawData(
                         reinterpret_cast<const char *>(data), static_cast<qsizetype>(caplen)));
                 }
@@ -742,8 +756,7 @@ private:
     QSocketNotifier *m_txNotifier = nullptr;
     std::deque<QByteArray> m_txQueue;
     qint64 m_txQueuedBytes = 0;
-    qint64 m_txDropped = 0;
-    qint64 m_rxDropped = 0;
+    // 丢帧的**累计**数不在这里——放 GatewayDiag::c 里，好让它一起进采样日志（多网卡时是合计值）。
     qint64 m_lastDropReportMs = -kDropReportMinIntervalMs;
     qint64 m_lastRxStatsMs = 0;
 #ifdef COAST_HAVE_TPACKET_V3

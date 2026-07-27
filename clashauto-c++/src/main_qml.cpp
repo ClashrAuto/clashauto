@@ -23,6 +23,7 @@
 #include "qml/UpdateController.h"
 #include "qml/DevicesController.h"
 #include "qml/NpcapInstaller.h"
+#include "net/GatewayDiag.h"
 #include "net/LanGateway.h"
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 #include "net/GatewaySelfTest.h"
@@ -341,6 +342,10 @@ int main(int argc, char *argv[])
     QObject::connect(clash, &ClashService::connectionsSnapshot, history, &HistoryStore::observe);
     // 退出前把待写缓冲 + 仍在途的长连接都落盘（aboutToQuit 时对象还活着；析构里也有一道保险）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, history, [history] { history->flush(true); });
+    // 网关数据面诊断日志：<userDir>/logs/gateway-diag.log，10s 一行、空窗口不写、4 MiB 轮转。
+    // 必须在建 LanGateway 之前设好——否则第一批采样会因为没有路径被丢掉。
+    // COAST_GW_DIAG=0 关闭 / COAST_GW_DIAG_MS=<ms> 改采样间隔。
+    GatewayDiag::setLogDir(config.userDir);
     auto *lanGateway = new LanGateway(&app);
     // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
     lanGateway->recoverFromCrash();

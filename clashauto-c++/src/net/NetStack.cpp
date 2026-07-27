@@ -7,12 +7,17 @@
 #include <QHostAddress>
 #include <QList>
 #include <QSet>
+#include <QDateTime>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QUdpSocket>
+
+#include "GatewayDiag.h"
 
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <utility>
 
 extern "C" {
@@ -160,6 +165,15 @@ constexpr quint16 kDnsHijackPort = 1053;
 constexpr int kLwipPumpIntervalMs = 25;
 constexpr int kHousekeepEveryTicks = 8;
 
+// 诊断采样里附带的 lwIP 内部量。这些只有 lwIP 头才拿得到，所以由本 TU 拼好字符串交给
+// GatewayDiag（它是跨平台 TU，不该碰 lwIP）。取的都是**这条链路真正会出问题**的量：
+//   · rexmit/rto —— 重传次数。发方丢帧修好之后，这一栏就是「还有没有在丢」的直接证据；
+//     它和 txdrop 的区别是：txdrop 是我们自己丢的，rexmit 还包含设备侧/空口丢的。
+//   · 各池的 used/max/err —— 池子耗尽是静默杀连接的（见 lwipopts.h 的 MEMP_NUM_TCP_PCB 一段），
+//     max 是高水位线，能回答「离上限还有多远」，不必等到 err 涨了才发现。
+// 计数器是 u16（LWIP_STATS_LARGE=0），窗口内增量用 u16 运算算，回绕一次也是对的。
+QString lwipStatsLine();
+
 // 容量兜底：句柄和 mihomo 侧的关联数都是有限资源。BT/DHT 这类应用通常共用一个源端口广撒（对本
 // 方案友好），但「源端口也乱换」的极端情况必须挡住，不能让一台设备把整个进程的 fd 吃光。
 constexpr int kMaxUdpFlowsPerDevice = 128;
@@ -234,7 +248,9 @@ struct NetStack::Impl {
     UdpLru udpLruLong;                       // 长档(一般 UDP)流的 LRU
     int udpFlowCount = 0;                    // 全局流数（对上限用，省得遍历）
     QTimer *timer = nullptr;
-    int pumpTick = 0; // 泵的拍数计数器，给「老化 + 池诊断」分频用（见 init() 里的说明）
+    int pumpTick = 0;        // 泵的拍数计数器，给「老化 + 池诊断」分频用（见 init() 里的说明）
+    QElapsedTimer pumpClock; // 量每一拍的真实间隔 → 迟到量 = 工作线程饱和度
+    qint64 lastDiagMs = 0;   // 上次写诊断采样的墙钟时刻
     bool inited = false;
 
     QString userForIp(const QString &ip) const { return devices.value(ip).socksUser; }
@@ -284,6 +300,8 @@ void evictOldestFlowOfDevice(NetStack::Impl *d, UdpSess *s)
         if (!victim || f->lastUsed < victim->lastUsed)
             victim = f;
     }
+    if (victim)
+        ++GatewayDiag::c.udpFlowsEvicted; // 撞每设备上限：可能顶掉一条正在用的流（QUIC 会莫名卡住）
     destroyUdpFlow(d, victim);
 }
 
@@ -293,6 +311,8 @@ void evictGlobalOldestFlow(NetStack::Impl *d)
     UdpFlow *a = d->udpLruShort.tail;
     UdpFlow *b = d->udpLruLong.tail;
     UdpFlow *victim = !a ? b : (!b ? a : (a->lastUsed <= b->lastUsed ? a : b));
+    if (victim)
+        ++GatewayDiag::c.udpFlowsEvicted; // 撞全局上限，同上
     destroyUdpFlow(d, victim);
 }
 
@@ -508,6 +528,8 @@ void flushRecvWindow(TcpConn *c)
         const qint64 queued = c->socks->bytesToWrite();
         const qint64 mark = c->upThrottled ? kUpQueueLowWater : kUpQueueHighWater;
         if (queued > mark) {
+            if (!c->upThrottled)
+                ++GatewayDiag::c.upThrottleHits; // 只数「进入节流态」的沿，不数每次评估
             c->upThrottled = true; // 继续扣着窗口，等 upstreamBytesWritten 再来评估
             return;
         }
@@ -523,6 +545,7 @@ void updateDownstreamPause(TcpConn *c)
         return;
     const int queued = c->toLwip.size();
     if (!c->downPaused && queued >= kToLwipHighWater) {
+        ++GatewayDiag::c.downPauseHits;
         c->downPaused = true;
         c->socks->setReadPaused(true);
     } else if (c->downPaused && queued <= kToLwipLowWater) {
@@ -587,6 +610,7 @@ void closeConn(TcpConn *c, bool abort)
         tcp_sent(c->pcb, nullptr);
         tcp_err(c->pcb, nullptr);
         if (abort) {
+            ++GatewayDiag::c.tcpAborted;
             tcp_abort(c->pcb);
             aborted = true; // 若身处 lwIP 回调，调用方要据此回 ERR_ABRT
         } else {
@@ -595,7 +619,10 @@ void closeConn(TcpConn *c, bool abort)
             // rst_on_unacked_data 分支）——设备侧会连带丢掉已经收到的下行数据。
             // 这是引入上行背压之后新出现的坑，不还窗口就会变成「下载到一半被 RST」。
             giveBackRecvWindow(c);
-            if (tcp_close(c->pcb) != ERR_OK) {
+            if (tcp_close(c->pcb) == ERR_OK) {
+                ++GatewayDiag::c.tcpClosed;
+            } else {
+                ++GatewayDiag::c.tcpAborted; // 优雅关不掉，退化成 RST
                 tcp_abort(c->pcb);
                 aborted = true;
             }
@@ -736,6 +763,7 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
                      serverIp.toLatin1().constData(), serverPort,
                      victimIp.toLatin1().constData(), user.toLatin1().constData());
 
+    ++GatewayDiag::c.tcpAccepted;
     auto *c = new TcpConn;
     c->impl = g_impl;
     c->pcb = newpcb;
@@ -766,6 +794,7 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
         pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
     });
     QObject::connect(c->socks, &Socks5Tcp::failed, g_impl->owner, [c](const QString &) {
+        ++GatewayDiag::c.socksFailed; // 拨 mihomo 失败：认证/端口/核心没起来，都汇到这一栏
         closeConn(c, true); // ★ 必然销毁 c —— 必须是最后一句
     });
     QObject::connect(c->socks, &Socks5Tcp::closed, g_impl->owner, [c]() {
@@ -856,6 +885,60 @@ void pollLwipPoolStats()
     qWarning().noquote() << "NetStack: lwIP 内存吃紧 ——" << detail
                          << "(TCP_PCB 耗尽会静默丢 SYN、甚至挤掉活连接；其余多为降速。"
                             "上限见 lwipopts.h)";
+}
+
+// 诊断采样的 lwIP 那一段（声明见本文件上方常量区的注释）。
+QString lwipStatsLine()
+{
+    QString out;
+
+#if TCP_STATS
+    // ★ lwIP **没有**重传计数器：struct stats_proto 只有 xmit/recv/fw/drop/chkerr/lenerr/
+    //   memerr/rterr/proterr/opterr/err/cachehit 这几个，tcp_out.c 的三个重传入口
+    //   （tcp_rexmit / tcp_rexmit_fast / tcp_rexmit_rto_commit）一个计数都不加。
+    //   所以这里报的是实际存在的量，别指望从中直接读出「重传了几次」：
+    //     · xmit/recv —— 本窗口收发的 TCP 段数。xmit 明显大于设备侧应有的量 = 在重传，
+    //       这是目前能拿到的最接近的信号（粗，但零成本）。
+    //     · drop —— 入站被丢的段（校验/序号/无 pcb 等）。
+    //     · memerr —— 分配不到 pbuf/seg，直接对应 lwipopts.h 里那几个池的容量。
+    //   真要精确的 rexmit 计数，得往 vendored lwIP 打一个 Coast 补丁（tcp_out.c 三处 +
+    //   一个自有计数器），和已有的 accept-all / nd6 静态邻居补丁同一路数 —— 留给以后。
+    // 上一窗口的快照。u16 计数器（LWIP_STATS_LARGE=0）的增量用 u16 运算，回绕一次结果依然正确。
+    static u16_t lastXmit = 0, lastRecv = 0, lastDrop = 0, lastMemerr = 0;
+    const u16_t xmit = lwip_stats.tcp.xmit, recv = lwip_stats.tcp.recv;
+    const u16_t drop = lwip_stats.tcp.drop, memerr = lwip_stats.tcp.memerr;
+    out += QStringLiteral("tcpXmit=%1 tcpRecv=%2 tcpDrop=%3 tcpMemerr=%4")
+               .arg(uint(u16_t(xmit - lastXmit)))
+               .arg(uint(u16_t(recv - lastRecv)))
+               .arg(uint(u16_t(drop - lastDrop)))
+               .arg(uint(u16_t(memerr - lastMemerr)));
+    lastXmit = xmit;
+    lastRecv = recv;
+    lastDrop = drop;
+    lastMemerr = memerr;
+#endif
+
+    // 池子只报「用量/高水位/失败数」三元组，且只报有意义的那几个（全报会把行撑爆）。
+    struct { memp_t pool; const char *name; } kPools[] = {
+        {MEMP_TCP_PCB, "pcb"},
+        {MEMP_TCP_SEG, "seg"},
+        {MEMP_PBUF_POOL, "pbuf"},
+    };
+    for (const auto &p : kPools) {
+        const struct stats_mem *m = lwip_stats.memp[p.pool];
+        if (!m)
+            continue;
+        out += QStringLiteral(" %1=%2/%3/%4")
+                   .arg(QLatin1String(p.name))
+                   .arg(uint(m->used))
+                   .arg(uint(m->max))   // 高水位：离 lwipopts.h 里的上限还有多远
+                   .arg(uint(m->err));  // 非 0 = 撞过上限，已经在静默降级了
+    }
+    out += QStringLiteral(" heap=%1/%2/%3")
+               .arg(uint(lwip_stats.mem.used))
+               .arg(uint(lwip_stats.mem.max))
+               .arg(uint(lwip_stats.mem.err));
+    return out;
 }
 
 // —— UDP 手工封包辅助 ——
@@ -999,6 +1082,15 @@ NetStack::NetStack(quint16 socksPort, QObject *parent)
 
 NetStack::~NetStack()
 {
+    // 诊断日志收尾：写掉最后一个采样窗口 + 一条停机标记。放在这里而不是 LanGateway::disableAll，
+    // 是因为**本析构在工作线程上跑**（见 LanGateway_linux.cpp 的线程模型），与所有 sample() 调用
+    // 同线程 —— GatewayDiag 的单线程前提得以保持。此刻 d->timer 还没被 delete d 干掉，但我们已经
+    // 不再回事件循环了，不会有第二个 sample 并发进来。
+    // 注意：进程被直接杀掉时（见 main_qml.cpp 里关于 aboutToQuit 跑不到的说明）这里不会执行，
+    // 最多丢最后一个未满 10s 的窗口 —— 可以接受，不为它加复杂度。
+    if (d->inited)
+        GatewayDiag::flush(lwipStatsLine(), "stop");
+
     for (UdpSess *s : std::as_const(d->udp))
         destroyUdpSess(d, s);
     d->udp.clear();
@@ -1063,12 +1155,33 @@ bool NetStack::init(QString *err)
     // 老化和诊断**不跟着提频**：它们本来就是 200ms 一次的量级，没必要 8 倍频，按拍数分频即可。
     d->timer = new QTimer(this);
     d->timer->setInterval(kLwipPumpIntervalMs);
+    d->pumpClock.start();
     connect(d->timer, &QTimer::timeout, this, [this] {
+        // ★ 泵的迟到量 = 工作线程的饱和度。这一拍本该 kLwipPumpIntervalMs 之后就到，迟到多少就
+        //   说明上一拍的活（收帧 → lwIP → SOCKS 读写）占了多少额外时间。这是**唯一**能把
+        //   「链路丢包」和「本机算不过来」分开的指标：前者只涨 txdrop/rxdrop，后者只涨这里。
+        const qint64 elapsed = d->pumpClock.restart();
+        const qint64 lag = elapsed - kLwipPumpIntervalMs;
+        ++GatewayDiag::c.pumpTicks;
+        if (elapsed > 2 * kLwipPumpIntervalMs) {
+            ++GatewayDiag::c.pumpLateTicks;
+            if (lag > GatewayDiag::c.pumpMaxLagMs)
+                GatewayDiag::c.pumpMaxLagMs = lag;
+        }
+
         sys_check_timeouts();
         if (++d->pumpTick >= kHousekeepEveryTicks) {
             d->pumpTick = 0;
             reapUdpFlows(d);
             pollLwipPoolStats();
+        }
+        // 诊断采样：按墙钟判间隔（不按拍数——泵一旦迟到，拍数和真实时间就对不上了）。
+        if (GatewayDiag::enabled()) {
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            if (now - d->lastDiagMs >= GatewayDiag::sampleIntervalMs()) {
+                d->lastDiagMs = now;
+                GatewayDiag::sample(lwipStatsLine());
+            }
         }
     });
     d->timer->start();
@@ -1351,6 +1464,7 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
                && (d->udpLruShort.tail || d->udpLruLong.tail))
             evictGlobalOldestFlow(d);
 
+        ++GatewayDiag::c.udpFlowsCreated;
         flow = new UdpFlow;
         flow->sess = s;
         flow->vport = sport;
@@ -1460,6 +1574,7 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
                && (d->udpLruShort.tail || d->udpLruLong.tail))
             evictGlobalOldestFlow(d);
 
+        ++GatewayDiag::c.udpFlowsCreated;
         flow = new UdpFlow;
         flow->sess = s;
         flow->vport = sport;
@@ -1544,8 +1659,13 @@ void NetStack::onUdpResponse(const QString &victimIp, quint16 vport, const QHost
 void NetStack::hijackDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
                          const QByteArray &query, bool v6)
 {
+    ++GatewayDiag::c.dnsHijacked;
+    // 「有没有等到应答」要在两个 lambda 之间共享，而它们的生命周期都挂在 ds 上 —— 用 shared_ptr
+    // 而不是捕获裸 bool 的引用：5s 那条定时器可能在 readyRead 之后才跑，栈上的东西早没了。
+    auto answered = std::make_shared<bool>(false);
     auto *ds = new QUdpSocket(this);
-    connect(ds, &QUdpSocket::readyRead, this, [this, ds, victimIp, vport, origServer, v6]() {
+    connect(ds, &QUdpSocket::readyRead, this, [this, ds, victimIp, vport, origServer, v6, answered]() {
+        *answered = true;
         while (ds->hasPendingDatagrams()) {
             QByteArray resp;
             resp.resize(int(ds->pendingDatagramSize()));
@@ -1565,5 +1685,11 @@ void NetStack::hijackDns(const QString &victimIp, quint16 vport, const QHostAddr
     });
     ds->writeDatagram(query, QHostAddress(QStringLiteral("127.0.0.1")), kDnsHijackPort);
     // 无应答兜底回收（mihomo 没起 / 解析失败）：5s 后无论如何删掉 socket，防泄漏。
-    QTimer::singleShot(5000, ds, [ds] { ds->deleteLater(); });
+    // dnsNoReply 涨 = 名字解析在核心那一侧就断了，这时再怎么查网关的数据面都是白费——
+    // 有这一栏才分得清「解析不出来」和「解析出来了但连不上」。
+    QTimer::singleShot(5000, ds, [ds, answered] {
+        if (!*answered)
+            ++GatewayDiag::c.dnsNoReply;
+        ds->deleteLater();
+    });
 }
