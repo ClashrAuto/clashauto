@@ -229,16 +229,30 @@ void ArpSpoofer::healOne(const QByteArray &victimMac, const QByteArray &victimIp
     if (!m_endpoint)
         return;
 
-    // 给 victim：网关 IP 在真实网关 MAC（还原它的默认网关映射）。
-    const QByteArray toVictim =
-        buildArpReply(victimMac, m_gatewayMac, m_gatewayMac, m_gatewayIp, victimMac, victimIp);
-    // 给网关：victim IP 在真实 victim MAC（还原网关侧映射）。
-    const QByteArray toGateway =
-        buildArpReply(m_gatewayMac, victimMac, victimMac, victimIp, m_gatewayMac, m_gatewayIp);
+    // ★ 还原必须能盖过设备「刚被投毒刷新、正处于 REACHABLE」的网关表项——否则停代理后设备一直把网关
+    //   指向已停工的本机 MAC，直到表项自己老化/重解析才恢复（就是之前那个「尽力而为、有恢复窗口」）。
+    //   关键机制：普通(非无偿) ARP 改一个「1 秒内刚更新过」的表项会被内核 LOCKTIME 挡掉（Linux 的
+    //   arp_process：override = 表项超过 LOCKTIME 未更新 || is_garp）。而**无偿 ARP（sender IP == target
+    //   IP）**命中 is_garp → **无视 LOCKTIME 直接 override**，立刻改。所以 heal 发的是「网关 IP is-at
+    //   真实网关 MAC」的**无偿** ARP（sender IP=target IP=网关 IP）。reply 和 request 各发一份，兼容
+    //   「只认无偿 request」的 BSD/macOS 与「reply 也认」的 Linux。eth 源 MAC 用**本机 MAC**（WiFi 站点
+    //   模式下发不出伪造源 MAC；ARP 处理只看载荷里的 sender，与 eth 源无关）。
+    //   同理给真网关补一份「victim IP is-at victim MAC」的无偿 ARP，还原它那一侧被投毒的映射。
+    static const QByteArray kZeroMac(6, char(0));
+    const QByteArray garpToVictim =
+        buildArpReply(victimMac, m_localMac, m_gatewayMac, m_gatewayIp, m_gatewayMac, m_gatewayIp);
+    const QByteArray garpReqToVictim =
+        buildArpRequest(victimMac, m_localMac, m_gatewayMac, m_gatewayIp, kZeroMac, m_gatewayIp);
+    const QByteArray garpToGateway =
+        buildArpReply(m_gatewayMac, m_localMac, victimMac, victimIp, victimMac, victimIp);
+    const QByteArray garpReqToGateway =
+        buildArpRequest(m_gatewayMac, m_localMac, victimMac, victimIp, kZeroMac, victimIp);
 
     for (int i = 0; i < kHealRepeat; ++i) {
-        m_endpoint->send(toVictim);
-        m_endpoint->send(toGateway);
+        m_endpoint->send(garpToVictim);
+        m_endpoint->send(garpReqToVictim);
+        m_endpoint->send(garpToGateway);
+        m_endpoint->send(garpReqToGateway);
     }
 }
 
