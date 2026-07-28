@@ -17,10 +17,13 @@
 #include <iphlpapi.h>
 #include <pcap.h>
 
+#include "GatewayDiag.h" // 数据面收发帧计数（与 linux/mac 端点对称；将来诊断版发布后 win 也有数据）
 #include "IL2Endpoint.h"
 #include "NpcapStatus.h"
 
 #include <QByteArray>
+#include <QDateTime>
+#include <QDebug>
 #include <QString>
 #include <QWinEventNotifier>
 
@@ -70,7 +73,18 @@ struct PcapApi
     decltype(&pcap_compile) compile = nullptr;
     decltype(&pcap_setfilter) setfilter = nullptr;
     decltype(&pcap_freecode) freecode = nullptr;
+    decltype(&pcap_setbuff) setbuff = nullptr; // 可选：加大驱动内核收缓冲（缺了不降级）
 };
+
+// 驱动内核收缓冲字节数。pcap_open_live 用的是 WinPcap/Npcap 的默认值（历史上 1 MiB 级），
+// 十几台设备一起下载时**收方**方向很容易在内核里溢出——溢出即静默丢设备发来的帧，lwIP 那条
+// TCP 只能等对端重传，表现就是「时好时坏 / 极慢」。加大到 4 MiB，与 lwipopts.h 里 PBUF_POOL
+// （入站帧缓冲）同量级。代价是驱动占的非分页内存，家用几十台设备的规模可接受。
+// 注意这是**收**缓冲；发方(pcap_sendpacket)是同步写驱动 TX 缓冲，没有对应的用户态旋钮，也没有
+// linux/mac 那种 EAGAIN+可写事件的流控模型，故 win 侧不做「发方积压队列」（做不了也不需要）。
+constexpr int kRxKernelBufBytes = 4 * 1024 * 1024;
+// 发方丢帧告警节流（与 linux/mac 端点一致）。
+constexpr qint64 kDropReportMinIntervalMs = 30000;
 
 // 加载并解析 wpcap.dll。返回 nullptr = 没装 Npcap（或版本太老、缺符号）。
 // 只做一次；DLL 句柄故意不释放（进程生命周期内一直要用）。
@@ -106,8 +120,10 @@ const PcapApi *pcapApi()
     api.compile = reinterpret_cast<decltype(&pcap_compile)>(sym("pcap_compile"));
     api.setfilter = reinterpret_cast<decltype(&pcap_setfilter)>(sym("pcap_setfilter"));
     api.freecode = reinterpret_cast<decltype(&pcap_freecode)>(sym("pcap_freecode"));
+    api.setbuff = reinterpret_cast<decltype(&pcap_setbuff)>(sym("pcap_setbuff"));
 
     // 缺任何一个都当没装：宁可优雅降级，也不要半残地跑到一半崩。
+    // setbuff **不在**必需清单里——它纯属收方优化，老 wpcap 缺它也应照常工作。
     ok = api.open_live && api.close && api.setmintocopy && api.getevent && api.sendpacket
             && api.next_ex && api.compile && api.setfilter && api.freecode;
     return ok ? &api : nullptr;
@@ -243,6 +259,10 @@ public:
             }
             return false;
         }
+        // 先加大驱动内核收缓冲，再武装通知器——必须在开始收包前设好（见 kRxKernelBufBytes）。
+        // pcap_setbuff 会清空当前缓冲，此刻还没开始收，无副作用；失败不致命（只是少了这层余量）。
+        if (m_api->setbuff && m_api->setbuff(m_pcap, kRxKernelBufBytes) != 0)
+            dbg("pcap_setbuff(%d) 失败，沿用驱动默认收缓冲", kRxKernelBufBytes);
         m_api->setmintocopy(m_pcap, 1); // 有 1 字节就触发事件，降低延迟
         m_localMac = adapter.mac;
 
@@ -274,12 +294,24 @@ public:
     }
     bool isOpen() const override { return m_pcap != nullptr; }
 
+    // 发一帧。pcap_sendpacket 是**同步**的：把帧写进驱动 TX 缓冲，成功返 0、失败返 -1。
+    // 没有 EAGAIN/可写事件那套语义，所以这里不做「满了排队等可写」——做不了（无可写通知），
+    // 也不必（驱动 TX 满时 WriteFile 会阻塞而非丢）。失败基本都是持久性错误（网卡拔了/句柄失效），
+    // 排队重发无意义，直接计数丢弃、交由 lwIP 重传兜底。计数与 linux/mac 端点对称，接进 GatewayDiag。
     bool send(const QByteArray &frame) override
     {
-        return m_pcap
-               && m_api->sendpacket(m_pcap, reinterpret_cast<const u_char *>(frame.constData()),
-                                    frame.size())
-                      == 0;
+        if (!m_pcap)
+            return false;
+        if (m_api->sendpacket(m_pcap, reinterpret_cast<const u_char *>(frame.constData()),
+                              frame.size())
+            == 0) {
+            ++GatewayDiag::c.txFrames;
+            GatewayDiag::c.txBytes += frame.size();
+            return true;
+        }
+        ++GatewayDiag::c.txDropped;
+        reportTxDropThrottled();
+        return false;
     }
     QByteArray localMac() const override { return m_localMac; }
     int ifIndex() const override { return 0; }
@@ -334,14 +366,29 @@ private:
             .toLatin1();
     }
 
+    void reportTxDropThrottled()
+    {
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - m_lastTxDropReportMs < kDropReportMinIntervalMs)
+            return;
+        m_lastTxDropReportMs = now;
+        qWarning().noquote()
+            << "L2Endpoint(Npcap): 发帧失败累计" << GatewayDiag::c.txDropped
+            << "帧（pcap_sendpacket 返回错误——网卡异常/句柄失效）。本机→设备方向丢帧会让被代理"
+               "设备「时好时坏 / 极慢」。";
+    }
+
     void drain()
     {
+        ++GatewayDiag::c.rxWakes; // 与 rxFrames 之比 = 每次唤醒取回多少帧（批处理效率）
         struct pcap_pkthdr *hdr = nullptr;
         const u_char *data = nullptr;
         int r;
         // 1=拿到一帧；0=本轮无更多(超时)；<0=出错。循环取尽本次事件的所有帧。
         while (m_pcap && (r = m_api->next_ex(m_pcap, &hdr, &data)) == 1) {
             if (data && hdr) {
+                ++GatewayDiag::c.rxFrames;
+                GatewayDiag::c.rxBytes += hdr->caplen;
                 // 诊断：过滤器已把「非被劫持设备」的帧挡在内核里，所以这里出现的每一帧都
                 // 应当来自某台被代理设备。前 20 帧逐帧打印源/目的 MAC + ethertype，之后每
                 // 200 帧报一次计数——用来判定「设备的帧到底有没有进到这一层」。
@@ -369,6 +416,7 @@ private:
     QByteArray m_localMac;
     long long m_rxCount = 0; // 收到的帧总数（诊断用）
     int m_rxLogged = 0;      // 已逐帧打印的条数（封顶 20）
+    qint64 m_lastTxDropReportMs = -kDropReportMinIntervalMs; // 发帧失败告警节流
 };
 
 } // namespace
