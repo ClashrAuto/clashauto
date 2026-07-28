@@ -424,69 +424,6 @@ ApplicationWindow {
     // 更新窗（独立顶层窗口，默认隐藏；点击侧栏「Ver:」→ updateWindow.show()）。
     UpdateWindow { id: updateWindow }
 
-    // ———————————————— 错误上报的一次性征询 ————————————————
-    // 上报会把（脱敏后的）报错发到**公开** issue 区，所以必须是用户明确点过「开启」才做。
-    // 只在真的攒下了报错、且从没问过的时候浮出来一次；无论选哪个都记为「已问过」，不再打扰。
-    Rectangle {
-        id: issueConsent
-        property bool dismissed: false
-        visible: !dismissed && !issues.asked && !issues.enabled && issues.pendingCount > 0
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.margins: 10
-        // 浮在页脚**上方**：页脚那排开关（增强/系统代理/核心/模式）是常用操作，不能被挡住。
-        anchors.bottomMargin: Theme.footerHeight + 10
-        radius: 6
-        color: Theme.card
-        border.width: 1
-        border.color: Theme.divider
-        implicitHeight: consentRow.implicitHeight + 20
-        z: 100
-
-        RowLayout {
-            id: consentRow
-            anchors.fill: parent
-            anchors.margins: 10
-            spacing: 10
-
-            Text {
-                Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                font.pixelSize: 12
-                color: Theme.textSecondary
-                text: qsTr("检测到 %1 条运行错误。要把它们（已脱敏：URL / IP / MAC / 用户名均已替换）"
-                           + "上报到 %2 的 issue 区帮助修复吗？可在设置里随时关闭或先预览内容。")
-                      .arg(issues.pendingCount).arg(issues.repo)
-            }
-            // 两个按钮都按文本实际宽度伸缩：中文「开启上报」四个字，英文 "Enable reporting"、
-            // 德文 "Melden aktivieren" 长得多，定宽会直接把字撑出按钮外（这里是自绘 Rectangle，
-            // 没有 Button 的 elide 兜底）。
-            Rectangle {
-                Layout.preferredWidth: Math.max(64, consentNoTxt.implicitWidth + 20)
-                Layout.preferredHeight: 26
-                radius: 4
-                color: Theme.dark ? "#252525" : "#eeeeee"
-                border.width: 1
-                border.color: Theme.divider
-                Text { id: consentNoTxt; anchors.centerIn: parent; text: qsTr("不用了")
-                       font.pixelSize: 11; color: Theme.textSecondary }
-                HoverHandler { cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: { issues.markAsked(); issueConsent.dismissed = true } }
-            }
-            Rectangle {
-                Layout.preferredWidth: Math.max(64, consentOkTxt.implicitWidth + 20)
-                Layout.preferredHeight: 26
-                radius: 4
-                color: consentOkHover.hovered ? Theme.accentStrong : Theme.accent
-                Text { id: consentOkTxt; anchors.centerIn: parent; text: qsTr("开启上报")
-                       font.pixelSize: 11; color: "#ffffff" }
-                HoverHandler { id: consentOkHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: { issues.enabled = true; issues.markAsked() } }
-            }
-        }
-    }
-
     // 启动 3 秒后开启后台自动检查：立即查一次程序/内核/GeoIP，之后每小时一次。
     // 程序有新版 → 侧栏版本右上角 "new" 角标；内核有新版 → "core" 角标；GeoIP 有新发布 → 静默下载。
     Timer {

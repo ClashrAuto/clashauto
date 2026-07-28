@@ -46,8 +46,6 @@ set(BACKEND_SOURCES
     src/ClashService.cpp     src/ClashService.h
     src/SubParser.cpp        src/SubParser.h
     src/TrayController.cpp   src/TrayController.h
-    # 运行时报错 → 脱敏 + 去重 + 提交到本项目 issue 区（默认关，见 IssueReporter.h 顶部说明）
-    src/IssueReporter.cpp    src/IssueReporter.h
     # 设备页后端（局域网发现 + 台账；框架无关）
     src/LanScanner.cpp       src/LanScanner.h
     src/DeviceStore.cpp      src/DeviceStore.h
