@@ -125,6 +125,26 @@ Item {
                 return y < lw / 2 ? lw / 2 : y;
             };
 
+            // minimal 的刻度：**必须按 yOf 定位**，不能沿用非 minimal 那套「H/4 等分」——
+            // 那套假设曲线铺满整高，而这里 headroom 只让曲线占下面一截，等分线会全部对不上
+            // 曲线的实际高度，刻度就成了骗人的。画在填充之下、文字画在曲线之上（免得被盖住）。
+            var ticks = [];
+            if (root.minimal) {
+                ctx.strokeStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.13);
+                ctx.lineWidth = 1;
+                const fr = [1.0, 0.75, 0.5, 0.25];
+                for (var ti = 0; ti < fr.length; ++ti) {
+                    var ty = Math.round(yOf(max * fr[ti])) + 0.5;
+                    if (ty < 18) // 顶到卡片标题那一带了就不画这一档
+                        continue;
+                    ticks.push({ y: ty, v: max * fr[ti] });
+                    ctx.beginPath();
+                    ctx.moveTo(0, ty);
+                    ctx.lineTo(W, ty);
+                    ctx.stroke();
+                }
+            }
+
             // minimal：线下补一层淡填充。只有一条细线的话，在卡片底纹这个尺度上几乎看不见，
             // 填充才撑得起「这块区域是这张图」的感觉。
             if (root.minimal) {
@@ -151,6 +171,15 @@ Item {
             ctx.lineJoin = "round";
             ctx.strokeStyle = Qt.rgba(lc.r, lc.g, lc.b, root.minimal ? 0.55 : 0.70);
             ctx.stroke();
+
+            // 刻度文字最后画：压在曲线之上才不会被填充盖掉。贴右边缘、坐在刻度线上方 3px。
+            if (root.minimal && ticks.length > 0) {
+                ctx.fillStyle = Theme.dark ? "#9a9a9a" : "#7a7a7a";
+                ctx.font = "9px '" + Theme.uiFont + "'";
+                ctx.textAlign = "right";
+                for (var si = 0; si < ticks.length; ++si)
+                    ctx.fillText(root.speedText(ticks[si].v), W - 6, ticks[si].y - 3);
+            }
         }
     }
 }
