@@ -14,6 +14,8 @@
 #include <QHash>
 #include <QObject>
 #include <QPair>
+#include <QSet>
+#include <QVariantList>
 #include <QVariantMap>
 #include <QVector>
 
@@ -48,6 +50,10 @@ class DevicesController final : public QObject
     Q_PROPERTY(bool gatewayReady READ gatewayReady NOTIFY topologyChanged)
     // 新设备提醒（蹭网检测）：首轮扫描后再发现的新设备 → 托盘通知。QSettings 持久化。
     Q_PROPERTY(bool newDeviceAlert READ newDeviceAlert WRITE setNewDeviceAlert NOTIFY newDeviceAlertChanged)
+    // 邻居安全监视（ArpWatch）：当前是否有活动威胁（有人代理本机 / 抢我劫持的设备）——驱动设备页横幅显隐。
+    Q_PROPERTY(bool underAttack READ underAttack NOTIFY securityChanged)
+    // 当前活动的安全告警列表（每项 {kind,offenderMac,subjectIp,mac,name}），供横幅展开显示。
+    Q_PROPERTY(QVariantList securityAlerts READ securityAlerts NOTIFY securityChanged)
 
 public:
     DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
@@ -83,6 +89,10 @@ public:
     bool newDeviceAlert() const { return m_newDeviceAlert; }
     void setNewDeviceAlert(bool on);
 
+    bool underAttack() const { return !m_secAlerts.isEmpty(); }
+    QVariantList securityAlerts() const;
+    Q_INVOKABLE void dismissSecurityAlerts(); // 用户手动关掉横幅（威胁若仍在，下次观察到会重新出现）
+
 signals:
     void scanningChanged();
     void topologyChanged();
@@ -92,6 +102,8 @@ signals:
     void newDeviceAlertChanged();
     void newDeviceFound(const QString &name);  // 首轮后发现新设备 → main 连到托盘通知
     void csvExported(const QString &path);     // 导出完成 → QML 可提示路径
+    void securityChanged();                    // 安全告警集合变化 → 横幅/徽标刷新
+    void securityAlertRaised(const QString &title, const QString &body); // 新威胁 → main 连托盘通知
 
 private:
     void onDiscovered(const QVector<class DeviceRecord> &devices);
@@ -125,6 +137,24 @@ private:
     qint64 m_totalRateUp = 0, m_totalRateDown = 0;
 
     void onDeviceAdded(const QString &mac); // store.deviceAdded → 首轮后发提醒
+
+    // —— 邻居安全监视（ArpWatch → LanGateway::securityAlert）——
+    void onSecurityAlert(int kind, const QString &offenderMac, const QString &subjectIp,
+                         const QString &subjectMac);
+    void sweepSecurityAlerts();  // TTL 过期：一段时间没再观察到的威胁视为已停止，清出横幅/徽标
+    void refreshContended();     // 把「争抢中」的 mac 集合喂给列表模型（打行徽标）
+    // 一条活动告警。key = "kind|offenderMac|subjectIp"。
+    struct SecAlert {
+        int kind = 0;
+        QString offenderMac, subjectIp, mac, name;
+        qint64 firstMs = 0, lastMs = 0;
+    };
+    QHash<QString, SecAlert> m_secAlerts;    // 活动告警（横幅/徽标数据源；dismiss/TTL 会清）
+    QHash<QString, qint64> m_secLastNotify;  // key → 上次托盘提醒时刻（**不**随 dismiss 清，只做去重节流）
+    QTimer *m_secTimer = nullptr;            // TTL 巡检
+    QElapsedTimer m_secClock;                // 单调时钟
+    static constexpr int kSecTtlMs = 150000;      // 超过这么久没再观察到该威胁 → 判定已停止
+    static constexpr int kSecRenotifyMs = 1800000; // 同一威胁再次弹托盘的最小间隔（30 分钟）
 
     // 每设备的会话累计（单调，算速率 + 落台账）。key = mac。
     struct Prev { qint64 up = 0, down = 0; qint64 elapsedMs = 0; };

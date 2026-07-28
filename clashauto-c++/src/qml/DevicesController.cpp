@@ -55,7 +55,13 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
                     m_lastGatewayErr = msg;
                     emit gatewayError(msg);
                 });
+        // 邻居安全监视：ArpWatch 检测到「有人代理本机 / 抢我劫持的设备」→ 横幅 + 徽标 + 托盘。
+        connect(m_gateway, &LanGateway::securityAlert, this, &DevicesController::onSecurityAlert);
     }
+    m_secClock.start();
+    m_secTimer = new QTimer(this);
+    m_secTimer->setInterval(30000); // 30s 巡检一次，把停了的威胁清出横幅/徽标
+    connect(m_secTimer, &QTimer::timeout, this, &DevicesController::sweepSecurityAlerts);
 
     // 读持久化的「新设备提醒」偏好（org/app 已在 main 设为 Coast）。
     m_newDeviceAlert = QSettings().value(QStringLiteral("devices/newDeviceAlert"), true).toBool();
@@ -202,6 +208,126 @@ void DevicesController::setNewDeviceAlert(bool on)
     m_newDeviceAlert = on;
     QSettings().setValue(QStringLiteral("devices/newDeviceAlert"), on);
     emit newDeviceAlertChanged();
+}
+
+// ———————————————————————— 邻居安全监视（ArpWatch） ————————————————————————
+// kind 与 ArpWatch::Kind 对齐（不引 net 头，避免 UI 层依赖数据面实现）。
+namespace {
+constexpr int kKindSelfImpersonated = 0; // 有人代理本机
+constexpr int kKindDeviceContended = 1;  // 我劫持的设备被别人也在抢
+} // namespace
+
+void DevicesController::onSecurityAlert(int kind, const QString &offenderMac,
+                                        const QString &subjectIp, const QString &subjectMac)
+{
+    const qint64 now = m_secClock.elapsed();
+    const QString key = QString::number(kind) + '|' + offenderMac + '|' + subjectIp;
+
+    SecAlert &a = m_secAlerts[key];
+    const bool isNew = a.firstMs == 0;
+    a.kind = kind;
+    a.offenderMac = offenderMac;
+    a.subjectIp = subjectIp;
+    a.mac = subjectMac;
+    a.lastMs = now;
+    if (isNew)
+        a.firstMs = now;
+    // 被抢设备的展示名（有 mac 才查得到；查不到就留空，QML 回落到 IP/MAC）。
+    if (!subjectMac.isEmpty()) {
+        const DeviceRecord *d = m_store->find(subjectMac);
+        a.name = d ? d->displayName() : QString();
+    }
+
+    // 托盘提醒：同一威胁 30 分钟内只弹一次（m_secLastNotify 不随 dismiss 清）。
+    qint64 &lastNotify = m_secLastNotify[key];
+    if (lastNotify == 0 || now - lastNotify >= kSecRenotifyMs) {
+        lastNotify = now;
+        QString title, body;
+        if (kind == kKindDeviceContended) {
+            title = tr("设备被争抢");
+            const QString who = a.name.isEmpty() ? (subjectIp.isEmpty() ? subjectMac : subjectIp)
+                                                 : a.name;
+            body = tr("%1 也在劫持你代理的设备「%2」").arg(offenderMac, who);
+        } else {
+            title = tr("检测到 ARP 欺骗");
+            body = tr("%1 正在冒充网关或本机，可能在监听/代理你的流量").arg(offenderMac);
+        }
+        emit securityAlertRaised(title, body);
+    }
+
+    refreshContended();
+    if (!m_secTimer->isActive())
+        m_secTimer->start();
+    emit securityChanged();
+}
+
+void DevicesController::sweepSecurityAlerts()
+{
+    const qint64 now = m_secClock.elapsed();
+    bool changed = false;
+    for (auto it = m_secAlerts.begin(); it != m_secAlerts.end();) {
+        if (now - it.value().lastMs > kSecTtlMs) {
+            it = m_secAlerts.erase(it);
+            changed = true;
+        } else {
+            ++it;
+        }
+    }
+    // 顺便老化通知去重表（放宽到 2× 重报间隔），别让它无界增长。
+    for (auto it = m_secLastNotify.begin(); it != m_secLastNotify.end();) {
+        if (now - it.value() > kSecRenotifyMs * 2)
+            it = m_secLastNotify.erase(it);
+        else
+            ++it;
+    }
+    if (m_secAlerts.isEmpty())
+        m_secTimer->stop();
+    if (changed) {
+        refreshContended();
+        emit securityChanged();
+    }
+}
+
+void DevicesController::refreshContended()
+{
+    QSet<QString> macs;
+    for (const SecAlert &a : m_secAlerts)
+        if (a.kind == kKindDeviceContended && !a.mac.isEmpty())
+            macs.insert(a.mac);
+    m_model.setContended(macs);
+}
+
+QVariantList DevicesController::securityAlerts() const
+{
+    // 按首次发现时间稳定排序，避免横幅里几条告警每次刷新乱跳。
+    QVector<const SecAlert *> v;
+    v.reserve(m_secAlerts.size());
+    for (auto it = m_secAlerts.constBegin(); it != m_secAlerts.constEnd(); ++it)
+        v.append(&it.value());
+    std::sort(v.begin(), v.end(),
+              [](const SecAlert *a, const SecAlert *b) { return a->firstMs < b->firstMs; });
+    QVariantList out;
+    out.reserve(v.size());
+    for (const SecAlert *a : v) {
+        QVariantMap m;
+        m.insert(QStringLiteral("kind"), a->kind);
+        m.insert(QStringLiteral("offenderMac"), a->offenderMac);
+        m.insert(QStringLiteral("subjectIp"), a->subjectIp);
+        m.insert(QStringLiteral("mac"), a->mac);
+        m.insert(QStringLiteral("name"), a->name);
+        out.append(m);
+    }
+    return out;
+}
+
+void DevicesController::dismissSecurityAlerts()
+{
+    if (m_secAlerts.isEmpty())
+        return;
+    m_secAlerts.clear(); // 威胁若仍在，下次 ArpWatch 观察到会重新加入（但托盘去重表还在，不会又弹）
+    m_secTimer->stop();
+    refreshContended();
+    emit securityChanged();
 }
 
 void DevicesController::onDiscovered(const QVector<DeviceRecord> &devices)

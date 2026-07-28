@@ -62,6 +62,8 @@ set(BACKEND_SOURCES
     src/net/L2Endpoint_mac.cpp
     src/net/L2Endpoint_win.cpp
     src/net/ArpSpoofer.cpp   src/net/ArpSpoofer.h
+    # 被动 ARP/NDP 冲突监视（检测「本机被劫持 / 被劫持设备被他人争抢」）——纯解析，跨平台可编译
+    src/net/ArpWatch.cpp     src/net/ArpWatch.h
     src/net/Socks5Client.cpp src/net/Socks5Client.h
     src/net/LanGateway.h
     # 数据面诊断日志（<userDir>/logs/gateway-diag.log）。跨平台编译：main_qml.cpp 要调 setLogDir，

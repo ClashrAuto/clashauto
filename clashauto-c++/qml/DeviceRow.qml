@@ -25,6 +25,7 @@ Rectangle {
     property bool isSelf: false
     property bool isGateway: false
     property bool proxyable: false // 能否开代理（非本机/网关 + 在主网卡网段内）
+    property bool contended: false // 被别的电脑也在投毒/争抢（ArpWatch 检测）——名字旁打红标 + 整行红框
     property bool selected: false
     signal clicked()
     signal toggleProxy()
@@ -40,6 +41,9 @@ Rectangle {
     color: selected ? Qt.rgba(72 / 255, 151 / 255, 248 / 255, 0.22)
                     : (rowMouse.containsMouse ? Theme.hover : Theme.nodeRowBg)
     opacity: online ? 1.0 : 0.5
+    // 被争抢的设备：整行描一圈红框，配合名字旁的红标（一眼看出是哪台）。
+    border.width: contended ? 1 : 0
+    border.color: "#e0533d"
 
     // 背景实时流量图（压在所有内容之下）。只有被代理的设备才有：其余设备的流量不经核心，
     // 画出来永远是贴底的 0 线。速率是 0 也照画——那正是「已接管、此刻闲着」的样子。
@@ -110,12 +114,37 @@ Rectangle {
             Layout.minimumWidth: 0
             Layout.alignment: Qt.AlignVCenter
             spacing: 1
-            Text {
+            // 名字这一行：名称（吃满剩余宽） + 「被争抢」红标（仅 contended 时出现，靠右不挤名字）。
+            RowLayout {
                 Layout.fillWidth: true
-                text: root.name
-                elide: Text.ElideRight
-                font.pixelSize: 13
-                color: Theme.textPrimary
+                spacing: 6
+                Text {
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 0
+                    text: root.name
+                    elide: Text.ElideRight
+                    font.pixelSize: 13
+                    color: Theme.textPrimary
+                }
+                Rectangle {
+                    visible: root.contended
+                    Layout.alignment: Qt.AlignVCenter
+                    implicitWidth: contendedTxt.implicitWidth + 10
+                    implicitHeight: contendedTxt.implicitHeight + 3
+                    radius: 3
+                    color: Qt.rgba(224 / 255, 83 / 255, 61 / 255, 0.18)
+                    Text {
+                        id: contendedTxt
+                        anchors.centerIn: parent
+                        text: qsTr("被争抢")
+                        font.pixelSize: 9
+                        color: "#e0533d"
+                    }
+                    HoverHandler { id: contendedHover }
+                    ToolTip.visible: contendedHover.hovered
+                    ToolTip.text: qsTr("另一台设备也在把这台设备的流量劫走")
+                    ToolTip.delay: 300
+                }
             }
             Text {
                 Layout.fillWidth: true

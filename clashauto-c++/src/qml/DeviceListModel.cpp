@@ -35,6 +35,7 @@ QVariant DeviceListModel::data(const QModelIndex &index, int role) const
     case LastHostRole:  return r.lastHost;
     case RateUpHistRole:   return histList(m_hist.value(r.mac).up);
     case RateDownHistRole: return histList(m_hist.value(r.mac).down);
+    case ContendedRole:    return m_contended.contains(r.mac);
     default:            return {};
     }
 }
@@ -58,6 +59,7 @@ QHash<int, QByteArray> DeviceListModel::roleNames() const
         {IsSelfRole, "isSelf"},   {IsGatewayRole, "isGateway"},
         {ProxyableRole, "proxyable"}, {LastHostRole, "lastHost"},
         {RateUpHistRole, "rateUpHist"}, {RateDownHistRole, "rateDownHist"},
+        {ContendedRole, "contended"},
     };
 }
 
@@ -89,6 +91,19 @@ DeviceListModel::Row DeviceListModel::toRow(const DeviceRecord &d)
 QString DeviceListModel::macAt(int row) const
 {
     return (row >= 0 && row < m_rows.size()) ? m_rows.at(row).mac : QString();
+}
+
+void DeviceListModel::setContended(const QSet<QString> &macs)
+{
+    if (macs == m_contended)
+        return;
+    // 只给「争抢状态翻转了」的 mac 发 dataChanged（进或出集合的差集），不整表刷。
+    const QSet<QString> changed = (m_contended - macs) + (macs - m_contended);
+    m_contended = macs;
+    const QVector<int> roles{ContendedRole};
+    for (int i = 0; i < m_rows.size(); ++i)
+        if (changed.contains(m_rows.at(i).mac))
+            emit dataChanged(index(i), index(i), roles);
 }
 
 void DeviceListModel::setDevices(const QVector<DeviceRecord> &devices)

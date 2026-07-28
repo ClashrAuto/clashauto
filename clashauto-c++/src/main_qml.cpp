@@ -470,6 +470,9 @@ int main(int argc, char *argv[])
                      [tray](const QString &name) {
                          tray->notify(QCoreApplication::translate("Devices", "发现新设备"), name);
                      });
+    // 邻居安全监视：ArpWatch 检测到「有人代理本机 / 抢我劫持的设备」→ 托盘气泡（标题/正文已在控制器里组好）。
+    QObject::connect(devicesCtrl, &DevicesController::securityAlertRaised, tray,
+                     [tray](const QString &title, const QString &body) { tray->notify(title, body); });
 
     // 托盘 toggle → 后端（与 Widgets 版契约一致）。核心生命周期仍由用户显式触发。
     // 增强(TUN) 走 bridge.toggleTun（而非直连 core）：Windows 上开启且非提权时先弹 UAC 提权重启，

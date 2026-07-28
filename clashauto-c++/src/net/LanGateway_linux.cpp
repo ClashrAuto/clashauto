@@ -32,6 +32,7 @@
 #include "LanGateway.h"
 
 #include "ArpSpoofer.h"
+#include "ArpWatch.h"
 #include "IL2Endpoint.h"
 #include "NdpSpoofer.h"
 #include "NetStack.h"
@@ -193,6 +194,7 @@ struct GwNic {
     LanGateway::NicSpec spec;
     IL2Endpoint *ep = nullptr;
     ArpSpoofer *arp = nullptr;
+    ArpWatch *watch = nullptr; // 被动 ARP/NDP 冲突监视（只读，检测本机被劫持/设备被争抢）
     NdpSpoofer *ndp = nullptr; // IPv6 邻居发现投毒器；v6 拓扑缺失时 configure 后自身 no-op
     quint32 localIp4 = 0, netMask4 = 0, gatewayIp4 = 0;
     QByteArray prefix6Net;     // v6 前缀网络部分（16 字节；空=未知，则不做 v6 同网段旁路）
@@ -265,6 +267,8 @@ public:
 signals:
     void deviceError(const QString &mac, const QString &message);
     void statusChanged();
+    void securityAlert(int kind, const QString &offenderMac, const QString &subjectIp,
+                       const QString &subjectMac);
 
 private:
     bool availableLocal() const;
@@ -413,6 +417,13 @@ void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &fr
         return;
     const QByteArray mb(reinterpret_cast<const char *>(f + 6), 6);
     m_net->addDeviceV6(n->ep, ip6, mb, m_victimUserByMac.value(vkey));
+    if (n->watch) {
+        const QString macStr = QStringLiteral("%1:%2:%3:%4:%5:%6")
+                                   .arg(mb[0] & 0xFF, 2, 16, QChar('0')).arg(mb[1] & 0xFF, 2, 16, QChar('0'))
+                                   .arg(mb[2] & 0xFF, 2, 16, QChar('0')).arg(mb[3] & 0xFF, 2, 16, QChar('0'))
+                                   .arg(mb[4] & 0xFF, 2, 16, QChar('0')).arg(mb[5] & 0xFF, 2, 16, QChar('0'));
+        n->watch->addVictimV6(macStr, ip6); // 也让监视器能检测「这台设备的 v6 被别人投毒」
+    }
     set.insert(ip6);
     if (gwDbgOn())
         std::fprintf(stderr, "[GW] learned device v6 %s\n", ip6.toLatin1().constData()),
@@ -538,6 +549,12 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         //（v6 劫持不生效，但绝不影响 v4）。
         if (n->ndp)
             n->ndp->configure(spec.localMac, n->effectiveRouterLL6(), n->effectiveRouterMac6());
+        // 监视器的真相表同样每轮刷新（网关/路由器 MAC 常是扫描几轮后才解析出来）。
+        if (n->watch) {
+            n->watch->setLocal(spec.localMac, spec.localIp, spec.localGlobal6);
+            n->watch->setGateway(spec.gatewayIp, spec.gatewayMac, n->effectiveRouterLL6(),
+                                 n->effectiveRouterMac6());
+        }
 
         if (n->ready)
             continue; // 已就绪：只刷新拓扑，不重建（重建会断掉这张卡上的活动劫持）
@@ -576,6 +593,10 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 return;
             const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
             const bool isArp = frame.size() >= 14 && f[12] == 0x08 && f[13] == 0x06;
+            // 被动安全监视：在任何 return/旁路之前先看一眼这帧的 ARP/NDP 声明。它只读、内部去抖，
+            // 既看得到真网关广播、也看得到冲我而来的毒帧（本机自己发的帧按 sender MAC 被它排掉）。
+            if (n->watch)
+                n->watch->observe(frame);
             // ★ 反应式反制:真网关自己发的 ARP(它周期性广播 who-has,携带「网关 IP 在真 MAC」,
             //   设备一收到就把投毒解掉)→ 立刻把所有 victim 重投一轮盖回去。这是「时通时不通」的
             //   根治:周期重发跟网关的 ARP 刷新是 1:1 拉锯,必须一看到解毒就抢回(tcpdump 实证 UniFi
@@ -741,6 +762,14 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             n->ndp = new NdpSpoofer(n->ep, this);
             n->ndp->configure(spec.localMac, n->effectiveRouterLL6(), n->effectiveRouterMac6());
         }
+        if (!n->watch) {
+            n->watch = new ArpWatch(this);
+            n->watch->setLocal(spec.localMac, spec.localIp, spec.localGlobal6);
+            n->watch->setGateway(spec.gatewayIp, spec.gatewayMac, n->effectiveRouterLL6(),
+                                 n->effectiveRouterMac6());
+            // 监视器活在工作线程 → 直连；它内部已去抖，这里原样上抛，由 GUI 线程队列接收。
+            connect(n->watch, &ArpWatch::alert, this, &GatewayWorker::securityAlert);
+        }
         n->ready = true;
         // 刚就绪、还没劫持任何设备：先装「全丢」内核过滤，避免混杂模式下整段流量白白进用户态。
         pushMacFilter(n);
@@ -765,6 +794,8 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         }
         if (n->arp)
             delete n->arp;
+        if (n->watch)
+            delete n->watch; // 只读监视器，无还原动作
         if (n->ndp)
             delete n->ndp; // NdpSpoofer 析构会 healAll（还原 v6 邻居缓存）
         m_nics.remove(ifn);
@@ -803,6 +834,8 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     n->arp->startSpoof(mac, ip);
     if (n->ndp)
         n->ndp->startSpoof(mac); // v6 投毒只需 MAC（设备 v6 地址随后从实帧里被动学到）
+    if (n->watch)
+        n->watch->addVictim(mac, ip); // 登记进监视真相表：检测「这台设备被别人也在投毒」
     ++n->victims;
     const quint64 vkey = macKey(mb);
     m_victimByMac.insert(vkey, ip);
@@ -829,6 +862,8 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     if (n) {
         if (n->arp)
             n->arp->stopSpoof(mac); // 内部会 heal（还原 ARP）
+        if (n->watch)
+            n->watch->removeVictim(mac); // 从监视真相表移除（v4/v6 地址一并清）
         if (n->ndp)
             n->ndp->stopSpoof(mac); // 内部会 heal（还原 v6 邻居缓存）
         if (n->victims > 0)
@@ -962,6 +997,8 @@ void GatewayWorker::teardownLocal()
         }
         if (n->arp)
             delete n->arp; // ArpSpoofer 的 QTimer 在工作线程析构
+        if (n->watch)
+            delete n->watch; // 只读监视器
         if (n->ndp)
             delete n->ndp; // NdpSpoofer 同理（析构 healAll 还原 v6）
         delete n;
@@ -998,6 +1035,7 @@ LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl)
     // 工作线程 emit 的信号 → 队列连接 → 在 GUI 线程重发本类同名信号（只带 QString 值类型，constraint 7）。
     connect(d->worker, &GatewayWorker::deviceError, this, &LanGateway::deviceError);
     connect(d->worker, &GatewayWorker::statusChanged, this, &LanGateway::statusChanged);
+    connect(d->worker, &GatewayWorker::securityAlert, this, &LanGateway::securityAlert);
     d->thread->start();
 }
 

@@ -8,6 +8,7 @@
 #include <QAbstractListModel>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QSet>
 #include <QString>
 #include <QVariantList>
 #include <QVector>
@@ -38,6 +39,7 @@ public:
         LastHostRole,   // 最后访问的地址（行最下面那行）
         RateUpHistRole, // 近 kHistPoints 拍的上/下行速率（行背景那张实时流量图）
         RateDownHistRole,
+        ContendedRole,  // 被别的电脑也在投毒/争抢（ArpWatch 检测；由 DevicesController 喂入，非台账字段）
     };
 
     explicit DeviceListModel(QObject *parent = nullptr);
@@ -56,6 +58,10 @@ public:
     Q_INVOKABLE void setFilter(const QString &query, bool onlineOnly);
     // 行 → MAC（详情选择用）。
     Q_INVOKABLE QString macAt(int row) const;
+
+    // 由 DevicesController 喂入「当前被别的电脑争抢」的 MAC 集合（ArpWatch 检测，带 TTL）。
+    // 只影响 ContendedRole，不进台账、不参与排序/过滤。变化的行发 dataChanged。
+    void setContended(const QSet<QString> &macs);
 
 signals:
     void countChanged();
@@ -108,6 +114,7 @@ private:
     int m_onlineCount = 0;
     int m_proxiedCount = 0;
     QHash<QString, Hist> m_hist; // mac → 速率历史
+    QSet<QString> m_contended;   // 当前被争抢的 MAC（setContended 维护；ContendedRole 读它）
     QElapsedTimer m_histClock;
     static constexpr int kHistPoints = 40;
     static constexpr int kHistMinIntervalMs = 800;

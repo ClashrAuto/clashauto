@@ -73,6 +73,11 @@ public:
 signals:
     void deviceError(const QString &mac, const QString &message);
     void statusChanged(); // 劫持集合变化
+    // 被动 ARP/NDP 监视发现冲突（有人冒充网关/本机在代理我，或有人在抢我劫持的设备）。
+    // kind：0=别人在代理我(SelfImpersonated)，1=我的设备被争抢(DeviceContended)。
+    // offenderMac=冒充者 MAC；subjectIp=被冒充/被抢的 IP；subjectMac=被抢设备 MAC（kind=1 才有值）。
+    void securityAlert(int kind, const QString &offenderMac, const QString &subjectIp,
+                       const QString &subjectMac);
 
 private:
     class Impl;

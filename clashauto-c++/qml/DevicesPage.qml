@@ -44,6 +44,82 @@ Item {
         // 各自写 Layout.rightMargin: 10 把这 10px 补回来，列表行则靠委托宽度 -10 保持同样的右对齐。
         spacing: 10
 
+        // —————————————————— 安全告警横幅 ——————————————————
+        // ArpWatch 检测到「有人代理本机 / 抢我劫持的设备」时出现，列出每条威胁；用户可关闭
+        //（威胁若仍在，下次观察到会重新弹出）。平时 underAttack=false，整条不占位。
+        Rectangle {
+            Layout.fillWidth: true
+            Layout.rightMargin: 10
+            visible: devices.underAttack
+            implicitHeight: alertCol.implicitHeight + 20
+            radius: 6
+            color: Qt.rgba(224 / 255, 83 / 255, 61 / 255, 0.12)
+            border.width: 1
+            border.color: Qt.rgba(224 / 255, 83 / 255, 61 / 255, 0.5)
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.margins: 10
+                spacing: 10
+
+                Text { // 警告图标（remixicon shield-flash / alarm-warning）
+                    text: "\uEA1C" // alarm-warning-fill
+                    font.family: Theme.riFont
+                    font.pixelSize: 20
+                    color: "#e0533d"
+                    Layout.alignment: Qt.AlignTop
+                }
+
+                ColumnLayout {
+                    id: alertCol
+                    Layout.fillWidth: true
+                    spacing: 3
+                    Text {
+                        text: qsTr("检测到局域网内有异常代理行为")
+                        font.pixelSize: 13
+                        font.bold: true
+                        color: Theme.textPrimary
+                    }
+                    Repeater {
+                        model: devices.securityAlerts
+                        Text {
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                            font.pixelSize: 11
+                            color: Theme.textSecondary
+                            text: {
+                                // modelData.name/subjectIp/mac 里挑一个能展示的被抢设备标识。
+                                var who = modelData.name && modelData.name.length > 0 ? modelData.name
+                                        : (modelData.subjectIp && modelData.subjectIp.length > 0 ? modelData.subjectIp
+                                        : modelData.mac);
+                                return modelData.kind === 1
+                                    ? qsTr("设备「%1」正被 %2 争抢").arg(who).arg(modelData.offenderMac)
+                                    : qsTr("%1 正在冒充网关或本机，可能在监听/代理本机流量").arg(modelData.offenderMac);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle { // 关闭按钮
+                    Layout.alignment: Qt.AlignTop
+                    implicitWidth: dismissTxt.implicitWidth + 16
+                    implicitHeight: dismissTxt.implicitHeight + 8
+                    radius: 4
+                    color: dismissHover.hovered ? Qt.rgba(224 / 255, 83 / 255, 61 / 255, 0.22)
+                                                : Qt.rgba(224 / 255, 83 / 255, 61 / 255, 0.12)
+                    Text {
+                        id: dismissTxt
+                        anchors.centerIn: parent
+                        text: qsTr("知道了")
+                        font.pixelSize: 11
+                        color: "#e0533d"
+                    }
+                    HoverHandler { id: dismissHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: devices.dismissSecurityAlerts() }
+                }
+            }
+        }
+
         // —————————————————— 概览条 ——————————————————
         // **必须显式 Layout.minimumWidth: 0**。RowLayout 里 fillWidth 为 false 的子项是「定宽」的，
         // 它们的宽度会原样计进这个 RowLayout 的最小宽度；而外层 ColumnLayout 布局子项时是按
@@ -275,6 +351,7 @@ Item {
                 isSelf: model.isSelf
                 isGateway: model.isGateway
                 proxyable: model.proxyable
+                contended: model.contended
                 selected: devices.selectedMac === model.mac
                 onClicked: detailWindow.openFor(model.mac)
                 onToggleProxy: devices.setProxyEnabled(model.mac, !model.proxied)
