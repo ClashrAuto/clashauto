@@ -10,6 +10,14 @@ Item {
     id: root
     property string title: ""
     property color lineColor: Theme.accent
+    // —— 背景模式（minimal）——
+    // 这张图现在还有第二种用法：当上传/下载卡的**底纹**（见 MetricCard.bgChart）。那时候网格、
+    // 右侧刻度、左上标题全是噪音，压在卡片的数字底下只会打架，所以 minimal 时一概不画，
+    // 改成「一条线 + 线下的淡填充」——底纹要的是趋势的形状，不是能读数的图表。
+    property bool minimal: false
+    // 曲线最高只占本控件高度的这个比例。minimal 下留出上方给卡片的标题/数值，曲线再高也不会
+    // 顶到字上；默认 1.0 = 独立成图时铺满，与原行为一致。
+    property real headroom: 1.0
     readonly property int maxPointer: 42        // length(40) + 2
     readonly property real kBase: 131072.0      // 128KB 基准
     readonly property real kRule: 2097152.0     // 2MB 步进
@@ -77,54 +85,71 @@ Item {
             var lc = root.lineColor;
             var max = root.currentMax();
 
-            // 背景（线色极淡）
-            ctx.fillStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.03);
-            ctx.fillRect(0, 0, W, H);
+            if (!root.minimal) {
+                // 背景（线色极淡）
+                ctx.fillStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.03);
+                ctx.fillRect(0, 0, W, H);
 
-            // 四分网格
-            ctx.strokeStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.10);
-            ctx.lineWidth = 1;
-            for (var gi = 0; gi <= 4; ++gi) {
-                var gy = Math.round(H / 4 * gi) + 0.5;
-                ctx.beginPath();
-                ctx.moveTo(0, gy);
-                ctx.lineTo(W, gy);
-                ctx.stroke();
+                // 四分网格
+                ctx.strokeStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.10);
+                ctx.lineWidth = 1;
+                for (var gi = 0; gi <= 4; ++gi) {
+                    var gy = Math.round(H / 4 * gi) + 0.5;
+                    ctx.beginPath();
+                    ctx.moveTo(0, gy);
+                    ctx.lineTo(W, gy);
+                    ctx.stroke();
+                }
+
+                // 右侧速度刻度（max / ¾ / ½ / ¼）——正文字体（Canvas 不继承应用默认字体，显式指定）
+                ctx.fillStyle = "#969696";
+                ctx.font = "10px '" + Theme.uiFont + "'";
+                ctx.textAlign = "right";
+                var labels = [max, max * 3 / 4, max / 2, max / 4];
+                for (var li = 0; li < 4; ++li)
+                    ctx.fillText(root.speedText(labels[li]), W - 6, H / 4 * li + 12);
+
+                // 左上标题——正文字体（与 UI 一致）
+                ctx.fillStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.70);
+                ctx.font = "11px '" + Theme.uiFont + "'"; // 全 UI 不加粗
+                ctx.textAlign = "left";
+                ctx.fillText(root.title, 10, 18);
             }
 
-            // 右侧速度刻度（max / ¾ / ½ / ¼）——正文字体（Canvas 不继承应用默认字体，显式指定）
-            ctx.fillStyle = "#969696";
-            ctx.font = "10px '" + Theme.uiFont + "'";
-            ctx.textAlign = "right";
-            var labels = [max, max * 3 / 4, max / 2, max / 4];
-            for (var li = 0; li < 4; ++li)
-                ctx.fillText(root.speedText(labels[li]), W - 6, H / 4 * li + 12);
-
-            // 左上标题——正文字体（与 UI 一致）
-            ctx.fillStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.70);
-            ctx.font = "11px '" + Theme.uiFont + "'"; // 全 UI 不加粗
-            ctx.textAlign = "left";
-            ctx.fillText(root.title, 10, 18);
-
-            // 折线（带滚动偏移；两端富余点 → 无缝、右侧不留缺口；无面积填充）
-            var lw = 3.0;
+            // 折线（带滚动偏移；两端富余点 → 无缝、右侧不留缺口）
+            var lw = root.minimal ? 2.0 : 3.0;
             var spacing = W / (root.maxPointer - 2);
             var offset = -spacing * root.phase;
+            var yOf = function (v) {
+                var y = H - (v / max) * H * root.headroom - lw / 2;
+                return y < lw / 2 ? lw / 2 : y;
+            };
+
+            // minimal：线下补一层淡填充。只有一条细线的话，在卡片底纹这个尺度上几乎看不见，
+            // 填充才撑得起「这块区域是这张图」的感觉。
+            if (root.minimal) {
+                ctx.beginPath();
+                ctx.moveTo(offset, H);
+                for (var fi = 0; fi < n; ++fi)
+                    ctx.lineTo(fi * spacing + offset, yOf(root.pointers[fi]));
+                ctx.lineTo((n - 1) * spacing + offset, H);
+                ctx.closePath();
+                ctx.fillStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.16);
+                ctx.fill();
+            }
+
             ctx.beginPath();
             for (var i = 0; i < n; ++i) {
-                var y = H - (root.pointers[i] / max) * H - lw / 2;
-                if (y < lw / 2)
-                    y = lw / 2;
                 var x = i * spacing + offset;
                 if (i === 0)
-                    ctx.moveTo(x, y);
+                    ctx.moveTo(x, yOf(root.pointers[i]));
                 else
-                    ctx.lineTo(x, y);
+                    ctx.lineTo(x, yOf(root.pointers[i]));
             }
             ctx.lineWidth = lw;
             ctx.lineCap = "round";
             ctx.lineJoin = "round";
-            ctx.strokeStyle = Qt.rgba(lc.r, lc.g, lc.b, 0.70);
+            ctx.strokeStyle = Qt.rgba(lc.r, lc.g, lc.b, root.minimal ? 0.55 : 0.70);
             ctx.stroke();
         }
     }

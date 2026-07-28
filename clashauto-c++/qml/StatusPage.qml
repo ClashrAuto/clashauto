@@ -2,9 +2,10 @@ import QtQuick
 import QtQuick.Layouts
 import ClashAuto
 
-// 状态页：四张放大的指标卡（2×2）+ 上/下行实时带宽折线。
+// 状态页：四张放大的指标卡（2×2），整页只有这一块。
 // 节点列表已独立成「节点」页（NodesPage），这里整页宽都归流量看板，卡片因此能画得下更多东西：
-//   · 上传 / 下载：本身只有一个数字，卡片留白很大 → 压一张同义的大号背景水印进去；
+//   · 上传 / 下载：**实时带宽折线直接画在卡的背景上**（原来是页面下方两张独立的图，
+//     占掉整整一屏高度还和上面的数字隔着老远——同一个指标的「此刻」和「最近 40 秒」该挨在一起）；
 //   · 连接：数字下面直接列**最近建立的 5 条连接**（含发起它的设备），不用再开「全部连接」窗才知道在连谁；
 //   · 总流量：直连 / 代理两段一根进度条对比，下面列**本会话用量最大的 5 个目标**。
 // 后两张卡的数据来自 bridge.recentConnections / topConnections / directBytes / proxyBytes，
@@ -65,34 +66,46 @@ Item {
 
         GridLayout {
             Layout.fillWidth: true
+            Layout.fillHeight: true
             columns: 2
             rowSpacing: 10
             columnSpacing: 10
 
-            // —— 上传 / 下载：只有一个数字，配大号背景水印 ——
+            // —— 上传 / 下载：实时带宽折线就画在卡的背景上 ——
+            // 这两张卡吃掉窗口变高时多出来的高度（曲线越高越好读）；下面两张列表卡是定高的。
             MetricCard {
+                id: upCard
                 Layout.fillWidth: true
-                Layout.preferredHeight: 92
-                glyph: "\uF24A"   // upload-2-line
-                bgGlyph: "\uF249" // upload-2-fill（背景水印）
+                Layout.fillHeight: true
+                Layout.minimumHeight: 92
+                Layout.preferredHeight: 190
+                glyph: "\uF24A" // upload-2-line
                 title: qsTr("上传")
                 value: bridge.upText
                 accentColor: "#a84343"
+                showChart: true
+                chartColor: "#b14a4a" // 与原「实时带宽·上传」那条线同色
             }
             MetricCard {
+                id: downCard
                 Layout.fillWidth: true
-                Layout.preferredHeight: 92
-                glyph: "\uEC54"   // download-2-line
-                bgGlyph: "\uEC53" // download-2-fill（背景水印）
+                Layout.fillHeight: true
+                Layout.minimumHeight: 92
+                Layout.preferredHeight: 190
+                glyph: "\uEC54" // download-2-line
                 title: qsTr("下载")
                 value: bridge.downText
                 accentColor: "#4da13e"
+                showChart: true
+                chartColor: "#5bb44b"
             }
 
             // —— 连接：数字 + 最近建立的 5 条 ——
             Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 208
+                Layout.fillHeight: true
+                Layout.minimumHeight: 208
+                Layout.maximumHeight: 260
                 radius: 4
                 color: Theme.metricBg
                 clip: true
@@ -199,7 +212,9 @@ Item {
             Rectangle {
                 id: totalCard
                 Layout.fillWidth: true
-                Layout.preferredHeight: 208
+                Layout.fillHeight: true
+                Layout.minimumHeight: 208
+                Layout.maximumHeight: 260
                 radius: 4
                 color: Theme.metricBg
                 clip: true
@@ -303,41 +318,14 @@ Item {
             }
         }
 
-        Text {
-            text: qsTr("实时带宽")
-            font.pixelSize: 18
-            color: Theme.textPrimary
-        }
-
-        // 两张折线并排（页面变宽后不必再上下堆，堆的话卡片一高就把它们压没了）
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            Layout.minimumHeight: 110
-            spacing: 10
-            BandwidthChart {
-                id: upChart
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                title: qsTr("上传")
-                lineColor: "#b14a4a"
-            }
-            BandwidthChart {
-                id: downChart
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                title: qsTr("下载")
-                lineColor: "#5bb44b"
-            }
-        }
     }
 
-    // 把 bridge 的实时流量喂进两个带宽图
+    // 把 bridge 的实时流量喂进两张卡的背景折线
     Connections {
         target: bridge
         function onTrafficChanged() {
-            upChart.push(bridge.upBytes);
-            downChart.push(bridge.downBytes);
+            upCard.pushChart(bridge.upBytes);
+            downCard.pushChart(bridge.downBytes);
         }
     }
 
