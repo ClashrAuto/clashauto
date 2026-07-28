@@ -36,7 +36,12 @@ Item {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 10
+        anchors.leftMargin: 10
+        anchors.topMargin: 10
+        anchors.bottomMargin: 10
+        // **右内距不写在这里**（其余三边照旧 10）：设备列表要一直铺到页面最右边缘，它的滚动条
+        // 才是贴着窗口右侧的，而不是悬在离边 10px 的空中。上面几条（概览条 / Npcap 提示 / 搜索行）
+        // 各自写 Layout.rightMargin: 10 把这 10px 补回来，列表行则靠委托宽度 -10 保持同样的右对齐。
         spacing: 10
 
         // —————————————————— 概览条 ——————————————————
@@ -48,6 +53,7 @@ Item {
         RowLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 0
+            Layout.rightMargin: 10 // 见 ColumnLayout 顶部：右内距逐项补
             spacing: 16
             Text { id: ovTitle; text: qsTr("设备"); font.pixelSize: 18; color: Theme.textPrimary }
             Row {
@@ -124,6 +130,7 @@ Item {
         Rectangle {
             Layout.fillWidth: true
             Layout.minimumWidth: 0 // 同概览条：定宽的「安装 Npcap」按钮不能反过来撑宽整页
+            Layout.rightMargin: 10 // 见 ColumnLayout 顶部：右内距逐项补
             visible: npcap.supported && (!npcap.installed || npcap.restricted)
             radius: 5
             color: Qt.rgba(198 / 255, 154 / 255, 84 / 255, 0.15)
@@ -180,6 +187,7 @@ Item {
         RowLayout {
             Layout.fillWidth: true
             Layout.minimumWidth: 0 // 同上：两个 28px 方钮不能把整页顶宽
+            Layout.rightMargin: 10 // 见 ColumnLayout 顶部：右内距逐项补
             spacing: 6
             TextField {
                 id: search
@@ -240,6 +248,8 @@ Item {
         // —————————————————— 设备列表（整页宽）——————————————————
         ListView {
             id: list
+            // **铺满到页面右边缘**（ColumnLayout 没给右内距），这样滚动条就贴在最右边；
+            // 行本身仍按 -10 收窄，右端和上面的搜索框/概览条对齐，滚动条正好悬在那条 10px 的空隙上。
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
@@ -247,7 +257,7 @@ Item {
             spacing: 4
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
             delegate: DeviceRow {
-                width: ListView.view.width
+                width: ListView.view.width - 10
                 mac: model.mac
                 ip: model.ip
                 name: model.name
