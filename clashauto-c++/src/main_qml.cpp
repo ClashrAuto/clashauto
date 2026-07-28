@@ -285,6 +285,95 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // 状态页「流量构成 / 连接速览」自检（COAST_CONNSTATS_SELFTEST=1）：喂两拍伪造的 /connections
+    // 快照给 QmlBridge::observeConnections，把四个输出打到 stdout 再退出，不建 GUI、不发网络请求。
+    // 这块是纯算术（逐连接取增量 + 直连/代理分桶 + 两种排序），没有 UI 能验，只能这么跑一遍：
+    // 第二拍必须只计**增量**，否则同一份流量每拍重复累加，总量会随挂机时间线性虚涨。
+    if (qEnvironmentVariableIsSet("COAST_CONNSTATS_SELFTEST")) {
+        const QString dir = QDir::temp().filePath(QStringLiteral("coast-connstats-selftest"));
+        QDir(dir).removeRecursively();
+        AppConfig cfg;
+        cfg.userDir = dir;
+        cfg.configDir = QDir(dir).filePath(QStringLiteral("config"));
+        QDir().mkpath(cfg.configDir);
+        auto *core = new CoreController(cfg, &app);
+        auto *clash = new ClashService(&app);
+        auto *subs = new SubscriptionStore(cfg, &app);
+        QmlBridge bridge(&cfg, core, clash, subs, &app);
+        // 台账里放一台设备：验「sourceIP → 设备名」这段（没有台账时该列退回显示 IP）。
+        auto *store = new DeviceStore(cfg.configDir, &app);
+        DeviceRecord dev;
+        dev.mac = QStringLiteral("aa:bb:cc:dd:ee:ff");
+        dev.ip = QStringLiteral("192.168.20.140");
+        dev.autoName = QStringLiteral("Xiaomi-Phone");
+        dev.online = true;
+        store->mergeDiscovered({dev});
+        bridge.setDeviceStore(store);
+
+        auto snap = [](const char *json) {
+            return QJsonDocument::fromJson(QByteArray(json)).array();
+        };
+        // 第一拍：代理 2 条（其中一条来自局域网设备）、直连 1 条、REJECT 1 条（两桶都不该记）
+        const QJsonArray t0 = snap(R"([
+            {"id":"a","start":"2026-07-28T10:00:01+08:00","chains":["HK-01","节点选择"],
+             "download":1000,"upload":100,
+             "metadata":{"host":"youtube.com","sourceIP":"192.168.20.140"}},
+            {"id":"b","start":"2026-07-28T10:00:02+08:00","chains":["DIRECT"],
+             "download":2000,"upload":200,
+             "metadata":{"host":"mirrors.aliyun.com","sourceIP":"127.0.0.1"}},
+            {"id":"c","start":"2026-07-28T10:00:03+08:00","chains":["JP-03"],
+             "download":50,"upload":5,
+             "metadata":{"host":"api.github.com","sourceIP":"127.0.0.1"}},
+            {"id":"d","start":"2026-07-28T10:00:04+08:00","chains":["REJECT"],
+             "download":9999,"upload":9999,
+             "metadata":{"host":"ads.example.com","sourceIP":"127.0.0.1"}}
+        ])");
+        // 第二拍：a/b 累计值变大（只该记增量）、c 断开消失、e 新建
+        const QJsonArray t1 = snap(R"([
+            {"id":"a","start":"2026-07-28T10:00:01+08:00","chains":["HK-01","节点选择"],
+             "download":1500,"upload":150,
+             "metadata":{"host":"youtube.com","sourceIP":"192.168.20.140"}},
+            {"id":"b","start":"2026-07-28T10:00:02+08:00","chains":["DIRECT"],
+             "download":2200,"upload":220,
+             "metadata":{"host":"mirrors.aliyun.com","sourceIP":"127.0.0.1"}},
+            {"id":"d","start":"2026-07-28T10:00:04+08:00","chains":["REJECT"],
+             "download":9999,"upload":9999,
+             "metadata":{"host":"ads.example.com","sourceIP":"127.0.0.1"}},
+            {"id":"e","start":"2026-07-28T10:00:09+08:00","chains":["SG-02"],
+             "download":300,"upload":30,
+             "metadata":{"host":"cdn.jsdelivr.net","sourceIP":"192.168.20.140"}}
+        ])");
+        auto feed = [&bridge](const QJsonArray &a) {
+            QMetaObject::invokeMethod(&bridge, "observeConnections", Qt::DirectConnection,
+                                      Q_ARG(QJsonArray, a));
+        };
+        auto dump = [&bridge](const char *tag) {
+            std::printf("[connstats] %s direct=%.0f proxy=%.0f total=%s\n", tag,
+                        bridge.directBytes(), bridge.proxyBytes(),
+                        bridge.totalText().toUtf8().constData());
+            for (const QVariant &v : bridge.recentConnections()) {
+                const QVariantMap m = v.toMap();
+                std::printf("[connstats]   recent %-20s dev=%-14s direct=%d\n",
+                            m.value("host").toString().toUtf8().constData(),
+                            m.value("device").toString().toUtf8().constData(),
+                            int(m.value("direct").toBool()));
+            }
+            for (const QVariant &v : bridge.topConnections()) {
+                const QVariantMap m = v.toMap();
+                std::printf("[connstats]   top    %-20s dev=%-14s bytes=%.0f\n",
+                            m.value("host").toString().toUtf8().constData(),
+                            m.value("device").toString().toUtf8().constData(),
+                            m.value("bytes").toDouble());
+            }
+        };
+        feed(t0);
+        dump("tick1"); // 期望 direct=2200 proxy=1155（REJECT 的 9999+9999 不计）
+        feed(t1);
+        dump("tick2"); // 期望 direct=2200+220 proxy=1155+550+330（只加增量；c 断开不回退）
+        std::fflush(stdout);
+        return 0;
+    }
+
     // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 载入配置；资源已内嵌 qrc，不再找 Clashr-Auto）。
     AppConfig config = AppConfigLoader::load();
     auto *core = new CoreController(config, &app);
@@ -309,6 +398,9 @@ int main(int argc, char *argv[])
     auto *updateCtrl = new UpdateController(config, core, &app);
     // 设备页：局域网发现台账 + 透明网关 + 控制器（自持连接轮询/热更新；页面显隐时开停）。
     auto *deviceStore = new DeviceStore(config.configDir, &app);
+    // 状态页的连接速览要显示「这条连接是哪台设备发起的」——把只读台账交给 bridge
+    // （它先于 DeviceStore 构造，只能后置注入）。
+    bridge.setDeviceStore(deviceStore);
     // 上网历史库（SQLite）：订阅 ClashService 每 2s 的连接快照，连接断开时落一条记录。
     // 复用同一次 /connections 请求，不额外发包；设备详情的「常用域名」也从它查。
     auto *history = new HistoryStore(config.configDir, deviceStore, &app);

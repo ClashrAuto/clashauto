@@ -104,6 +104,7 @@ qt_add_qml_module(clashauto-qml
         qml/Main.qml
         qml/Theme.qml
         qml/StatusPage.qml
+        qml/NodesPage.qml
         qml/DevicesPage.qml
         qml/DeviceRow.qml
         qml/DeviceTrafficBg.qml

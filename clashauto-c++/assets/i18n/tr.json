@@ -287,5 +287,12 @@
 
   "设备详情": "Cihaz ayrıntıları",
   "未选择设备": "Cihaz seçilmedi",
-  "近 7 天": "Son 7 gün"
+  "近 7 天": "Son 7 gün",
+
+  "代理": "Proxy",
+  "总流量": "Toplam trafik",
+  "暂无流量": "Henüz trafik yok",
+  "暂无连接": "Henüz bağlantı yok",
+  "最近连接": "Son bağlantılar",
+  "用量最多": "En çok kullanım"
 }

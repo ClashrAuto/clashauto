@@ -21,7 +21,8 @@ src/qml/QmlBridge.{h,cpp} # THE facade: backend signals -> Q_PROPERTY, UI action
 src/qml/NodeListModel.{h,cpp} # QAbstractListModel of ClashService nodes (roles below)
 qml/Main.qml              # shell: sidebar + StackLayout(pages) + footer
 qml/Theme.qml             # pragma Singleton design tokens (dark/light)
-qml/StatusPage.qml        # DONE (traffic cards + bandwidth charts + node list)
+qml/StatusPage.qml        # DONE (4 traffic cards: up/down + connections/total-traffic with preview lists, bandwidth charts)
+qml/NodesPage.qml         # DONE (node list + search/speed-test toolbar; split out of StatusPage)
 qml/{Subscriptions,Settings,Logs,About}Page.qml   # STUBS to fill
 qml/{Card,NavButton,FooterSwitch,MetricCard,NodeRow,BandwidthChart}.qml   # reusable components
 ```

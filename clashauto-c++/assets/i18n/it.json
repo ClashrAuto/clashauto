@@ -287,5 +287,12 @@
 
   "设备详情": "Dettagli dispositivo",
   "未选择设备": "Nessun dispositivo selezionato",
-  "近 7 天": "Ultimi 7 giorni"
+  "近 7 天": "Ultimi 7 giorni",
+
+  "代理": "Proxy",
+  "总流量": "Traffico totale",
+  "暂无流量": "Ancora nessun traffico",
+  "暂无连接": "Ancora nessuna connessione",
+  "最近连接": "Connessioni recenti",
+  "用量最多": "Utilizzo maggiore"
 }

@@ -3,6 +3,7 @@
 #include "../AppConfig.h"
 #include "../ClashService.h"
 #include "../CoreController.h"
+#include "../DeviceStore.h"
 #include "../SubscriptionStore.h"
 #include "Version.h"
 
@@ -13,10 +14,12 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStyleHints>
 #include <QTimer>
 #include <QVariantMap>
 #include <QWindow>
+#include <algorithm>
 
 #if defined(Q_OS_MACOS)
 #include "../MacWindow.h" // configureMacTitleBar / enableMacBlur（纯 C++ 接口，实现在 MacWindow.mm）
@@ -79,6 +82,8 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
         m_totalDownText = speedText(total);
         emit connectionsChanged();
     });
+    // 状态页的「流量构成 + 连接速览」：蹭历史库那次 /connections（2s 一发），不额外发包。
+    connect(m_clash, &ClashService::connectionsSnapshot, this, &QmlBridge::observeConnections);
 
     // 切换加载态：转圈帧推进（120ms）与 6s 兜底（严格对齐旧项目 m_spinnerTimer + beginNodeSwitch 内的兜底）
     m_spinnerTimer = new QTimer(this);
@@ -519,6 +524,163 @@ void QmlBridge::refreshConnections()
             list.append(m);
         m_connModel.setRaw(list);
     });
+}
+
+// sourceIP / inboundUser → 设备显示名。归属口径与 DevicesController::aggregate 一致：
+// 透明网关代理的连接 sourceIP 恒为 127.0.0.1（SOCKS 在本机），真实身份在 inboundUser=dev-<mac>，
+// 所以**先认用户名再认 IP**；两条都落空时退回显示来源 IP，宁可显示得糙一点也别归错设备。
+QString QmlBridge::deviceNameFor(const QString &sourceIp, const QString &inboundUser) const
+{
+    if (!m_deviceStore) {
+        return sourceIp;
+    }
+    const QVector<DeviceRecord> &devs = m_deviceStore->devices();
+    if (inboundUser.startsWith(QStringLiteral("dev-"))) {
+        for (const DeviceRecord &d : devs) {
+            if (DeviceStore::socksUser(d.mac) == inboundUser)
+                return d.displayName();
+        }
+    }
+    if (!sourceIp.isEmpty()) {
+        for (const DeviceRecord &d : devs) {
+            if (!d.ip.isEmpty() && d.ip == sourceIp)
+                return d.displayName();
+        }
+        // 回环 = 本机自己发起（系统代理/TUN 都走这条）：认台账里的本机记录，没有就写「本机」。
+        if (sourceIp == QLatin1String("127.0.0.1") || sourceIp == QLatin1String("::1")) {
+            for (const DeviceRecord &d : devs) {
+                if (d.isSelf)
+                    return d.displayName();
+            }
+            return tr("本机");
+        }
+    }
+    return sourceIp;
+}
+
+void QmlBridge::observeConnections(const QJsonArray &conns)
+{
+    struct Recent {
+        QString start, host, chain, device;
+        qint64 bytes = 0;
+        bool direct = false;
+    };
+    QVector<Recent> recents;
+    recents.reserve(conns.size());
+    QSet<QString> alive;
+    alive.reserve(conns.size());
+
+    for (const QJsonValue &v : conns) {
+        const QJsonObject c = v.toObject();
+        const QJsonObject meta = c.value("metadata").toObject();
+        const QString id = c.value("id").toString();
+        if (id.isEmpty())
+            continue;
+        alive.insert(id);
+
+        QString host = meta.value("host").toString();
+        if (host.isEmpty())
+            host = meta.value("destinationIP").toString();
+        const QJsonArray chains = c.value("chains").toArray();
+        // chains[0] 是真正出网的那一跳：DIRECT = 直连，其余（节点名/组名）= 走了代理。
+        // REJECT 系列既没出网也没流量，两桶都不该记，直接跳过。
+        const QString outbound = chains.isEmpty() ? QString() : chains.first().toString();
+        if (outbound.startsWith(QStringLiteral("REJECT")))
+            continue;
+        const bool direct = outbound == QLatin1String("DIRECT");
+
+        const qint64 dl = static_cast<qint64>(c.value("download").toInteger());
+        const qint64 ul = static_cast<qint64>(c.value("upload").toInteger());
+        // 逐连接取增量：/connections 给的是这条连接**自建立以来**的累计值，直接相加会把
+        // 同一份流量在每一拍重复计一次。首次见到的连接，它此前的量一次性计入（就是它的全部）。
+        const ConnBytes prev = m_connBytes.value(id);
+        qint64 dDown = dl - prev.down;
+        qint64 dUp = ul - prev.up;
+        if (dDown < 0) dDown = dl; // 理论上只增不减；核心重启后 id 撞车才可能回退，按新连接算
+        if (dUp < 0) dUp = ul;
+        m_connBytes.insert(id, ConnBytes{dl, ul});
+
+        const qint64 delta = dDown + dUp;
+        if (direct)
+            m_directBytes += delta;
+        else
+            m_proxyBytes += delta;
+
+        const QString device = deviceNameFor(meta.value("sourceIP").toString(),
+                                             meta.value("inboundUser").toString());
+        if (!host.isEmpty()) {
+            HostStat &hs = m_hostBytes[host];
+            hs.bytes += delta;
+            hs.device = device;
+            hs.direct = direct;
+        }
+
+        Recent r;
+        r.start = c.value("start").toString();
+        r.host = host;
+        r.chain = outbound;
+        r.device = device;
+        r.bytes = dl + ul;
+        r.direct = direct;
+        recents.append(r);
+    }
+
+    // 已断开连接的记账清掉：不清的话这张表会随会话无限长，且核心重启后 id 复用会读到脏底数。
+    for (auto it = m_connBytes.begin(); it != m_connBytes.end();) {
+        if (alive.contains(it.key()))
+            ++it;
+        else
+            it = m_connBytes.erase(it);
+    }
+
+    // host 表只增不减，给它一个上限：满了就只留用量最大的一半（被裁掉的都是零头）。
+    if (m_hostBytes.size() > kMaxHostStats) {
+        QVector<QPair<qint64, QString>> all;
+        all.reserve(m_hostBytes.size());
+        for (auto it = m_hostBytes.cbegin(); it != m_hostBytes.cend(); ++it)
+            all.append({it.value().bytes, it.key()});
+        std::sort(all.begin(), all.end(),
+                  [](const auto &a, const auto &b) { return a.first > b.first; });
+        for (int i = kMaxHostStats / 2; i < all.size(); ++i)
+            m_hostBytes.remove(all.at(i).second);
+    }
+
+    // 最近建立的 5 条：按 start 倒序（RFC3339 同时区定长 → 字典序即时间序）。
+    std::sort(recents.begin(), recents.end(),
+              [](const Recent &a, const Recent &b) { return a.start > b.start; });
+    m_recentConns.clear();
+    for (int i = 0; i < recents.size() && i < 5; ++i) {
+        const Recent &r = recents.at(i);
+        QVariantMap m;
+        m[QStringLiteral("host")] = r.host;
+        m[QStringLiteral("chain")] = r.chain;
+        m[QStringLiteral("device")] = r.device;
+        m[QStringLiteral("direct")] = r.direct;
+        m[QStringLiteral("bytes")] = static_cast<double>(r.bytes);
+        m_recentConns.append(m);
+    }
+
+    // 用量最大的 5 个目标（按本会话累计，连接断了也还在榜上）。
+    QVector<QPair<qint64, QString>> tops;
+    tops.reserve(m_hostBytes.size());
+    for (auto it = m_hostBytes.cbegin(); it != m_hostBytes.cend(); ++it)
+        tops.append({it.value().bytes, it.key()});
+    std::sort(tops.begin(), tops.end(),
+              [](const auto &a, const auto &b) { return a.first > b.first; });
+    m_topConns.clear();
+    for (int i = 0; i < tops.size() && i < 5; ++i) {
+        const HostStat &hs = m_hostBytes.value(tops.at(i).second);
+        if (hs.bytes <= 0)
+            break; // 一个字节都没跑过的目标不占榜位
+        QVariantMap m;
+        m[QStringLiteral("host")] = tops.at(i).second;
+        m[QStringLiteral("device")] = hs.device;
+        m[QStringLiteral("direct")] = hs.direct;
+        m[QStringLiteral("bytes")] = static_cast<double>(hs.bytes);
+        m_topConns.append(m);
+    }
+
+    emit trafficStatsChanged();
 }
 
 void QmlBridge::resetConnections()

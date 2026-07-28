@@ -287,5 +287,12 @@
 
   "设备详情": "Chi tiết thiết bị",
   "未选择设备": "Chưa chọn thiết bị",
-  "近 7 天": "7 ngày qua"
+  "近 7 天": "7 ngày qua",
+
+  "代理": "Proxy",
+  "总流量": "Tổng lưu lượng",
+  "暂无流量": "Chưa có lưu lượng",
+  "暂无连接": "Chưa có kết nối",
+  "最近连接": "Kết nối gần đây",
+  "用量最多": "Dùng nhiều nhất"
 }

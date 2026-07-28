@@ -19,7 +19,9 @@
 class AppConfig;
 class ClashService;
 class CoreController;
+class DeviceStore;
 class SubscriptionStore;
+class QJsonArray;
 class QTimer;
 class QWindow;
 
@@ -39,6 +41,18 @@ class QmlBridge final : public QObject
     Q_PROPERTY(QString totalDownText READ totalDownText NOTIFY connectionsChanged)
     // 连接列表模型（进程卡「查看全部连接」弹窗按需刷新）：增量更新，保滚动位置。
     Q_PROPERTY(ConnectionsModel *connectionsModel READ connectionsModel CONSTANT)
+    // —— 状态页：本次会话的流量构成 + 两份连接速览（都由 observeConnections 每拍算出）——
+    // 直连/代理是**本会话累计**（按连接 id 取增量攒的），不是核心那个 downloadTotal：
+    // 后者只有一个总数，答不了「有多少走了代理」。
+    Q_PROPERTY(double directBytes READ directBytes NOTIFY trafficStatsChanged)
+    Q_PROPERTY(double proxyBytes READ proxyBytes NOTIFY trafficStatsChanged)
+    Q_PROPERTY(QString directText READ directText NOTIFY trafficStatsChanged)
+    Q_PROPERTY(QString proxyText READ proxyText NOTIFY trafficStatsChanged)
+    Q_PROPERTY(QString totalText READ totalText NOTIFY trafficStatsChanged)
+    // 最近建立的 5 条连接 {host, chain, device, direct, bytes}
+    Q_PROPERTY(QVariantList recentConnections READ recentConnections NOTIFY trafficStatsChanged)
+    // 本会话用量最大的 5 个目标 {host, device, direct, bytes}
+    Q_PROPERTY(QVariantList topConnections READ topConnections NOTIFY trafficStatsChanged)
     // —— 节点 / 组 ——
     Q_PROPERTY(NodeListModel *nodeModel READ nodeModel CONSTANT)
     Q_PROPERTY(QString selectedNode READ selectedNode NOTIFY nodesChanged)
@@ -72,7 +86,18 @@ public:
     double downBytes() const { return static_cast<double>(m_downBytes); }
     int connectionsCount() const { return m_connectionsCount; }
     QString totalDownText() const { return m_totalDownText; }
+    double directBytes() const { return static_cast<double>(m_directBytes); }
+    double proxyBytes() const { return static_cast<double>(m_proxyBytes); }
+    QString directText() const { return speedText(m_directBytes); }
+    QString proxyText() const { return speedText(m_proxyBytes); }
+    QString totalText() const { return speedText(m_directBytes + m_proxyBytes); }
+    QVariantList recentConnections() const { return m_recentConns; }
+    QVariantList topConnections() const { return m_topConns; }
     ConnectionsModel *connectionsModel() { return &m_connModel; }
+
+    // 设备台账后置注入（main 里 bridge 先于 DeviceStore 构造）：只用来把连接归到设备名下，
+    // 没注入也能正常跑，连接速览里的「设备」一列会退回显示来源 IP。
+    void setDeviceStore(DeviceStore *store) { m_deviceStore = store; }
     NodeListModel *nodeModel() { return &m_nodeModel; }
     QString selectedNode() const { return m_selectedNode; }
     QStringList groups() const { return m_groups; }
@@ -148,6 +173,7 @@ signals:
     void statusChanged();
     void trafficChanged();
     void connectionsChanged();
+    void trafficStatsChanged();
     void nodesChanged();
     void groupsChanged();
     void speedTestingChanged();
@@ -163,8 +189,17 @@ signals:
     // 请求重注册系统通知（重显托盘图标）：仅在用户把「切换通知」从关手动切到开时发。
     void reinitNotificationsRequested();
 
+private slots:
+    // 每 2s 的 /connections 快照（与历史库共用同一次请求，不额外发包）：按连接 id 取增量，
+    // 攒出「直连 / 代理」两桶累计流量、按目标 host 的累计用量，以及最近建立的那几条连接。
+    // 声明成 slot（而非普通私有函数）是为了能被 invokeMethod 按名字调到：这块纯算术没有 UI，
+    // 只能靠喂两拍假快照、把四个输出打出来验（COAST_CONNSTATS_SELFTEST=1，见 main_qml.cpp）。
+    void observeConnections(const QJsonArray &conns);
+
 private:
     static QString speedText(qint64 value);
+    // sourceIP / inboundUser → 设备显示名（台账没注入或归不到设备时返回来源 IP）。
+    QString deviceNameFor(const QString &sourceIp, const QString &inboundUser) const;
     void refreshStatusFromCore(); // 以 CoreController 为准刷新三盏灯
     void endNodeSwitch();          // 结束切换加载态：停转圈、清态（对齐旧项目 endNodeSwitch）
     void pushLog(const QString &message); // 写页脚日志：更新 lastLog 并广播（同构造里的 pushLog）
@@ -194,6 +229,23 @@ private:
     // 连接管理页：累积「见过的连接」（按 id）。每次 poll 里没出现的不丢弃，而是标 offline 保留，
     // 这样 Offline 过滤才有内容（对齐旧项目 connections.vue 的 loadConnections）。连接窗打开时清空。
     QList<QVariantMap> m_seenConns;
+
+    // —— 状态页的流量构成（observeConnections 维护）——
+    DeviceStore *m_deviceStore = nullptr; // 只读台账，用于把连接归到设备名下；可为空
+    struct ConnBytes { qint64 down = 0, up = 0; };
+    QHash<QString, ConnBytes> m_connBytes; // 连接 id → 上一拍的累计值，用来取增量（连接消失即清）
+    struct HostStat {
+        qint64 bytes = 0;
+        QString device;
+        bool direct = false;
+    };
+    QHash<QString, HostStat> m_hostBytes;  // 目标 host → 本会话累计用量（「用得最多的 5 个」）
+    qint64 m_directBytes = 0;
+    qint64 m_proxyBytes = 0;
+    QVariantList m_recentConns;
+    QVariantList m_topConns;
+    // m_hostBytes 是会话内只增的：超过这个数就只留用量最大的一半，免得挂机一整天涨到几万条。
+    static constexpr int kMaxHostStats = 512;
     QString m_selectedNode;
     bool m_nodeInitialized = false; // 首次节点填充跳过切换通知，避免启动即误报（对齐 MainWindow m_nodeInitialized）
     QStringList m_groups;
