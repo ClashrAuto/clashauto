@@ -4,6 +4,7 @@
 #include "../ClashService.h"
 #include "../CoreController.h"
 #include "../DeviceStore.h"
+#include "../HistoryStore.h"
 #include "../SubscriptionStore.h"
 #include "Version.h"
 
@@ -681,6 +682,67 @@ void QmlBridge::observeConnections(const QJsonArray &conns)
     }
 
     emit trafficStatsChanged();
+}
+
+// ———————————————— 今日流量卡 ————————————————
+// 三个查询都是对今天这几千到几万行做 GROUP BY，10s 一次、且只在状态页可见时跑（setStatusActive）。
+void QmlBridge::refreshTodayTraffic()
+{
+    if (!m_history)
+        return;
+    const HistoryStore::Scope scope = m_trafficProxyOnly ? HistoryStore::Scope::ProxyOnly
+                                                         : HistoryStore::Scope::All;
+    const HistoryStore::Dimension dim = m_trafficDimension == 1 ? HistoryStore::Dimension::Device
+                                      : m_trafficDimension == 2 ? HistoryStore::Dimension::Host
+                                                                : HistoryStore::Dimension::Process;
+
+    m_todayHourly.clear();
+    m_todayTotal = 0;
+    for (qint64 v : m_history->todayHourly(scope)) {
+        m_todayHourly.append(static_cast<double>(v));
+        m_todayTotal += v;
+    }
+    m_todayTop.clear();
+    for (const HistoryStore::GroupTotal &g : m_history->todayTop(dim, scope, 5)) {
+        QVariantMap m;
+        m[QStringLiteral("label")] = g.label;
+        m[QStringLiteral("bytes")] = static_cast<double>(g.bytes);
+        m_todayTop.append(m);
+    }
+    emit todayTrafficChanged();
+}
+
+void QmlBridge::setTrafficProxyOnly(bool on)
+{
+    if (on == m_trafficProxyOnly)
+        return;
+    m_trafficProxyOnly = on;
+    refreshTodayTraffic(); // 立刻重算：切了口径还等 10s 才变，会被当成开关没生效
+}
+
+void QmlBridge::setTrafficDimension(int dim)
+{
+    if (dim == m_trafficDimension || dim < 0 || dim > 2)
+        return;
+    m_trafficDimension = dim;
+    refreshTodayTraffic();
+}
+
+void QmlBridge::setStatusActive(bool active)
+{
+    if (!m_todayTimer) {
+        m_todayTimer = new QTimer(this);
+        m_todayTimer->setInterval(10000);
+        connect(m_todayTimer, &QTimer::timeout, this, &QmlBridge::refreshTodayTraffic);
+    }
+    if (active == m_todayTimer->isActive())
+        return;
+    if (active) {
+        refreshTodayTraffic();
+        m_todayTimer->start();
+    } else {
+        m_todayTimer->stop();
+    }
 }
 
 void QmlBridge::resetConnections()

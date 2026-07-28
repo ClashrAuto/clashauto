@@ -52,6 +52,8 @@ set(BACKEND_SOURCES
     # 全应用共用的 SQLite 库 coast.db：device 表（设备台账）+ conn 表（上网历史）
     src/Sqlite.cpp           src/Sqlite.h
     src/HistoryStore.cpp     src/HistoryStore.h
+    # 状态页延迟卡：直连/到路由/DNS 三项自测（TCP 握手 RTT），到代理那项取核心的测速结果
+    src/LatencyProbe.cpp     src/LatencyProbe.h
     # 透明网关——跨平台可编译层。L2 工厂按平台各一份实现（Linux=AF_PACKET / mac=BPF /
     # Windows=Npcap待做，现桩 nullptr）；每个 .cpp 用 #if <os> 守卫，同一平台只有一个定义。
     src/net/IL2Endpoint.h

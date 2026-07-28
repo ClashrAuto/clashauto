@@ -11,6 +11,7 @@
 #include "DeviceStore.h"
 #include "HistoryStore.h" // 上网历史库（SQLite）
 #include "LanScanner.h"   // COAST_SCAN_SELFTEST 的扫描耗时自检
+#include "LatencyProbe.h" // 状态页延迟卡：直连/路由/DNS/代理四个数
 #include "SubscriptionStore.h"
 #include "TrayController.h"
 #include "qml/QmlBridge.h"
@@ -416,6 +417,14 @@ int main(int argc, char *argv[])
     lanGateway->recoverFromCrash();
     auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, history, &app);
     // Npcap 安装引导（Windows 专用；其它平台 supported()=false，设备页那条提示条不显示）。
+    // 状态页「今日流量」卡的数据源（小时柱 + 进程/设备/域名 Top5）——同样是后置注入。
+    bridge.setHistoryStore(history);
+    // 状态页「延迟」卡：直连 / 到路由 / DNS 三项自己测（TCP 握手 RTT），到代理那项取核心的测速结果。
+    // 网关 IP 跟着设备页的拓扑变化走（换网络后要重新指向新网关）。
+    auto *latency = new LatencyProbe(clash, &app);
+    latency->setGatewayIp(devicesCtrl->gatewayIp());
+    QObject::connect(devicesCtrl, &DevicesController::topologyChanged, latency,
+                     [latency, devicesCtrl] { latency->setGatewayIp(devicesCtrl->gatewayIp()); });
     auto *npcapInstaller = new NpcapInstaller(config, core, &app);
     // 装完立刻重扫一轮：onDiscovered → ensureGatewayConfigured 会重新 open 二层端点，
     // 此时 wpcap.dll 已在系统里（延迟加载，无需重启程序），gatewayReady 随之转真。
@@ -490,6 +499,7 @@ int main(int argc, char *argv[])
     engine.rootContext()->setContextProperty("updater", updateCtrl);
     engine.rootContext()->setContextProperty("devices", devicesCtrl);
     engine.rootContext()->setContextProperty("npcap", npcapInstaller);
+    engine.rootContext()->setContextProperty("latency", latency);
 
     // 界面语言（i18n）：按 config.language 在「加载 QML 前」装好翻译器，首帧即是目标语言（zh-CN 为默认，
     // 不装翻译器 → 用中文源串；en-US 装英文表）。设置页切语言经 languageChangeRequested → 运行时 retranslate。

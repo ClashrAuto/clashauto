@@ -276,5 +276,17 @@
   "暂无流量": "No traffic yet",
   "暂无连接": "No connections yet",
   "最近连接": "Recent connections",
-  "用量最多": "Top usage"
+  "用量最多": "Top usage",
+
+  "延迟": "Latency",
+  "到路由": "To router",
+  "今日流量": "Today's traffic",
+  "全部": "All",
+  "仅代理": "Proxy only",
+  "进程": "Process",
+  "域名": "Domain",
+  "今日暂无数据": "No data today",
+  "本机 / 未归属": "This PC / unattributed",
+  "其它设备": "Other devices",
+  "未知域名": "Unknown domain"
 }

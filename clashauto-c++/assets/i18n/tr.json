@@ -294,5 +294,17 @@
   "暂无流量": "Henüz trafik yok",
   "暂无连接": "Henüz bağlantı yok",
   "最近连接": "Son bağlantılar",
-  "用量最多": "En çok kullanım"
+  "用量最多": "En çok kullanım",
+
+  "延迟": "Gecikme",
+  "到路由": "Yönlendiriciye",
+  "今日流量": "Bugünkü trafik",
+  "全部": "Tümü",
+  "仅代理": "Yalnızca proxy",
+  "进程": "İşlem",
+  "域名": "Alan adı",
+  "今日暂无数据": "Bugün veri yok",
+  "本机 / 未归属": "Bu bilgisayar / atanmamış",
+  "其它设备": "Diğer cihazlar",
+  "未知域名": "Bilinmeyen alan adı"
 }

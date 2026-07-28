@@ -57,6 +57,17 @@ public:
         qint64 up = 0;
         qint64 down = 0;
     };
+    // 「某个维度的一项 → 字节」聚合（状态页今日流量卡的 进程/设备/域名 Top N）。
+    // key 是库里的原值（mac / process / host），label 是给人看的（设备取备注名或主机名）。
+    struct GroupTotal {
+        QString key;
+        QString label;
+        qint64 bytes = 0;
+    };
+    // 统计口径：全部流量，还是只算走了代理的（chain 既不是 DIRECT 也不是 REJECT）。
+    enum class Scope { All, ProxyOnly };
+    // 分组维度。
+    enum class Dimension { Process, Device, Host };
 
     HistoryStore(const QString &configDir, DeviceStore *devices, QObject *parent = nullptr);
     ~HistoryStore() override;
@@ -80,6 +91,12 @@ public:
     QVector<DomainTotal> topDomains(const QString &mac, int days, int limit) const;
     // 某设备最近 days 天的按天用量（含今天；没有记录的日子返回 0，保证长度 = days）。
     QVector<DayTotal> dailyTraffic(const QString &mac, int days) const;
+
+    // —— 状态页「今日流量」卡 ——
+    // 今日 0 点起按**本地小时**分桶的字节数，定长 24（索引 = 小时；未到的小时是 0）。
+    QVector<qint64> todayHourly(Scope scope) const;
+    // 今日按维度聚合的 Top N（字节降序）。
+    QVector<GroupTotal> todayTop(Dimension dim, Scope scope, int limit) const;
 
 private:
     void openDatabase(const QString &configDir);

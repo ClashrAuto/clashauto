@@ -294,5 +294,17 @@
   "暂无流量": "Chưa có lưu lượng",
   "暂无连接": "Chưa có kết nối",
   "最近连接": "Kết nối gần đây",
-  "用量最多": "Dùng nhiều nhất"
+  "用量最多": "Dùng nhiều nhất",
+
+  "延迟": "Độ trễ",
+  "到路由": "Tới router",
+  "今日流量": "Lưu lượng hôm nay",
+  "全部": "Tất cả",
+  "仅代理": "Chỉ proxy",
+  "进程": "Tiến trình",
+  "域名": "Tên miền",
+  "今日暂无数据": "Hôm nay chưa có dữ liệu",
+  "本机 / 未归属": "Máy này / chưa gán",
+  "其它设备": "Thiết bị khác",
+  "未知域名": "Tên miền không xác định"
 }

@@ -344,3 +344,115 @@ QVector<HistoryStore::DayTotal> HistoryStore::dailyTraffic(const QString &mac, i
     }
     return out;
 }
+
+// ———————————————— 状态页「今日流量」卡的两个查询 ————————————————
+// 两者共用的口径说明：
+//  · 时间轴一律**本地时区**：ended_at 是毫秒 unix 时间，SQLite 里用 'unixepoch','localtime'
+//    转换，否则东八区凌晨 8 点前的流量会被算到前一天/前一小时去。
+//  · ProxyOnly = chain 既不是 DIRECT 也不是 REJECT*（chain 存的是 chains[0]，即真正出网的
+//    那一跳）。空 chain 也排除：那是连策略都没记上的历史数据，算不清走没走代理。
+//  · 都要把**仍在途的连接**并进来（同 topDomains）：只查库的话，此刻正开着的连接一个字节都
+//    不算，刚看了十分钟视频却显示今日 0 字节，看着就像统计坏了。在途的算在「当前小时」。
+
+namespace {
+// 走了代理？（与 QmlBridge::observeConnections 的判定同口径）
+bool isProxied(const QString &chain)
+{
+    return !chain.isEmpty() && chain != QLatin1String("DIRECT")
+            && !chain.startsWith(QLatin1String("REJECT"));
+}
+} // namespace
+
+QVector<qint64> HistoryStore::todayHourly(Scope scope) const
+{
+    QVector<qint64> out(24, 0);
+    if (!m_ok)
+        return out;
+
+    const qint64 since = QDateTime(QDate::currentDate(), QTime(0, 0)).toMSecsSinceEpoch();
+    QSqlQuery q(m_db);
+    q.prepare(QStringLiteral(
+        "SELECT CAST(strftime('%H', ended_at / 1000, 'unixepoch', 'localtime') AS INTEGER) AS h, "
+        "SUM(up + down), chain FROM conn WHERE ended_at >= ? GROUP BY h, chain"));
+    q.addBindValue(since);
+    if (q.exec()) {
+        while (q.next()) {
+            const int h = q.value(0).toInt();
+            if (h < 0 || h > 23)
+                continue;
+            if (scope == Scope::ProxyOnly && !isProxied(q.value(2).toString()))
+                continue;
+            out[h] += q.value(1).toLongLong();
+        }
+    }
+
+    const int nowHour = QTime::currentTime().hour();
+    for (auto it = m_live.constBegin(); it != m_live.constEnd(); ++it) {
+        if (scope == Scope::ProxyOnly && !isProxied(it->chain))
+            continue;
+        out[nowHour] += it->up + it->down;
+    }
+    return out;
+}
+
+QVector<HistoryStore::GroupTotal> HistoryStore::todayTop(Dimension dim, Scope scope,
+                                                         int limit) const
+{
+    QVector<GroupTotal> out;
+    if (!m_ok || limit <= 0)
+        return out;
+
+    const QString col = dim == Dimension::Process ? QStringLiteral("process")
+                      : dim == Dimension::Device  ? QStringLiteral("mac")
+                                                  : QStringLiteral("host");
+    const qint64 since = QDateTime(QDate::currentDate(), QTime(0, 0)).toMSecsSinceEpoch();
+    QHash<QString, qint64> agg;
+
+    QSqlQuery q(m_db);
+    // 连 chain 一起 GROUP，好在这里按口径过滤——把 chain 判断塞进 SQL 的 WHERE 里，
+    // 「什么算代理」就会散落成两份（这里一份、observeConnections 一份），迟早走神。
+    q.prepare(QStringLiteral("SELECT %1, SUM(up + down), chain FROM conn "
+                             "WHERE ended_at >= ? GROUP BY %1, chain").arg(col));
+    q.addBindValue(since);
+    if (q.exec()) {
+        while (q.next()) {
+            if (scope == Scope::ProxyOnly && !isProxied(q.value(2).toString()))
+                continue;
+            agg[q.value(0).toString()] += q.value(1).toLongLong();
+        }
+    }
+    for (auto it = m_live.constBegin(); it != m_live.constEnd(); ++it) {
+        if (scope == Scope::ProxyOnly && !isProxied(it->chain))
+            continue;
+        const QString key = dim == Dimension::Process ? it->process
+                          : dim == Dimension::Device  ? it->mac
+                                                      : it->host;
+        agg[key] += it->up + it->down;
+    }
+
+    out.reserve(agg.size());
+    for (auto it = agg.constBegin(); it != agg.constEnd(); ++it) {
+        if (it.value() <= 0)
+            continue;
+        GroupTotal g;
+        g.key = it.key();
+        g.bytes = it.value();
+        // 显示名：设备取台账里的名字；进程/域名就是它自己。三者的「空」含义不同，各给一句人话。
+        if (dim == Dimension::Device) {
+            const DeviceRecord *d = (m_devices && !g.key.isEmpty()) ? m_devices->find(g.key) : nullptr;
+            g.label = d ? d->displayName()
+                        : (g.key.isEmpty() ? tr("本机 / 未归属") : g.key);
+        } else if (dim == Dimension::Process) {
+            // 进程名只有本机发起的连接才有（局域网设备的进程在别人机器上，见 QmlBridge）。
+            g.label = g.key.isEmpty() ? tr("其它设备") : g.key;
+        } else {
+            g.label = g.key.isEmpty() ? tr("未知域名") : g.key;
+        }
+        out.append(g);
+    }
+    std::sort(out.begin(), out.end(),
+              [](const GroupTotal &a, const GroupTotal &b) { return a.bytes > b.bytes; });
+    if (out.size() > limit)
+        out.resize(limit);
+    return out;
+}

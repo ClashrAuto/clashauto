@@ -294,5 +294,17 @@
   "暂无流量": "Ainda sem tráfego",
   "暂无连接": "Ainda sem conexões",
   "最近连接": "Conexões recentes",
-  "用量最多": "Maior uso"
+  "用量最多": "Maior uso",
+
+  "延迟": "Latência",
+  "到路由": "Até o roteador",
+  "今日流量": "Tráfego de hoje",
+  "全部": "Tudo",
+  "仅代理": "Somente proxy",
+  "进程": "Processo",
+  "域名": "Domínio",
+  "今日暂无数据": "Sem dados hoje",
+  "本机 / 未归属": "Este PC / não atribuído",
+  "其它设备": "Outros dispositivos",
+  "未知域名": "Domínio desconhecido"
 }

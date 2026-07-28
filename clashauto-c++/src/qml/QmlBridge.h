@@ -20,6 +20,7 @@ class AppConfig;
 class ClashService;
 class CoreController;
 class DeviceStore;
+class HistoryStore;
 class SubscriptionStore;
 class QJsonArray;
 class QTimer;
@@ -53,6 +54,13 @@ class QmlBridge final : public QObject
     Q_PROPERTY(QVariantList recentConnections READ recentConnections NOTIFY trafficStatsChanged)
     // 本会话用量最大的 5 个目标 {host, device, direct, bytes}
     Q_PROPERTY(QVariantList topConnections READ topConnections NOTIFY trafficStatsChanged)
+    // —— 状态页「今日流量」卡（数据来自历史库，跨重启保留）——
+    Q_PROPERTY(QVariantList todayHourly READ todayHourly NOTIFY todayTrafficChanged)  // 24 个小时桶的字节数
+    Q_PROPERTY(QVariantList todayTop READ todayTop NOTIFY todayTrafficChanged)        // Top5 {label, bytes}
+    Q_PROPERTY(double todayTotal READ todayTotal NOTIFY todayTrafficChanged)          // 今日合计（当前口径）
+    // 口径：只算走代理的流量；维度：0=进程 1=设备 2=域名。都由卡片上的控件写入。
+    Q_PROPERTY(bool trafficProxyOnly READ trafficProxyOnly WRITE setTrafficProxyOnly NOTIFY todayTrafficChanged)
+    Q_PROPERTY(int trafficDimension READ trafficDimension WRITE setTrafficDimension NOTIFY todayTrafficChanged)
     // —— 节点 / 组 ——
     Q_PROPERTY(NodeListModel *nodeModel READ nodeModel CONSTANT)
     Q_PROPERTY(QString selectedNode READ selectedNode NOTIFY nodesChanged)
@@ -93,11 +101,20 @@ public:
     QString totalText() const { return speedText(m_directBytes + m_proxyBytes); }
     QVariantList recentConnections() const { return m_recentConns; }
     QVariantList topConnections() const { return m_topConns; }
+    QVariantList todayHourly() const { return m_todayHourly; }
+    QVariantList todayTop() const { return m_todayTop; }
+    double todayTotal() const { return static_cast<double>(m_todayTotal); }
+    bool trafficProxyOnly() const { return m_trafficProxyOnly; }
+    void setTrafficProxyOnly(bool on);
+    int trafficDimension() const { return m_trafficDimension; }
+    void setTrafficDimension(int dim);
     ConnectionsModel *connectionsModel() { return &m_connModel; }
 
     // 设备台账后置注入（main 里 bridge 先于 DeviceStore 构造）：只用来把连接归到设备名下，
     // 没注入也能正常跑，连接速览里的「设备」一列会退回显示来源 IP。
     void setDeviceStore(DeviceStore *store) { m_deviceStore = store; }
+    // 历史库后置注入（同上）：今日流量卡的数据源。没注入时那张卡显示空。
+    void setHistoryStore(HistoryStore *history) { m_history = history; }
     NodeListModel *nodeModel() { return &m_nodeModel; }
     QString selectedNode() const { return m_selectedNode; }
     QStringList groups() const { return m_groups; }
@@ -132,6 +149,8 @@ public:
     Q_INVOKABLE void refreshConnections();               // 拉取当前连接并与「已见连接」增量合并（断开的标 offline 保留）
     Q_INVOKABLE void resetConnections();                 // 清空「已见连接」历史（连接窗每次打开时调用，避免上次会话残留）
     Q_INVOKABLE void closeConnectionById(const QString &id); // 断开单个连接，随后刷新列表
+    // 状态页显隐：只有它可见时才每 10s 重算今日流量（那是几条 GROUP BY，没人看时白烧 CPU）。
+    Q_INVOKABLE void setStatusActive(bool active);
 
     // macOS 毛玻璃：把 QML 窗口交给原生层做「透明标题栏 + 整窗 NSVisualEffectView」。
     // 非 macOS 上是安全 no-op。dark 决定玻璃深浅（跟随应用主题）。
@@ -174,6 +193,7 @@ signals:
     void trafficChanged();
     void connectionsChanged();
     void trafficStatsChanged();
+    void todayTrafficChanged();
     void nodesChanged();
     void groupsChanged();
     void speedTestingChanged();
@@ -200,6 +220,8 @@ private:
     static QString speedText(qint64 value);
     // sourceIP / inboundUser → 设备显示名（台账没注入或归不到设备时返回来源 IP）。
     QString deviceNameFor(const QString &sourceIp, const QString &inboundUser) const;
+    // 重算今日流量卡（小时柱 + 当前维度的 Top5）。切口径/切 tab 时立刻调，平时 10s 一次。
+    void refreshTodayTraffic();
     void refreshStatusFromCore(); // 以 CoreController 为准刷新三盏灯
     void endNodeSwitch();          // 结束切换加载态：停转圈、清态（对齐旧项目 endNodeSwitch）
     void pushLog(const QString &message); // 写页脚日志：更新 lastLog 并广播（同构造里的 pushLog）
@@ -244,6 +266,15 @@ private:
     qint64 m_proxyBytes = 0;
     QVariantList m_recentConns;
     QVariantList m_topConns;
+
+    // —— 今日流量卡（数据来自历史库；只在状态页可见时每 10s 重算，见 setStatusActive）——
+    HistoryStore *m_history = nullptr;
+    QTimer *m_todayTimer = nullptr;
+    QVariantList m_todayHourly;
+    QVariantList m_todayTop;
+    qint64 m_todayTotal = 0;
+    bool m_trafficProxyOnly = false;
+    int m_trafficDimension = 0; // 0=进程 1=设备 2=域名
     // m_hostBytes 是会话内只增的：超过这个数就只留用量最大的一半，免得挂机一整天涨到几万条。
     static constexpr int kMaxHostStats = 512;
     QString m_selectedNode;
