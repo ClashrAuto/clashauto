@@ -506,6 +506,7 @@ void DevicesController::pollConnections()
             m["type"] = type;
             m["chain"] = chains.isEmpty() ? QStringLiteral("-") : chains.first().toString();
             m["id"] = c.value("id").toString();
+            m["start"] = c.value("start").toString(); // 详情连接列表按它把新连接排在最上面
             m["download"] = static_cast<qlonglong>(c.value("download").toInteger());
             m["upload"] = static_cast<qlonglong>(c.value("upload").toInteger());
             m["sourceIP"] = meta.value("sourceIP").toString();

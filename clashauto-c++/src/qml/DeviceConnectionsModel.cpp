@@ -2,6 +2,7 @@
 
 #include <QSet>
 #include <QVariantMap>
+#include <algorithm>
 
 DeviceConnectionsModel::DeviceConnectionsModel(QObject *parent) : QAbstractListModel(parent) {}
 
@@ -78,6 +79,7 @@ void DeviceConnectionsModel::recompute()
             c.chain = m.value("chain").toString();
             c.type = m.value("type").toString();
             c.id = m.value("id").toString();
+            c.start = m.value("start").toString();
             c.download = m.value("download").toLongLong();
             c.upload = m.value("upload").toLongLong();
             targetIndex.insert(c.id, filtered.size());
@@ -101,17 +103,25 @@ void DeviceConnectionsModel::recompute()
             emit dataChanged(index(i), index(i));
         }
     }
-    // C：追加新连接
+    // C：新连接插到**列表最上面**（不是追加到末尾）。这个列表是「这台设备此刻在跟谁说话」，
+    // 刚建立的连接才是要看的那条；追加到末尾意味着它出现在几十行之下、还得手动翻到底。
+    // 同一拍里可能冒出好几条：按 start 倒序（越新越靠上）——/connections 是 Go map 的快照，
+    // 原始顺序是随机的，不排的话这一批的先后每拍都不一样。
     QSet<QString> present;
     for (const Conn &c : m_rows)
         present.insert(c.id);
-    QVector<Conn> toAppend;
+    QVector<Conn> toPrepend;
     for (const Conn &c : filtered)
         if (!present.contains(c.id))
-            toAppend.append(c);
-    if (!toAppend.isEmpty()) {
-        beginInsertRows(QModelIndex(), m_rows.size(), m_rows.size() + toAppend.size() - 1);
-        m_rows += toAppend;
+            toPrepend.append(c);
+    if (!toPrepend.isEmpty()) {
+        std::sort(toPrepend.begin(), toPrepend.end(), [](const Conn &a, const Conn &b) {
+            if (a.start != b.start)
+                return a.start > b.start; // RFC3339 定长同时区 → 字典序即时间序
+            return a.id > b.id;           // start 缺失/同毫秒：拿 id 兜个稳定序
+        });
+        beginInsertRows(QModelIndex(), 0, toPrepend.size() - 1);
+        m_rows = toPrepend + m_rows;
         endInsertRows();
     }
     emit countChanged();

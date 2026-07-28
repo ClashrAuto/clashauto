@@ -95,7 +95,11 @@ ApplicationWindow {
     ScrollView {
         id: detailScroll
         anchors.fill: parent
-        anchors.margins: 12
+        anchors.leftMargin: 12
+        anchors.topMargin: 12
+        anchors.bottomMargin: 12
+        // **右边不留内距**（同设备页）：滚动区一直铺到窗口右缘，滚动条才贴着边，而不是悬在
+        // 离边 12px 的空中。内容列自己收窄 12px 补回来，滚动条正好落在那条空隙上、不压内容。
         visible: devices.selectedMac !== ""
         clip: true
         contentWidth: availableWidth
@@ -103,12 +107,11 @@ ApplicationWindow {
 
         ColumnLayout {
             id: detailCol
-            width: detailScroll.availableWidth
-            // 显式给高度（内容自然高 与 视口高 取大）：窗口拉高/全屏时多出来的高度会被
-            // Layout 分配给唯一 fillHeight 的连接列表，让它跟着一起长；窗口矮的时候
-            // 取内容高，ScrollView 照常滚动。（只写 implicitHeight 的话视口再高也没用，
-            // 列表永远卡在自己那点固定高度上，下面一大片空白。）
-            height: Math.max(implicitHeight, detailScroll.availableHeight)
+            width: detailScroll.availableWidth - 12
+            // 高度就是内容的自然高度。以前这里取 max(内容高, 视口高)，是为了把多出来的高度
+            // 分给唯一 fillHeight 的连接列表——但连接列表现在不再自带滚动、整份铺开，内容高
+            // 本来就随连接数一起长，再跟视口高取大只会让各个 Layout 子项被拉伸变形。
+            height: implicitHeight
             spacing: 12
 
             // —— 头部 ——
@@ -464,18 +467,20 @@ ApplicationWindow {
                 }
             }
             ListView {
+                id: connList
                 Layout.fillWidth: true
-                // 唯一吃掉剩余高度的项：窗口越高它越长（上限是内容本身的高度，别把
-                // 一条连接撑成半屏空白），窗口矮时退回 220 的老行为并由外层滚动。
-                Layout.fillHeight: true
-                Layout.preferredHeight: Math.min(contentHeight, 220)
-                Layout.minimumHeight: 96
-                Layout.maximumHeight: Math.max(120, contentHeight)
-                clip: true
-                interactive: contentHeight > height
+                // **整份铺开，不自带滚动**：以前它是个 220px 高、自己带滚动条的小窗口，嵌在本来
+                // 就能滚的详情页里——两层滚动叠在一起，滚轮落在谁身上全看指针位置，翻连接得先
+                // 把指针挪进那个小框。现在整列铺开，整页只剩外层 ScrollView 一个滚动条。
+                // 高度**按行数直接算**（行高 34 + 间距 2），不写 contentHeight：ListView 只为
+                // 视口内的行建委托，拿 contentHeight 当自己的高度就成了「高度→建更多行→
+                // contentHeight 变大→高度再变」的逐帧追赶。空列表时留 96px 放空态文字。
+                readonly property int rows: devices.connModel.count
+                Layout.preferredHeight: rows > 0 ? rows * 34 + (rows - 1) * spacing : 96
+                interactive: false // 滚动交给外层 ScrollView（自己不再抢滚轮）
+                clip: true         // 高度变化的那一帧，缓冲区里的委托别画到相邻区块上
                 model: devices.connModel
                 spacing: 2
-                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
                 delegate: Rectangle {
                     width: ListView.view.width
                     height: 34
@@ -525,12 +530,16 @@ ApplicationWindow {
         }
     }
 
-    // 选中设备的实时下载速率喂进详情带宽图（selectedChanged 每拍触发）。
-    Connections {
-        target: devices
-        function onSelectedChanged() {
-            if (devices.selectedMac !== "")
-                devChart.push(devices.selectedDevice.rateDown || 0);
-        }
+    // 选中设备的实时下载速率喂进详情带宽图 —— **固定 1s 一拍**，不再挂在 selectedChanged 上。
+    // selectedChanged 的含义是「选中设备的数据变了」，一秒里能触发好几次（每秒的流量聚合、5s
+    // 的在线态热更新、每轮扫描、台账的任何一次保存都会走到 rebuildSelected）。于是曲线一会儿
+    // 连推三个点、一会儿一个不推，而 BandwidthChart 的滚动相位是按「距上次入点 1000ms」算的：
+    // 入点节奏一乱，画面就一顿一顿。状态页那张图之所以顺，是因为它的数据源(/traffic 常开流)
+    // 本来就是稳定的每秒一条。这里补一个自己的稳定节拍，两张图的观感就一致了。
+    Timer {
+        interval: 1000
+        repeat: true
+        running: win.visible && devices.selectedMac !== ""
+        onTriggered: devChart.push(win.dev.rateDown || 0)
     }
 }
