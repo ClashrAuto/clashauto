@@ -141,6 +141,36 @@ void DevicesController::onCoreRunningChanged(bool up)
         resumeProxies();
 }
 
+// ———————————————————————— 系统睡眠 / 唤醒 ————————————————————————
+// 本机一睡，用户态栈就停了转发，可设备的 ARP 还钉在本机 MAC 上 —— 合盖睡眠 = 那台设备直接断网，
+// 而且比关机高频得多（关机路径早就有还原，睡眠这条一直是空的）。
+// 挂起前必须**同步**撤劫持 + 发还原 ARP：disableAll() 是 BlockingQueued，返回时帧已经写到网卡上。
+void DevicesController::handleSleep()
+{
+    if (!m_gateway || m_gateway->activeDevices().isEmpty())
+        return;
+    std::fprintf(stderr, "[POWER] sleep: withdrawing %lld device proxy(ies)\n",
+                 static_cast<long long>(m_gateway->activeDevices().size()));
+    std::fflush(stderr);
+    m_gateway->disableAll();
+    m_armedIp.clear();
+    m_resumeErr.clear();
+    // 台账里的「代理网络」开关不动 —— 那是持久意图，醒来由 handleWake 补回去。
+}
+
+void DevicesController::handleWake()
+{
+    if (!hasProxiedDevices())
+        return;
+    std::fprintf(stderr, "[POWER] wake: rescanning to re-arm device proxy\n");
+    std::fflush(stderr);
+    // 睡了一觉，IP/网关/网卡都可能变了（换了网络、DHCP 续租），必须重扫拓扑而不是直接上劫持。
+    // 扫描结果经 onDiscovered → ensureGatewayConfigured + resumeProxies 完成补挂。
+    scan();
+    if (!m_livenessTimer->isActive())
+        m_livenessTimer->start();
+}
+
 void DevicesController::resumeProxies()
 {
     if (!m_gateway)

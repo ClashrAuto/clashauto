@@ -23,7 +23,9 @@
 #include "qml/UpdateController.h"
 #include "qml/DevicesController.h"
 #include "qml/NpcapInstaller.h"
+#include "PowerWatcher.h" // 睡眠/唤醒：挂起前撤劫持还原 ARP，醒来补回
 #include "net/GatewayDiag.h"
+#include "net/GatewayPanic.h" // 崩溃兜底：进程被打死时裸发还原 ARP
 #include "net/LanGateway.h"
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 #include "net/GatewaySelfTest.h"
@@ -480,6 +482,9 @@ int main(int argc, char *argv[])
     // 必须在建 LanGateway 之前设好——否则第一批采样会因为没有路径被丢掉。
     // COAST_GW_DIAG=0 关闭 / COAST_GW_DIAG_MS=<ms> 改采样间隔。
     GatewayDiag::setLogDir(config.userDir);
+    // 崩溃兜底：装 SIGSEGV/abort/未处理异常的处理器。必须在建 LanGateway **之前**装好——上劫持
+    // 时会往里登记还原帧，登记之后随时可能崩。
+    GatewayPanic::installHandlers();
     auto *lanGateway = new LanGateway(&app);
     // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
     lanGateway->recoverFromCrash();
@@ -533,6 +538,14 @@ int main(int argc, char *argv[])
 
     // 退出必须可靠还原所有被劫持设备的 ARP（否则设备断网）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, lanGateway, &LanGateway::disableAll);
+
+    // 睡眠/唤醒：合盖睡下去时本机就不转发了，必须在挂起前把被代理设备还给真网关（否则它一直
+    // 指着一台睡着的机器 = 断网），醒来再重扫拓扑补挂。直连（非队列）确保在挂起窗口内跑完。
+    auto *powerWatcher = new PowerWatcher(&app);
+    QObject::connect(powerWatcher, &PowerWatcher::aboutToSleep, devicesCtrl,
+                     &DevicesController::handleSleep, Qt::DirectConnection);
+    QObject::connect(powerWatcher, &PowerWatcher::wokeUp, devicesCtrl,
+                     &DevicesController::handleWake);
     // 新设备提醒（蹭网检测）：首轮扫描后发现新设备 → 托盘气泡。
     QObject::connect(devicesCtrl, &DevicesController::newDeviceFound, tray,
                      [tray](const QString &name) {

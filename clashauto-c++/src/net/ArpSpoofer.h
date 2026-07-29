@@ -68,6 +68,11 @@ public:
     // 没发」当成劫持成功，设备就卡在「UI 显示代理中、实际走直连、而且再也不重试」的状态。
     bool configured() const;
 
+    // 某台 victim 的「还原」帧（healOne 实际发出去的那四帧，各一份，不含重发）。给崩溃兜底
+    // GatewayPanic 预先缓存用：信号处理器里不能拼帧、不能分配，只能把现成字节裸发出去。
+    // 未配置或地址非法返回空。
+    QVector<QByteArray> healFrames(const QString &victimMac, const QString &victimIp) const;
+
 private:
     struct Target {
         QByteArray mac; // 6 字节
@@ -79,6 +84,9 @@ private:
     void sendSpoof(const Target &t); // 给一个 victim 发欺骗 ARP（(a)reply+(a2)request 给 victim +(b)给网关）
     // 给一个 victim 发数遍正确 ARP：gatewayIp is-at gatewayMac（给 victim）、victimIp is-at victimMac（给网关）。
     void healOne(const QByteArray &victimMac, const QByteArray &victimIp);
+    // 拼那四帧（唯一一份实现，healOne 与 healFrames 共用）。
+    QVector<QByteArray> buildHealFrames(const QByteArray &victimMac,
+                                        const QByteArray &victimIp) const;
     bool hasVictimMac(const QByteArray &mac6) const; // 6 字节 MAC 是否仍在被劫持集合里（延迟连发前复核）
 
     static QByteArray macToBytes(const QString &); // "aa:bb:.." → 6 字节（非法返回空）

@@ -61,6 +61,17 @@ public:
         return false; // 默认：不支持内核过滤，交用户态兜底
     }
 
+    // ———————————— 崩溃兜底用的「裸发」通道（见 GatewayPanic）————————————
+    // send() 走不通的场合只有一个：**进程已经在崩了**（SIGSEGV/abort 的处理器里）。那里不能碰
+    // QByteArray、不能分配、不能加锁，而我们又必须把「还原 ARP」这几帧发出去——否则被代理设备
+    // 会一直把网关指着一个已经死掉的进程所在的 MAC。
+    // 于是端点额外暴露一条最小通道：一个**只做一次系统调用**的函数指针 + 一个地址稳定的上下文。
+    // 契约：panicSender() 返回的函数必须是 async-signal-safe（只允许 sendto/write 这类），
+    // panicContext() 返回的指针必须在端点存活期内地址不变。不支持的平台返回 nullptr。
+    using RawSendFn = void (*)(void *ctx, const unsigned char *data, int len);
+    virtual RawSendFn panicSender() const { return nullptr; }
+    virtual void *panicContext() { return nullptr; }
+
 signals:
     // 收到一个完整以太帧（含以太头）。接收方零拷贝语义：帧内容仅在槽内有效，需要保留请拷贝。
     //

@@ -353,6 +353,31 @@ public:
 
     bool isOpen() const override { return m_fd >= 0; }
 
+    // ——— 崩溃兜底通道（IL2Endpoint::panicSender 的契约）———
+    // 只做一次 sendto，无分配、无锁、无 Qt —— 可以在 SIGSEGV 的处理器里调用。
+    // 上下文是本对象里的一个成员（地址稳定），装着 fd 与 ifIndex。
+    static void panicSendImpl(void *ctx, const unsigned char *data, int len)
+    {
+        const PanicCtx *c = static_cast<const PanicCtx *>(ctx);
+        if (!c || c->fd < 0 || !data || len < 14)
+            return;
+        struct sockaddr_ll sll;
+        std::memset(&sll, 0, sizeof(sll));
+        sll.sll_family = AF_PACKET;
+        sll.sll_ifindex = c->ifIndex;
+        sll.sll_halen = 6;
+        std::memcpy(sll.sll_addr, data, 6); // 目的 MAC = 帧头前 6 字节
+        (void)::sendto(c->fd, data, static_cast<size_t>(len), 0,
+                       reinterpret_cast<struct sockaddr *>(&sll), sizeof(sll));
+    }
+    RawSendFn panicSender() const override { return &panicSendImpl; }
+    void *panicContext() override
+    {
+        m_panicCtx.fd = m_fd;
+        m_panicCtx.ifIndex = m_ifIndex;
+        return &m_panicCtx;
+    }
+
     // 发一帧。缓冲满时**排队重试**而不是丢（理由见文件头「发方」一节）。
     // 返回 false 只在「参数非法 / 端点没开 / 队列也满了」——调用方（lwipLinkOutput）历来忽略它，
     // 这里也不指望它去处理；真正的可观测性在 m_txDropped 的节流日志上。
@@ -750,6 +775,12 @@ private:
 
     int m_fd = -1;
     int m_ifIndex = -1;
+    // 崩溃兜底上下文：地址必须稳定（GatewayPanic 长期持有它的指针），所以放成员而不是临时量。
+    struct PanicCtx {
+        int fd = -1;
+        int ifIndex = -1;
+    };
+    PanicCtx m_panicCtx;
     int m_mtu = 1500;
     QByteArray m_localMac;
     QSocketNotifier *m_notifier = nullptr;

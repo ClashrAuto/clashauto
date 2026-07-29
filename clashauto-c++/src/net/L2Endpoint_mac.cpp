@@ -122,6 +122,22 @@ public:
     }
     bool isOpen() const override { return m_fd >= 0; }
 
+    // ——— 崩溃兜底通道（IL2Endpoint::panicSender 的契约）———
+    // bpf 设备发帧就是一次 ::write，无分配无锁 → 可在 SIGSEGV 处理器里调用。
+    static void panicSendImpl(void *ctx, const unsigned char *data, int len)
+    {
+        const int fd = ctx ? *static_cast<const int *>(ctx) : -1;
+        if (fd < 0 || !data || len < 14)
+            return;
+        (void)::write(fd, data, size_t(len));
+    }
+    RawSendFn panicSender() const override { return &panicSendImpl; }
+    void *panicContext() override
+    {
+        m_panicFd = m_fd;
+        return &m_panicFd;
+    }
+
     // 发一帧。fd 是**非阻塞**的，bpf 的写缓冲/网卡发送队列一满就返回 ENOBUFS/EAGAIN ——
     // 老写法在这里直接 return false 把帧丢掉，而上层（NetStack 的 lwipLinkOutput）忽略返回值、
     // 恒回 ERR_OK，于是变成「本机→设备方向的静默丢包」，只能等 lwIP 几百毫秒后重传。
@@ -324,6 +340,7 @@ private:
     }
 
     int m_fd = -1;
+    int m_panicFd = -1; // 崩溃兜底用（地址稳定，GatewayPanic 长期持有其指针）
     int m_bufLen = 32768;
     QByteArray m_localMac;
     QSocketNotifier *m_notifier = nullptr;

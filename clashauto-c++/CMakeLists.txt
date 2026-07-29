@@ -27,6 +27,14 @@ set(CMAKE_AUTOUIC ON)
 find_package(QT NAMES Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 
+# Linux 的睡眠/唤醒事件走 systemd-logind 的 D-Bus 信号 PrepareForSleep（外加一把 delay 抑制锁，
+# 保证我们能在挂起前把被代理设备的 ARP 还回去）。QtDBus 属 qtbase，装了 Qt 基本就有；**故意做成
+# 可选**——万一某个构建环境缺它，只是这条链路降级为不可用，不该让整个构建失败。
+# Windows/macOS 不需要（各有原生通知）。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Qt6 QUIET COMPONENTS DBus)
+endif()
+
 # QML 模块资源默认前缀 :/qt/qml/（引擎的 qrc import path）。不设 NEW 时用旧前缀，
 # 运行时 loadFromModule("ClashAuto","Main") 找不到模块 → "contains no type named Main"。
 if(POLICY QTP0001)
@@ -54,6 +62,8 @@ set(BACKEND_SOURCES
     src/HistoryStore.cpp     src/HistoryStore.h
     # 状态页延迟卡：直连/到路由/DNS 三项自测（TCP 握手 RTT），到代理那项取核心的测速结果
     src/LatencyProbe.cpp     src/LatencyProbe.h
+    # 系统睡眠/唤醒（Windows WM_POWERBROADCAST / mac NSWorkspace / Linux logind）——挂起前撤劫持
+    src/PowerWatcher.cpp     src/PowerWatcher.h
     # 透明网关——跨平台可编译层。L2 工厂按平台各一份实现（Linux=AF_PACKET / mac=BPF /
     # Windows=Npcap待做，现桩 nullptr）；每个 .cpp 用 #if <os> 守卫，同一平台只有一个定义。
     src/net/IL2Endpoint.h
@@ -62,6 +72,8 @@ set(BACKEND_SOURCES
     src/net/L2Endpoint_mac.cpp
     src/net/L2Endpoint_win.cpp
     src/net/ArpSpoofer.cpp   src/net/ArpSpoofer.h
+    # 崩溃兜底：预存还原帧，进程被 SIGSEGV/abort 打死时由信号处理器裸发（跨平台可编译）
+    src/net/GatewayPanic.cpp src/net/GatewayPanic.h
     # 被动 ARP/NDP 冲突监视（检测「本机被劫持 / 被劫持设备被他人争抢」）——纯解析，跨平台可编译
     src/net/ArpWatch.cpp     src/net/ArpWatch.h
     src/net/Socks5Client.cpp src/net/Socks5Client.h
@@ -216,6 +228,12 @@ target_link_libraries(clashauto-qml PRIVATE
     $<$<PLATFORM_ID:Windows>:crypt32>
 )
 
+# Linux：有 QtDBus 才编入 logind 那条睡眠通道（见 src/PowerWatcher.cpp 的 COAST_HAVE_DBUS 分支）。
+if(Qt6DBus_FOUND)
+    target_link_libraries(clashauto-qml PRIVATE Qt6::DBus)
+    target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_DBUS)
+endif()
+
 target_compile_options(clashauto-qml PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
@@ -258,10 +276,13 @@ if(APPLE)
     target_sources(clashauto-qml PRIVATE
         src/MacHelperClient.mm src/MacHelperClient.h
         src/MacWindow.mm src/MacWindow.h
-        src/MacSpeedItem.mm src/MacSpeedItem.h)
+        src/MacSpeedItem.mm src/MacSpeedItem.h
+        # 睡眠/唤醒的 mac 后端（NSWorkspace 通知）；跨平台声明在 src/PowerWatcher.h
+        src/PowerWatcher_mac.mm)
     set_source_files_properties(src/MacHelperClient.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     set_source_files_properties(src/MacWindow.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     set_source_files_properties(src/MacSpeedItem.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_source_files_properties(src/PowerWatcher_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
     target_link_libraries(clashauto-qml PRIVATE
         ${SECURITY_FRAMEWORK}

@@ -195,6 +195,28 @@ ApplicationWindow {
                 }
             }
 
+            // 代理生效中的「依赖说明」：这台设备的默认网关已经被指到本机，它的每个包都要本机
+            // 转发——用户必须知道「本机不在 = 它上不了网」，以及各种退出方式的实际后果。
+            Rectangle {
+                Layout.fillWidth: true
+                visible: win.dev.proxyEnabled === true && devices.gatewayReady
+                radius: 5
+                color: Theme.metricBg
+                implicitHeight: dependTxt.implicitHeight + 14
+                Text {
+                    id: dependTxt
+                    anchors.fill: parent
+                    anchors.margins: 7
+                    wrapMode: Text.WordWrap
+                    text: qsTr("该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器"
+                               + "（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。")
+                          + (settings.autoStart ? "" : qsTr("\n建议在「设置」里打开「开机自启」，"
+                                                            + "重启后才能自动接着代理。"))
+                    font.pixelSize: 11; color: Theme.textMuted
+                    lineHeight: 1.25
+                }
+            }
+
             // 「为什么不能开代理」——本机/网关/跨网段/离线各给一句人话。
             Rectangle {
                 Layout.fillWidth: true

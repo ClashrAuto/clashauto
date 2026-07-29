@@ -140,6 +140,14 @@ private:
     // 内核起停 → 劫持跟着上/撤（被劫持设备的唯一出口就是内核，见 .cpp 里的说明）。
     void onCoreRunningChanged(bool up);
 
+public:
+    // 系统电源事件（PowerWatcher）。本机一睡就不再转发，而设备的 ARP 还指着本机 → 必须在挂起前
+    // 撤劫持还原，醒来再补回去。**handleSleep 必须同步做完**（调用方在系统给的挂起窗口里调它）。
+    void handleSleep();
+    void handleWake();
+
+private:
+
     // —— 邻居安全监视（ArpWatch → LanGateway::securityAlert）——
     void onSecurityAlert(int kind, const QString &offenderMac, const QString &subjectIp,
                          const QString &subjectMac);

@@ -294,6 +294,20 @@ public:
     }
     bool isOpen() const override { return m_pcap != nullptr; }
 
+    // ——— 崩溃兜底通道（IL2Endpoint::panicSender 的契约）———
+    // Windows 上没有信号，走的是 SetUnhandledExceptionFilter：崩溃线程同步执行本函数。
+    // 严格说 pcap_sendpacket 不是「异常安全」的（它会进驱动、可能取锁），但这是**最后一搏**——
+    // 不发这几帧，被代理设备就一直把网关指着这台已经死掉的机器。做完就让异常继续传给系统。
+    static void panicSendImpl(void *ctx, const unsigned char *data, int len)
+    {
+        const PcapApi *api = pcapApi();
+        if (!api || !api->sendpacket || !ctx || !data || len < 14)
+            return;
+        (void)api->sendpacket(static_cast<pcap_t *>(ctx), data, len);
+    }
+    RawSendFn panicSender() const override { return &panicSendImpl; }
+    void *panicContext() override { return m_pcap; }
+
     // 发一帧。pcap_sendpacket 是**同步**的：把帧写进驱动 TX 缓冲，成功返 0、失败返 -1。
     // 没有 EAGAIN/可写事件那套语义，所以这里不做「满了排队等可写」——做不了（无可写通知），
     // 也不必（驱动 TX 满时 WriteFile 会阻塞而非丢）。失败基本都是持久性错误（网卡拔了/句柄失效），

@@ -33,6 +33,7 @@
 
 #include "ArpSpoofer.h"
 #include "ArpWatch.h"
+#include "GatewayPanic.h" // 崩溃兜底：上劫持时预存还原帧，进程被打死时由信号处理器裸发
 #include "IL2Endpoint.h"
 #include "NdpSpoofer.h"
 #include "NetStack.h"
@@ -879,6 +880,10 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     m_victimNic.insert(ip, n->spec.ifname);
     m_victimUserByMac.insert(vkey, socksUser); // v6 学习登记时补 mihomo 身份要用
     pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
+    // 崩溃兜底：把这台设备的还原帧预存起来。进程若被 SIGSEGV/abort 打死，正常的 disableAll
+    // 一步都走不到，只有这条路能把设备的网关 ARP 还回去（详见 GatewayPanic.h）。
+    if (const IL2Endpoint::RawSendFn pfn = n->ep ? n->ep->panicSender() : nullptr)
+        GatewayPanic::arm(vkey, pfn, n->ep->panicContext(), n->arp->healFrames(mac, ip));
     saveState();
     publishSnapshot();
     emit statusChanged();
@@ -894,6 +899,7 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     const QString ip = m_victimByMac.value(key);
     if (ip.isEmpty())
         return;
+    GatewayPanic::disarm(key); // 先撤兜底：这台已经要正常还原了，别让崩溃处理器再对它发一遍
     GwNic *n = m_nics.value(m_victimNic.value(ip));
     if (n) {
         if (n->arp)
@@ -927,6 +933,7 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
 
 void GatewayWorker::disableAllLocal()
 {
+    GatewayPanic::disarmAll(); // 崩溃兜底连同劫持一起撤（下面就要真正还原了）
     // 每张卡都要还原：漏掉任何一张，那张卡上的设备会一直用着被投毒的 ARP → 断网。
     // 全程在工作线程上同步执行：端点 send() 是裸的 pcap_sendpacket/::sendto，本函数返回时还原 ARP 帧
     // 已经写到网卡上了。LanGateway::disableAll 用 BlockingQueued 投过来，于是「disableAll() 返回」==
@@ -1093,6 +1100,7 @@ void GatewayWorker::teardownLocal()
         return;
     m_torndown = true;
     // 先还原全部 ARP（constraint 2 对析构/退出同样成立），再销毁数据面对象——全在工作线程上。
+    // disableAllLocal() 里已 disarmAll()：端点马上要被 delete，兜底表里绝不能留着它的 fd/句柄。
     disableAllLocal();
     for (GwNic *n : m_nics) {
         if (n->ep) {

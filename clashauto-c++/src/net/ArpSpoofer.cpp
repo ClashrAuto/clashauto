@@ -224,11 +224,22 @@ void ArpSpoofer::sendSpoof(const Target &t)
     m_endpoint->send(replyToGateway);
 }
 
-void ArpSpoofer::healOne(const QByteArray &victimMac, const QByteArray &victimIp)
+QVector<QByteArray> ArpSpoofer::healFrames(const QString &victimMac, const QString &victimIp) const
 {
-    if (!m_endpoint)
-        return;
+    if (!configured())
+        return {};
+    const QByteArray vmac = macToBytes(victimMac);
+    const QByteArray vip = ipToBytes(victimIp);
+    if (vmac.size() != 6 || vip.size() != 4)
+        return {};
+    return buildHealFrames(vmac, vip);
+}
 
+// 一台 victim 的四帧「还原」报文。healOne 发它们，GatewayPanic 也预先缓存它们——所以拼帧的逻辑
+// 只能有这一份（两边发的必须字节级一致，否则崩溃兜底发出去的是另一套语义）。
+QVector<QByteArray> ArpSpoofer::buildHealFrames(const QByteArray &victimMac,
+                                                const QByteArray &victimIp) const
+{
     // ★ 还原必须能盖过设备「刚被投毒刷新、正处于 REACHABLE」的网关表项——否则停代理后设备一直把网关
     //   指向已停工的本机 MAC，直到表项自己老化/重解析才恢复（就是之前那个「尽力而为、有恢复窗口」）。
     //   关键机制：普通(非无偿) ARP 改一个「1 秒内刚更新过」的表项会被内核 LOCKTIME 挡掉（Linux 的
@@ -248,12 +259,17 @@ void ArpSpoofer::healOne(const QByteArray &victimMac, const QByteArray &victimIp
     const QByteArray garpReqToGateway =
         buildArpRequest(m_gatewayMac, m_localMac, victimMac, victimIp, kZeroMac, victimIp);
 
-    for (int i = 0; i < kHealRepeat; ++i) {
-        m_endpoint->send(garpToVictim);
-        m_endpoint->send(garpReqToVictim);
-        m_endpoint->send(garpToGateway);
-        m_endpoint->send(garpReqToGateway);
-    }
+    return {garpToVictim, garpReqToVictim, garpToGateway, garpReqToGateway};
+}
+
+void ArpSpoofer::healOne(const QByteArray &victimMac, const QByteArray &victimIp)
+{
+    if (!m_endpoint)
+        return;
+    const QVector<QByteArray> frames = buildHealFrames(victimMac, victimIp);
+    for (int i = 0; i < kHealRepeat; ++i)
+        for (const QByteArray &f : frames)
+            m_endpoint->send(f);
 }
 
 QByteArray ArpSpoofer::macToBytes(const QString &mac)
