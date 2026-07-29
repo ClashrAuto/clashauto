@@ -61,6 +61,24 @@ public:
         return false; // 默认：不支持内核过滤，交用户态兜底
     }
 
+    // 立刻把内核收缓冲里已到达的帧全部取走（同步、就地发 frameReceived），然后返回。
+    //
+    // 为什么需要这条「计划外」的排空口 —— 它是给 **Windows** 补漏的：
+    //   收帧本来是事件驱动的（Npcap 事件句柄 + QWinEventNotifier + pcap_setmintocopy(1)，来一字节
+    //   就该被唤醒）。但通知器要靠 Qt 事件循环去派发，而网关工作线程上还挤着上百条到 mihomo 的
+    //   socket、lwIP、ARP 投毒。真机 gateway-diag.log 里：设备下行 >600 帧/秒时 wakes 与 pump 逐窗口
+    //   相等（如 pump=204 wakes=203）、fpw 从 1.8 涨到 9.7 —— 一轮事件循环只服务一次通知器，
+    //   排空周期塌到 ~50ms。设备发出的每个包（含 TCP ACK）白白多躺 50ms，等价于给**所有**目的地
+    //   凭空加 50ms RTT，国内低 RTT 的目标受害尤其明显。
+    //   于是让 lwIP 那个定时器泵（已改成 PreciseTimer，走多媒体定时器、不被消息队列饿死）每一拍
+    //   顺手排空一次，给收帧一条 25ms 的**下限**通道。
+    //
+    // 这是**兜底不是主路**：事件驱动照常工作，这里多半排到空、直接返回（一次 pcap_next_ex 返回 0）。
+    // 真正的解法是把收帧挪出工作线程，那是另一件事；在那之前这条兜底把最坏情况砍掉一半。
+    // 默认空实现：Linux(AF_PACKET+QSocketNotifier) / macOS(BPF) 的事件派发没有 Windows 那种
+    // 「最低优先级消息」语义，不需要补这一刀。
+    virtual void drainNow() {}
+
     // ———————————— 崩溃兜底用的「裸发」通道（见 GatewayPanic）————————————
     // send() 走不通的场合只有一个：**进程已经在崩了**（SIGSEGV/abort 的处理器里）。那里不能碰
     // QByteArray、不能分配、不能加锁，而我们又必须把「还原 ARP」这几帧发出去——否则被代理设备

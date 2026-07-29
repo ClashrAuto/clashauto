@@ -1181,6 +1181,19 @@ bool NetStack::init(QString *err)
                 GatewayDiag::c.pumpMaxLagMs = lag;
         }
 
+        // ★ 收帧排空兜底（Windows 才有实际动作，见 IL2Endpoint::drainNow 的注释）。
+        //   放在 sys_check_timeouts() **之前**：先把已经到达的帧喂进 lwIP，再跑它的定时器 ——
+        //   否则新到的 ACK 要多等一整拍才被 lwIP 看到，等于白排空。
+        //   先快照 key 再遍历：排空会同步触发 frameReceived → inputFrame，虽然帧处理路径不会
+        //   增删网卡，但直接在 QHash 上边遍历边回调是自找麻烦。网卡数是个位数，这份拷贝可忽略。
+        if (!d->nics.isEmpty()) {
+            const QList<IL2Endpoint *> eps = d->nics.keys();
+            for (IL2Endpoint *ep : eps) {
+                if (ep && d->nics.contains(ep)) // 上一张卡的回调万一把这张摘了，这里挡一下
+                    ep->drainNow();
+            }
+        }
+
         sys_check_timeouts();
         if (++d->pumpTick >= kHousekeepEveryTicks) {
             d->pumpTick = 0;

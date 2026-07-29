@@ -308,6 +308,17 @@ public:
     RawSendFn panicSender() const override { return &panicSendImpl; }
     void *panicContext() override { return m_pcap; }
 
+    // 定时器泵每拍调一次的排空兜底（契约与理由见 IL2Endpoint.h 的 drainNow）。
+    // 与通知器回调走的是同一个 drain()：pcap_next_ex 本来就是「有就取、没有返 0」的语义，
+    // 多调一次不会重复消费、也不会阻塞。唯一的副作用是 rxWakes 会把这些拍算进去 ——
+    // 这恰恰是想要的：fpw(帧/唤醒) 因此能如实反映「一次取回多少帧」，排空频率变高时它会掉回 1~2，
+    // 正好用来验证这条兜底有没有起作用。
+    void drainNow() override
+    {
+        if (m_pcap)
+            drain();
+    }
+
     // 发一帧。pcap_sendpacket 是**同步**的：把帧写进驱动 TX 缓冲，成功返 0、失败返 -1。
     // 没有 EAGAIN/可写事件那套语义，所以这里不做「满了排队等可写」——做不了（无可写通知），
     // 也不必（驱动 TX 满时 WriteFile 会阻塞而非丢）。失败基本都是持久性错误（网卡拔了/句柄失效），
