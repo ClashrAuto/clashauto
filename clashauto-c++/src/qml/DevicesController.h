@@ -112,6 +112,8 @@ private:
     void pollConnections();       // 拉 /connections → 聚合每设备流量 + 喂连接模型
     void aggregate(const QVariantList &conns);
     void ensureGatewayConfigured(); // 用当前扫描到的拓扑配置 LanGateway（每次开代理前确保）
+    // 本机 v6 前缀变化 → rebuildConfig。v6 没有固定私网段，规则跟着网络走，会过期。
+    void syncLanPrefixRules();
     // 把台账里「代理开着」但当前没在劫持的设备重新上劫持（幂等，每轮发现后调）。
     // 两个场景：①重启 Coast——开关是持久的，劫持是运行时的，新进程里没人重新劫持；
     // ②设备换了 IP（DHCP 续租）——按旧 IP 的劫持已经失效，得按新 IP 重上。
@@ -189,6 +191,9 @@ private:
     bool m_coreUp = false;
     // 本会话是否已为「恢复劫持」补过一次配置重生成（full.yaml 的 coast-gateway listener/IN-USER）。
     bool m_resumeConfigSynced = false;
+    // 本机 v6 前缀的上一次快照 + 是否已记过基线（见 syncLanPrefixRules）。
+    QStringList m_lanPrefixes6;
+    bool m_lanPrefixSynced = false;
     // 上次全量扫描的时刻：进页面时用它去抖，避免来回切导航反复触发重扫（scan() 里 restart）。
     QElapsedTimer m_lastScan;
     static constexpr int kRescanMinIntervalMs = 30000;

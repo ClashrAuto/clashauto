@@ -1,5 +1,6 @@
 #include "DevicesController.h"
 #include "../ClashService.h"
+#include "../ConfigBuilder.h" // localGlobal6Prefixes()：与生成配置同一份实现
 #include "../CoreController.h"
 #include "../DeviceStore.h"
 #include "../HistoryStore.h"
@@ -438,11 +439,43 @@ void DevicesController::onDiscovered(const QVector<DeviceRecord> &devices)
         m_store->markOffline(mac);
     // 扫描后拓扑（含网关 MAC）已知 → 配置网关，使 gatewayReady 反映真实可用性。
     ensureGatewayConfigured();
+    syncLanPrefixRules();
     // 台账里开着代理、当前却没在劫持的设备（重启后 / 换了 IP）在这里补上。
     resumeProxies();
     // mergeDiscovered/markOffline 会 emit changed → refreshModel/rebuildSelected 已连；此处补拓扑通知。
     emit topologyChanged();
     emit overviewChanged();
+}
+
+// 本机 IPv6 前缀变了 → 重新生成 full.yaml（+ 热重载）。每轮扫描调一次。
+//
+// 为什么非有这一步不可：ConfigBuilder::applyPrivateNetworkRules() 会把本机各网卡的 v6 全局单播
+// 前缀写成 IP-CIDR6 DIRECT 规则。v4 那三段 RFC1918 是常量、永远不会过期，v6 却是路由器 RA 下发的
+// **全局**前缀（家宽上就是 240e:/2408: 这种），换 Wi-Fi、换 ISP、运营商重新委派前缀都会变。
+// 而 full.yaml 只在设置/规则/订阅/设备开关变动时才重建 —— 不补这一刀，配置里那条前缀就会在
+// 你换网络的那一刻起一直是旧的：被代理设备发往新网关 v6 地址的流量匹配不上，落 MATCH 出海。
+//
+// 挂在 onDiscovered 上而不是新起一个轮询：扫描本来就在跑，且**恰好**在需要它的场景下跑
+//（有设备开着代理时 m_livenessTimer 常驻，见构造函数里那段自动恢复代理的注释）。没有被代理设备时
+// 不扫也无所谓 —— 那时没人经网关出网，这条规则也就没有受众。
+//
+// 只在**集合真的变了**时才重建：rebuildConfig 会热重载核心（clearConnections 开着时还会断连接），
+// 每轮扫描都来一次是灾难。首轮只记基线不重建 —— 那份 full.yaml 是核心启动前刚生成的，本来就是新的。
+void DevicesController::syncLanPrefixRules()
+{
+    const QStringList now = ConfigBuilder::localGlobal6Prefixes();
+    if (!m_lanPrefixSynced) {
+        m_lanPrefixSynced = true;
+        m_lanPrefixes6 = now;
+        return;
+    }
+    if (now == m_lanPrefixes6) {
+        return;
+    }
+    m_lanPrefixes6 = now;
+    if (m_core) {
+        m_core->rebuildConfig();
+    }
 }
 
 void DevicesController::refreshModel()

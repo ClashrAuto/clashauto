@@ -18,6 +18,11 @@ public:
     static QStringList proxyNames(const QString &yaml);
     static QStringList existingGroupNames(const QString &yaml);
 
+    // 本机各网卡的 IPv6 全局单播前缀，已拼成 IP-CIDR6 规则行。**静态公开**：除了本类生成配置要用，
+    // DevicesController 每轮扫描也拿它比对「网段变了没有」——变了才触发 rebuildConfig()。
+    // 两处必须是同一份实现，否则会出现「探测说变了、生成出来却没变」的空转热重载。
+    static QStringList localGlobal6Prefixes();
+
 private:
     struct SubscriptionNode {
         QString name;
@@ -38,6 +43,7 @@ private:
     QString applySubscriptions(QString yaml, const QVector<Subscription> &subscriptions) const;
     QString applyCustomRules(QString yaml) const;
     QString applyDevicePolicies(QString yaml) const; // 设备台账(coast.db device 表) → 网关 SOCKS listener + IN-USER 规则
+    QString applyPrivateNetworkRules(QString yaml) const; // 私网/回环/链路本地 → DIRECT，前插到 rules: 最顶
     QString applySniffer(QString yaml) const;        // 顶层 sniffer: 块——从 TLS SNI/HTTP Host 还原域名
     QString applyProfilePersistence(QString yaml) const; // 顶层 profile: 块——持久化 fake-ip 映射与节点选择，扛住热重载
     QString addToFirstGroup(QString yaml, const QStringList &names) const;

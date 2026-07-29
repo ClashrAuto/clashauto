@@ -8,6 +8,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QHostAddress>
+#include <QNetworkInterface>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTextStream>
@@ -61,6 +63,11 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     yaml = applySubscriptions(yaml, readSubscriptions());
     yaml = applyCustomRules(yaml);
     yaml = applyDevicePolicies(yaml);
+    // ★ 必须排在 applyCustomRules / applyDevicePolicies **之后** —— 三者都是「前插到 rules: 顶部」，
+    //   后插的在最上面。私网直连要压过 applyDevicePolicies 生成的 IN-USER 规则：policy=global 的设备
+    //   否则会把「访问自己家路由器后台 / 内网 NAS」也发到代理节点上（LanGateway_linux.cpp 里旁路
+    //   广播/组播那段注释描述的就是这个坑的另一半）。
+    yaml = applyPrivateNetworkRules(yaml);
     yaml = applySniffer(yaml);
     yaml = applyProfilePersistence(yaml);
 
@@ -423,6 +430,130 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
     }
 
     return yaml;
+}
+
+// 私网 / 回环 / 链路本地目的地一律 DIRECT，前插到 rules: 最顶。
+//
+// 为什么必须有这块（不是"顺手加条保险"）：
+//   透明网关只旁路**同网段且非网关 IP**的帧（见 LanGateway_linux.cpp 的"同网段直连旁路"）。
+//   发往网关 IP 本身的帧（路由器后台、UPnP、非 :53 的路由器服务）和发往**本机另一个网段**的帧
+//   都会进 lwIP → SOCKS → 核心。而私网地址匹配不上 GEOIP,CN，于是一路落到 MATCH 兜底 →
+//   **被发到境外节点**，必然超时。真机上就撞到过：default.yaml 种子里手写了
+//   `IP-CIDR,192.168.20.0/24,DIRECT`，但这台机器同时还挂着 192.168.31.0/24 的 WLAN，
+//   那个网段上的被代理设备访问自家路由器就是这么断的。
+//
+// 为什么生成在代码里而不是写进 default.yaml 种子：种子只在用户目录里不存在时复制一次
+//（ensureFullConfig 开头那个 QFile::exists 判断），之后再改种子对已装机器完全无效 ——
+// 与 applySniffer / applyProfilePersistence 同一个理由，别再往种子里加。
+//
+// 范围只取「按定义就不可能是互联网目的地」的段，宁缺毋滥：
+//   · RFC1918 三段 + 回环 + 链路本地(169.254/16, APIPA)；v6 取 ULA(fc00::/7) 与链路本地(fe80::/10)。
+//   · **不含 198.18.0.0/15** —— 那是核心 fake-ip 池所在段，直连它等于把所有走 fake-ip 的域名打死。
+//   · 不含 100.64/10(CGNAT)：部分 ISP 真的用它承载上网，判不准就不判。
+//   · 不含组播/广播：网关侧 L2 已经旁路掉了（bypassBcast），TUN 也不路由它们。
+// 一律带 no-resolve：只想拦「目的地就是私网 IP 字面量」的连接，绝不为了比对而强行解析域名
+//（开了 fake-ip 之后强行解析既慢又没意义）。
+QString ConfigBuilder::applyPrivateNetworkRules(QString yaml) const
+{
+    static const char *const kNets[] = {
+        "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
+        "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
+        "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
+        "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
+        "IP-CIDR,169.254.0.0/16,DIRECT,no-resolve",
+        "IP-CIDR6,fc00::/7,DIRECT,no-resolve",
+        "IP-CIDR6,fe80::/10,DIRECT,no-resolve",
+    };
+
+    const qsizetype rulesPos = yaml.indexOf("\nrules:");
+    if (rulesPos < 0) {
+        return yaml; // 没有 rules: 锚点就不注入（与 applyCustomRules 的取舍一致）
+    }
+    const qsizetype lineEnd = yaml.indexOf('\n', rulesPos + 1);
+    if (lineEnd < 0) {
+        return yaml;
+    }
+
+    QStringList lines;
+    for (const char *rule : kNets) {
+        lines << QString::fromLatin1(rule);
+    }
+    // IPv6 没有 RFC1918 那种「固定私网段」——家用 v6 内网用的就是运营商 RA 下发的**全局单播**
+    // 前缀（如电信的 240e:…/64），换网络/换 ISP 就变，静态列表根本写不出来。上面那两条
+    // fc00::/7(ULA) + fe80::/10(链路本地) 一条都盖不住它。所以这一段必须动态取。
+    lines += localGlobal6Prefixes();
+
+    QString block;
+    for (const QString &line : lines) {
+        // 幂等：种子/订阅里可能已经写死了同一条（真机 default.yaml 就有手写的 192.168.20.0/24）。
+        // 完全相同的行不重复插；不同写法的重复无害——先命中的那条赢，目标策略都是 DIRECT。
+        if (yaml.contains(line)) {
+            continue;
+        }
+        block += QStringLiteral("  - %1\n").arg(yamlQuote(line));
+    }
+    if (!block.isEmpty()) {
+        yaml.insert(lineEnd + 1, block);
+    }
+    return yaml;
+}
+
+// 本机各网卡上的 IPv6 **全局单播**前缀 → IP-CIDR6 DIRECT 规则行。
+//
+// 为什么只取 v6、v4 一律不动态探测：
+//   v4 那三段 RFC1918 按定义就穷尽了所有合法私网，动态探测的结果只会是它们的子集（更窄），
+//   补不出任何东西 —— 但会补出**致命的东西**：本机上 mihomo 的 TUN 网卡带着 198.18.0.1/30，
+//   探测进来写成 DIRECT 就等于把 fake-ip 池直连，所有走 fake-ip 的域名当场全死。真机实测，
+//   一台双网卡机器探到的 6 个 v4 网段里 5 个已被静态段覆盖、第 6 个正是那条 198.18.0.0/30。
+//   v6 则相反：真实的内网前缀是 RA 给的全局地址，静态列表写不出来，只能探。
+//
+// 「只收全局单播(2000::/3)」这一条筛选顺带把所有坑一次排掉：
+//   · fe80::/10 链路本地、fc00::/7 ULA —— 上面已有静态规则，不必重复；
+//   · mihomo TUN 的 fdfe:dcba:9876::1/126 落在 fc00::/7 里 —— 自动被排除（对应 v4 的 198.18 陷阱）；
+//   · ::1 / 组播 —— 都不在 2000::/3。
+// 再加两道：只收前缀长度 48–64（RA 下发的就是 /64；/128 是主机地址和临时地址，收进来毫无意义
+// 且会把规则表撑爆），以及要求网卡 IsUp && IsRunning && !IsLoopBack。
+//
+// ★ 时效性的坑，写在这里免得以后有人踩：full.yaml 只在设置/规则/订阅/设备变更时重建，
+//   **换 Wi-Fi / DHCP 续租 / 插拔网线都不会重建**。所以这份前缀在你换网络那一刻就过期了
+//   （旧前缀留在规则里无害——那个网段已经不存在；新前缀则要等下一次重建才进来）。
+//   要根治得让网段变化也触发 rebuildConfig()，LanScanner 本来就在周期扫，比较一下集合即可。
+QStringList ConfigBuilder::localGlobal6Prefixes()
+{
+    QStringList out;
+    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+        const QNetworkInterface::InterfaceFlags f = iface.flags();
+        if (!(f & QNetworkInterface::IsUp) || !(f & QNetworkInterface::IsRunning)
+            || (f & QNetworkInterface::IsLoopBack)) {
+            continue;
+        }
+        for (const QNetworkAddressEntry &e : iface.addressEntries()) {
+            const QHostAddress ip = e.ip();
+            if (ip.protocol() != QAbstractSocket::IPv6Protocol) {
+                continue;
+            }
+            const int plen = e.prefixLength();
+            if (plen < 48 || plen > 64) {
+                continue; // /128 主机地址、以及短得离谱的前缀都不要
+            }
+            const Q_IPV6ADDR raw = ip.toIPv6Address();
+            if ((raw[0] & 0xE0) != 0x20) {
+                continue; // 只收 2000::/3 全局单播；其余（LL/ULA/组播/回环）见上面注释
+            }
+            // 掩到前缀边界：240e:…:bbc0:xxxx:xxxx:xxxx:xxxx/64 → 240e:…:bbc0::/64
+            Q_IPV6ADDR net = raw;
+            for (int bit = plen; bit < 128; ++bit) {
+                net[bit / 8] &= uchar(~(1u << (7 - (bit % 8))));
+            }
+            const QString rule = QStringLiteral("IP-CIDR6,%1/%2,DIRECT,no-resolve")
+                                     .arg(QHostAddress(net).toString())
+                                     .arg(plen);
+            if (!out.contains(rule)) { // 同一前缀常同时挂在多张卡/多个地址上
+                out << rule;
+            }
+        }
+    }
+    return out;
 }
 
 QString ConfigBuilder::applyDevicePolicies(QString yaml) const
