@@ -404,6 +404,21 @@ err_t lwipNetifInit(struct netif *netif)
 
 void closeConn(TcpConn *c, bool abort);
 
+// 把所有网卡攒着的出帧一次性交给驱动（契约与理由见 IL2Endpoint::flushTx）。
+// 为什么不挑「这条连接对应的那张卡」：TcpConn 手里只有 pcb，反查 netif→Nic 要多绕一圈，而网卡
+// 数是个位数、空队列的 flushTx 只是一次判空 —— 全刷一遍更简单也更不容易漏。
+// **绝对安全**：flushTx 只走到 pcap_sendqueue_transmit，不发任何 Qt 信号，回不到 TcpConn 上
+// （与 ConnWatch 上方那张「确认安全」清单里的 tcp_output 同类）。
+void flushNicTx(NetStack::Impl *d)
+{
+    if (!d)
+        return;
+    for (auto it = d->nics.constBegin(); it != d->nics.constEnd(); ++it) {
+        if (it.key())
+            it.key()->flushTx();
+    }
+}
+
 // ————————————————————— 背压：两个方向都必须有闸 —————————————————————
 //
 // 这条链路是「设备 ⇄ lwIP ⇄ Socks5Tcp(QTcpSocket) ⇄ mihomo」，两头的速率毫不相干。谁慢谁就是
@@ -517,6 +532,10 @@ void giveBackRecvWindow(TcpConn *c)
         tcp_recved(c->pcb, give);
     }
     c->upThrottled = false;
+    // tcp_recved 打开窗口后 lwIP 会立刻打一个窗口更新 ACK 出去 —— 那是**设备上行**能不能继续
+    // 发的唯一许可。本函数最常见的调用点是 Socks5Tcp::upstreamBytesWritten（socket 回调），
+    // 既不在收帧排空里也不在 pumpToLwip 里，不在这里收口就要等泵那一拍，等于给上行凭空加 25 ms。
+    flushNicTx(c->impl);
 }
 
 // 按 SOCKS 侧的排空进度决定要不要归还接收窗口（高/低水位迟滞）。
@@ -582,6 +601,10 @@ bool pumpToLwip(TcpConn *c)
         c->toLwip.remove(0, n);
     }
     tcp_output(c->pcb);
+    // ★ flushTx 的第二个调用点：上面这一串 tcp_write + tcp_output 是「下行数据到了 → 打给设备」
+    //   的主路，一次能吐出几十个段。它们由 mihomo 的 socket 回调触发，**不在**收帧排空里，
+    //   所以必须在这里自己收口，否则要等泵那一拍（最多 25 ms）才发得出去。
+    flushNicTx(c->impl);
     // 排空到低水位 → 恢复从 socks 读。放在这里是因为 tcp_sent 是下行唯一的「有进展」信号。
     updateDownstreamPause(c);
     // socks 早已关闭、下行残余也全交给 lwIP 了 → 现在才轮到优雅关闭本端。
@@ -637,6 +660,10 @@ void closeConn(TcpConn *c, bool abort)
         c->socks->deleteLater();
         c->socks = nullptr;
     }
+    // 上面 tcp_close/tcp_abort 打出去的 FIN/RST 也要收口：本函数最常从 socks 的 failed/closed
+    // 槽（socket 回调）进来，不在任何一个批量提交点上。晚 25 ms 关连接不致命，但设备侧会多挂
+    // 一条半开连接，没必要。
+    flushNicTx(c->impl);
     markConnDestroyed(c, aborted); // 必须在 delete 之前登记，外层 ConnWatch 靠它判存活
     delete c;
 }
@@ -1015,6 +1042,9 @@ void sendUdpResponse6(UdpSess *s, quint16 vport, const QHostAddress &fromIp, qui
     u[7] = uck & 0xFF;
 
     s->nic->ep->send(frame);
+    // UDP/DNS 回程是**单帧**且延迟敏感，而它由 socks 的 UDP 回调触发 —— 既不在收帧排空里、
+    // 也不在 pumpToLwip 里，不在这里收口就要等泵那一拍（最多 25 ms）才发出去，DNS 会直接慢一档。
+    s->nic->ep->flushTx();
 }
 
 // 手工封 IPv4/UDP/以太 回程包发给设备（从 onUdpResponse 抽出，DNS 劫持回程也复用）。
@@ -1068,6 +1098,9 @@ void sendUdpResponse4(UdpSess *s, quint16 vport, const QHostAddress &fromIp, qui
     u[6] = (uck >> 8) & 0xFF; u[7] = uck & 0xFF;
 
     s->nic->ep->send(frame);
+    // UDP/DNS 回程是**单帧**且延迟敏感，而它由 socks 的 UDP 回调触发 —— 既不在收帧排空里、
+    // 也不在 pumpToLwip 里，不在这里收口就要等泵那一拍（最多 25 ms）才发出去，DNS 会直接慢一档。
+    s->nic->ep->flushTx();
 }
 
 } // namespace
@@ -1195,6 +1228,11 @@ bool NetStack::init(QString *err)
         }
 
         sys_check_timeouts();
+        // ★ flushTx 的第三个调用点，同时是**兜底**：重传、延迟 ACK、ARP/NDP 周期投毒这些帧
+        //   既不在收帧排空里、也不在 pumpToLwip 里，只有这里能收口。它也保证了「任何漏掉
+        //   flush 的出帧路径最迟 25 ms 也会被发出去」——加新的出帧路径时这条兜底是安全网，
+        //   但别拿它当主路（25 ms 的延迟对 TCP 自时钟是致命的）。
+        flushNicTx(d);
         if (++d->pumpTick >= kHousekeepEveryTicks) {
             d->pumpTick = 0;
             reapUdpFlows(d);

@@ -24,11 +24,16 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QDebug>
+#include <QElapsedTimer>
+#include <QMutex>
 #include <QString>
+#include <QThread>
+#include <QWaitCondition>
 #include <QWinEventNotifier>
 
 #include <cstdarg>
 #include <cstdio>
+#include <functional>
 #include <vector>
 
 namespace {
@@ -74,6 +79,11 @@ struct PcapApi
     decltype(&pcap_setfilter) setfilter = nullptr;
     decltype(&pcap_freecode) freecode = nullptr;
     decltype(&pcap_setbuff) setbuff = nullptr; // 可选：加大驱动内核收缓冲（缺了不降级）
+    // 可选：批量发送队列（WinPcap 兼容 API，Npcap 全都导出）。缺任何一个 → 退回逐帧 sendpacket。
+    decltype(&pcap_sendqueue_alloc) sq_alloc = nullptr;
+    decltype(&pcap_sendqueue_destroy) sq_destroy = nullptr;
+    decltype(&pcap_sendqueue_queue) sq_queue = nullptr;
+    decltype(&pcap_sendqueue_transmit) sq_transmit = nullptr;
 };
 
 // 驱动内核收缓冲字节数。pcap_open_live 用的是 WinPcap/Npcap 的默认值（历史上 1 MiB 级），
@@ -85,6 +95,348 @@ struct PcapApi
 constexpr int kRxKernelBufBytes = 4 * 1024 * 1024;
 // 发方丢帧告警节流（与 linux/mac 端点一致）。
 constexpr qint64 kDropReportMinIntervalMs = 30000;
+
+// —————————————————————— 批量发送（本文件最重要的一处性能改动）——————————————————————
+// 背景与证据见 IL2Endpoint::flushTx 的注释：逐帧 pcap_sendpacket 实测约 306 µs/帧的工作线程
+// 墙钟，且让 WiFi 驱动无从做 A-MPDU 聚合。改成把一批帧灌进 pcap_send_queue 一次提交：
+// NPF 的 NPF_BufferedWrite 在**内核里**遍历这批包、逐个 NdisFSendNetBufferLists 发出去，
+// 最后只等**一次**全部完成——用户/内核切换从 N 次变 1 次，空口上驱动也终于同时看得到多个包。
+//
+// 一批发多少**不设固定上限**，由 TxWorker 的队列深度自然决定（忙时攒得多、闲时一帧就发）。
+// 固定批次在 WiFi 上有个坑：万一聚合没如期发生，64 帧 × 306 µs 就是 20 ms 的块状阻塞，比逐帧
+// 还糟。自调节没有这个失效模式。队列容量 256 KiB ≈ 170 个满帧，灌满就先提交一次、剩下的下一轮。
+constexpr u_int kTxQueueBytes = 256 * 1024;
+
+// 应急开关：COAST_GW_TXBATCH=0 → 不开发送线程、不建发送队列，完全退回「工作线程逐帧同步
+// pcap_sendpacket」，即本轮改动之前的行为。留它是因为这条路只能在真机上验证，也方便用同一个
+// 构建做 A/B（对比两次的 usPerTx / fpb / tx 帧率峰值）。
+bool txBatchEnabled()
+{
+    static const bool on = qEnvironmentVariable("COAST_GW_TXBATCH") != QLatin1String("0");
+    return on;
+}
+
+// 收帧线程的应急开关：COAST_GW_RXTHREAD=0 → 回到 QWinEventNotifier + 工作线程 drain()
+// （本轮改动之前的行为）。与 TX 的开关分开，两个方向可以各自 A/B。
+bool rxThreadEnabled()
+{
+    static const bool on = qEnvironmentVariable("COAST_GW_RXTHREAD") != QLatin1String("0");
+    return on;
+}
+
+// 单调微秒时钟。只服务诊断计数，进程级一个实例。
+qint64 nowUs()
+{
+    static QElapsedTimer t = [] {
+        QElapsedTimer x;
+        x.start();
+        return x;
+    }();
+    return t.nsecsElapsed() / 1000;
+}
+
+// 队列上限（帧）。驱动真卡住时不能让内存无限涨；撞上限就丢，交 TCP 重传兜底。
+// 4096 帧 ≈ 6 MB 满帧，按实测 306 µs/帧算够驱动消化 1.2 秒 —— 到这个深度还没排空，
+// 说明网卡已经出问题了，继续攒只会让延迟更离谱。
+constexpr int kTxQueueMaxFrames = 4096;
+
+// ————————————————————————— 发送线程（本文件的第二处性能改动）—————————————————————————
+// 为什么必须**离开工作线程**：
+//   pcap_sendpacket 那 306 µs/帧（实测，见 flushTx 注释）几乎全是驱动里等空口发送完成的时间，
+//   不是 CPU。它挂在工作线程上的后果是灾难性的 —— 峰值 1263 帧/秒 × 306 µs = 39% 的线程墙钟，
+//   而这根线程还要跑收帧、lwIP、上百条到 mihomo 的 socket、ARP 投毒。于是：
+//     · 泵周期从 25 ms 塌到 45–120 ms（实测），lwIP 的重传/延迟 ACK 节奏跟着变粗；
+//     · Npcap 收帧通知器在 Qt 的 Windows 事件分发里本来就排在所有 socket 消息之后，
+//       线程一忙，设备的 ACK 要多躺几十毫秒才被读走，直接压死对端的发送窗口；
+//     · 整个日志跨多天从未突破 1263 帧/秒 —— 那是**帧率**天花板，正是「每帧一次阻塞系统调用」
+//       的特征。
+//   把发送整个挪走之后，工作线程上就只剩纯 CPU 的活（lwIP + SOCKS 转发），不再有任何阻塞点。
+//
+// 批次是**自调节**的，不需要调参：线程忙着提交时新帧在队列里自然攒起来，下一轮一次全取走；
+// 空闲时队列里只有一帧，就单帧发出去（延迟最优）。所以既拿到了驱动侧的聚合收益（一次
+// sendqueue 提交让 WiFi 驱动同时看到多帧、能做 A-MPDU），又不会像固定批次那样在低负载时
+// 平白引入排队延迟 —— 之前那版固定 64 帧的批次在 WiFi 上有「聚合没发生就变成 20 ms 块状
+// 阻塞」的风险，自调节把这个风险一起消掉了。
+//
+// 专用发送句柄：pcap_t 不是线程安全的，绝不能和收帧共用一个。第二个句柄开不出来就整个
+// 降级回「工作线程同步发送」（= 本改动之前的行为），不冒险。
+class TxWorker final : public QThread
+{
+public:
+    TxWorker(const PcapApi *api, pcap_t *pcap, pcap_send_queue *q)
+        : m_api(api), m_pcap(pcap), m_txq(q)
+    {
+    }
+
+    // —— 以下三个由**工作线程**调用 ——
+    // 入队一帧。QByteArray 是隐式共享 + 原子引用计数，跨线程传所有权安全（只读不改）。
+    bool post(const QByteArray &frame)
+    {
+        QMutexLocker lk(&m_mutex);
+        if (m_pending.size() >= kTxQueueMaxFrames) {
+            ++m_stDropped;
+            return false;
+        }
+        m_pending.append(frame);
+        m_cv.wakeOne();
+        return true;
+    }
+    void kick()
+    {
+        QMutexLocker lk(&m_mutex);
+        m_cv.wakeOne();
+    }
+    // 把发送线程攒下的统计取回来，由工作线程折进 GatewayDiag —— 这样 GatewayDiag::c
+    // 依然只被工作线程碰，头文件里那条「单线程前提」的约定不用破。
+    void takeStats(qint64 *frames, qint64 *bytes, qint64 *dropped, qint64 *sendUs, qint64 *batches)
+    {
+        QMutexLocker lk(&m_mutex);
+        *frames = m_stFrames;   m_stFrames = 0;
+        *bytes = m_stBytes;     m_stBytes = 0;
+        *dropped = m_stDropped; m_stDropped = 0;
+        *sendUs = m_stSendUs;   m_stSendUs = 0;
+        *batches = m_stBatches; m_stBatches = 0;
+    }
+    // 停机：**必须排空再退**。ArpSpoofer 的「还原 ARP」就在最后那批里，丢了等于把被代理
+    // 设备的网关永久指向一台已经不转发的机器（彻底断网直到缓存老化）。
+    void stopAndJoin()
+    {
+        {
+            QMutexLocker lk(&m_mutex);
+            m_stop = true;
+            m_cv.wakeOne();
+        }
+        wait();
+    }
+
+protected:
+    void run() override
+    {
+        QVector<QByteArray> batch;
+        for (;;) {
+            {
+                QMutexLocker lk(&m_mutex);
+                while (!m_stop && m_pending.isEmpty())
+                    m_cv.wait(&m_mutex);
+                if (m_pending.isEmpty() && m_stop)
+                    return; // 只有队列真空了才退（stopAndJoin 的契约）
+                batch.swap(m_pending);
+                m_pending.clear();
+            }
+            submit(batch); // 不持锁：提交要几百微秒到几毫秒，持锁会把工作线程堵在 post 上
+            batch.clear();
+        }
+    }
+
+private:
+    void submit(const QVector<QByteArray> &frames)
+    {
+        const qint64 t0 = nowUs();
+        qint64 okFrames = 0, okBytes = 0, dropped = 0, batches = 0;
+
+        if (m_txq) {
+            int i = 0;
+            while (i < frames.size()) {
+                m_txq->len = 0; // WinPcap 语义：transmit 不动队列，复用前必须自己归零
+                int n = 0;
+                qint64 bytes = 0;
+                // 灌到装不下为止。单帧就比整个队列还大是不可能的（队列 256 KiB vs MTU 1518），
+                // 但仍然判一下，免得 n==0 时死循环。
+                while (i < frames.size()) {
+                    const QByteArray &f = frames.at(i);
+                    struct pcap_pkthdr hdr;
+                    hdr.ts.tv_sec = 0; // sync=0 提交，时间戳不参与调度
+                    hdr.ts.tv_usec = 0;
+                    hdr.caplen = bpf_u_int32(f.size());
+                    hdr.len = hdr.caplen;
+                    if (m_api->sq_queue(m_txq, &hdr, reinterpret_cast<const u_char *>(f.constData()))
+                        != 0)
+                        break; // 队列满：先把这批发掉，剩下的下一轮
+                    ++n;
+                    bytes += f.size();
+                    ++i;
+                }
+                if (n == 0) { // 单帧都灌不进去（不该发生）→ 退回逐帧，保证不卡死
+                    if (sendOneRaw(frames.at(i))) { ++okFrames; okBytes += frames.at(i).size(); }
+                    else ++dropped;
+                    ++i;
+                    ++batches;
+                    continue;
+                }
+                const u_int len = m_txq->len;
+                const u_int sent = m_api->sq_transmit(m_pcap, m_txq, 0);
+                ++batches;
+                if (sent < len) {
+                    dropped += n; // 短发：断在第几帧无从得知，整批记丢，交 TCP 重传
+                } else {
+                    okFrames += n;
+                    okBytes += bytes;
+                }
+            }
+        } else {
+            for (const QByteArray &f : frames) {
+                if (sendOneRaw(f)) { ++okFrames; okBytes += f.size(); }
+                else ++dropped;
+                ++batches;
+            }
+        }
+
+        const qint64 us = nowUs() - t0;
+        QMutexLocker lk(&m_mutex);
+        m_stFrames += okFrames;
+        m_stBytes += okBytes;
+        m_stDropped += dropped;
+        m_stSendUs += us;
+        m_stBatches += batches;
+    }
+    bool sendOneRaw(const QByteArray &f)
+    {
+        return m_api->sendpacket(m_pcap, reinterpret_cast<const u_char *>(f.constData()), f.size())
+                == 0;
+    }
+
+    const PcapApi *m_api;
+    pcap_t *m_pcap;             // 专用发送句柄，本线程独占
+    pcap_send_queue *m_txq;     // 可空 → 逐帧提交
+    QMutex m_mutex;
+    QWaitCondition m_cv;
+    QVector<QByteArray> m_pending;
+    bool m_stop = false;
+    qint64 m_stFrames = 0, m_stBytes = 0, m_stDropped = 0, m_stSendUs = 0, m_stBatches = 0;
+};
+
+// ————————————————————————— 收帧线程 —————————————————————————
+// 为什么收帧也必须离开工作线程（和发送是两个独立的病因）：
+//   收帧本来是事件驱动的（Npcap 事件句柄 + QWinEventNotifier + mintocopy(1)，来一字节就该唤醒）。
+//   但 Qt 的 Windows 事件分发把 winEventNotifier 放在消息派发的**最后一档** —— 只有 PeekMessage
+//   彻底取空才轮到它。而工作线程上挂着几十上百条到 mihomo 的 QTcpSocket，每条可读都是一条
+//   窗口消息。于是收帧的优先级低于**每一条** socket 事件。
+//   真机实证：重载窗口里 pump 与 wakes 逐窗口相等（如 pump=204 wakes=203），一轮事件循环各服务
+//   一次，排空周期塌到 49 ms。设备发出的每个包 —— 包括每个 TCP ACK、每个新连接的 SYN —— 平均
+//   多躺半个周期。ACK 晚到直接压死对端发送窗口，这是「设备比本机慢」的另一半原因。
+//
+// 挪到独立线程之后：pcap_next_ex 在自己的线程上阻塞等（to_ms=1 的等待此时不再是成本，正是
+// 我们想要的「有帧就醒」），帧一到就深拷贝进批，整批一次投递给工作线程。工作线程侧仍然是
+// 一次 posted event 处理一批，**每帧一次信号派发的语义完全不变**。
+//
+// 反压（这一段不能省）：工作线程要是跟不上，投递出去的批会在事件队列里无限堆积、吃光内存。
+// 所以记「已投递未消费」的帧数，超过高水位就让收帧线程**等**（不是丢！）—— 让帧压在 Npcap
+// 的 4 MiB 内核缓冲里，那里满了才丢，且丢在内核、有 tp_drops 类计数可查。用户态静默丢帧是
+// 这条链路上最难查的故障，绝不引入。
+class RxWorker final : public QThread
+{
+public:
+    // 高/低水位（帧）。8192 帧 ≈ 12 MB 满帧，足够扛住工作线程一次几十毫秒的卡顿；
+    // 迟滞是为了别在水位线上反复唤醒。
+    static constexpr int kHighWater = 8192;
+    static constexpr int kLowWater = 4096;
+
+    RxWorker(const PcapApi *api, pcap_t *pcap, QObject *target,
+             std::function<void(const QVector<QByteArray> &, qint64)> sink)
+        : m_api(api), m_pcap(pcap), m_target(target), m_sink(std::move(sink))
+    {
+    }
+
+    // 工作线程消费完一批后调，放行可能正在等水位的收帧线程。
+    void consumed(int frames)
+    {
+        QMutexLocker lk(&m_mutex);
+        m_outstanding -= frames;
+        if (m_outstanding <= kLowWater)
+            m_cv.wakeOne();
+    }
+    void takeStats(qint64 *wakes, qint64 *us)
+    {
+        QMutexLocker lk(&m_mutex);
+        *wakes = m_stWakes; m_stWakes = 0;
+        *us = m_stUs;       m_stUs = 0;
+    }
+    void stopAndJoin()
+    {
+        {
+            QMutexLocker lk(&m_mutex);
+            m_stop = true;
+            m_cv.wakeAll(); // 可能正卡在水位上
+        }
+        wait();
+    }
+
+protected:
+    void run() override
+    {
+        // 一次最多攒多少帧再投递。太小 → posted event 太多；太大 → 首帧等太久。
+        // 256 帧在实测的 300 帧/秒量级下约等于「有多少收多少」，重载时才会真的攒满。
+        constexpr int kBatchMax = 256;
+        QVector<QByteArray> batch;
+        batch.reserve(kBatchMax);
+        qint64 batchBytes = 0;
+
+        for (;;) {
+            {
+                QMutexLocker lk(&m_mutex);
+                if (m_stop)
+                    return;
+                // 反压：等工作线程把积压消化到低水位。绝不丢帧（见类注释）。
+                while (!m_stop && m_outstanding > kHighWater)
+                    m_cv.wait(&m_mutex);
+                if (m_stop)
+                    return;
+            }
+
+            const qint64 t0 = nowUs();
+            struct pcap_pkthdr *hdr = nullptr;
+            const u_char *data = nullptr;
+            int r;
+            // to_ms=1：没帧时这里睡 1 ms 后返回 0 —— 在**自己的**线程上，这就是想要的等待。
+            while ((r = m_api->next_ex(m_pcap, &hdr, &data)) == 1) {
+                if (data && hdr) {
+                    // ★ 深拷贝：帧要跨线程，绝不能把指向 Npcap 内核缓冲的视图传出去
+                    //   （IL2Endpoint::frameReceived 的三条硬约束之一）。
+                    batch.append(QByteArray(reinterpret_cast<const char *>(data), hdr->caplen));
+                    batchBytes += hdr->caplen;
+                }
+                if (batch.size() >= kBatchMax)
+                    break;
+            }
+            const qint64 us = nowUs() - t0;
+
+            {
+                QMutexLocker lk(&m_mutex);
+                ++m_stWakes;
+                m_stUs += us;
+                if (!batch.isEmpty())
+                    m_outstanding += batch.size();
+            }
+            if (!batch.isEmpty()) {
+                // 一次 posted event 投递整批。QVector<QByteArray> 的拷贝只是一串引用计数自增。
+                auto sink = m_sink;
+                const QVector<QByteArray> payload = batch;
+                const qint64 bytes = batchBytes;
+                QMetaObject::invokeMethod(
+                    m_target, [sink, payload, bytes] { sink(payload, bytes); },
+                    Qt::QueuedConnection);
+                batch.clear();
+                batchBytes = 0;
+            }
+            if (r < 0) {
+                // 句柄出错（网卡拔了）。别空转刷屏，退出；close() 会收尾。
+                dbg("rx thread: next_ex 返回 %d，退出", r);
+                return;
+            }
+        }
+    }
+
+private:
+    const PcapApi *m_api;
+    pcap_t *m_pcap;
+    QObject *m_target;
+    std::function<void(const QVector<QByteArray> &, qint64)> m_sink;
+    QMutex m_mutex;
+    QWaitCondition m_cv;
+    bool m_stop = false;
+    int m_outstanding = 0;
+    qint64 m_stWakes = 0, m_stUs = 0;
+};
 
 // 加载并解析 wpcap.dll。返回 nullptr = 没装 Npcap（或版本太老、缺符号）。
 // 只做一次；DLL 句柄故意不释放（进程生命周期内一直要用）。
@@ -121,9 +473,16 @@ const PcapApi *pcapApi()
     api.setfilter = reinterpret_cast<decltype(&pcap_setfilter)>(sym("pcap_setfilter"));
     api.freecode = reinterpret_cast<decltype(&pcap_freecode)>(sym("pcap_freecode"));
     api.setbuff = reinterpret_cast<decltype(&pcap_setbuff)>(sym("pcap_setbuff"));
+    api.sq_alloc = reinterpret_cast<decltype(&pcap_sendqueue_alloc)>(sym("pcap_sendqueue_alloc"));
+    api.sq_destroy =
+        reinterpret_cast<decltype(&pcap_sendqueue_destroy)>(sym("pcap_sendqueue_destroy"));
+    api.sq_queue = reinterpret_cast<decltype(&pcap_sendqueue_queue)>(sym("pcap_sendqueue_queue"));
+    api.sq_transmit =
+        reinterpret_cast<decltype(&pcap_sendqueue_transmit)>(sym("pcap_sendqueue_transmit"));
 
     // 缺任何一个都当没装：宁可优雅降级，也不要半残地跑到一半崩。
-    // setbuff **不在**必需清单里——它纯属收方优化，老 wpcap 缺它也应照常工作。
+    // setbuff / sq_* **不在**必需清单里——前者是收方优化、后者是发方优化，
+    // 老 wpcap 缺了只是少一层加速，逐帧路径照常工作。
     ok = api.open_live && api.close && api.setmintocopy && api.getevent && api.sendpacket
             && api.next_ex && api.compile && api.setfilter && api.freecode;
     return ok ? &api : nullptr;
@@ -266,26 +625,102 @@ public:
         m_api->setmintocopy(m_pcap, 1); // 有 1 字节就触发事件，降低延迟
         m_localMac = adapter.mac;
 
-        HANDLE h = m_api->getevent(m_pcap);
-        if (!h) {
-            if (err) *err = QStringLiteral("pcap_getevent 返回空句柄");
-            close();
-            return false;
+        // 批量发送队列（见 kTxQueueBytes 一节）。分配失败/符号缺失/被开关关掉 → m_txq 保持空，
+        // send() 自动走逐帧老路，功能完全不受影响。
+        if (txBatchEnabled() && m_api->sq_alloc && m_api->sq_queue && m_api->sq_transmit
+            && m_api->sq_destroy) {
+            m_txq = m_api->sq_alloc(kTxQueueBytes);
+            if (!m_txq)
+                dbg("pcap_sendqueue_alloc(%u) 失败，退回逐帧发送", kTxQueueBytes);
         }
-        m_notifier = new QWinEventNotifier(h, this);
-        QObject::connect(m_notifier, &QWinEventNotifier::activated, this,
-                         [this](HANDLE) { drain(); });
-        m_notifier->setEnabled(true);
+
+        // —— 专用发送句柄 + 发送线程（理由见 TxWorker 的注释）——
+        // pcap_t 不是线程安全的，所以**另开一个句柄**给发送线程独占，绝不与收帧共用。
+        // to_ms/snaplen 取最小：这个句柄从不读包，snaplen 只影响捕获路径。
+        // 任何一步失败都整体降级回「工作线程同步发送」= 本改动之前的行为，不冒险。
+        if (txBatchEnabled()) {
+            char txerr[PCAP_ERRBUF_SIZE] = {0};
+            m_txPcap = m_api->open_live(adapter.npfName.constData(), 128, 0 /*非混杂*/, 1, txerr);
+            if (m_txPcap) {
+                // 让这个句柄一个包都不捕获：否则内核收缓冲会白白攒满（我们从不读它）。
+                struct bpf_program prog;
+                if (m_api->compile(m_txPcap, &prog, "greater 65535", 1, PCAP_NETMASK_UNKNOWN) >= 0) {
+                    m_api->setfilter(m_txPcap, &prog);
+                    m_api->freecode(&prog);
+                }
+                if (m_api->setbuff)
+                    m_api->setbuff(m_txPcap, 64 * 1024); // 收缓冲用不上，压到最小
+                m_tx = new TxWorker(m_api, m_txPcap, m_txq);
+                m_txq = nullptr; // 所有权交给发送线程，本对象不再碰它
+                m_tx->start();
+                dbg("tx thread started (dedicated pcap handle)");
+            } else {
+                dbg("发送专用句柄打不开（%s），退回工作线程同步发送", txerr);
+            }
+        }
+
+        // —— 收帧：独立线程（默认）或 QWinEventNotifier（降级）——
+        if (rxThreadEnabled()) {
+            m_rx = new RxWorker(m_api, m_pcap, this,
+                                [this](const QVector<QByteArray> &frames, qint64 bytes) {
+                                    onRxBatch(frames, bytes);
+                                });
+            m_rx->start();
+            dbg("rx thread started");
+        } else {
+            HANDLE h = m_api->getevent(m_pcap);
+            if (!h) {
+                if (err) *err = QStringLiteral("pcap_getevent 返回空句柄");
+                close();
+                return false;
+            }
+            m_notifier = new QWinEventNotifier(h, this);
+            // rxWakes 只在**事件驱动**这条路上自增（泵兜底走 rxDrains），fpw 才有意义。
+            QObject::connect(m_notifier, &QWinEventNotifier::activated, this, [this](HANDLE) {
+                ++GatewayDiag::c.rxWakes;
+                drain();
+            });
+            m_notifier->setEnabled(true);
+        }
         dbg("open ok, notifier armed, localMac=%s", m_localMac.toHex(':').constData());
         return true;
     }
 
     void close() override
     {
+        // 收帧线程持有 m_pcap，必须在 m_api->close(m_pcap) 之前停掉，否则是 use-after-free。
+        if (m_rx) {
+            m_rx->stopAndJoin();
+            delete m_rx;
+            m_rx = nullptr;
+        }
         if (m_notifier) {
             m_notifier->setEnabled(false);
             delete m_notifier;
             m_notifier = nullptr;
+        }
+        // ★ 先让发送线程把队列排空再退出，然后才关句柄。停网关时 ArpSpoofer 会发最后一轮
+        //   「还原 ARP」，那几帧要是丢了，被代理设备就会一直把网关指着一台已经不转发的机器
+        //   ——彻底断网直到邻居缓存老化。stopAndJoin 的契约就是「队列真空了才返回」。
+        if (m_tx) {
+            m_tx->stopAndJoin();
+            qint64 f=0,b=0,d=0,us=0,n=0;
+            m_tx->takeStats(&f,&b,&d,&us,&n); // 最后一批的账也要记上
+            GatewayDiag::c.txFrames += f;
+            GatewayDiag::c.txBytes += b;
+            GatewayDiag::c.txSendUs += us;
+            GatewayDiag::c.txBatches += n;
+            GatewayDiag::c.txDropped += d;
+            delete m_tx;
+            m_tx = nullptr;
+        }
+        if (m_txq) { // 只有「线程没起来」的降级路径才轮到这里
+            m_api->sq_destroy(m_txq);
+            m_txq = nullptr;
+        }
+        if (m_txPcap) {
+            m_api->close(m_txPcap);
+            m_txPcap = nullptr;
         }
         if (m_pcap) {
             m_api->close(m_pcap); // m_pcap 非空 ⇒ open 成功过 ⇒ m_api 必然有效
@@ -310,16 +745,31 @@ public:
 
     // 定时器泵每拍调一次的排空兜底（契约与理由见 IL2Endpoint.h 的 drainNow）。
     // 与通知器回调走的是同一个 drain()：pcap_next_ex 本来就是「有就取、没有返 0」的语义，
-    // 多调一次不会重复消费、也不会阻塞。唯一的副作用是 rxWakes 会把这些拍算进去 ——
-    // 这恰恰是想要的：fpw(帧/唤醒) 因此能如实反映「一次取回多少帧」，排空频率变高时它会掉回 1~2，
-    // 正好用来验证这条兜底有没有起作用。
+    // 多调一次不会重复消费、也不会阻塞。
+    // ★ 计数走 rxDrains 而**不是** rxWakes：混在一起会把 fpw 稀释成恒 0，等于把「事件驱动
+    //   到底还灵不灵」这个唯一的判据弄瞎（详见 GatewayDiag.h 里 rxDrains 的注释）。
     void drainNow() override
     {
-        if (m_pcap)
-            drain();
+        if (!m_pcap)
+            return;
+        // ★ 有收帧线程时这里必须什么都不做：pcap_t 非线程安全，两个线程同时 next_ex 同一个
+        //   句柄就是竞态。而且也没必要了 —— 收帧线程本来就在阻塞等帧，泵兜底这条路存在的
+        //   前提（收帧被事件循环饿死）已经不成立。
+        if (m_rx)
+            return;
+        ++GatewayDiag::c.rxDrains;
+        drain();
     }
 
-    // 发一帧。pcap_sendpacket 是**同步**的：把帧写进驱动 TX 缓冲，成功返 0、失败返 -1。
+    // 发一帧。
+    //
+    // 【异步路径（默认）】只把帧挂进 TxWorker 的队列就返回，由发送线程去碰驱动。返回 true 的
+    //   含义因此从「驱动收下了」变成「进队了」—— 与逐帧路径的语义其实一致：两者都只保证
+    //   「交出去了」，都不保证空口上真的送达（那由 TCP 重传兜底）。而且 lwipLinkOutput
+    //   （NetStack.cpp）与两个投毒器**本来就不看返回值**，没有调用方被这个变化误导。
+    //   代价：帧不再立即出网卡。所有产帧路径都必须有 flushTx() 收口点，契约见 IL2Endpoint.h。
+    //
+    // 【逐帧路径（降级）】pcap_sendpacket 是**同步**的：把帧写进驱动 TX 缓冲，成功返 0、失败返 -1。
     // 没有 EAGAIN/可写事件那套语义，所以这里不做「满了排队等可写」——做不了（无可写通知），
     // 也不必（驱动 TX 满时 WriteFile 会阻塞而非丢）。失败基本都是持久性错误（网卡拔了/句柄失效），
     // 排队重发无意义，直接计数丢弃、交由 lwIP 重传兜底。计数与 linux/mac 端点对称，接进 GatewayDiag。
@@ -327,16 +777,36 @@ public:
     {
         if (!m_pcap)
             return false;
-        if (m_api->sendpacket(m_pcap, reinterpret_cast<const u_char *>(frame.constData()),
-                              frame.size())
-            == 0) {
-            ++GatewayDiag::c.txFrames;
-            GatewayDiag::c.txBytes += frame.size();
-            return true;
+        // 有发送线程就只入队，**工作线程绝不碰驱动**（那是 306 µs/帧的阻塞，见 TxWorker）。
+        // 入队失败只有一种情况：队列到 kTxQueueMaxFrames 上限，即驱动已经卡了一秒以上 ——
+        // 此时丢帧交 TCP 重传，比继续攒着让延迟雪崩要好。
+        if (m_tx)
+            return m_tx->post(frame);
+        // 降级路径（发送句柄开不出来 / COAST_GW_TXBATCH=0）：与本改动之前完全一致的同步发送。
+        return sendOne(frame);
+    }
+
+    // 把攒着的一批交给驱动。空队列时只做一次判空（契约要求可以随便调）。
+    void flushTx() override
+    {
+        if (!m_tx)
+            return; // 降级路径下 send() 本来就是立即发，无事可做
+        // 踢一下：发送线程多半已经在跑，这一下只保证「刚入队的帧不会等到下一次有人入队」。
+        // 延迟敏感的路径（ARP 抢答补帧、还原帧、DNS 回程）靠它把队头立刻推出去。
+        m_tx->kick();
+        // 顺带把发送线程攒的统计取回来折进 GatewayDiag —— 在**工作线程**上做，
+        // GatewayDiag::c 的「单线程前提」因此依然成立。flushTx 在各条出帧路径上都会被调到，
+        // 采样频率远高于 10 s 的诊断窗口，不会漏账。
+        qint64 f=0,b=0,d=0,us=0,n=0;
+        m_tx->takeStats(&f,&b,&d,&us,&n);
+        GatewayDiag::c.txFrames += f;
+        GatewayDiag::c.txBytes += b;
+        GatewayDiag::c.txSendUs += us;
+        GatewayDiag::c.txBatches += n;
+        if (d > 0) {
+            GatewayDiag::c.txDropped += d;
+            reportTxDropThrottled();
         }
-        ++GatewayDiag::c.txDropped;
-        reportTxDropThrottled();
-        return false;
     }
     QByteArray localMac() const override { return m_localMac; }
     int ifIndex() const override { return 0; }
@@ -385,6 +855,24 @@ public:
     }
 
 private:
+    // 逐帧提交（无批量队列时的老路，也是批量灌不进时的兜底）。
+    bool sendOne(const QByteArray &frame)
+    {
+        const qint64 t0 = nowUs();
+        const int rc = m_api->sendpacket(m_pcap, reinterpret_cast<const u_char *>(frame.constData()),
+                                         frame.size());
+        GatewayDiag::c.txSendUs += nowUs() - t0;
+        ++GatewayDiag::c.txBatches; // 逐帧 = 每帧一批，fpb 会如实显示成 1
+        if (rc == 0) {
+            ++GatewayDiag::c.txFrames;
+            GatewayDiag::c.txBytes += frame.size();
+            return true;
+        }
+        ++GatewayDiag::c.txDropped;
+        reportTxDropThrottled();
+        return false;
+    }
+
     // 6 字节 MAC → "aa:bb:cc:dd:ee:ff"（拼进 pcap 过滤表达式）。
     static QByteArray macToText(const QByteArray &m)
     {
@@ -405,9 +893,46 @@ private:
                "设备「时好时坏 / 极慢」。";
     }
 
+    // 收帧线程投递来的一批帧 —— 跑在**工作线程**上（QueuedConnection）。
+    // 对下游而言语义与原来完全一致：仍然是逐帧 emit frameReceived，仍然是直连，仍然在工作线程。
+    // 变的只是「谁把帧从驱动里捞出来」。
+    void onRxBatch(const QVector<QByteArray> &frames, qint64 bytes)
+    {
+        GatewayDiag::c.rxFrames += frames.size();
+        GatewayDiag::c.rxBytes += bytes;
+        for (const QByteArray &f : frames) {
+            if (dbgOn() && f.size() >= 14) {
+                const uchar *p = reinterpret_cast<const uchar *>(f.constData());
+                if (m_rxLogged < 20) {
+                    ++m_rxLogged;
+                    dbg("rx#%lld len=%d dst=%02x:%02x:%02x:%02x:%02x:%02x "
+                        "src=%02x:%02x:%02x:%02x:%02x:%02x eth=%02x%02x",
+                        m_rxCount + 1, int(f.size()), p[0], p[1], p[2], p[3], p[4], p[5],
+                        p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]);
+                } else if ((m_rxCount % 200) == 0) {
+                    dbg("rx total=%lld", m_rxCount + 1);
+                }
+            }
+            ++m_rxCount;
+            emit frameReceived(f);
+        }
+        // 这一批喂完，lwIP 顺带打出来的 ACK/数据段/ARP 抢答都还在发送队列里 —— 一次收口。
+        // 「收 N 帧 → 发 M 帧」这条批量链路就是在这里成立的。
+        flushTx();
+        // 放行可能正卡在高水位上的收帧线程，并把它的统计折进 GatewayDiag（工作线程上做，
+        // 单线程约定不破）。
+        if (m_rx) {
+            m_rx->consumed(frames.size());
+            qint64 wakes = 0, us = 0;
+            m_rx->takeStats(&wakes, &us);
+            GatewayDiag::c.rxWakes += wakes;
+            GatewayDiag::c.rxDrainUs += us;
+        }
+    }
+
     void drain()
     {
-        ++GatewayDiag::c.rxWakes; // 与 rxFrames 之比 = 每次唤醒取回多少帧（批处理效率）
+        const qint64 t0 = nowUs();
         struct pcap_pkthdr *hdr = nullptr;
         const u_char *data = nullptr;
         int r;
@@ -435,11 +960,20 @@ private:
                 emit frameReceived(QByteArray(reinterpret_cast<const char *>(data), hdr->caplen));
             }
         }
+        // ★ 一次排空里 lwIP 顺带打出来的所有帧（ACK、被 ACK 打开窗口后续发的段、ARP 抢答…）
+        //   都还攒在发送队列里 —— 在这里一次提交。这是 flushTx 三个调用点里的第一个，
+        //   也是「一次唤醒收 N 帧 → 一次提交 M 帧」这条批量链路成立的关键。
+        flushTx();
+        GatewayDiag::c.rxDrainUs += nowUs() - t0;
     }
 
     const PcapApi *m_api = nullptr; // open() 里解析；进程级单例，不属本对象所有
     pcap_t *m_pcap = nullptr;
-    QWinEventNotifier *m_notifier = nullptr;
+    pcap_send_queue *m_txq = nullptr; // 发送队列；所有权在 open() 里交给 TxWorker，之后恒为空
+    pcap_t *m_txPcap = nullptr;       // 发送专用句柄（TxWorker 独占；pcap_t 非线程安全）
+    TxWorker *m_tx = nullptr;         // 空 = 降级到工作线程同步发送
+    QWinEventNotifier *m_notifier = nullptr; // 仅降级路径使用
+    RxWorker *m_rx = nullptr;                // 空 = 降级到通知器 + 工作线程 drain()
     QByteArray m_localMac;
     long long m_rxCount = 0; // 收到的帧总数（诊断用）
     int m_rxLogged = 0;      // 已逐帧打印的条数（封顶 20）

