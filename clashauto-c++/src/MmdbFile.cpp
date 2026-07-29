@@ -323,6 +323,19 @@ bool MmdbFile::validate(const QByteArray &data, QString *why)
     return true;
 }
 
+bool MmdbFile::validateFile(const QString &path, QString *why)
+{
+    QFile in(path);
+    if (!in.open(QIODevice::ReadOnly)) {
+        if (why)
+            *why = QStringLiteral("读不了 %1: %2").arg(path, in.errorString());
+        return false;
+    }
+    const QByteArray data = in.readAll();
+    in.close();
+    return validate(data, why);
+}
+
 bool MmdbFile::stage(const QByteArray &data, const QString &target, QString *why)
 {
     if (!validate(data, why))

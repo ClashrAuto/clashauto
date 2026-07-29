@@ -22,6 +22,11 @@
 //          （"a file with a user-mapped section open"）——实测过；
 //        · 就算换成功了也没用 —— mmdb 在核心里是 sync.Once 加载的，不重启核心不会重读。
 //      即：原地覆盖从来就没有「立刻生效」过，它唯一的效果就是有概率毁掉好文件。
+//   3) validateFile() —— 上面两条只保证「以后不会再写坏」，管不到**已经**坏在用户目录里的那份。
+//      而且旧的下载路径写坏文件时已经把 QSettings 的 geoip/lastPublished 记成了最新版本，
+//      checkGeoip() 之后每次都在 `last == stamp && haveLocal` 处直接 return —— 坏库会一直用到
+//      上游发下一个 release 为止。所以起核心前还要给线上那份做一次体检，坏了就退回 qrc 种子
+//      并清掉版本戳（见 CoreController::start）。
 #include <QByteArray>
 #include <QString>
 
@@ -35,6 +40,10 @@ namespace MmdbFile {
 //   · 拿几个知名 IP 走一遍树，终止记录必须落在合法的数据指针区间内
 // 通过返回 true；失败返回 false 并把人话原因写进 *why（可为 nullptr）。
 bool validate(const QByteArray &data, QString *why = nullptr);
+
+// 同 validate()，但校验的是磁盘上已有的一份库。文件不存在/读不出来一律算不通过。
+// 给「起核心前体检线上 Country.mmdb」用（见 CoreController::start 的自愈分支）。
+bool validateFile(const QString &path, QString *why = nullptr);
 
 // 校验 + 原子写到 <target>.new（QSaveFile：先写临时文件，commit 时才改名）。
 // **不动 target 本身**——它可能正被运行中的核心 mmap 着。失败置 *why。

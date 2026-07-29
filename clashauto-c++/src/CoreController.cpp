@@ -11,6 +11,7 @@
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QSysInfo>
 #include <QTimer>
 
@@ -337,6 +338,23 @@ void CoreController::startCore()
     if (MmdbFile::applyStaged(mmdb)) {
         AppConfig::makeWritable(mmdb);
         emit logUpdated(tr("已启用新下载的 GeoIP 数据库: %1").arg(mmdb));
+    }
+    // 线上库自愈。上面那两步只保证「以后不会再写坏」，救不了**已经**坏在用户目录里的那份：
+    // 旧的下载路径原地覆盖时写坏过一次，而且当场把 geoip/lastPublished 记成了最新版本，于是
+    // AboutController::checkGeoip() 之后每次都在 `last == stamp && haveLocal` 处直接返回 ——
+    // 不重下、不报错，坏库会一直用到上游发下一个 release。这类坏文件核心能正常 Load、不 fatal，
+    // 只是查什么都返回空：GEOIP,CN 是 MATCH 前最后一条规则，它静默失配就等于所有嗅探不出域名的
+    // 裸 IP 目的地集体出海。所以每次起核心前给线上那份做一次体检（几 MB、一次启动一次）。
+    QString mmdbWhy;
+    if (QFileInfo::exists(mmdb) && !MmdbFile::validateFile(mmdb, &mmdbWhy)) {
+        emit logUpdated(tr("GeoIP 数据库不可用，已退回内置种子 — %1").arg(mmdbWhy));
+        QFile::remove(mmdb);
+        if (QFileInfo::exists(bundledMmdb) && QFile::copy(bundledMmdb, mmdb)) {
+            AppConfig::makeWritable(mmdb);
+        }
+        // 清掉版本戳：否则 checkGeoip() 认为本地已是最新，永远不会去下真正的新库，
+        // 用户就被钉死在内置种子上了。清掉之后下次启动会重新下载 + 走 stage/applyStaged。
+        QSettings().remove(QStringLiteral("geoip/lastPublished"));
     }
 
 #if defined(Q_OS_WIN)
