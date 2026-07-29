@@ -482,7 +482,22 @@ const PacketApi *packetApi()
     if (tried)
         return ok ? &api : nullptr;
     tried = true;
-    HMODULE h = LoadLibraryA("Packet.dll"); // 装了 Npcap 就有（与 wpcap.dll 同目录，SetDllDirectory 已加过）
+    // ★ Packet.dll 在 %SystemRoot%\System32\Npcap\，**不在默认 DLL 搜索路径**。裸
+    //   LoadLibraryA("Packet.dll") 会失败 —— 这正是之前 fpb=1（批量没生效、退回逐帧）的原因：
+    //   pcapApi() 加载 wpcap 时特意 SetDllDirectory 到 Npcap 目录再还原，我这里漏了这一步。
+    //   而 wpcap.dll 依赖 Packet.dll，pcapApi() 成功后它一定**已经加载**了，所以先用
+    //   GetModuleHandle 按基名直接拿到已加载的那份（确定命中，且不增引用计数）。
+    HMODULE h = GetModuleHandleA("Packet.dll");
+    if (!h) {
+        // 兜底：万一没被依赖带进来，按 Npcap 全路径加载。
+        char sysdir[MAX_PATH] = {0};
+        if (GetSystemDirectoryA(sysdir, MAX_PATH)) {
+            const QByteArray full = QByteArray(sysdir) + "\\Npcap\\Packet.dll";
+            h = LoadLibraryA(full.constData());
+        }
+        if (!h)
+            h = LoadLibraryA("Packet.dll");
+    }
     if (!h)
         return nullptr;
     api.openAdapter = reinterpret_cast<decltype(api.openAdapter)>(GetProcAddress(h, "PacketOpenAdapter"));
