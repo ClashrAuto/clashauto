@@ -331,9 +331,9 @@ public:
     static constexpr int kHighWater = 8192;
     static constexpr int kLowWater = 4096;
 
-    RxWorker(const PcapApi *api, pcap_t *pcap, QObject *target,
+    RxWorker(const PcapApi *api, pcap_t *pcap, HANDLE evt, QObject *target,
              std::function<void(const QVector<QByteArray> &, qint64)> sink)
-        : m_api(api), m_pcap(pcap), m_target(target), m_sink(std::move(sink))
+        : m_api(api), m_pcap(pcap), m_evt(evt), m_target(target), m_sink(std::move(sink))
     {
     }
 
@@ -387,7 +387,11 @@ protected:
             struct pcap_pkthdr *hdr = nullptr;
             const u_char *data = nullptr;
             int r;
-            // to_ms=1：没帧时这里睡 1 ms 后返回 0 —— 在**自己的**线程上，这就是想要的等待。
+            // ★ 别指望 next_ex 的 to_ms 当阻塞原语：它在空缓冲上很快就返回 0（实测这个循环
+            //   空转到 1640 次/秒，白烧 ~9% 的一个核，还把 rxWakes/fpw 又一次冲成无意义的数）。
+            //   正确做法是**空转了才去等 pcap 的事件句柄**：有帧时一轮都不多等（next_ex 直接
+            //   返回数据），没帧时阻塞在 WaitForSingleObject 上，事件一来立刻醒。
+            //   100 ms 只是「没帧时多久回来看一眼 m_stop」的上限，不影响收帧延迟。
             while ((r = m_api->next_ex(m_pcap, &hdr, &data)) == 1) {
                 if (data && hdr) {
                     // ★ 深拷贝：帧要跨线程，绝不能把指向 Npcap 内核缓冲的视图传出去
@@ -400,15 +404,23 @@ protected:
             }
             const qint64 us = nowUs() - t0;
 
+            if (batch.isEmpty()) {
+                // 这一轮什么都没收到 → 阻塞等事件，别空转。也不记 wake：rxWakes 的语义是
+                // 「被唤醒并真的取到帧的次数」，fpw(帧/唤醒) 才有意义。
+                if (m_evt)
+                    WaitForSingleObject(m_evt, 100);
+                else
+                    msleep(1); // 拿不到事件句柄时的兜底，至少别 100% 占核
+                continue;
+            }
             {
                 QMutexLocker lk(&m_mutex);
                 ++m_stWakes;
                 m_stUs += us;
-                if (!batch.isEmpty())
-                    m_outstanding += batch.size();
+                m_outstanding += batch.size();
             }
-            if (!batch.isEmpty()) {
-                // 一次 posted event 投递整批。QVector<QByteArray> 的拷贝只是一串引用计数自增。
+            // 一次 posted event 投递整批。QVector<QByteArray> 的拷贝只是一串引用计数自增。
+            {
                 auto sink = m_sink;
                 const QVector<QByteArray> payload = batch;
                 const qint64 bytes = batchBytes;
@@ -429,6 +441,7 @@ protected:
 private:
     const PcapApi *m_api;
     pcap_t *m_pcap;
+    HANDLE m_evt;   // pcap_getevent：空转时阻塞在它上面
     QObject *m_target;
     std::function<void(const QVector<QByteArray> &, qint64)> m_sink;
     QMutex m_mutex;
@@ -661,7 +674,7 @@ public:
 
         // —— 收帧：独立线程（默认）或 QWinEventNotifier（降级）——
         if (rxThreadEnabled()) {
-            m_rx = new RxWorker(m_api, m_pcap, this,
+            m_rx = new RxWorker(m_api, m_pcap, m_api->getevent(m_pcap), this,
                                 [this](const QVector<QByteArray> &frames, qint64 bytes) {
                                     onRxBatch(frames, bytes);
                                 });
