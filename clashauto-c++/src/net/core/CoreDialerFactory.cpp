@@ -2,6 +2,7 @@
 
 #include "DirectOutbound.h"
 #include "ProxyConfig.h"
+#include "proto/OutboundRegistry.h"
 
 // ———————————————————————————————————————————————————————————————————————————
 // 为什么需要「路由包装器」而不能在 createTcp/createUdp 里直接选实现：
@@ -29,16 +30,24 @@ IOutboundTcp *makeInnerTcp(const QString &node, ProxyConfigStore *store, Outboun
     if (node == QStringLiteral("DIRECT")) {
         return new DirectOutboundTcp(parent); // 进程内直连
     }
-    // 具名节点：查快照看它是不是内建 direct；是就直连。
+    // 具名节点：查快照拿到它的完整参数（type/server/port/cipher/…）。
     if (store) {
         if (const std::shared_ptr<const ProxyConfig> cfg = store->current()) {
-            if (const ProxyNode *n = cfg->nodeByName(node); n && n->isDirect()) {
-                return new DirectOutboundTcp(parent);
+            if (const ProxyNode *n = cfg->nodeByName(node)) {
+                if (n->isDirect()) {
+                    return new DirectOutboundTcp(parent); // 内建直连
+                }
+                // 协议出站：查注册表。已注册该 type 就用进程内协议实现；createTcp 可能返回 null
+                // （creator 为空 / 内部拒绝），那时照样回退 fallback，绝不缺失功能。
+                if (OutboundRegistry::instance().has(n->type)) {
+                    if (IOutboundTcp *proto = OutboundRegistry::instance().createTcp(*n, parent)) {
+                        return proto;
+                    }
+                }
             }
         }
     }
-    // TODO(协议出站单元)：这里按 node 的 type（ss/trojan/vmess/socks5…）造对应的进程内协议出站。
-    //   目前还没有协议实现，一律回退到 fallback（拨 mihomo），保证功能不缺失、只是没走进程内。
+    // 未注册的协议 / 查不到节点 / 协议实现拒绝 → 回退 fallback（拨 mihomo），保证功能不缺失。
     return fallback->createTcp(parent);
 }
 
@@ -53,12 +62,21 @@ IOutboundUdp *makeInnerUdp(const QString &node, ProxyConfigStore *store, Outboun
     }
     if (store) {
         if (const std::shared_ptr<const ProxyConfig> cfg = store->current()) {
-            if (const ProxyNode *n = cfg->nodeByName(node); n && n->isDirect()) {
-                return new DirectOutboundUdp(parent);
+            if (const ProxyNode *n = cfg->nodeByName(node)) {
+                if (n->isDirect()) {
+                    return new DirectOutboundUdp(parent);
+                }
+                // 协议 UDP 出站：注册表里该协议的 UdpCreator 为空（协议不支持 UDP）时 createUdp 返回
+                // null，落到下面回退 fallback。
+                if (OutboundRegistry::instance().has(n->type)) {
+                    if (IOutboundUdp *proto = OutboundRegistry::instance().createUdp(*n, parent)) {
+                        return proto;
+                    }
+                }
             }
         }
     }
-    // TODO(协议出站单元)：按节点协议造进程内 UDP 出站；暂回退 fallback。
+    // 未注册 / 该协议不支持 UDP / 查不到节点 → 回退 fallback。
     return fallback->createUdp(parent);
 }
 

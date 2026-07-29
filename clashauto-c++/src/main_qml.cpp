@@ -26,6 +26,7 @@
 #include "PowerWatcher.h" // 睡眠/唤醒：挂起前撤劫持还原 ARP，醒来补回
 #include "net/GatewayDiag.h"
 #include "net/GatewayPanic.h" // 崩溃兜底：进程被打死时裸发还原 ARP
+#include "net/core/crypto/CryptoSelfTest.h" // COAST_CRYPTO_SELFTEST：AEAD/KDF 已知答案测试
 #include "net/LanGateway.h"
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 #include "net/GatewaySelfTest.h"
@@ -148,6 +149,12 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsSet("COAST_NDP_RA_SELFTEST"))
         return runNdpRaSelfTest();
 #endif
+
+    // 加密层已知答案测试（COAST_CRYPTO_SELFTEST=1）：跑 AEAD(AES-GCM/ChaCha20-Poly1305)、HKDF-SHA1、
+    // EVP_BytesToKey 的公开测试向量，逐项 PASS/FAIL 打到 stderr，返回非零退出码表示有失败。跨平台、
+    // 不建 GUI、不碰网络 —— 加密写错是静默的，唯一防线就是拿 RFC/NIST 向量逐字节比对（见 CryptoSelfTest.cpp）。
+    if (qEnvironmentVariableIsSet("COAST_CRYPTO_SELFTEST"))
+        return coastcore::runCryptoSelfTest();
 
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报
     // "current style does not support customization"），本 app 全是自绘控件，必须 Basic。

@@ -27,6 +27,11 @@ set(CMAKE_AUTOUIC ON)
 find_package(QT NAMES Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 
+# OpenSSL libcrypto —— CoastCore 协议出站的裸 AEAD（AES-GCM / ChaCha20-Poly1305，见
+# src/net/core/crypto/Aead.cpp）。只用 libcrypto 的 EVP（不用它做哈希——哈希/HMAC 走 Qt）。
+# 本地 MinGW 自带（头 opt/include、库 opt/lib）；CI 里由工具链/aqt 提供。用 -DOPENSSL_ROOT_DIR 提示。
+find_package(OpenSSL REQUIRED)
+
 # Linux 的睡眠/唤醒事件走 systemd-logind 的 D-Bus 信号 PrepareForSleep（外加一把 delay 抑制锁，
 # 保证我们能在挂起前把被代理设备的 ARP 还回去）。QtDBus 属 qtbase，装了 Qt 基本就有；**故意做成
 # 可选**——万一某个构建环境缺它，只是这条链路降级为不可用，不该让整个构建失败。
@@ -86,6 +91,14 @@ set(BACKEND_SOURCES
     src/net/core/ProxyConfig.cpp       src/net/core/ProxyConfig.h
     src/net/core/DirectOutbound.cpp    src/net/core/DirectOutbound.h
     src/net/core/CoreDialerFactory.cpp src/net/core/CoreDialerFactory.h
+    # 协议出站的共享基建（跨平台）：AEAD/KDF 加密层(OpenSSL libcrypto)、TLS/WebSocket 传输原语、
+    # 协议注册表（加协议=加文件+注册一行）。各协议出站单元并行建立在这之上。
+    src/net/core/crypto/Aead.cpp          src/net/core/crypto/Aead.h
+    src/net/core/crypto/Kdf.cpp           src/net/core/crypto/Kdf.h
+    src/net/core/crypto/CryptoSelfTest.cpp src/net/core/crypto/CryptoSelfTest.h
+    src/net/core/transport/TlsClient.cpp  src/net/core/transport/TlsClient.h
+    src/net/core/transport/WsClient.cpp   src/net/core/transport/WsClient.h
+    src/net/core/proto/OutboundRegistry.cpp src/net/core/proto/OutboundRegistry.h
     src/net/LanGateway.h
     # 数据面诊断日志（<userDir>/logs/gateway-diag.log）。跨平台编译：main_qml.cpp 要调 setLogDir，
     # 而计数器只有 POSIX 上的网关才真的往里写。
@@ -228,6 +241,8 @@ target_link_libraries(clashauto-qml PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Sql
+    # 协议出站 AEAD 的裸加密（EVP）。只链 libcrypto，不链 libssl（TLS 由 Qt 的 QSslSocket 负责）。
+    OpenSSL::Crypto
     $<$<PLATFORM_ID:Windows>:dwmapi>
     $<$<PLATFORM_ID:Windows>:shell32>
     $<$<PLATFORM_ID:Windows>:advapi32>
