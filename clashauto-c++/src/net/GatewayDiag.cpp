@@ -108,16 +108,21 @@ void GatewayDiag::sample(const QString &extra)
     line.reserve(512);
     line += QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
     line += QStringLiteral(" win=%1ms").arg(winMs);
+    const qint64 wakes = d(c.rxWakes, g_prev.rxWakes);
+    const qint64 drains = d(c.rxDrains, g_prev.rxDrains);
     line += QStringLiteral(" rx=%1(%2/s) rxKB=%3 wakes=%4 fpw=%5 rxdrop=%6")
                 .arg(rxF)
                 .arg(rate(rxF))
                 .arg(d(c.rxBytes, g_prev.rxBytes) / 1024)
-                .arg(d(c.rxWakes, g_prev.rxWakes))
+                .arg(wakes)
                 // 每次唤醒平均取回多少帧：收环批处理的实际效果。掉到 1 附近 = 退化成逐帧唤醒。
-                .arg(d(c.rxWakes, g_prev.rxWakes) > 0
-                         ? rxF / d(c.rxWakes, g_prev.rxWakes)
-                         : 0)
+                // ★ 分母**只算事件驱动的唤醒**，泵主动排空(drains)另计——否则这一栏恒为 0。
+                .arg(wakes > 0 ? rxF / wakes : 0)
                 .arg(d(c.rxKernelDrops, g_prev.rxKernelDrops));
+    // 排空成本：drains = 泵兜底排空次数；drainUs = 每次排空平均微秒（含缓冲空时的阻塞等待）。
+    line += QStringLiteral(" drains=%1 drainUs=%2")
+                .arg(drains)
+                .arg((wakes + drains) > 0 ? d(c.rxDrainUs, g_prev.rxDrainUs) / (wakes + drains) : 0);
     line += QStringLiteral(" fed=%1 bypLan=%2 bypBcast=%3 nonVictim=%4")
                 .arg(d(c.fedLwip, g_prev.fedLwip))
                 .arg(d(c.bypassLan, g_prev.bypassLan))
@@ -130,6 +135,16 @@ void GatewayDiag::sample(const QString &extra)
                 .arg(d(c.txDeferred, g_prev.txDeferred))
                 .arg(d(c.txDropped, g_prev.txDropped))
                 .arg(c.txBacklogPeak / 1024);
+    // ★ 本条是回答「设备路径为什么慢」的核心一栏（理由见 GatewayDiag.h 的 txSendUs）：
+    //   usPerTx = 每帧平均花在驱动里的微秒数。它若在 200~400 µs 量级，就坐实了
+    //   「每帧一次同步 pcap_sendpacket、驱动等 NDIS 发送完成」= WiFi 无法做 A-MPDU 聚合，
+    //   单帧空口时间被完整串行化；批量发之后这个数应当掉一个数量级、fpb 明显 > 1。
+    line += QStringLiteral(" txBatch=%1 fpb=%2 usPerTx=%3")
+                .arg(d(c.txBatches, g_prev.txBatches))
+                .arg(d(c.txBatches, g_prev.txBatches) > 0
+                         ? txF / d(c.txBatches, g_prev.txBatches)
+                         : 0)
+                .arg(txF > 0 ? d(c.txSendUs, g_prev.txSendUs) / txF : 0);
     line += QStringLiteral(" tcpAcc=%1 tcpClose=%2 tcpAbort=%3 socksFail=%4")
                 .arg(d(c.tcpAccepted, g_prev.tcpAccepted))
                 .arg(d(c.tcpClosed, g_prev.tcpClosed))

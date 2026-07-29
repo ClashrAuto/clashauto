@@ -44,7 +44,12 @@ public:
         // —— 二层：收 ——
         qint64 rxFrames;      // 从二层端点交上来的帧（已过内核 BPF 源 MAC 过滤）
         qint64 rxBytes;
-        qint64 rxWakes;       // 可读事件次数。rxFrames/rxWakes = 批处理效率（收环的核心收益）
+        qint64 rxWakes;       // **事件驱动**的可读唤醒次数。rxFrames/rxWakes = 批处理效率（收环的核心收益）
+        // 泵主动排空（IL2Endpoint::drainNow）的次数。**必须与 rxWakes 分开记**：
+        // 它是「每拍每网卡固定加一」的量，混进 rxWakes 会把 fpw(帧/唤醒) 稀释成恒 0，
+        // 于是「事件驱动到底还灵不灵」这个唯一能回答收帧饥饿的指标就瞎了（f524cb5 实际发生过：
+        // 07-29 之后所有窗口 fpw 恒 0、wakes ≈ 2×pump）。
+        qint64 rxDrains;
         // 内核 PACKET_STATISTICS 的 tp_drops：环满、用户态没跟上。
         // ★ 仅 Linux 有值；mac 的 bpf 要走 BIOCGSTATS(bs_drop)，还没接 —— 在 mac 上这一栏恒 0，
         //   别把它当「mac 上没丢包」的证据。
@@ -55,6 +60,21 @@ public:
         qint64 txDeferred;    // 内核缓冲满 → 排进积压队列（不是丢，但已经是拥塞信号）
         qint64 txDropped;     // 积压也满了 → 真丢帧，只能等 TCP 重传
         qint64 txBacklogPeak; // 本窗口积压字节数的高水位（瞬时量，每窗口清零）
+        // ★ 发方**时延**计数（Windows）。加它的直接理由：本文件原有的量全是「次数」，
+        //   而 6000 个采样窗口对 (win − pump×标称周期) 做二元最小二乘的结果是
+        //     每发一帧 ≈ 306 µs 的工作线程墙钟、每收一帧 ≈ 0（收方成本被发方完全盖住）。
+        //   306 µs 比这条路上所有用户态动作（QByteArray 分配 + 1500B memcpy ≈ 0.3 µs）大三个数量级，
+        //   只可能是 pcap_sendpacket 里那次同步等待 NDIS 发送完成。但「只可能是」不是「测到了」——
+        //   这两个计数把它变成可直接读出的事实：usPerTx = txSendUs/txFrames。
+        //   开销：每次发送两次 QueryPerformanceCounter（约 40 ns），相对被测量的 300 µs 是 0.01%。
+        qint64 txSendUs;      // 累计花在「把帧交给驱动」上的微秒数（含批量提交）
+        qint64 txBatches;     // 提交批次数。txFrames/txBatches = 平均每批多少帧（批量发的实际效果）
+        // 收方排空耗时：一次 drain() 的全程，含 ① pcap_next_ex 在缓冲空时那次阻塞等待
+        //（Npcap 的 PacketReceivePacket 会 WaitForSingleObject(ReadEvent, to_ms)，to_ms=1ms）、
+        // ② 每帧喂进 lwIP 的处理、③ 末尾那次 flushTx —— 所以它与 txSendUs 有意重叠。
+        // rxDrainUs/(rxWakes+rxDrains) = 平均一次排空多贵，正是「泵里排空（f524cb5）到底是
+        // 省了延迟还是把泵自己拖慢了」的直接判据。
+        qint64 rxDrainUs;
         // —— 帧分流（LanGateway 的过滤链，回答「流量断在哪一环」）——
         qint64 fedLwip;       // 真出网、喂进用户态栈的帧
         qint64 bypassLan;     // 同网段直连旁路
