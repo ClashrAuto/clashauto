@@ -1,7 +1,9 @@
 #include "AboutController.h"
 
+#include "MmdbFile.h"
 #include "Version.h" // APP_VERSION（由 CMake configure_file 生成，QmlBridge.cpp 同款包含）
 
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -252,20 +254,18 @@ void AboutController::checkGeoip()
             if (dl->error() != QNetworkReply::NoError || data.isEmpty()) {
                 return; // 后台静默：失败就下次再试，不打扰用户
             }
-            const QStringList targets = {QDir(m_config.userDir).filePath(QStringLiteral("Country.mmdb"))};
-            bool anySaved = false;
-            for (const QString &path : targets) {
-                QDir().mkpath(QFileInfo(path).absolutePath());
-                QFile out(path);
-                if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                    out.write(data);
-                    out.close();
-                    anySaved = true;
-                }
+            // ★ 校验 + 暂存，不碰线上库（理由见 MmdbFile.h）。这条路径是**启动时静默**跑的，
+            //   一旦写坏用户完全无感 —— 真机上就是这么在 2026-07-29 09:37 把 GEOIP 弄失效的。
+            //   所以这里比手动那条更需要校验：失败只记日志、不推进版本戳，下次发布再试。
+            const QString target = QDir(m_config.userDir).filePath(QStringLiteral("Country.mmdb"));
+            QDir().mkpath(QFileInfo(target).absolutePath());
+            QString why;
+            if (!MmdbFile::stage(data, target, &why)) {
+                qWarning().noquote()
+                    << "GeoIP 静默更新：下载到的库校验不通过，已保留原有数据库 —" << why;
+                return; // 不写 lastPublished：这个版本还没成功装上，下次启动应当再试
             }
-            if (anySaved) {
-                QSettings().setValue(QStringLiteral("geoip/lastPublished"), stamp);
-            }
+            QSettings().setValue(QStringLiteral("geoip/lastPublished"), stamp);
         });
     });
 }

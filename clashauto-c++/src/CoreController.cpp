@@ -1,5 +1,7 @@
 #include "CoreController.h"
 
+#include "MmdbFile.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -327,6 +329,14 @@ void CoreController::startCore()
         QFile::copy(bundledMmdb, mmdb);
         AppConfig::makeWritable(mmdb); // qrc 种子只读；「更新 GeoIP」要覆盖它
         emit logUpdated(tr("Country.mmdb 已就位: %1").arg(mmdb));
+    }
+    // 下载来的新 GeoIP 库只被暂存成 Country.mmdb.new（下载侧绝不原地覆盖，见 MmdbFile.h）。
+    // **这里是唯一能安全换上去的时机**：核心还没起来，文件也就还没被它 mmap 住。
+    // 换之前 applyStaged 会再校验一遍，坏的直接丢弃 —— 宁可继续用旧库，也不让核心带着一份
+    // 「打得开但查什么都查不到」的 GeoIP 跑（那会让 GEOIP,CN 静默失配、国内流量集体出海）。
+    if (MmdbFile::applyStaged(mmdb)) {
+        AppConfig::makeWritable(mmdb);
+        emit logUpdated(tr("已启用新下载的 GeoIP 数据库: %1").arg(mmdb));
     }
 
 #if defined(Q_OS_WIN)

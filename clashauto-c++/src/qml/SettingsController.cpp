@@ -5,6 +5,7 @@
 #include "ConfigBuilder.h"
 #include "CoreController.h"
 #include "I18n.h"
+#include "MmdbFile.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -988,20 +989,23 @@ void SettingsController::updateGeoip()
             setMessage(QStringLiteral("GeoIP 更新失败: %1").arg(err));
             return;
         }
-        int saved = 0;
-        const QStringList targets = {QDir(cfg.userDir).filePath("Country.mmdb")};
-        for (const QString &path : targets) {
-            QDir().mkpath(QFileInfo(path).absolutePath());
-            QFile out(path);
-            if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                out.write(data);
-                out.close();
-                ++saved;
-            }
+        // ★ 先校验再落盘，且**绝不原地覆盖** —— 详见 MmdbFile.h 开头那段。这里下载走的是
+        //   applyDownloadProxy 装的代理，几 MB 的响应从代理节点上拿到半截是常事；旧写法会把
+        //   半截 body 直接盖到线上库上，而核心加载坏库既不报错也不 fatal，只是从此 GEOIP
+        //   规则全部失配 —— 国内流量集体出海，且日志里毫无痕迹。
+        const QString target = QDir(cfg.userDir).filePath("Country.mmdb");
+        QDir().mkpath(QFileInfo(target).absolutePath());
+        QString why;
+        if (!MmdbFile::stage(data, target, &why)) {
+            setGeoipStatus(QStringLiteral("更新 GeoIP"), false);
+            setMessage(QStringLiteral("GeoIP 更新失败（已保留原有数据库）: %1").arg(why));
+            return;
         }
         setGeoipStatus(QStringLiteral("更新 GeoIP"), false);
-        setMessage(QStringLiteral("GeoIP 已更新（%1 处，%2 KB），重启核心生效")
-                       .arg(QString::number(saved), QString::number(data.size() / 1024)));
+        // 说「重启核心生效」不是甩锅：mmdb 在核心里是启动时一次性加载的，原地换掉也不会被重读，
+        // 所以这里只暂存，由 CoreController 在下次启核心之前换上去（MmdbFile::applyStaged）。
+        setMessage(QStringLiteral("GeoIP 已下载并校验通过（%1 KB），重启核心生效")
+                       .arg(data.size() / 1024));
     });
 }
 

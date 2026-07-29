@@ -53,6 +53,8 @@ set(BACKEND_SOURCES
     src/CoreController.cpp   src/CoreController.h
     src/ClashService.cpp     src/ClashService.h
     src/SubParser.cpp        src/SubParser.h
+    # GeoIP 库(Country.mmdb)的校验 + 原子落盘：下载侧只暂存，CoreController 起核心前才换上去
+    src/MmdbFile.cpp         src/MmdbFile.h
     src/TrayController.cpp   src/TrayController.h
     # 设备页后端（局域网发现 + 台账；框架无关）
     src/LanScanner.cpp       src/LanScanner.h
