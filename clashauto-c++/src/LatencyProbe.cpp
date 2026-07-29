@@ -8,6 +8,8 @@
 #include <QTcpSocket>
 #include <QTimer>
 
+#include <memory>
+
 namespace {
 // 直连探测目标：公共 DNS 的 53 口。选它是因为**不需要先解析域名**（拿域名当目标的话，测到的
 // 是「DNS + 握手」，DNS 那一项就重复计了），而且它在国内外都通，端口常年开着。
@@ -89,17 +91,22 @@ void LatencyProbe::probeTcp(const QString &host, quint16 port, int *slot)
 {
     auto *sock = new QTcpSocket(this);
     sock->setProxy(QNetworkProxy::NoProxy); // 必须：否则开着系统代理时测的是到代理的延迟
-    auto *clock = new QElapsedTimer;
+    // ★ clock/done 必须是 shared_ptr，不能裸 new/delete。settle 里的 abort() 会**同步**再发一
+    //   次信号（连接还在途时 QAbstractSocket::abort 立刻发 errorOccurred；QDnsLookup::abort 同理
+    //   发 finished）→ 另一份 settle 副本被**重入**。老写法在 abort() 之前就 delete 了 done/clock，
+    //   重入那次读的是已释放内存：读到非 0 侥幸早退，读到 0 就当作「还没结算过」一路走到底，再
+    //   delete 一遍 → glibc "free(): double free detected" → 整个进程 SIGABRT。
+    //   真机实证（树莓派）：网络不通/DNS 超时时必崩，而那正是**开机那几十秒**的常态；Coast 一崩，
+    //   被代理设备的 ARP 就没人还原、也没人再转发 → 设备彻底断网。交给引用计数后谁都不用删。
+    auto clock = std::make_shared<QElapsedTimer>();
     clock->start();
-    auto *done = new bool(false);
+    auto done = std::make_shared<bool>(false);
 
     auto settle = [this, sock, clock, done, slot](int ms) {
         if (*done)
             return;
         *done = true;
         *slot = ms;
-        delete clock;
-        delete done;
         sock->abort();
         sock->deleteLater();
         finishOne();
@@ -123,17 +130,16 @@ void LatencyProbe::probeDns()
     auto *lookup = new QDnsLookup(QDnsLookup::A,
                                   QString::fromLatin1(kDnsNames[m_dnsNameIndex]), this);
     m_dnsNameIndex = (m_dnsNameIndex + 1) % kDnsNameCount;
-    auto *clock = new QElapsedTimer;
+    // 同 probeTcp：abort() 会同步再发一次 finished → 重入 settle，裸指针必然二次 delete。
+    auto clock = std::make_shared<QElapsedTimer>();
     clock->start();
-    auto *done = new bool(false);
+    auto done = std::make_shared<bool>(false);
 
     auto settle = [this, lookup, clock, done](int ms) {
         if (*done)
             return;
         *done = true;
         m_dns = ms;
-        delete clock;
-        delete done;
         lookup->abort();
         lookup->deleteLater();
         finishOne();

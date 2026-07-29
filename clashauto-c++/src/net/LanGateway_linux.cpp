@@ -57,6 +57,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <utility> // std::as_const
 
 namespace {
 // COAST_GATEWAY_DEBUG=1 → 把「收到的设备帧走到哪一步」打到 stderr（配合 L2Endpoint 的 [WINL2]
@@ -277,6 +278,11 @@ private:
     QString statePath() const;
     void persist() const;
     void clearState() const { QFile::remove(statePath()); }
+    // 状态文件 = 「当前正在劫持」∪「上次遗留、还没还原成功」。两边都空才删文件，否则重写。
+    // 所有原来写 persist()/clearState() 的地方都改走它，免得某一边把另一边的记录冲掉。
+    void saveState() const;
+    // 尝试还原 m_pendingHeal 里的遗留投毒记录；还原不了的留着，等网卡就绪后下一轮 configure 再试。
+    void healPending();
     // 把当前状态刷进 GUI 可读的快照（每次改状态后调用一次）。
     void publishSnapshot();
 
@@ -289,6 +295,10 @@ private:
     QHash<quint64, qint64> m_lastSeenMs;     // src MAC 打包键 → 上次见到该 victim 帧的时刻（唤醒沿检测）
     QHash<quint64, QString> m_victimUserByMac; // src MAC 打包键 → mihomo 身份 user（v6 学习时补登记要用）
     QHash<quint64, QSet<QString>> m_victimV6ByMac; // src MAC 打包键 → 已学到并登记的设备 v6 地址集（去重/回收）
+    // 上次异常退出遗留、**尚未还原成功**的投毒记录（每项自带 ifname/localMac/gatewayIp/gatewayMac/
+    // routerLL6/routerMac6，与状态文件里的对象同形）。开机那一刻网卡常常还没就绪，一次还原打空是
+    // 常态；留在这里 + 写回状态文件，等 configureLocal 拿到就绪网卡后重试，直到真的还原掉。
+    QVector<QJsonObject> m_pendingHeal;
     void learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame); // 从设备 v6 帧学它的地址
     // 从线上观察到的 RA 学 v6 路由器（不依赖本机 accept_ra / 路由表）。详见实现处的说明。
     void learnRouterFromRa(GwNic *n, const QByteArray &frame);
@@ -471,6 +481,10 @@ void GatewayWorker::persist() const
         }
         arr.append(o);
     }
+    // 还没还原成功的遗留记录一并写回：它们已经不在 m_victimMacStr 里，但设备的 ARP 仍指着本机，
+    // 漏掉的话这次再被杀就彻底失联了（本进程还没来得及还原就没人知道要还原谁）。
+    for (const QJsonObject &o : m_pendingHeal)
+        arr.append(o);
     QJsonObject root;
     root["victims"] = arr;
     QFile f(statePath());
@@ -478,6 +492,14 @@ void GatewayWorker::persist() const
         f.write(QJsonDocument(root).toJson(QJsonDocument::Compact));
         f.close();
     }
+}
+
+void GatewayWorker::saveState() const
+{
+    if (m_victimMacStr.isEmpty() && m_pendingHeal.isEmpty())
+        clearState();
+    else
+        persist();
 }
 
 void GatewayWorker::publishSnapshot()
@@ -802,6 +824,10 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         delete n;
     }
 
+    // 网卡就绪状态刚刷新过 → 顺手重试一次「上次遗留、还没还原成功」的投毒记录（开机第一发常
+    // 因为网卡/WiFi 没就绪而打空，这里是它的重试点）。没有遗留时是个空调用。
+    healPending();
+
     publishSnapshot();
 }
 
@@ -829,6 +855,16 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
             *err = QStringLiteral("该设备不在任何已就绪网卡的网段内");
         return false;
     }
+    // ★ 网关 MAC 还没解析出来（ArpSpoofer 未 configure）时**必须失败**。
+    //   ArpSpoofer::startSpoof 在未配置时是**静默 no-op**：一帧毒都不发。这里若照常返回 true，
+    //   这台设备就进了 activeDevices()，而 DevicesController::resumeProxies 见「已在劫持且 IP 没变」
+    //   就直接跳过 —— 再也不会重试。结果是 UI 显示「代理中」、实际走的是直连（重启后首轮扫描时
+    //   ARP 表里往往还没有网关 MAC，最容易踩）。宁可报错，让上层每轮扫描重试到拓扑齐了为止。
+    if (!n->arp || !n->arp->configured()) {
+        if (err)
+            *err = QStringLiteral("网关 MAC 尚未解析，稍后自动重试");
+        return false;
+    }
 
     m_net->addDevice(ip, mb, socksUser);
     n->arp->startSpoof(mac, ip);
@@ -843,7 +879,7 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     m_victimNic.insert(ip, n->spec.ifname);
     m_victimUserByMac.insert(vkey, socksUser); // v6 学习登记时补 mihomo 身份要用
     pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
-    persist();
+    saveState();
     publishSnapshot();
     emit statusChanged();
     return true;
@@ -884,10 +920,7 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     m_victimV6ByMac.remove(key);
     if (n)
         pushMacFilter(n); // 该卡移除一台设备：重推内核过滤（可能变回「全丢」）
-    if (m_victimMacStr.isEmpty())
-        clearState();
-    else
-        persist();
+    saveState();
     publishSnapshot();
     emit statusChanged();
 }
@@ -922,7 +955,7 @@ void GatewayWorker::disableAllLocal()
     // 所有设备清空后，每张卡都重推（现在集合都空了 → 全部装「全丢」，收方彻底静默）。
     for (GwNic *n : m_nics)
         pushMacFilter(n);
-    clearState();
+    saveState(); // 还有没还原成功的遗留记录时不能删状态文件（下次启动还要靠它）
     publishSnapshot();
     emit statusChanged();
 }
@@ -939,46 +972,119 @@ void GatewayWorker::recoverLocal()
         clearState();
         return;
     }
-    // 用上次留下的网卡/网关信息，给这些设备发还原 ARP（先修复被投毒的缓存，避免设备断网）。
-    // 在工作线程上开临时端点、healAll——纯 send，不需要跑事件循环。端点 parent=worker、也在工作线程析构。
-    QHash<QString, QVector<QJsonObject>> byIface;
+    // 先把记录**展平**（缺的字段从 root 兜底补齐），此后每条都自带完整拓扑，可以脱离 root 重试。
+    static const char *kTopoKeys[] = {"ifname",   "localMac",  "gatewayIp",
+                                      "gatewayMac", "routerLL6", "routerMac6"};
+    m_pendingHeal.clear();
     for (const QJsonValue &v : victims) {
-        const QJsonObject o = v.toObject();
-        const QString ifn = o.contains("ifname") ? o["ifname"].toString()
-                                                 : root["ifname"].toString();
-        byIface[ifn].append(o);
+        QJsonObject o = v.toObject();
+        for (const char *k : kTopoKeys) {
+            if (!o.contains(k) && root.contains(k))
+                o[k] = root[k];
+        }
+        if (o["mac"].toString().isEmpty() || o["ifname"].toString().isEmpty())
+            continue; // 没有 MAC/网卡名 = 永远还原不了，别留着无限重试
+        m_pendingHeal.append(o);
     }
+    healPending();
+}
+
+// 尝试还原上次遗留的投毒记录。**还原不掉的绝不丢弃**——开机那一刻 WiFi 常常还没关联、网卡/Npcap
+// 驱动还没就绪，这一发很容易打空；老代码无论成败都 clearState()，等于把「谁被投毒了」这份唯一的
+// 记录扔掉，被劫持设备就会一直把网关指着本机 MAC（本机又不再转发）→ 连直连都断，只能等两侧邻居
+// 缓存老化。现在留在 m_pendingHeal + 状态文件里，每次 configureLocal（每轮扫描）都重试一次。
+void GatewayWorker::healPending()
+{
+    if (m_pendingHeal.isEmpty())
+        return;
+
+    QHash<QString, QVector<QJsonObject>> byIface;
+    for (const QJsonObject &o : std::as_const(m_pendingHeal)) {
+        // 这台设备现在又被我们正常劫持着 → 旧记录作废：再 heal 就把刚投的毒解掉了。
+        const QByteArray mb = macBytes(o["mac"].toString());
+        if (!mb.isEmpty() && m_victimByMac.contains(macKey(mb)))
+            continue;
+        byIface[o["ifname"].toString()].append(o);
+    }
+
+    QVector<QJsonObject> left;
     for (auto it = byIface.constBegin(); it != byIface.constEnd(); ++it) {
         const QString ifname = it.key();
-        if (ifname.isEmpty())
-            continue;
         const QVector<QJsonObject> &group = it.value();
         const QJsonObject &first = group.constFirst();
-        const auto field = [&](const char *k) {
-            return first.contains(k) ? first[k].toString() : root[k].toString();
+        GwNic *n = m_nics.value(ifname);
+        // 拓扑取用：状态文件优先，**缺的用这张卡当前的拓扑兜底**。网关 MAC 是扫描几轮后才解析出来
+        // 的，上次退出时若还没解析到，文件里就是空的——只认文件的话这条记录永远还原不了、永远重试。
+        const auto field = [&](const char *k) -> QString {
+            const QString v = first[k].toString();
+            if (!v.isEmpty() || !n)
+                return v;
+            if (std::strcmp(k, "localMac") == 0)
+                return n->spec.localMac;
+            if (std::strcmp(k, "gatewayIp") == 0)
+                return n->spec.gatewayIp;
+            if (std::strcmp(k, "gatewayMac") == 0)
+                return n->spec.gatewayMac;
+            if (std::strcmp(k, "routerLL6") == 0)
+                return n->effectiveRouterLL6();
+            if (std::strcmp(k, "routerMac6") == 0)
+                return n->effectiveRouterMac6();
+            return v;
         };
-        IL2Endpoint *ep = createL2Endpoint(this);
-        if (ep && ep->open(ifname, nullptr)) {
-            ArpSpoofer healer(ep, this);
-            healer.configure(field("localMac"), field("gatewayIp"), field("gatewayMac"));
-            // v6 也要还原：上次投毒过设备的 v6 邻居缓存，不还原同样会让设备 v6 断网。routerLL6 为空
-            //（上次没有 v6 拓扑）→ NdpSpoofer no-op，heal 自然跳过。routerMac6 缺则回落 gatewayMac。
-            NdpSpoofer ndpHealer(ep, this);
-            const QString rmac6 = field("routerMac6").isEmpty() ? field("gatewayMac")
-                                                                : field("routerMac6");
-            ndpHealer.configure(field("localMac"), field("routerLL6"), rmac6);
+        // 这张卡已经开着就直接复用它的端点（省一次 pcap/AF_PACKET 打开，也避开同卡双开的坑）；
+        // 否则临时开一个。临时端点在工作线程上开、也在工作线程上同步销毁（constraint 4/9）。
+        IL2Endpoint *ep = nullptr;
+        bool temporary = false;
+        if (n && n->ready && n->ep && n->ep->isOpen()) {
+            ep = n->ep;
+        } else if (!m_nics.isEmpty() && !n) {
+            // 已经配置过网卡了，而这张卡不在其中 = 它当前根本不存在（拔了/改名了）。别每轮扫描都
+            // 去试开一次（那是白白的系统调用/pcap 打开）。记录留着：卡回来了自然会走上面那条分支。
+            left += group;
+            continue;
+        } else {
+            ep = createL2Endpoint(this);
+            if (ep && !ep->open(ifname, nullptr)) {
+                delete ep;
+                ep = nullptr;
+            }
+            temporary = ep != nullptr;
+        }
+        if (!ep) {
+            left += group; // 这张卡还没就绪：留着下轮再试，**不**清记录
+            continue;
+        }
+        ArpSpoofer healer(ep, this);
+        healer.configure(field("localMac"), field("gatewayIp"), field("gatewayMac"));
+        // v6 也要还原：上次投毒过设备的 v6 邻居缓存，不还原同样会让设备 v6 断网。routerLL6 为空
+        //（上次没有 v6 拓扑）→ NdpSpoofer no-op，heal 自然跳过。routerMac6 缺则回落 gatewayMac。
+        NdpSpoofer ndpHealer(ep, this);
+        const QString rmac6 = field("routerMac6").isEmpty() ? field("gatewayMac")
+                                                            : field("routerMac6");
+        ndpHealer.configure(field("localMac"), field("routerLL6"), rmac6);
+        // 网关 MAC 没记下来（老版本状态文件 / 上次也没解析出来）→ healer 未配置，stopSpoof 是
+        // 静默 no-op，等于**没还原**。这种也要留着重试：下一轮扫描后拓扑就有了。
+        const bool healable = healer.configured();
+        if (healable) {
             for (const QJsonObject &o : group) {
                 healer.startSpoof(o["mac"].toString(), o["ip"].toString());
                 healer.stopSpoof(o["mac"].toString()); // startSpoof 建档、stopSpoof 立刻 heal
                 ndpHealer.startSpoof(o["mac"].toString());
                 ndpHealer.stopSpoof(o["mac"].toString());
             }
+        } else {
+            left += group;
         }
-        // 同步 delete（工作线程上），把临时端点的通知器一并在本线程销毁；不用 deleteLater 免得
-        // 悬到不确定时点。healer 是栈对象，其析构再 healAll 一次（集合已空 → no-op）。
-        delete ep;
+        if (temporary)
+            delete ep; // 同步 delete（工作线程上），通知器随之销毁；不用 deleteLater 免得悬到不确定时点
+        if (gwDbgOn())
+            std::fprintf(stderr, "[GW] healPending %s: %d 台 %s\n", ifname.toLatin1().constData(),
+                         int(group.size()), healable ? "已还原" : "延后重试"),
+                std::fflush(stderr);
     }
-    clearState();
+
+    m_pendingHeal = left;
+    saveState();
 }
 
 void GatewayWorker::teardownLocal()

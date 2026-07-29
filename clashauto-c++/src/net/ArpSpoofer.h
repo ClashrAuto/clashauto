@@ -63,6 +63,11 @@ public:
 
     QStringList victims() const; // 当前被劫持的 victim MAC 列表
 
+    // 本机/网关信息是否齐备且合法。**未配置时 startSpoof/heal 全是静默 no-op** —— 调用方（
+    // LanGateway 的 enableDevice）必须先问这一句再决定「劫持是否真的上了」，否则会把「一帧毒都
+    // 没发」当成劫持成功，设备就卡在「UI 显示代理中、实际走直连、而且再也不重试」的状态。
+    bool configured() const;
+
 private:
     struct Target {
         QByteArray mac; // 6 字节
@@ -74,7 +79,6 @@ private:
     void sendSpoof(const Target &t); // 给一个 victim 发欺骗 ARP（(a)reply+(a2)request 给 victim +(b)给网关）
     // 给一个 victim 发数遍正确 ARP：gatewayIp is-at gatewayMac（给 victim）、victimIp is-at victimMac（给网关）。
     void healOne(const QByteArray &victimMac, const QByteArray &victimIp);
-    bool configured() const;     // 本机/网关信息是否齐备且合法
     bool hasVictimMac(const QByteArray &mac6) const; // 6 字节 MAC 是否仍在被劫持集合里（延迟连发前复核）
 
     static QByteArray macToBytes(const QString &); // "aa:bb:.." → 6 字节（非法返回空）

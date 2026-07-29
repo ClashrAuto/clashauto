@@ -58,6 +58,17 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
         // 邻居安全监视：ArpWatch 检测到「有人代理本机 / 抢我劫持的设备」→ 横幅 + 徽标 + 托盘。
         connect(m_gateway, &LanGateway::securityAlert, this, &DevicesController::onSecurityAlert);
     }
+    // ★ 内核是被劫持设备的**唯一出口**。投毒一旦上了，设备的每个包（包括最终会命中 DIRECT 规则的
+    //   那些）都必须走 lwIP → SOCKS 127.0.0.1:7899 → mihomo 才出得去——它没有「绕过我们直连」这条
+    //   路，因为本机就是它的默认网关。所以内核没起来/挂了却还劫持着 = 该设备**彻底断网，连直连都断**。
+    //   规则：内核不在跑就不上劫持（resumeProxies 开头拦掉）；跑起来了立刻补上；停了/崩了立刻全撤，
+    //   让设备的 ARP 还原回真网关、掉回真直连。
+    if (m_core) {
+        m_coreUp = m_core->isRunning();
+        connect(m_core, &CoreController::statusChanged, this,
+                [this](bool, bool, bool core) { onCoreRunningChanged(core); });
+    }
+
     m_secClock.start();
     m_secTimer = new QTimer(this);
     m_secTimer->setInterval(30000); // 30s 巡检一次，把停了的威胁清出横幅/徽标
@@ -107,10 +118,41 @@ bool DevicesController::hasProxiedDevices() const
     return false;
 }
 
+void DevicesController::onCoreRunningChanged(bool up)
+{
+    if (up == m_coreUp)
+        return;
+    m_coreUp = up;
+    if (!up) {
+        // 内核停了/崩了：立刻撤销全部劫持并还原 ARP。台账里的「代理网络」开关**不动**——它是持久
+        // 意图，内核回来时 resumeProxies 会自动补上。宁可让设备掉回真直连，也不能把它悬在一个
+        // 没有出口的劫持里（那是彻底断网，比不代理糟得多）。
+        if (m_gateway && !m_gateway->activeDevices().isEmpty()) {
+            m_gateway->disableAll();
+            m_armedIp.clear();
+            emit gatewayError(QStringLiteral("核心已停止，已暂时撤销设备代理（设备恢复直连）"));
+        }
+        m_resumeErr.clear();
+        return;
+    }
+    // 内核回来了：不必等下一轮扫描，立刻用现有拓扑把劫持补回去。首轮扫描之前拓扑还是空的
+    //（网关都没配置），这时候试只会白报一句「网关未就绪」——交给 onDiscovered 那次就行。
+    if (m_firstScanDone)
+        resumeProxies();
+}
+
 void DevicesController::resumeProxies()
 {
     if (!m_gateway)
         return;
+    // ★ 内核不在跑就一台都不上（见构造函数里那段说明）。开关仍然开着，等 onCoreRunningChanged
+    //   在内核起来时补。少了这道门禁，开机时序（劫持 2s 就绪、内核可能还在加载 rule-provider，
+    //   或正等 TUN 的 UAC 确认）就会把设备劫持到一个空出口上，表现为「重启后设备全网断」。
+    if (m_core && !m_core->isRunning()) {
+        if (qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG"))
+            std::fprintf(stderr, "[RESUME] 内核未运行，本轮不上劫持\n"), std::fflush(stderr);
+        return;
+    }
     const QStringList active = m_gateway->activeDevices();
     for (const DeviceRecord &d : m_store->devices()) {
         if (!d.proxyEnabled || !d.proxyable() || !d.online || d.ip.isEmpty())
@@ -120,8 +162,25 @@ void DevicesController::resumeProxies()
             continue; // 已在劫持，且还是同一个 IP —— 无事可做
         if (armed)
             m_gateway->disableDevice(d.mac); // IP 变了：按旧 IP 的劫持早已无效，拆了重上
+        // 真正上第一台之前补一次配置重生成：full.yaml 里的 coast-gateway listener(7899) + 每设备
+        // IN-USER 规则是 ConfigBuilder 从 coast.db 读出来生成的。内核若是在设备开关落库**之前**
+        // 起来的（或用的是一份旧 full.yaml），那份配置里根本没有网关口 → 拨 7899 直接被拒 → 设备
+        // 全断。每会话只做一次，避免每轮扫描都热重载。
+        if (!m_resumeConfigSynced && m_core) {
+            m_resumeConfigSynced = true;
+            m_core->rebuildConfig();
+        }
         QString err;
-        if (m_gateway->enableDevice(d.mac, d.ip, DeviceStore::socksUser(d.mac), &err)) {
+        const bool ok = m_gateway->enableDevice(d.mac, d.ip, DeviceStore::socksUser(d.mac), &err);
+        // 恢复劫持的成败在 headless（网关联调、树莓派）下**没有任何出口**——gatewayError 只连到
+        // 设备页的浮动提示。一行 stderr，定位「重启后没接上代理」时这是唯一凭据。
+        if (qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG")) {
+            std::fprintf(stderr, "[RESUME] %s ip=%s -> %s%s\n", d.mac.toUtf8().constData(),
+                         d.ip.toUtf8().constData(), ok ? "armed" : "FAILED: ",
+                         ok ? "" : err.toUtf8().constData());
+            std::fflush(stderr);
+        }
+        if (ok) {
             m_armedIp.insert(d.mac, d.ip);
             m_resumeErr.remove(d.mac);
         } else {

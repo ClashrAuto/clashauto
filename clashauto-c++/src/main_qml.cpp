@@ -53,6 +53,74 @@
 #include <unistd.h>
 #endif
 
+#if defined(Q_OS_WIN)
+#include <QAbstractNativeEventFilter>
+#include <functional>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+namespace {
+// —————————————— 关机/注销时的可靠清理（Windows 上 aboutToQuit 的补强）——————————————
+// Unix 有上面那套 SIGTERM 自管道兜底，Windows 什么都没有：全靠 Qt 在收到 **WM_ENDSESSION** 时
+// 同步 emit aboutToQuit。可那已经是「所有程序都同意关机之后」的最后一刻，系统随时可能直接把进程
+// 干掉；漏一次的代价很实在：
+//   · LanGateway::disableAll 没跑 → 被代理设备的网关 ARP 一直指着本机 MAC，而本机重启后既没在
+//     转发、也没人还原 → 那台设备**彻底断网（连直连都断）**，只能等两侧邻居缓存老化；
+//   · stopCore 没跑 → WinINET 系统代理留在 127.0.0.1:7890，重启后内核起来之前整机都连不上。
+// 所以把清理提前到 **WM_QUERYENDSESSION**（系统征询阶段，早于 WM_ENDSESSION，有几秒预算）。
+// 分两档，因为征询阶段的关机**有可能被别的程序取消**：
+//   early —— 还原 ARP/NDP + 落盘。全都能自愈：万一关机取消了，下一轮扫描 resumeProxies 会把
+//            劫持重新上回去，落盘更是无害。
+//   late  —— 停核心 + 还原系统代理。只在 WM_ENDSESSION(wParam=TRUE)「确定要关了」时才做，免得
+//            关机被取消后用户的代理莫名其妙没了。
+// 两档都幂等，之后 Qt 的 aboutToQuit 链再跑一遍无害。返回 false = 不拦截，交回 Qt 默认处理。
+class WinSessionEndFilter final : public QAbstractNativeEventFilter
+{
+public:
+    WinSessionEndFilter(std::function<void()> early, std::function<void()> late)
+        : m_early(std::move(early)), m_late(std::move(late))
+    {
+    }
+
+    bool nativeEventFilter(const QByteArray &, void *message, qintptr *) override
+    {
+        const MSG *msg = static_cast<const MSG *>(message);
+        if (!msg)
+            return false;
+        if (msg->message == WM_QUERYENDSESSION) {
+            runEarly();
+        } else if (msg->message == WM_ENDSESSION && msg->wParam) {
+            runEarly();
+            if (!m_lateDone) {
+                m_lateDone = true;
+                // 纯 ASCII：Windows 控制台/重定向文件是 GBK，中文会变成乱码（实测）。
+                std::fprintf(stderr, "[SESSION] WM_ENDSESSION: stop core + restore system proxy\n");
+                std::fflush(stderr);
+                m_late();
+            }
+        }
+        return false;
+    }
+
+private:
+    void runEarly()
+    {
+        if (m_earlyDone)
+            return;
+        m_earlyDone = true;
+        // 一行日志，一次会话最多两行：现场排查「关机那次到底还原没还原」时这就是唯一凭据。
+        std::fprintf(stderr, "[SESSION] WM_QUERYENDSESSION: restore device ARP + flush stores\n");
+        std::fflush(stderr);
+        m_early();
+    }
+    std::function<void()> m_early, m_late;
+    bool m_earlyDone = false, m_lateDone = false;
+};
+} // namespace
+#endif
+
 int main(int argc, char *argv[])
 {
     QApplication app(argc, argv);
@@ -491,6 +559,18 @@ int main(int argc, char *argv[])
 
     // 退出时停核心、还原系统代理（对齐 Widgets 版 aboutToQuit）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, core, &CoreController::stopCore);
+
+#if defined(Q_OS_WIN)
+    // 关机/注销：别等 Qt 在 WM_ENDSESSION 里 emit aboutToQuit（见文件顶部 WinSessionEndFilter 的
+    // 说明）。early 在 WM_QUERYENDSESSION 就跑，把「漏了会让别人断网」的还原动作做掉。
+    app.installNativeEventFilter(new WinSessionEndFilter(
+        [lanGateway, deviceStore, history] {
+            lanGateway->disableAll(); // 同步：返回时还原 ARP/NDP 的帧已经写到网卡上
+            deviceStore->save();
+            history->flush(true);
+        },
+        [core] { core->stopCore(); }));
+#endif
 
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty("bridge", &bridge);

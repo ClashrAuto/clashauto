@@ -137,6 +137,8 @@ private:
     qint64 m_totalRateUp = 0, m_totalRateDown = 0;
 
     void onDeviceAdded(const QString &mac); // store.deviceAdded → 首轮后发提醒
+    // 内核起停 → 劫持跟着上/撤（被劫持设备的唯一出口就是内核，见 .cpp 里的说明）。
+    void onCoreRunningChanged(bool up);
 
     // —— 邻居安全监视（ArpWatch → LanGateway::securityAlert）——
     void onSecurityAlert(int kind, const QString &offenderMac, const QString &subjectIp,
@@ -175,6 +177,10 @@ private:
     QHash<QString, QString> m_armedIp;
     // mac → 上次自动恢复劫持失败的原因。resumeProxies 每轮都会重试，同一条只提示一次。
     QHash<QString, QString> m_resumeErr;
+    // 内核在不在跑（CoreController::statusChanged 的第三个参数）。劫持只在它为真时上。
+    bool m_coreUp = false;
+    // 本会话是否已为「恢复劫持」补过一次配置重生成（full.yaml 的 coast-gateway listener/IN-USER）。
+    bool m_resumeConfigSynced = false;
     // 上次全量扫描的时刻：进页面时用它去抖，避免来回切导航反复触发重扫（scan() 里 restart）。
     QElapsedTimer m_lastScan;
     static constexpr int kRescanMinIntervalMs = 30000;
