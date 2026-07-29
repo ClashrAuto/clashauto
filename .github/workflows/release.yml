@@ -74,10 +74,23 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install aqtinstall
-          if ("${{ matrix.arch }}" -eq "arm64") {
-            python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -O C:\Qt
+          # aqt 偶发拉包失败（下载源抖动）——之前 arm64 job 两次挂在这里都是它，且失败方式很差：
+          # 装不上不当场报，一路拖到三分钟后的 Configure 才以 "QT_HOST_PATH not set" 报出来。
+          # 包一个带重试的 helper，装不上就当场硬失败，别让后面的步骤替它背锅。
+          function Aqt([string[]]$aqtArgs) {
+            for ($i = 1; $i -le 3; $i++) {
+              python -m aqt install-qt @aqtArgs
+              if ($LASTEXITCODE -eq 0) { return }
+              Write-Host "aqt 第 $i 次失败（exit=$LASTEXITCODE），重试..."
+              Start-Sleep -Seconds 10
+            }
+            throw "aqt install-qt 三次均失败: $($aqtArgs -join ' ')"
           }
-          python -m aqt install-qt windows desktop $env:QT_VERSION ${{ matrix.qt_arch }} -O C:\Qt
+          if ("${{ matrix.arch }}" -eq "arm64") {
+            # arm64 是交叉编译，必须先装宿主(x64) Qt 供 QT_HOST_PATH 用。
+            Aqt @("windows","desktop","$env:QT_VERSION","win64_msvc2022_64","-O","C:\Qt")
+          }
+          Aqt @("windows","desktop","$env:QT_VERSION","${{ matrix.qt_arch }}","-O","C:\Qt")
           $qtRoot = Get-ChildItem "C:\Qt\$env:QT_VERSION" -Directory |
             Where-Object {
               (Test-Path (Join-Path $_.FullName "bin\qmake.exe")) -or
@@ -98,6 +111,11 @@ jobs:
           $hostQtRoot = Get-ChildItem "C:\Qt\$env:QT_VERSION" -Directory |
             Where-Object { $_.Name -notlike "*arm64*" -and (Test-Path (Join-Path $_.FullName "bin\windeployqt.exe")) } |
             Select-Object -First 1 -ExpandProperty FullName
+          # arm64 交叉编译**必须**有宿主 Qt（CMakeLists 的 find_package 要 QT_HOST_PATH）。
+          # 之前这里是静默的 if：装不上就跳过，把失败推给三分钟后的 Configure。改成当场硬失败。
+          if ("${{ matrix.arch }}" -eq "arm64" -and -not $hostQtRoot) {
+            throw "arm64 交叉编译缺宿主 Qt（win64_msvc2022_64 没装上）——QT_HOST_PATH 无从设置"
+          }
           if ($hostQtRoot) {
             "QT_HOST_ROOT=$hostQtRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }

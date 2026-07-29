@@ -445,6 +445,92 @@ void LanScanner::detectIpv6Topology()
             }
         }
     }
+#elif defined(Q_OS_WIN)
+    // Windows：用 IP Helper 的 GetIpForwardTable2 取每张网卡的 v6 默认路由器链路本地地址，
+    // 再用 GetIpNetTable2（v6 邻居表）查它的 MAC。等价于 Linux 那边的 `ip -6 route` + `ip -6 neigh`。
+    //
+    // 为什么非补这一段不可：之前整个函数只在 Q_OS_LINUX 下有实现，Windows 上是空的 —— 于是
+    // NicSpec 的 routerLinkLocal6/routerMac6 恒空，effectiveRouterLL6() 只能回落到「从线上 RA
+    // 学到的」，可 RA 是路由器发的组播、常被网关的源 MAC BPF 过滤挡在内核外。两条路都断，
+    // NdpSpoofer 永久 no-op —— 真机实证：被代理的 Android 其 v6 网关仍指着真路由器，v6 流量
+    // 完全绕过代理（而现代 App 大量优先走 v6，表现就是「开了代理却像没生效」）。
+    {
+        // (a) v6 默认路由（DestinationPrefix 长度 0）的下一跳链路本地地址，按接口 LUID 归拢。
+        PMIB_IPFORWARD_TABLE2 rt = nullptr;
+        if (GetIpForwardTable2(AF_INET6, &rt) == NO_ERROR && rt) {
+            for (ULONG i = 0; i < rt->NumEntries; ++i) {
+                const MIB_IPFORWARD_ROW2 &r = rt->Table[i];
+                if (r.DestinationPrefix.PrefixLength != 0)
+                    continue; // 只要默认路由
+                const IN6_ADDR &nh = r.NextHop.Ipv6.sin6_addr;
+                // 下一跳必须是链路本地（fe80::/10）—— NDP 投毒的目标就是它。
+                if (!(nh.u.Byte[0] == 0xFE && (nh.u.Byte[1] & 0xC0) == 0x80))
+                    continue;
+                wchar_t name[IF_MAX_STRING_SIZE + 1] = {0};
+                if (ConvertInterfaceLuidToNameW(&r.InterfaceLuid, name, IF_MAX_STRING_SIZE) != NO_ERROR)
+                    continue;
+                const QString dev = QString::fromWCharArray(name);
+                char buf[46] = {0};
+                if (!InetNtopA(AF_INET6, &nh, buf, sizeof buf))
+                    continue;
+                const QString ll = QString::fromLatin1(buf);
+                // f.name 在 Windows 上就是 QNetworkInterface::name()（= LUID 名，见 detectLocalTopology）。
+                for (LocalIface &f : m_physIfaces)
+                    if (f.name == dev && f.gatewayLL6.isEmpty())
+                        f.gatewayLL6 = ll;
+            }
+            FreeMibTable(rt);
+        }
+        // (b) v6 邻居表查路由器 LL 的 MAC。
+        PMIB_IPNET_TABLE2 nb = nullptr;
+        if (GetIpNetTable2(AF_INET6, &nb) == NO_ERROR && nb) {
+            for (ULONG i = 0; i < nb->NumEntries; ++i) {
+                const MIB_IPNET_ROW2 &row = nb->Table[i];
+                if (row.PhysicalAddressLength != 6)
+                    continue;
+                // ★ 跳过全零 MAC：邻居表里同一个 LL 常有多条记录，INCOMPLETE/STALE 的表项
+                //   PhysicalAddress 是 00:00:00:00:00:00。拿它当路由器 MAC 会让 NDP 投毒指向
+                //   一个不存在的地址（真机 GetIpNetTable2 实测：真路由器那条 MAC 正确，但同一
+                //   LL 还夹着七八条全零记录）。只认非零的那条。
+                bool allZero = true;
+                for (int b = 0; b < 6; ++b)
+                    if (row.PhysicalAddress[b] != 0) { allZero = false; break; }
+                if (allZero)
+                    continue;
+                char buf[46] = {0};
+                if (!InetNtopA(AF_INET6, &row.Address.Ipv6.sin6_addr, buf, sizeof buf))
+                    continue;
+                const QString addr = QString::fromLatin1(buf);
+                QString mac;
+                for (int b = 0; b < 6; ++b)
+                    mac += QString::asprintf(b ? ":%02x" : "%02x", row.PhysicalAddress[b]);
+                for (LocalIface &f : m_physIfaces)
+                    if (f.gatewayMac6.isEmpty() && !f.gatewayLL6.isEmpty()
+                        && f.gatewayLL6.compare(addr, Qt::CaseInsensitive) == 0)
+                        f.gatewayMac6 = mac;
+            }
+            FreeMibTable(nb);
+        }
+    }
+    // (c) 本机全局 v6 + 前缀：QNetworkInterface 已有，直接取（省一次系统调用）。
+    for (const QNetworkInterface &iface : QNetworkInterface::allInterfaces()) {
+        for (LocalIface &f : m_physIfaces) {
+            if (f.name != iface.name())
+                continue;
+            for (const QNetworkAddressEntry &e : iface.addressEntries()) {
+                const QHostAddress ip = e.ip();
+                if (ip.protocol() != QAbstractSocket::IPv6Protocol)
+                    continue;
+                const Q_IPV6ADDR raw = ip.toIPv6Address();
+                if ((raw[0] & 0xE0) != 0x20) // 只要全局单播 2000::/3
+                    continue;
+                if (f.global6.isEmpty())
+                    f.global6 = ip.toString();
+                if (f.prefix6.isEmpty() && e.prefixLength() > 0)
+                    f.prefix6 = ip.toString() + QStringLiteral("/") + QString::number(e.prefixLength());
+            }
+        }
+    }
 #endif
 }
 
