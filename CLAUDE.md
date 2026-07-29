@@ -32,7 +32,7 @@ cmake --build build-ninja
 .\build-ninja\Coast.exe          # OUTPUT_NAME is "Coast" on Windows (was clashauto.exe)
 ```
 
-`find_package(Qt6 … Widgets Network Qml Quick QuickControls2)`. `AUTOMOC`/`AUTORCC`/`AUTOUIC` are on, so new `Q_OBJECT` classes and `.qrc`/`.qml` changes are picked up — but **new `.cpp` files must be added by hand** to `CMakeLists.txt` (`BACKEND_SOURCES` / `QML_GLUE_SOURCES`), and new `.qml` files to the `qt_add_qml_module(... QML_FILES ...)` list. Build dirs (`build-*`) are gitignored.
+`find_package(Qt6 … Widgets Network Qml Quick QuickControls2)`. `AUTOMOC`/`AUTORCC`/`AUTOUIC` are on, so new `Q_OBJECT` classes and `.qrc`/`.qml` changes are picked up — but **new `.cpp` files must be added by hand** to `CMakeLists.txt` (`BACKEND_SOURCES` / `QML_GLUE_SOURCES`), and new `.qml` files to the `qt_add_qml_module(... QML_FILES ...)` list. Build dirs: only `build-ninja/`, `build-qml/`, `build-release/` are in `.gitignore` — there is **no `build-*` wildcard**, so any other build dir you create shows up as untracked.
 
 ## Verifying a release — `validate/`
 
@@ -93,6 +93,9 @@ Product is **Coast**; names follow each platform's convention:
 ## Releases & CI (`.github/workflows/release.yml`)
 
 - Version **auto-increments per commit**: `major.minor` from `project(... VERSION x.y.z)` in `CMakeLists.txt` + git commit count (`git rev-list --count HEAD`) → `major.minor.<count>`, tag `v<version>` (hence `fetch-depth: 0`). `APP_VERSION` → CMake `configure_file` → `Version.h` → shown in-app (sidebar `Ver:` + About).
-- **Any push to `master`/`main`** builds + publishes a GitHub Release: Windows x64/arm64 (portable zip + NSIS setup), Linux x64/arm64 (tar.gz/zip + `.deb`), macOS universal DMG (via schat.build). PRs build artifacts but don't publish.
+- **Every push to any branch** builds + publishes a GitHub Release: Windows x64/arm64 (portable zip + NSIS setup), Linux x64/arm64 (tar.gz/zip + `.deb`), macOS universal DMG (via schat.build). PRs build artifacts but don't publish.
+  - `master`/`main` → **stable** release, tag `v<version>`, `make_latest: true`.
+  - any other branch → **prerelease**, tag `v<version>-beta.<sha7>` (the sha7 only disambiguates two branches landing on the same commit count; `APP_VERSION` itself stays purely numeric because asset filenames and the in-app version compare depend on it), release name `Clash Auto <ver> (beta · <branch>)`, `make_latest: false`. **No macOS DMG** — `trigger-mac` stays master/main-only, because the external signer clobbers the DMG onto the release it targets and a beta run would overwrite the stable one.
+  - The app's **`beta` setting** (`config.yaml`, Settings → 程序更新 → 接收测试版, default off) decides whether prereleases are visible: `AboutController::check()` (the update badge) skips them when off, and `UpdateWindow.qml` picks `UpdateController`'s release vs beta channel from it. Note `/releases/latest` excludes prereleases by GitHub's own definition — that's why the check reads the full `/releases` list and filters itself.
 - **Self-contained CI** — no Clashr-Auto download/staging; the package is just the exe + Qt runtime (resources embedded in the exe, core downloaded in-app). `windeployqt` runs with **`--no-opengl-sw --no-system-d3d-compiler`** to drop ~24 MB of fallback DLLs — still fine after the move to the D3D11 RHI backend: WARP ships with Windows (no `opengl32sw.dll` needed unless Qt falls back to the OpenGL RHI), and Qt Quick's shaders are pre-compiled (no runtime `d3dcompiler_47.dll`). If a GPU-less machine ever fails to start, that pairing is the first thing to re-check.
 - Windows CI = **MSVC (VS 17 2022)**; Linux CI = Ninja + aqt Qt6 (bundled into the package, RPATH `$ORIGIN/lib`); macOS = aqt universal Qt6. ARM64 Windows is a cross-compile (`-DQT_HOST_PATH`).

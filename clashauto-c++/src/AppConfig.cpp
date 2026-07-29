@@ -106,6 +106,7 @@ AppConfig AppConfigLoader::load()
     config.autoTheme = boolFromYaml(yaml, "autoTheme", config.autoTheme);
     config.autoLanguage = boolFromYaml(yaml, "autoLanguage", config.autoLanguage);
     config.mirror = boolFromYaml(yaml, "mirror", config.mirror);
+    config.receiveBeta = boolFromYaml(yaml, "beta", config.receiveBeta);
     config.language = valueFromYaml(yaml, "language", config.language);
     config.secret = valueFromYaml(yaml, "secret", QString());
 

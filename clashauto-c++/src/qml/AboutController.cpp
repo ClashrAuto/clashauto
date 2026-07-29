@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -23,6 +24,14 @@ namespace {
 bool versionNewer(const QString &remote, const QString &local)
 {
     auto parse = [](QString s) {
+        // ★ 先砍掉第一个 '-' 之后的一切。测试版的 tag 形如 v0.1.94-beta.a1b2c3d：不砍的话
+        //   下面那句「去掉非数字/点」会把短 sha 里的数字留下来（"0.1.94.123"），版本比较就
+        //   变成拿提交哈希在比大小 —— 两个同版本号的 beta 谁新全看运气。正式版 tag 里没有
+        //   '-'，这一刀对它无影响。
+        const qsizetype dash = s.indexOf(QLatin1Char('-'));
+        if (dash >= 0) {
+            s.truncate(dash);
+        }
         s.remove(QRegularExpression(QStringLiteral("[^0-9.]")));
         QVector<int> v;
         for (const QString &p : s.split('.', Qt::SkipEmptyParts)) {
@@ -72,7 +81,13 @@ void AboutController::check()
     }
     setChecking(true);
 
-    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/ClashrAuto/clashauto/releases/latest")));
+    // ★ 用 /releases 全量列表而不是 /releases/latest —— 后者按 GitHub 的定义**排除 prerelease**，
+    //   开了「接收测试版」也永远看不到 beta。这里一次拉回来自己挑：正式版永远参与比较，
+    //   prerelease 只在开关打开时参与。开关每次现读 AppConfig（而不是构造时的那份快照），
+    //   免得用户刚在设置页打开、下一次小时检查还按旧值走。
+    const bool wantBeta = AppConfigLoader::load().receiveBeta;
+    QNetworkRequest req(QUrl(QStringLiteral(
+        "https://api.github.com/repos/ClashrAuto/clashauto/releases?per_page=20")));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "clashauto-cpp");
     // 组织/仓库改名会以 301 跳转——必须跟随，否则拿到空响应而「查不到版本」。
@@ -82,7 +97,7 @@ void AboutController::check()
 #endif
 
     QNetworkReply *reply = m_nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, wantBeta] {
         reply->deleteLater();
         setChecking(false);
 
@@ -90,12 +105,35 @@ void AboutController::check()
             emit checkFailed(reply->errorString());
             return;
         }
-        const QJsonObject r = QJsonDocument::fromJson(reply->readAll()).object();
-        const QString tag = r.value(QStringLiteral("tag_name")).toString();
-        const QString local = QString::fromUtf8(APP_VERSION);
-        if (tag.isEmpty()) {
-            const QString apiMsg = r.value(QStringLiteral("message")).toString();
+        const QByteArray body = reply->readAll();
+        const QJsonDocument doc = QJsonDocument::fromJson(body);
+        if (!doc.isArray()) {
+            // 出错时 GitHub 返的是对象（rate limit / 404），把它的 message 原样交给用户。
+            const QString apiMsg = doc.object().value(QStringLiteral("message")).toString();
             emit checkFailed(apiMsg.isEmpty() ? QStringLiteral("未取到版本号") : apiMsg);
+            return;
+        }
+        // 列表按发布时间倒序，但 tag 版本号才是权威（补发/改期都可能打乱时间序），所以逐条比。
+        const QString local = QString::fromUtf8(APP_VERSION);
+        QString tag;
+        for (const QJsonValue &v : doc.array()) {
+            const QJsonObject r = v.toObject();
+            if (r.value(QStringLiteral("draft")).toBool()) {
+                continue;
+            }
+            if (r.value(QStringLiteral("prerelease")).toBool() && !wantBeta) {
+                continue; // 没开测试版：prerelease 当作不存在
+            }
+            const QString t = r.value(QStringLiteral("tag_name")).toString();
+            if (t.isEmpty()) {
+                continue;
+            }
+            if (tag.isEmpty() || versionNewer(t, tag)) {
+                tag = t;
+            }
+        }
+        if (tag.isEmpty()) {
+            emit checkFailed(QStringLiteral("未取到版本号"));
             return;
         }
 

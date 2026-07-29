@@ -39,6 +39,7 @@ class SettingsController final : public QObject
     Q_PROPERTY(bool autoStart READ autoStart CONSTANT)
     Q_PROPERTY(bool nodeSwitchNote READ nodeSwitchNote CONSTANT)
     Q_PROPERTY(bool mirror READ mirror NOTIFY mirrorChanged)
+    Q_PROPERTY(bool receiveBeta READ receiveBeta NOTIFY receiveBetaChanged)
     Q_PROPERTY(int autoUpdateMinutes READ autoUpdateMinutes CONSTANT)
     Q_PROPERTY(bool themeLight READ themeLight CONSTANT)
     Q_PROPERTY(bool autoTheme READ autoTheme CONSTANT)
@@ -88,6 +89,7 @@ public:
     bool autoStart() const { return m_autoStart; }
     bool nodeSwitchNote() const { return m_nodeNote; }
     bool mirror() const { return m_mirror; }
+    bool receiveBeta() const { return m_receiveBeta; }
     int autoUpdateMinutes() const { return m_autoUpdate; }
     bool themeLight() const { return m_themeLight; }
     bool autoTheme() const { return m_autoTheme; }
@@ -127,6 +129,7 @@ public:
     // 即时落盘（无需点「应用」，对齐 Widgets 的 toggled 即时持久化）
     Q_INVOKABLE void setNodeOnly(bool on);
     Q_INVOKABLE void setMirror(bool on);
+    Q_INVOKABLE void setReceiveBeta(bool on);
 
     // 系统 tab 开关/下拉全部即时落盘+即时生效；「应用」按钮仍整表保存（Host/端口等文本项用）。
     Q_INVOKABLE void setAutoStart(bool on);          // sys：写注册表 Run 键
@@ -165,6 +168,7 @@ signals:
     void rulesChanged();
     void areasChanged();
     void mirrorChanged();
+    void receiveBetaChanged();
     void coreUpdatingChanged();
     void coreUpdateStatusChanged();
     void geoipUpdatingChanged();
@@ -214,6 +218,7 @@ private:
     bool m_autoStart = false;
     bool m_nodeNote = true;
     bool m_mirror = false;
+    bool m_receiveBeta = false;
     int m_autoUpdate = 0;
     bool m_themeLight = false;
     bool m_autoTheme = false;

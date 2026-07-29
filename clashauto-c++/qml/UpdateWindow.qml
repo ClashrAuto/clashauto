@@ -23,6 +23,10 @@ ApplicationWindow {
 
     property int currentTab: 0   // 0 程序 / 1 内核 / 2 GeoIP
 
+    // 程序更新的**频道**：0=正式版 / 1=测试版(prerelease)。与 currentTab 无关，别混。
+    // updater 后端一直同时备着两条频道（releaseXxx / betaXxx），这里只是把「用哪条」接到设置上。
+    readonly property int channel: settings.receiveBeta ? 1 : 0
+
     // 当前 tab 的「更新」是否进行中（下载 / 安装）。
     readonly property bool busy: currentTab === 0 ? updater.downloading
                                  : currentTab === 1 ? settings.coreUpdating
@@ -40,9 +44,9 @@ ApplicationWindow {
         if (win.busy)
             return
         if (currentTab === 0) {
-            var i = updater.recommendedIndex(0) // 正式版频道里自动选便携 zip / 安装器
+            var i = updater.recommendedIndex(win.channel) // 该频道里自动选安装器/便携包
             if (i >= 0)
-                updater.oneClickUpdate(0, i, settings.mirror)
+                updater.oneClickUpdate(win.channel, i, settings.mirror)
         } else if (currentTab === 1) {
             settings.updateCore()
         } else {
@@ -155,12 +159,12 @@ ApplicationWindow {
                         color: Theme.textSecondary
                     }
                     Text {
-                        text: updater.releaseVersion
+                        text: win.channel === 1 ? updater.betaVersion : updater.releaseVersion
                         font.pixelSize: 15
                         color: Theme.textPrimary
                     }
                     Text { text: qsTr("更新说明"); font.pixelSize: 12; color: Theme.textMuted }
-                    NotesCard { text: updater.releaseNotes }
+                    NotesCard { text: win.channel === 1 ? updater.betaNotes : updater.releaseNotes }
                 }
 
                 // ——— 内核 ———

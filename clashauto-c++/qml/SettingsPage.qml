@@ -520,6 +520,11 @@ Item {
                                     onClicked: settings.updateGeoip()
                                 } }
                             CardDivider {}
+                            SettingRow { label: qsTr("程序更新")
+                                Label { text: qsTr("接收测试版"); color: Theme.textSecondary; font.pixelSize: 13 }
+                                ThemedSwitch { id: betaCheck; checked: settings.receiveBeta
+                                    onToggled: settings.setReceiveBeta(checked) } }
+                            CardDivider {}
                             SettingRow { label: qsTr("mihomo 内核")
                                 Label { text: qsTr("国内加速"); color: Theme.textSecondary; font.pixelSize: 13 }
                                 ThemedSwitch { id: mirrorCheck; checked: settings.mirror

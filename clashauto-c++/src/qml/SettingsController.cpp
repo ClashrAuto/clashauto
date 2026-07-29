@@ -163,6 +163,7 @@ void SettingsController::loadInitialValues()
     m_autoStart = c.autoStart;
     m_nodeNote = c.nodeSwitchNote;
     m_mirror = c.mirror;
+    m_receiveBeta = c.receiveBeta;
     m_autoUpdate = c.autoUpdateMinutes;
     m_themeLight = c.theme.compare(QLatin1String("light"), Qt::CaseInsensitive) == 0;
     m_autoTheme = c.autoTheme;
@@ -265,6 +266,18 @@ void SettingsController::setMirror(bool on)
     m_mirror = on;
     persistConfigBool(QStringLiteral("mirror"), on);
     emit mirrorChanged();
+}
+
+// 接收测试版。只落 config.yaml 的 beta 键，没有别的副作用——读它的两处（更新窗选频道、
+// AboutController 判「有没有新版」）都是每次用时现读，不需要在这里通知谁。
+void SettingsController::setReceiveBeta(bool on)
+{
+    if (m_receiveBeta == on) {
+        return;
+    }
+    m_receiveBeta = on;
+    persistConfigBool(QStringLiteral("beta"), on);
+    emit receiveBetaChanged();
 }
 
 // —— 系统 tab 的即时 setter：切换即落盘 + 即生效（副作用与 apply() 一一对应）——
