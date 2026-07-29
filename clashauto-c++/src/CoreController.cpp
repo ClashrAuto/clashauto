@@ -363,6 +363,13 @@ void CoreController::startCore()
         }
         // 经 helper 起失败：不再静默退回——讲清楚原因，再以非 root QProcess 兜底（TUN 将不可用）。
         emit logUpdated(tr("经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效").arg(herr));
+    } else if (m_tunEnabled) {
+        // TUN 开着、但免密 helper 还没启用（未安装/待批准）：核心只能非 root 冷启动，建不了 utun，
+        // TUN **不会生效**。以前这里是**静默**回退（用户只看到「增强灯亮着却不全局」，无从查起）——
+        // 明确记一条，把「去设置装并批准免密助手」这条出路讲清楚。这正是「mac 上启用 TUN 却不全局」
+        // 在冷启动路径下的根因提示。
+        emit logUpdated(tr("增强(TUN) 已开启，但免密 helper 未启用——核心将以非 root 启动、TUN 不会生效。"
+                           "请在「设置 → 系统」安装并批准免密助手后重开增强。"));
     }
 #endif
 
@@ -477,9 +484,28 @@ void CoreController::toggleTun()
     } else {
         m_configBuilder.writeTunEnabled(m_fullConfigPath, m_tunEnabled);
     }
+#if defined(Q_OS_MACOS)
+    // macOS 不能靠热重载翻 TUN——两条原因叠加，缺一不可：
+    //   ① 建/拆 utun + 改默认路由必须 **root**，而 root 只在核心由特权 helper **冷启动**时才有；
+    //   ② mihomo 的 PUT /configs 默认**不重载 general/tun 段**（要 ?force=true 才会），所以热重载
+    //      改 tun.enable 核心根本不理会。
+    // 于是运行中翻开关既没权限建 utun、核心也不重读 tun → 「开了 TUN 却不全局」。这里改为把核心
+    // **重启**：停掉后 startCore() 经 helper 以 root 冷启动，读取刚写入的 tun.enable，utun 与全局路由
+    // 才真正建立（与 Windows 开 TUN 提权冷重启同理）。helper 没启用时 startCore 会回退非 root 并明确
+    // 记「TUN 将不生效」，把真正原因暴露出来而非静默失败。
+    emit logUpdated(m_tunEnabled ? tr("已开启增强模式，正在以 root 重启核心以应用 TUN")
+                                 : tr("已关闭增强模式，正在重启核心"));
+    if (isRunning()) {
+        stopCore();
+        startCore();
+    }
+    emitStatus();
+    return;
+#else
     emit logUpdated(m_tunEnabled ? tr("已开启增强模式，正在重载 TUN 配置") : tr("已关闭增强模式，正在重载 TUN 配置"));
     reloadConfig();
     emitStatus();
+#endif
 }
 
 void CoreController::rebuildConfig()

@@ -23,7 +23,8 @@
 #include <algorithm>
 
 #if defined(Q_OS_MACOS)
-#include "../MacWindow.h" // configureMacTitleBar / enableMacBlur（纯 C++ 接口，实现在 MacWindow.mm）
+#include "../MacWindow.h"       // configureMacTitleBar / enableMacBlur（纯 C++ 接口，实现在 MacWindow.mm）
+#include "../MacHelperClient.h" // 开 TUN 前确保免密 helper 已启用（TUN 建 utun/改路由要 root）
 #endif
 #if defined(Q_OS_WIN)
 #include "../WinWindow.h" // setWindowsCaptionColor（DWM 标题栏染色，实现在 WinWindow.cpp）
@@ -213,6 +214,30 @@ void QmlBridge::toggleTun()
     if (turningOn && !isProcessElevated()) {
         relaunchElevatedForTun();
         return;
+    }
+#elif defined(Q_OS_MACOS)
+    // macOS 上 TUN 建 utun / 改默认路由要 **root**，root 只在核心由免密 helper 冷启动时才有。开启前
+    // 先确保 helper 已启用：未启用则注册并把用户引到「系统设置 → 登录项」批准，**本次不开启**（批准后
+    // 再点一次开关即可）——与 Windows 未提权时不翻开关、改走提权重启同理，避免「开了却因非 root 静默不
+    // 生效」。关闭 TUN 不需要 helper，照常往下走。
+    if (turningOn) {
+        if (!m_core->isCoreInstalled()) {
+            pushLog(tr("未检测到 mihomo 内核，请先在「设置 → 系统」下载后再开启增强"));
+            return;
+        }
+        if (MacHelper::status() != MacHelper::RegStatus::Enabled) {
+            QString err;
+            const MacHelper::RegStatus st = MacHelper::registerDaemon(&err);
+            if (st != MacHelper::RegStatus::Enabled) {
+                if (st == MacHelper::RegStatus::RequiresApproval) {
+                    MacHelper::openLoginItemsSettings();
+                    pushLog(tr("增强(TUN) 需要 root：请在「系统设置 → 登录项」允许 Coast 的后台项，批准后再打开增强"));
+                } else {
+                    pushLog(tr("增强(TUN) 需要免密 helper，但安装失败：%1").arg(err));
+                }
+                return; // 等 helper 就绪；本次不翻开关
+            }
+        }
     }
 #endif
     m_core->toggleTun();
