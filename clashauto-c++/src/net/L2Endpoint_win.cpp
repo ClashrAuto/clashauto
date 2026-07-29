@@ -145,24 +145,6 @@ qint64 nowUs()
 // 说明网卡已经出问题了，继续攒只会让延迟更离谱。
 constexpr int kTxQueueMaxFrames = 4096;
 
-// —— 发送句柄数（WiFi 上的关键旋钮）——
-// 实测（同一块 WiFi 网卡，N 个 pcap 句柄各一个线程并发注入 1500 B 帧）：
-//     1 句柄  1,395 帧/s   2.00 MB/s      ← 单句柄天花板，与真机实测完全吻合
-//     2 句柄  2,915 帧/s   4.17 MB/s
-//     4 句柄  4,084 帧/s   5.84 MB/s
-//     8 句柄  8,999 帧/s  12.87 MB/s
-// 每个句柄的 us/frame 恒在 690~980 µs 不变 —— 那 700 µs 是**每句柄内部串行**的驱动提交开销，
-// 不是空口也不是网卡的限制。多开句柄直接线性放大。
-// 以太网不需要：单句柄逐帧就有 15,282 帧/s(65 µs/帧)、批量更是 18 µs/帧，早就够了。
-constexpr int kTxHandlesWifi = 8;
-constexpr int kTxHandlesEth = 1;
-// COAST_GW_TXHANDLES=<n> 手工覆盖（0/缺省 = 按介质自动选）。
-int txHandlesOverride()
-{
-    static const int n = qEnvironmentVariableIntValue("COAST_GW_TXHANDLES");
-    return n;
-}
-
 // ————————————————————————— 发送线程（本文件的第二处性能改动）—————————————————————————
 // 为什么必须**离开工作线程**：
 //   pcap_sendpacket 那 306 µs/帧（实测，见 flushTx 注释）几乎全是驱动里等空口发送完成的时间，
@@ -688,40 +670,24 @@ public:
         // 发送线程与批量**互相独立**：WiFi 上批量关掉了，但逐帧提交实测 731~752 µs/帧，
         // 更不能压在工作线程上（真机上一关线程，泵立刻从 400 拍掉到 258 拍、late=37）。
         if (txThreadEnabled()) {
-            int want = txHandlesOverride();
-            if (want <= 0)
-                want = adapter.wifi ? kTxHandlesWifi : kTxHandlesEth;
-            for (int i = 0; i < want; ++i) {
-                char txerr[PCAP_ERRBUF_SIZE] = {0};
-                pcap_t *h =
-                    m_api->open_live(adapter.npfName.constData(), 128, 0 /*非混杂*/, 1, txerr);
-                if (!h) {
-                    dbg("发送句柄 #%d 打不开（%s）", i, txerr);
-                    break; // 开到几个算几个；一个都没开成则整体降级回同步发送
-                }
+            char txerr[PCAP_ERRBUF_SIZE] = {0};
+            m_txPcap = m_api->open_live(adapter.npfName.constData(), 128, 0 /*非混杂*/, 1, txerr);
+            if (m_txPcap) {
                 // 让这个句柄一个包都不捕获：否则内核收缓冲会白白攒满（我们从不读它）。
                 struct bpf_program prog;
-                if (m_api->compile(h, &prog, "greater 65535", 1, PCAP_NETMASK_UNKNOWN) >= 0) {
-                    m_api->setfilter(h, &prog);
+                if (m_api->compile(m_txPcap, &prog, "greater 65535", 1, PCAP_NETMASK_UNKNOWN) >= 0) {
+                    m_api->setfilter(m_txPcap, &prog);
                     m_api->freecode(&prog);
                 }
                 if (m_api->setbuff)
-                    m_api->setbuff(h, 64 * 1024); // 收缓冲用不上，压到最小
-                // 批量队列每个分片一份（只有以太网会走批量，WiFi 上 m_txq 恒空）。
-                pcap_send_queue *q = nullptr;
-                if (wantBatch && m_api->sq_alloc)
-                    q = (i == 0) ? m_txq : m_api->sq_alloc(kTxQueueBytes);
-                if (i == 0)
-                    m_txq = nullptr; // 0 号的队列所有权移交，本对象不再碰它
-                m_txPcaps.append(h);
-                auto *w = new TxWorker(m_api, h, q);
-                w->start();
-                m_tx.append(w);
+                    m_api->setbuff(m_txPcap, 64 * 1024); // 收缓冲用不上，压到最小
+                m_tx = new TxWorker(m_api, m_txPcap, m_txq);
+                m_txq = nullptr; // 所有权交给发送线程，本对象不再碰它
+                m_tx->start();
+                dbg("tx thread started (dedicated pcap handle)");
+            } else {
+                dbg("发送专用句柄打不开（%s），退回工作线程同步发送", txerr);
             }
-            dbg("发送分片 %lld 个（介质=%s，模式=%s）", (long long)m_tx.size(),
-                adapter.wifi ? "WiFi" : "以太网", wantBatch ? "批量" : "逐帧");
-            if (m_tx.isEmpty())
-                dbg("一个发送句柄都没开成，退回工作线程同步发送");
         }
 
         // —— 收帧：独立线程（默认）或 QWinEventNotifier（降级）——
@@ -767,25 +733,26 @@ public:
         // ★ 先让发送线程把队列排空再退出，然后才关句柄。停网关时 ArpSpoofer 会发最后一轮
         //   「还原 ARP」，那几帧要是丢了，被代理设备就会一直把网关指着一台已经不转发的机器
         //   ——彻底断网直到邻居缓存老化。stopAndJoin 的契约就是「队列真空了才返回」。
-        for (TxWorker *w : m_tx) {
-            w->stopAndJoin();
+        if (m_tx) {
+            m_tx->stopAndJoin();
             qint64 f=0,b=0,d=0,us=0,n=0;
-            w->takeStats(&f,&b,&d,&us,&n); // 最后一批的账也要记上
+            m_tx->takeStats(&f,&b,&d,&us,&n); // 最后一批的账也要记上
             GatewayDiag::c.txFrames += f;
             GatewayDiag::c.txBytes += b;
             GatewayDiag::c.txSendUs += us;
             GatewayDiag::c.txBatches += n;
             GatewayDiag::c.txDropped += d;
-            delete w;
+            delete m_tx;
+            m_tx = nullptr;
         }
-        m_tx.clear();
         if (m_txq) { // 只有「线程没起来」的降级路径才轮到这里
             m_api->sq_destroy(m_txq);
             m_txq = nullptr;
         }
-        for (pcap_t *h : m_txPcaps)
-            m_api->close(h);
-        m_txPcaps.clear();
+        if (m_txPcap) {
+            m_api->close(m_txPcap);
+            m_txPcap = nullptr;
+        }
         if (m_pcap) {
             m_api->close(m_pcap); // m_pcap 非空 ⇒ open 成功过 ⇒ m_api 必然有效
             m_pcap = nullptr;
@@ -841,11 +808,11 @@ public:
     {
         if (!m_pcap)
             return false;
-        // 有发送线程就只入队，**工作线程绝不碰驱动**（那是每帧数百微秒的阻塞，见 TxWorker）。
-        // 入队失败只有一种情况：该分片队列到 kTxQueueMaxFrames 上限，即驱动已经卡了一秒以上 ——
+        // 有发送线程就只入队，**工作线程绝不碰驱动**（那是 306 µs/帧的阻塞，见 TxWorker）。
+        // 入队失败只有一种情况：队列到 kTxQueueMaxFrames 上限，即驱动已经卡了一秒以上 ——
         // 此时丢帧交 TCP 重传，比继续攒着让延迟雪崩要好。
-        if (!m_tx.isEmpty())
-            return m_tx.at(shardFor(frame))->post(frame);
+        if (m_tx)
+            return m_tx->post(frame);
         // 降级路径（发送句柄开不出来 / COAST_GW_TXBATCH=0）：与本改动之前完全一致的同步发送。
         return sendOne(frame);
     }
@@ -853,64 +820,24 @@ public:
     // 把攒着的一批交给驱动。空队列时只做一次判空（契约要求可以随便调）。
     void flushTx() override
     {
-        if (m_tx.isEmpty())
+        if (!m_tx)
             return; // 降级路径下 send() 本来就是立即发，无事可做
-        qint64 F=0,B=0,D=0,US=0,N=0;
-        for (TxWorker *w : m_tx) {
-            // 踢一下：发送线程多半已经在跑，这一下只保证「刚入队的帧不会等到下一次有人入队」。
-            // 延迟敏感的路径（ARP 抢答补帧、还原帧、DNS 回程）靠它把队头立刻推出去。
-            w->kick();
-            qint64 f=0,b=0,d=0,us=0,n=0;
-            w->takeStats(&f,&b,&d,&us,&n);
-            F+=f; B+=b; D+=d; US+=us; N+=n;
-        }
-        // 统计在**工作线程**上折进 GatewayDiag，它的「单线程前提」因此依然成立。
-        // usPerTx 现在是所有分片的平均；分片数变了要连带解读（8 个分片时单帧成本不变，
-        // 但聚合吞吐是 8 倍 —— 看 tx 帧率，别只看 usPerTx）。
-        GatewayDiag::c.txFrames += F;
-        GatewayDiag::c.txBytes += B;
-        GatewayDiag::c.txSendUs += US;
-        GatewayDiag::c.txBatches += N;
-        if (D > 0) {
-            GatewayDiag::c.txDropped += D;
+        // 踢一下：发送线程多半已经在跑，这一下只保证「刚入队的帧不会等到下一次有人入队」。
+        // 延迟敏感的路径（ARP 抢答补帧、还原帧、DNS 回程）靠它把队头立刻推出去。
+        m_tx->kick();
+        // 顺带把发送线程攒的统计取回来折进 GatewayDiag —— 在**工作线程**上做，
+        // GatewayDiag::c 的「单线程前提」因此依然成立。flushTx 在各条出帧路径上都会被调到，
+        // 采样频率远高于 10 s 的诊断窗口，不会漏账。
+        qint64 f=0,b=0,d=0,us=0,n=0;
+        m_tx->takeStats(&f,&b,&d,&us,&n);
+        GatewayDiag::c.txFrames += f;
+        GatewayDiag::c.txBytes += b;
+        GatewayDiag::c.txSendUs += us;
+        GatewayDiag::c.txBatches += n;
+        if (d > 0) {
+            GatewayDiag::c.txDropped += d;
             reportTxDropThrottled();
         }
-    }
-
-    // 帧 → 发送分片。**同一条流必须恒定落在同一个分片上**，否则并发提交会把 TCP 打乱序，
-    // 那比慢更糟。按四元组哈希：IPv4/IPv6 的 TCP/UDP 走哈希，其余一律 0 号分片。
-    // ARP 与 ICMPv6(NDP) 固定 0 号：投毒帧对时序极其敏感（抢答要赢下毫秒级竞争），
-    // 打散到多个队列上会让它们互相穿插，得不偿失。
-    int shardFor(const QByteArray &f) const
-    {
-        const int n = int(m_tx.size());
-        if (n <= 1 || f.size() < 34)
-            return 0;
-        const uchar *p = reinterpret_cast<const uchar *>(f.constData());
-        const quint16 eth = (quint16(p[12]) << 8) | p[13];
-        quint32 h = 2166136261u; // FNV-1a 起始值
-        auto mix = [&h](const uchar *b, int len) {
-            for (int i = 0; i < len; ++i) { h ^= b[i]; h *= 16777619u; }
-        };
-        if (eth == 0x0800) {
-            const int proto = p[23];
-            if (proto != 6 && proto != 17)
-                return 0; // 非 TCP/UDP（ICMP 等）→ 0 号，量小且时序敏感
-            mix(p + 26, 8); // src+dst IPv4
-            const int l4 = 14 + (p[14] & 0x0F) * 4;
-            if (f.size() >= l4 + 4)
-                mix(p + l4, 4); // src+dst 端口
-        } else if (eth == 0x86DD && f.size() >= 54) {
-            const int nh = p[20];
-            if (nh != 6 && nh != 17)
-                return 0; // ICMPv6/NDP → 0 号
-            mix(p + 22, 32); // src+dst IPv6
-            if (f.size() >= 58)
-                mix(p + 54, 4);
-        } else {
-            return 0; // ARP 等
-        }
-        return int(h % quint32(n));
     }
     QByteArray localMac() const override { return m_localMac; }
     int ifIndex() const override { return 0; }
@@ -1074,10 +1001,8 @@ private:
     const PcapApi *m_api = nullptr; // open() 里解析；进程级单例，不属本对象所有
     pcap_t *m_pcap = nullptr;
     pcap_send_queue *m_txq = nullptr; // 发送队列；所有权在 open() 里交给 TxWorker，之后恒为空
-    // 发送分片：每片一个专用 pcap 句柄 + 一个线程（pcap_t 非线程安全，且那 ~700 µs/帧的
-    // 驱动提交开销是**每句柄串行**的，多开才能并行）。空 = 降级到工作线程同步发送。
-    QVector<pcap_t *> m_txPcaps;
-    QVector<TxWorker *> m_tx;
+    pcap_t *m_txPcap = nullptr;       // 发送专用句柄（TxWorker 独占；pcap_t 非线程安全）
+    TxWorker *m_tx = nullptr;         // 空 = 降级到工作线程同步发送
     QWinEventNotifier *m_notifier = nullptr; // 仅降级路径使用
     RxWorker *m_rx = nullptr;                // 空 = 降级到通知器 + 工作线程 drain()
     QByteArray m_localMac;
