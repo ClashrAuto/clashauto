@@ -1155,6 +1155,18 @@ bool NetStack::init(QString *err)
     // 老化和诊断**不跟着提频**：它们本来就是 200ms 一次的量级，没必要 8 倍频，按拍数分频即可。
     d->timer = new QTimer(this);
     d->timer->setInterval(kLwipPumpIntervalMs);
+    // ★ 必须显式 PreciseTimer —— 默认的 Qt::CoarseTimer 在 **Windows** 上把这个泵毁掉两次：
+    //   1) 粒度：CoarseTimer 走 SetTimer/WM_TIMER，受系统时钟节拍（默认 15.6ms）约束，25ms 实际
+    //      变成 31.25ms。真机 gateway-diag.log 里 6033 个采样窗口有 5933 个泵周期正好是 31ms
+    //      —— 不是负载，是纯粹的量化误差，空闲时也一样。
+    //   2) 饥饿：WM_TIMER 是**队列空时才合成**的最低优先级消息。数据面忙起来（Npcap 收帧事件 +
+    //      上百条到 mihomo 的 socket 通知挤满消息队列）时它会被无限期推后 —— 同一份日志里，设备
+    //      下行 >600 帧/秒的窗口泵周期滑到 45ms、26% 的拍迟到 2 倍以上、最坏一次迟到 631ms。
+    //      泵一停就是 lwIP 的重传/延迟 ACK 全停，对外表现是所有被代理设备同时卡住半秒。
+    //   PreciseTimer 在 Qt 的 Windows 事件分发器里走 timeSetEvent（多媒体定时器）：既不受 15.6ms
+    //   节拍限制，也不再是 WM_TIMER，因而不被消息队列里的收帧/socket 事件饿死。
+    //   linux/mac 上两种类型都是 timerfd/kqueue，本行无副作用。
+    d->timer->setTimerType(Qt::PreciseTimer);
     d->pumpClock.start();
     connect(d->timer, &QTimer::timeout, this, [this] {
         // ★ 泵的迟到量 = 工作线程的饱和度。这一拍本该 kLwipPumpIntervalMs 之后就到，迟到多少就

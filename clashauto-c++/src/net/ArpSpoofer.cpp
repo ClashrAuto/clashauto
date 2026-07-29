@@ -30,6 +30,11 @@ ArpSpoofer::ArpSpoofer(IL2Endpoint *endpoint, QObject *parent)
     m_timer->setInterval(kSpoofIntervalMs);
     connect(m_timer, &QTimer::timeout, this, &ArpSpoofer::tick);
     m_boostTimer->setInterval(kBoostIntervalMs);
+    // 高频窗口整个存在的意义就是「抢在真网关的应答之前」，差几十毫秒就输。默认 CoarseTimer 在
+    // Windows 上受 15.6ms 系统节拍量化，50ms 实际是 62.5ms，8 拍的窗口从 400ms 变成 500ms 且每拍
+    // 都晚 25% —— 正好晚在最要紧的那一瞬。周期重发那个 1s 的定时器不需要（5% 的粗调无所谓）。
+    // 同 NetStack 的 lwIP 泵，理由详见那里。
+    m_boostTimer->setTimerType(Qt::PreciseTimer);
     connect(m_boostTimer, &QTimer::timeout, this, &ArpSpoofer::boostTick);
 }
 

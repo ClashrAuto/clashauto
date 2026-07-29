@@ -81,6 +81,7 @@ NdpSpoofer::NdpSpoofer(IL2Endpoint *endpoint, QObject *parent)
     m_timer->setInterval(kSpoofIntervalMs);
     connect(m_timer, &QTimer::timeout, this, &NdpSpoofer::tick);
     m_boostTimer->setInterval(kBoostIntervalMs);
+    m_boostTimer->setTimerType(Qt::PreciseTimer); // 与 ArpSpoofer 的 boost 同理，见那里的注释
     connect(m_boostTimer, &QTimer::timeout, this, &NdpSpoofer::boostTick);
 }
 
