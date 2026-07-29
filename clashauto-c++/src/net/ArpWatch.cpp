@@ -2,6 +2,7 @@
 
 #include <QHostAddress>
 
+#include <cstdio>
 #include <cstring>
 
 // ———————————————————————— 帧偏移常量（与 ArpSpoofer/NdpSpoofer 一致）————————————————————————
@@ -250,6 +251,14 @@ void ArpWatch::maybeAlert(int kind, const QByteArray &offMac6, const QString &su
     QString subMac;
     if (subjectMac6.size() == 6 && !isZeroMac(subjectMac6))
         subMac = macToStr(reinterpret_cast<const uchar *>(subjectMac6.constData()));
+    // 诊断：安全告警是低频事件（首报 + 60s 节流），COAST_GATEWAY_DEBUG 下打一行到 stderr，方便
+    // 无 GUI 的网关（真机对抗测试 / gateway-diag）直接在日志里看到「检测到了什么」。
+    static const bool s_dbg = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
+    if (s_dbg)
+        std::fprintf(stderr, "[ARPWATCH] alert kind=%d(%s) offender=%s subject=%s%s\n", kind,
+                     kind == DeviceContended ? "device-contended" : "self-impersonated",
+                     offMac.toUtf8().constData(), subjectIp.toUtf8().constData(),
+                     subMac.isEmpty() ? "" : (QStringLiteral(" victim=") + subMac).toUtf8().constData());
     emit alert(kind, offMac, subjectIp, subMac);
 }
 
