@@ -49,11 +49,11 @@ struct DeviceInfo {
     QString socksUser;
 };
 
-// 一条被终结的 TCP 连接：lwIP pcb ↔ 到 mihomo 的 Socks5Tcp。
+// 一条被终结的 TCP 连接：lwIP pcb ↔ 出站隧道（现状经工厂拨 mihomo 的 Socks5Tcp）。
 struct TcpConn {
     NetStack::Impl *impl = nullptr;
     struct tcp_pcb *pcb = nullptr;
-    Socks5Tcp *socks = nullptr;
+    IOutboundTcp *socks = nullptr;
     QByteArray toLwip;    // socks→设备 方向待写入 lwIP 的字节（受 tcp_sndbuf 限流）
     // 上行背压：已经交给 socks、但**还没**用 tcp_recved 归还给 lwIP 的接收窗口字节数。
     // 上限天然是 TCP_WND(128 KiB)——lwIP 不会送来超过已通告窗口的数据。
@@ -115,7 +115,7 @@ struct UdpSess; // 每设备的壳（MAC / 网卡 / 该设备的所有流）
 // 一条 UDP 流 = 设备的一个源端口。
 struct UdpFlow {
     UdpSess *sess = nullptr;
-    Socks5Udp *socks = nullptr;
+    IOutboundUdp *socks = nullptr;
     quint16 vport = 0;                 // 设备源端口：回程包的目的端口就是它
     bool ready = false;                // associate 完成
     struct Pending {
@@ -237,7 +237,9 @@ void lruTouch(UdpFlow *f)
 } // namespace
 
 struct NetStack::Impl {
-    quint16 socksPort = 0;
+    // 出站工厂：每条被终结的连接向它要一个新出站对象（现状 = Socks5OutboundFactory 拨 mihomo）。
+    // NetStack 拥有它，dtor 里 delete。
+    OutboundFactory *factory = nullptr;
     NetStack *owner = nullptr;
     struct tcp_pcb *listener = nullptr;
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的 netif 上下文
@@ -794,7 +796,7 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
     auto *c = new TcpConn;
     c->impl = g_impl;
     c->pcb = newpcb;
-    c->socks = new Socks5Tcp(g_impl->owner);
+    c->socks = g_impl->factory->createTcp(g_impl->owner);
 
     tcp_arg(newpcb, c);
     tcp_recv(newpcb, lwipTcpRecv);
@@ -805,33 +807,33 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
     // 下面这些槽都是**直连**（context 是 NetStack，同一个线程），所以它们跑在信号发射者的栈上。
     // 凡是会销毁 c 的调用（pumpToLwip / closeConn）一律放在**最后一句**，槽返回后就没人再碰 c
     // 了——这样才不必在每个槽里再夹一层 ConnWatch。改这几个 lambda 时务必保持这个形状。
-    QObject::connect(c->socks, &Socks5Tcp::established, g_impl->owner, [c]() {
+    QObject::connect(c->socks, &IOutboundTcp::established, g_impl->owner, [c]() {
         c->established = true;
         // 握手期扣下的窗口在这里重新评估一次：pending 刚被冲进 socket，水位变了。
         // flushRecvWindow 不会销毁 c（只有 getter + 纯 lwIP 调用），故无需保护。
         flushRecvWindow(c);
     });
-    QObject::connect(c->socks, &Socks5Tcp::upstreamBytesWritten, g_impl->owner, [c](qint64) {
+    QObject::connect(c->socks, &IOutboundTcp::upstreamBytesWritten, g_impl->owner, [c](qint64) {
         // 上行真的排空了一点 → 按量把 lwIP 的接收窗口还回去。这是上行唯一的推进点，
         // 也正是「不会死锁」的依据：只要还扣着窗口，就一定还有没发完的字节在等这个信号。
         flushRecvWindow(c);
     });
-    QObject::connect(c->socks, &Socks5Tcp::dataReceived, g_impl->owner, [c](const QByteArray &d) {
+    QObject::connect(c->socks, &IOutboundTcp::dataReceived, g_impl->owner, [c](const QByteArray &d) {
         c->toLwip.append(d);
         pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
     });
-    QObject::connect(c->socks, &Socks5Tcp::failed, g_impl->owner, [c](const QString &) {
-        ++GatewayDiag::c.socksFailed; // 拨 mihomo 失败：认证/端口/核心没起来，都汇到这一栏
+    QObject::connect(c->socks, &IOutboundTcp::failed, g_impl->owner, [c](const QString &) {
+        ++GatewayDiag::c.socksFailed; // 拨出站失败：认证/端口/核心没起来，都汇到这一栏
         closeConn(c, true); // ★ 必然销毁 c —— 必须是最后一句
     });
-    QObject::connect(c->socks, &Socks5Tcp::closed, g_impl->owner, [c]() {
+    QObject::connect(c->socks, &IOutboundTcp::closed, g_impl->owner, [c]() {
         // socks 关闭：先记账，把剩余下行写完之后再优雅关闭 lwIP 侧（收口在 pumpToLwip 里，
         // 排空后自己会 closeConn）。
         c->socksClosed = true;
         pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
     });
 
-    c->socks->connectTo(g_impl->socksPort, serverIp, serverPort, user);
+    c->socks->connectTo(serverIp, serverPort, user);
     return ERR_OK;
 }
 
@@ -1109,7 +1111,8 @@ void sendUdpResponse4(UdpSess *s, quint16 vport, const QHostAddress &fromIp, qui
 NetStack::NetStack(quint16 socksPort, QObject *parent)
     : QObject(parent), d(new Impl)
 {
-    d->socksPort = socksPort;
+    // 默认出站 = 拨 mihomo 混合端口。CoastCore 落地后这里可换成按节点选实现的工厂。
+    d->factory = new Socks5OutboundFactory(socksPort);
     d->owner = this;
 }
 
@@ -1134,6 +1137,7 @@ NetStack::~NetStack()
     }
     if (g_impl == d)
         g_impl = nullptr;
+    delete d->factory;
     delete d;
 }
 
@@ -1532,18 +1536,18 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         flow->sess = s;
         flow->vport = sport;
         flow->idleMs = isShortLivedUdpPort(dport) ? kUdpDnsIdleMs : kUdpIdleMs;
-        flow->socks = new Socks5Udp(this);
+        flow->socks = d->factory->createUdp(this);
         s->flows.insert(sport, flow);
         d->udpFlowCount++;
 
         UdpFlow *nf = flow;
-        connect(nf->socks, &Socks5Udp::ready, this, [nf]() {
+        connect(nf->socks, &IOutboundUdp::ready, this, [nf]() {
             nf->ready = true;
             for (const UdpFlow::Pending &pk : std::as_const(nf->pending))
                 nf->socks->sendTo(QHostAddress(pk.dstIp), pk.dport, pk.payload);
             nf->pending.clear();
         });
-        connect(nf->socks, &Socks5Udp::datagramReceived, this,
+        connect(nf->socks, &IOutboundUdp::datagramReceived, this,
                 [this, srcIp, sport](const QHostAddress &fromIp, quint16 fromPort,
                                      const QByteArray &data) {
                     // 捕值不捕流指针：即便这条流已经被老化/淘汰掉，槽里也只是查表落空，
@@ -1553,12 +1557,12 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         // 关联建不起来（mihomo 没起来）或控制连接掉线（mihomo 重启）→ 立刻收掉这条流，别让这个
         // 源端口一直黑洞到老化为止；设备下次发包会重建。destroyUdpFlow 走的是 disconnect +
         // deleteLater，在被删对象自己的信号里调用是安全的。
-        connect(nf->socks, &Socks5Udp::failed, this, [this, nf](const QString &) {
+        connect(nf->socks, &IOutboundUdp::failed, this, [this, nf](const QString &) {
             destroyUdpFlow(d, nf);
         });
-        connect(nf->socks, &Socks5Udp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
+        connect(nf->socks, &IOutboundUdp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
 
-        nf->socks->associate(d->socksPort, dev.socksUser);
+        nf->socks->associate(dev.socksUser);
     }
 
     // 续命 + 换档：同一个源端口只要打过一次非 DNS 目的，就永久升到长档（降回去会把一条正在用的
@@ -1645,12 +1649,12 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
         // v6 的来源校验：peers 用的是 QSet<quint32>（v4 地址），装不下 v6。直接退化成全锥
         //（不校验来源），记录在案的取舍——v6 UDP（QUIC/DNS64 等）以此为代价换实现简单。
         flow->coneOpen = true;
-        flow->socks = new Socks5Udp(this);
+        flow->socks = d->factory->createUdp(this);
         s->flows.insert(sport, flow);
         d->udpFlowCount++;
 
         UdpFlow *nf = flow;
-        connect(nf->socks, &Socks5Udp::ready, this, [nf]() {
+        connect(nf->socks, &IOutboundUdp::ready, this, [nf]() {
             nf->ready = true;
             for (const UdpFlow::Pending &pk : std::as_const(nf->pending)) {
                 Q_IPV6ADDR d6;
@@ -1659,17 +1663,17 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
             }
             nf->pending.clear();
         });
-        connect(nf->socks, &Socks5Udp::datagramReceived, this,
+        connect(nf->socks, &IOutboundUdp::datagramReceived, this,
                 [this, srcIp, sport](const QHostAddress &fromIp, quint16 fromPort,
                                      const QByteArray &data) {
                     onUdpResponse(srcIp, sport, fromIp, fromPort, data);
                 });
-        connect(nf->socks, &Socks5Udp::failed, this, [this, nf](const QString &) {
+        connect(nf->socks, &IOutboundUdp::failed, this, [this, nf](const QString &) {
             destroyUdpFlow(d, nf);
         });
-        connect(nf->socks, &Socks5Udp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
+        connect(nf->socks, &IOutboundUdp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
 
-        nf->socks->associate(d->socksPort, dev.socksUser);
+        nf->socks->associate(dev.socksUser);
     }
 
     if (!isShortLivedUdpPort(dport))
