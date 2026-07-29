@@ -326,9 +326,11 @@ public:
 
         QByteArray expr;
         if (macs.isEmpty()) {
-            // 没有被劫持设备：装一个「恒不命中」的过滤把整段流量挡在内核里。源 MAC 不可能是广播地址，
-            // 拿它当恒假条件——比 "len < 0" 之类更稳的合法 pcap 语法。
-            expr = "ether src ff:ff:ff:ff:ff:ff";
+            // 没有被劫持设备时**不再全丢**：仍放行 ARP + ICMPv6(NDP)，让被动监视器 ArpWatch 能检测
+            //「有人冒充网关/本机在代理我」——这类检测不需要正在劫持任何设备（idle 也要能报警）。数据帧
+            // 照旧被挡在内核外（非混杂模式 + 这条过滤只匹配 ARP/ICMPv6 低频帧，近零成本）。与 Linux 端
+            // L2Endpoint_linux 的 idle 放行 ARP/NDP 对齐。
+            expr = "arp or icmp6";
         } else {
             QByteArray macClause;
             for (const QByteArray &m : macs) {
