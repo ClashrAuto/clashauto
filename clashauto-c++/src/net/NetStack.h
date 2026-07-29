@@ -27,6 +27,7 @@
 #include <QString>
 
 class IL2Endpoint;
+class OutboundFactory;
 class QHostAddress;
 
 class NetStack final : public QObject
@@ -38,6 +39,13 @@ public:
 
     // 初始化 lwIP + catch-all TCP 监听 + 定时器泵。全进程只能有一个实例。失败置 *err。
     bool init(QString *err);
+
+    // 换出站工厂（取得所有权：delete 掉旧的，存下新的）。默认工厂 = 构造时按 socksPort 建的
+    // Socks5OutboundFactory（全走 mihomo）。CoastCore 落地后由 CoreController 装一个 CoreDialerFactory
+    //（内部包着 Socks5OutboundFactory 做回退），从而把「按目的地/设备选出站」接进来。
+    // 必须在本 NetStack 所属线程上调用（与其它公开方法同一线程前提，见文件头）；只影响**之后**新建的
+    // 连接/会话，在途的仍用各自已持有的出站对象。f 不可为空。
+    void setOutboundFactory(OutboundFactory *f);
 
     // 挂一张网卡：ep 为其二层端点，localMac6/localIp/netmask 为本机在这张卡上的信息。
     // localIp/netmask 必须有效——它们决定出方向选哪个 netif（见文件头说明）。

@@ -1141,6 +1141,16 @@ NetStack::~NetStack()
     delete d;
 }
 
+void NetStack::setOutboundFactory(OutboundFactory *f)
+{
+    if (!f || f == d->factory)
+        return;
+    // 取得所有权：先 delete 旧的再存新的。在途连接/会话早已各自持有从旧工厂造出的出站对象
+    //（不是持有工厂本身），所以换工厂不影响它们；只有此后新建的连接才向新工厂要出站。
+    delete d->factory;
+    d->factory = f;
+}
+
 bool NetStack::init(QString *err)
 {
     if (d->inited)
