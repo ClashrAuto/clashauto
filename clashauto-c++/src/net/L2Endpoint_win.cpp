@@ -110,10 +110,15 @@ constexpr u_int kTxQueueBytes = 256 * 1024;
 // 应急开关：COAST_GW_TXBATCH=0 → 不开发送线程、不建发送队列，完全退回「工作线程逐帧同步
 // pcap_sendpacket」，即本轮改动之前的行为。留它是因为这条路只能在真机上验证，也方便用同一个
 // 构建做 A/B（对比两次的 usPerTx / fpb / tx 帧率峰值）。
-bool txBatchEnabled()
+bool txThreadEnabled()
 {
-    static const bool on = qEnvironmentVariable("COAST_GW_TXBATCH") != QLatin1String("0");
+    static const bool on = qEnvironmentVariable("COAST_GW_TXTHREAD") != QLatin1String("0");
     return on;
+}
+bool txBatchForcedOff()
+{
+    static const bool off = qEnvironmentVariable("COAST_GW_TXBATCH") == QLatin1String("0");
+    return off;
 }
 
 // 收帧线程的应急开关：COAST_GW_RXTHREAD=0 → 回到 QWinEventNotifier + 工作线程 drain()
@@ -514,6 +519,7 @@ struct AdapterInfo
 {
     QByteArray npfName; // "\Device\NPF_{GUID}"
     QByteArray mac;     // 6 字节；取不到则为空
+    bool wifi = false;  // IfType == IF_TYPE_IEEE80211：决定发送走批量还是逐帧，见 open()
     bool ok = false;
 };
 
@@ -555,6 +561,7 @@ AdapterInfo adapterFor(const QString &ifname)
         out.npfName = QByteArray("\\Device\\NPF_") + guid.toLatin1();
         if (a->PhysicalAddressLength == 6)
             out.mac = QByteArray(reinterpret_cast<const char *>(a->PhysicalAddress), 6);
+        out.wifi = (a->IfType == IF_TYPE_IEEE80211);
         out.ok = !guid.isEmpty();
         break;
     }
@@ -638,20 +645,31 @@ public:
         m_api->setmintocopy(m_pcap, 1); // 有 1 字节就触发事件，降低延迟
         m_localMac = adapter.mac;
 
-        // 批量发送队列（见 kTxQueueBytes 一节）。分配失败/符号缺失/被开关关掉 → m_txq 保持空，
-        // send() 自动走逐帧老路，功能完全不受影响。
-        if (txBatchEnabled() && m_api->sq_alloc && m_api->sq_queue && m_api->sq_transmit
+        // —— 批量发送队列：**只在以太网上用** ——
+        // 真机 A/B（同一台手机、同一条 WiFi、同一时刻）：
+        //   批量开 → 5.7~176 KB/s、ICMP 丢包 20%、TLS 握手最长 18 秒
+        //   批量关 → 870~1918 KB/s、ICMP 丢包 0%
+        // 而同一份代码在以太网设备上批量开是 17.1 MB/s / 12439 帧每秒（关掉只有 1.85 MB/s）。
+        // 也就是说 pcap_sendqueue_transmit 在 Windows 的 Native WiFi 驱动上**会丢帧且不报错**
+        //（txdrop 恒 0，设备侧却收不到，lwIP 只能一直重传），以太网上则是 9 倍收益。
+        // 结论：按介质选，别按开关选。COAST_GW_TXBATCH=0 只是手工覆盖用的逃生口。
+        const bool wantBatch = !adapter.wifi && !txBatchForcedOff();
+        if (wantBatch && m_api->sq_alloc && m_api->sq_queue && m_api->sq_transmit
             && m_api->sq_destroy) {
             m_txq = m_api->sq_alloc(kTxQueueBytes);
             if (!m_txq)
                 dbg("pcap_sendqueue_alloc(%u) 失败，退回逐帧发送", kTxQueueBytes);
         }
+        dbg("媒介=%s，发送模式=%s", adapter.wifi ? "WiFi" : "以太网",
+            m_txq ? "批量提交" : "逐帧提交");
 
         // —— 专用发送句柄 + 发送线程（理由见 TxWorker 的注释）——
         // pcap_t 不是线程安全的，所以**另开一个句柄**给发送线程独占，绝不与收帧共用。
         // to_ms/snaplen 取最小：这个句柄从不读包，snaplen 只影响捕获路径。
         // 任何一步失败都整体降级回「工作线程同步发送」= 本改动之前的行为，不冒险。
-        if (txBatchEnabled()) {
+        // 发送线程与批量**互相独立**：WiFi 上批量关掉了，但逐帧提交实测 731~752 µs/帧，
+        // 更不能压在工作线程上（真机上一关线程，泵立刻从 400 拍掉到 258 拍、late=37）。
+        if (txThreadEnabled()) {
             char txerr[PCAP_ERRBUF_SIZE] = {0};
             m_txPcap = m_api->open_live(adapter.npfName.constData(), 128, 0 /*非混杂*/, 1, txerr);
             if (m_txPcap) {
