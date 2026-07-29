@@ -33,6 +33,7 @@
 
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <vector>
 
@@ -165,11 +166,22 @@ constexpr int kTxQueueMaxFrames = 4096;
 //
 // 专用发送句柄：pcap_t 不是线程安全的，绝不能和收帧共用一个。第二个句柄开不出来就整个
 // 降级回「工作线程同步发送」（= 本改动之前的行为），不冒险。
+// —— Packet.dll（Npcap 底层 API）的三个符号 —— 定义放在 TxWorker 之前（它 submit 要用）。
+// 加载逻辑在下面 packetApi()（挨着 pcap 的运行时绑定）。
+struct PacketApi
+{
+    void *(*openAdapter)(const char *) = nullptr;
+    void (*closeAdapter)(void *) = nullptr;
+    int (*sendPackets)(void *, void *, unsigned long, int) = nullptr;
+};
+
 class TxWorker final : public QThread
 {
 public:
-    TxWorker(const PcapApi *api, pcap_t *pcap, pcap_send_queue *q)
-        : m_api(api), m_pcap(pcap), m_txq(q)
+    // adapter 非空 → 用 PacketSendPackets 批量提交（快 53 倍，见 PacketApi 注释）；
+    // 空 → 退回逐帧 pcap_sendpacket（COAST_GW_TXBATCH=0 / 没装 Packet.dll / 打不开时）。
+    TxWorker(const PcapApi *api, pcap_t *pcap, void *adapter, const PacketApi *pkt)
+        : m_api(api), m_pcap(pcap), m_adapter(adapter), m_pkt(pkt)
     {
     }
 
@@ -239,43 +251,38 @@ private:
         const qint64 t0 = nowUs();
         qint64 okFrames = 0, okBytes = 0, dropped = 0, batches = 0;
 
-        if (m_txq) {
+        if (m_adapter && m_pkt) {
+            // 一次 PacketSendPackets 提交多帧。缓冲格式与 WinPcap send queue 一致：连续的
+            // (pcap_pkthdr + 帧数据)，无对齐填充 —— PacketSendPackets 就是逐个按 caplen 走过去的。
+            constexpr int kCap = 256 * 1024; // 单次提交上限，太大内核会拒
             int i = 0;
             while (i < frames.size()) {
-                m_txq->len = 0; // WinPcap 语义：transmit 不动队列，复用前必须自己归零
+                m_buf.resize(0);
                 int n = 0;
                 qint64 bytes = 0;
-                // 灌到装不下为止。单帧就比整个队列还大是不可能的（队列 256 KiB vs MTU 1518），
-                // 但仍然判一下，免得 n==0 时死循环。
                 while (i < frames.size()) {
                     const QByteArray &f = frames.at(i);
-                    struct pcap_pkthdr hdr;
-                    hdr.ts.tv_sec = 0; // sync=0 提交，时间戳不参与调度
-                    hdr.ts.tv_usec = 0;
+                    const int need = int(sizeof(pcap_pkthdr)) + f.size();
+                    if (!m_buf.isEmpty() && m_buf.size() + need > kCap)
+                        break; // 这批满了，先发掉，剩下的下一轮
+                    pcap_pkthdr hdr;
+                    std::memset(&hdr, 0, sizeof hdr);
                     hdr.caplen = bpf_u_int32(f.size());
                     hdr.len = hdr.caplen;
-                    if (m_api->sq_queue(m_txq, &hdr, reinterpret_cast<const u_char *>(f.constData()))
-                        != 0)
-                        break; // 队列满：先把这批发掉，剩下的下一轮
+                    m_buf.append(reinterpret_cast<const char *>(&hdr), sizeof hdr);
+                    m_buf.append(f);
                     ++n;
                     bytes += f.size();
                     ++i;
                 }
-                if (n == 0) { // 单帧都灌不进去（不该发生）→ 退回逐帧，保证不卡死
-                    if (sendOneRaw(frames.at(i))) { ++okFrames; okBytes += frames.at(i).size(); }
-                    else ++dropped;
-                    ++i;
-                    ++batches;
-                    continue;
-                }
-                const u_int len = m_txq->len;
-                const u_int sent = m_api->sq_transmit(m_pcap, m_txq, 0);
+                const int sent = m_pkt->sendPackets(m_adapter, m_buf.data(),
+                                                    static_cast<unsigned long>(m_buf.size()), 0);
                 ++batches;
-                if (sent < len) {
-                    dropped += n; // 短发：断在第几帧无从得知，整批记丢，交 TCP 重传
-                } else {
+                if (sent >= m_buf.size()) { // 返回值是已提交字节数（含 header）
                     okFrames += n;
                     okBytes += bytes;
+                } else {
+                    dropped += n; // 短发：断在第几帧无从得知，整批记丢，交 TCP 重传
                 }
             }
         } else {
@@ -301,8 +308,10 @@ private:
     }
 
     const PcapApi *m_api;
-    pcap_t *m_pcap;             // 专用发送句柄，本线程独占
-    pcap_send_queue *m_txq;     // 可空 → 逐帧提交
+    pcap_t *m_pcap;             // 逐帧降级路径用（pcap_sendpacket）；批量路径不碰它
+    void *m_adapter;            // Packet.dll 的 LPADAPTER；批量提交走它。空 → 逐帧
+    const PacketApi *m_pkt;     // Packet.dll 符号；空 → 逐帧
+    QByteArray m_buf;           // 批量缓冲，复用避免每轮重分配
     QMutex m_mutex;
     QWaitCondition m_cv;
     QVector<QByteArray> m_pending;
@@ -455,6 +464,35 @@ private:
     int m_outstanding = 0;
     qint64 m_stWakes = 0, m_stUs = 0;
 };
+
+// —— Packet.dll（Npcap 底层 API）运行时绑定 ——
+// 为什么不用 pcap_sendqueue_transmit：它走 NPF 的 BufferedWrite，实测在 **WiFi** 网卡上会丢帧
+// （sq_transmit 返回成功、帧却不上空口，lwIP 只能狂重传）。而 Packet.dll 的 PacketSendPackets
+// 是**另一条内核路径**，把一批帧一次性交给驱动逐个发。独立探针实测（同一块 WiFi 网卡）：
+//     逐帧 pcap_sendpacket   738 µs/帧    2.0 MB/s
+//     PacketSendPackets(256) 12.3 µs/帧  115.9 MB/s   —— 53 倍
+// 根因是逐帧每次一个 DeviceIoControl 内核往返，WiFi 上要 ~700µs；批量一次往返摊薄到十几 µs。
+// 头文件 Packet32.h 与 pcap.h 的 bpf_program 定义冲突，故这里**手动声明**需要的三个符号、不 include。
+// 64 位下只有一种调用约定，函数指针签名不必操心 __cdecl/__stdcall。
+const PacketApi *packetApi()
+{
+    static bool tried = false;
+    static PacketApi api;
+    static bool ok = false;
+    if (tried)
+        return ok ? &api : nullptr;
+    tried = true;
+    HMODULE h = LoadLibraryA("Packet.dll"); // 装了 Npcap 就有（与 wpcap.dll 同目录，SetDllDirectory 已加过）
+    if (!h)
+        return nullptr;
+    api.openAdapter = reinterpret_cast<decltype(api.openAdapter)>(GetProcAddress(h, "PacketOpenAdapter"));
+    api.closeAdapter =
+        reinterpret_cast<decltype(api.closeAdapter)>(GetProcAddress(h, "PacketCloseAdapter"));
+    api.sendPackets =
+        reinterpret_cast<decltype(api.sendPackets)>(GetProcAddress(h, "PacketSendPackets"));
+    ok = api.openAdapter && api.closeAdapter && api.sendPackets;
+    return ok ? &api : nullptr;
+}
 
 // 加载并解析 wpcap.dll。返回 nullptr = 没装 Npcap（或版本太老、缺符号）。
 // 只做一次；DLL 句柄故意不释放（进程生命周期内一直要用）。
@@ -648,27 +686,10 @@ public:
         // —— 批量发送队列：**只在以太网上用** ——
         // 真机 A/B（同一台手机、同一条 WiFi、同一时刻）：
         //   批量开 → 5.7~176 KB/s、ICMP 丢包 20%、TLS 握手最长 18 秒
-        //   批量关 → 870~1918 KB/s、ICMP 丢包 0%
-        // 而同一份代码在以太网设备上批量开是 17.1 MB/s / 12439 帧每秒（关掉只有 1.85 MB/s）。
-        // 也就是说 pcap_sendqueue_transmit 在 Windows 的 Native WiFi 驱动上**会丢帧且不报错**
-        //（txdrop 恒 0，设备侧却收不到，lwIP 只能一直重传），以太网上则是 9 倍收益。
-        // 结论：按介质选，别按开关选。COAST_GW_TXBATCH=0 只是手工覆盖用的逃生口。
-        const bool wantBatch = !adapter.wifi && !txBatchForcedOff();
-        if (wantBatch && m_api->sq_alloc && m_api->sq_queue && m_api->sq_transmit
-            && m_api->sq_destroy) {
-            m_txq = m_api->sq_alloc(kTxQueueBytes);
-            if (!m_txq)
-                dbg("pcap_sendqueue_alloc(%u) 失败，退回逐帧发送", kTxQueueBytes);
-        }
-        dbg("媒介=%s，发送模式=%s", adapter.wifi ? "WiFi" : "以太网",
-            m_txq ? "批量提交" : "逐帧提交");
-
         // —— 专用发送句柄 + 发送线程（理由见 TxWorker 的注释）——
         // pcap_t 不是线程安全的，所以**另开一个句柄**给发送线程独占，绝不与收帧共用。
         // to_ms/snaplen 取最小：这个句柄从不读包，snaplen 只影响捕获路径。
         // 任何一步失败都整体降级回「工作线程同步发送」= 本改动之前的行为，不冒险。
-        // 发送线程与批量**互相独立**：WiFi 上批量关掉了，但逐帧提交实测 731~752 µs/帧，
-        // 更不能压在工作线程上（真机上一关线程，泵立刻从 400 拍掉到 258 拍、late=37）。
         if (txThreadEnabled()) {
             char txerr[PCAP_ERRBUF_SIZE] = {0};
             m_txPcap = m_api->open_live(adapter.npfName.constData(), 128, 0 /*非混杂*/, 1, txerr);
@@ -681,10 +702,21 @@ public:
                 }
                 if (m_api->setbuff)
                     m_api->setbuff(m_txPcap, 64 * 1024); // 收缓冲用不上，压到最小
-                m_tx = new TxWorker(m_api, m_txPcap, m_txq);
-                m_txq = nullptr; // 所有权交给发送线程，本对象不再碰它
+
+                // 批量提交走 Packet.dll 的 PacketSendPackets（有线/WiFi 都用它，实测两种介质
+                // 都是 10~15 µs/帧且不丢帧；替代了会在 WiFi 上丢帧的 pcap_sendqueue）。
+                // COAST_GW_TXBATCH=0 → 不开 adapter，TxWorker 退回逐帧 pcap_sendpacket。
+                const PacketApi *pkt = packetApi();
+                if (pkt && !txBatchForcedOff()) {
+                    m_txAdapter = pkt->openAdapter(adapter.npfName.constData());
+                    if (!m_txAdapter)
+                        dbg("PacketOpenAdapter 失败，退回逐帧发送");
+                }
+                dbg("发送模式=%s（介质=%s）", m_txAdapter ? "批量(PacketSendPackets)" : "逐帧",
+                    adapter.wifi ? "WiFi" : "以太网");
+                m_tx = new TxWorker(m_api, m_txPcap, m_txAdapter,
+                                    m_txAdapter ? pkt : nullptr);
                 m_tx->start();
-                dbg("tx thread started (dedicated pcap handle)");
             } else {
                 dbg("发送专用句柄打不开（%s），退回工作线程同步发送", txerr);
             }
@@ -745,9 +777,11 @@ public:
             delete m_tx;
             m_tx = nullptr;
         }
-        if (m_txq) { // 只有「线程没起来」的降级路径才轮到这里
-            m_api->sq_destroy(m_txq);
-            m_txq = nullptr;
+        // 发送线程停干净后才关它用的句柄（PacketOpenAdapter 的 adapter + 逐帧降级的 pcap）。
+        if (m_txAdapter) {
+            if (const PacketApi *pkt = packetApi())
+                pkt->closeAdapter(m_txAdapter);
+            m_txAdapter = nullptr;
         }
         if (m_txPcap) {
             m_api->close(m_txPcap);
@@ -1000,8 +1034,8 @@ private:
 
     const PcapApi *m_api = nullptr; // open() 里解析；进程级单例，不属本对象所有
     pcap_t *m_pcap = nullptr;
-    pcap_send_queue *m_txq = nullptr; // 发送队列；所有权在 open() 里交给 TxWorker，之后恒为空
-    pcap_t *m_txPcap = nullptr;       // 发送专用句柄（TxWorker 独占；pcap_t 非线程安全）
+    pcap_t *m_txPcap = nullptr;       // 逐帧降级句柄（TxWorker 独占；pcap_t 非线程安全）
+    void *m_txAdapter = nullptr;      // Packet.dll LPADAPTER：批量提交走它；close 时释放
     TxWorker *m_tx = nullptr;         // 空 = 降级到工作线程同步发送
     QWinEventNotifier *m_notifier = nullptr; // 仅降级路径使用
     RxWorker *m_rx = nullptr;                // 空 = 降级到通知器 + 工作线程 drain()
