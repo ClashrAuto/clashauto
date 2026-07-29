@@ -2,9 +2,10 @@ name: Build and Release
 
 on:
   push:
+    # 所有分支都构建。主分支(master/main)发正式 Release，其余分支发 prerelease ——
+    # 功能分支可以先打包给人装上试，不污染正式版通道；app 里「接收测试版」开关决定要不要看到它们。
     branches:
-      - master
-      - main
+      - '**'
   pull_request:
     branches:
       - master
@@ -57,9 +58,16 @@ jobs:
           $minor = if ($Matches[2]) { $Matches[2] } else { "0" }
           $build = "$(git rev-list --count HEAD)".Trim()
           $version = "$major.$minor.$build"
+          # 主分支 = 正式版，其余分支 = prerelease。
+          # APP_VERSION 保持纯数字 major.minor.build —— 资源文件名(ClashAuto-<ver>-…)和 app 内的
+          # 版本比较都靠它，掺字母会一起坏掉。分支上 build 天然大于主分支（= 主分支提交数 + 本分支
+          # 的提交），版本序自然正确；tag 再加个短 sha，防「两个分支各 +N 撞到同一个号」。
+          $isPre = if ("${{ github.ref }}" -eq "refs/heads/master" -or "${{ github.ref }}" -eq "refs/heads/main") { "false" } else { "true" }
+          $tag = if ($isPre -eq "true") { "v$version-beta.$("${{ github.sha }}".Substring(0,7))" } else { "v$version" }
           "APP_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RELEASE_TAG=v$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "Release version: $version (build number = commit count)"
+          "RELEASE_TAG=$tag" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "IS_PRERELEASE=$isPre" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "Release version: $version tag=$tag prerelease=$isPre (build number = commit count)"
 
       - name: Install Qt
         shell: pwsh
@@ -266,25 +274,31 @@ jobs:
             dist/ClashAuto-*-windows-${{ matrix.arch }}-setup.exe
 
       - name: Write release notes
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        if: github.event_name == 'push'
         shell: bash
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: printf '%s\n' "$COMMIT_MSG" > release-notes.md
 
       - name: Upload to GitHub Release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Clash Auto ${{ env.APP_VERSION }}
+          # 名字带上分支，便于在 Release 列表里一眼分辨这是哪条分支的测试版。
+          # ★ 资源**文件名**仍是 ClashAuto-<ver>-<平台>-<架构>-… 一个字没动 —— app 的一键更新
+          #   是按文件名里的平台/架构挑资源的（UpdateController::recommendedIndex）。
+          name: ${{ env.IS_PRERELEASE == 'true' && format('Clash Auto {0} (beta · {1})', env.APP_VERSION, github.ref_name) || format('Clash Auto {0}', env.APP_VERSION) }}
+          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
           target_commitish: ${{ github.sha }}
           # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示），经上一步写盘的
           # 文件传入。不能用 generate_release_notes：创建 release 时 GitHub 会把「提供的
           # body + 自动说明」合并，body 里的部分换行被转义成字面 \n；后续 job 的 body_path
           # 更新又会覆盖掉自动说明——它只留下污染的中间态，纯负作用，故移除。
           body_path: release-notes.md
-          make_latest: true
+          # prerelease 绝不能占 latest：/releases/latest 是正式版通道，被 beta 占了会把所有
+          # 没开「接收测试版」的用户推到测试版上去。
+          make_latest: ${{ env.IS_PRERELEASE == 'true' && 'false' || 'true' }}
           overwrite_files: true
           files: |
             dist/ClashAuto-*
@@ -314,11 +328,18 @@ jobs:
           [ -n "$minor" ] || minor=0
           build="$(git rev-list --count HEAD)"
           version="${major}.${minor}.${build}"
+          # 主分支 = 正式版，其余分支 = prerelease。取舍见 windows job 那段注释。
+          if [ "${{ github.ref }}" = "refs/heads/master" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            is_pre=false; tag="v$version"
+          else
+            is_pre=true; tag="v$version-beta.$(echo "${{ github.sha }}" | cut -c1-7)"
+          fi
           {
             echo "APP_VERSION=$version"
-            echo "RELEASE_TAG=v$version"
+            echo "RELEASE_TAG=$tag"
+            echo "IS_PRERELEASE=$is_pre"
           } >> "$GITHUB_ENV"
-          echo "Release version: $version (build number = commit count)"
+          echo "Release version: $version tag=$tag prerelease=$is_pre (build number = commit count)"
 
       - name: Install build dependencies
         shell: bash
@@ -557,11 +578,18 @@ jobs:
           [ -n "$minor" ] || minor=0
           build="$(git rev-list --count HEAD)"
           version="${major}.${minor}.${build}"
+          # 主分支 = 正式版，其余分支 = prerelease。取舍见 windows job 那段注释。
+          if [ "${{ github.ref }}" = "refs/heads/master" ] || [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            is_pre=false; tag="v$version"
+          else
+            is_pre=true; tag="v$version-beta.$(echo "${{ github.sha }}" | cut -c1-7)"
+          fi
           {
             echo "APP_VERSION=$version"
-            echo "RELEASE_TAG=v$version"
+            echo "RELEASE_TAG=$tag"
+            echo "IS_PRERELEASE=$is_pre"
           } >> "$GITHUB_ENV"
-          echo "Release version: $version (build number = commit count)"
+          echo "Release version: $version tag=$tag prerelease=$is_pre (build number = commit count)"
 
       - name: Install build dependencies
         shell: bash
@@ -751,25 +779,31 @@ jobs:
             dist/ClashAuto-*-linux-${{ matrix.arch }}.deb
 
       - name: Write release notes
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        if: github.event_name == 'push'
         shell: bash
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: printf '%s\n' "$COMMIT_MSG" > release-notes.md
 
       - name: Upload to GitHub Release
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          name: Clash Auto ${{ env.APP_VERSION }}
+          # 名字带上分支，便于在 Release 列表里一眼分辨这是哪条分支的测试版。
+          # ★ 资源**文件名**仍是 ClashAuto-<ver>-<平台>-<架构>-… 一个字没动 —— app 的一键更新
+          #   是按文件名里的平台/架构挑资源的（UpdateController::recommendedIndex）。
+          name: ${{ env.IS_PRERELEASE == 'true' && format('Clash Auto {0} (beta · {1})', env.APP_VERSION, github.ref_name) || format('Clash Auto {0}', env.APP_VERSION) }}
+          prerelease: ${{ env.IS_PRERELEASE == 'true' }}
           target_commitish: ${{ github.sha }}
           # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示），经上一步写盘的
           # 文件传入。不能用 generate_release_notes：创建 release 时 GitHub 会把「提供的
           # body + 自动说明」合并，body 里的部分换行被转义成字面 \n；后续 job 的 body_path
           # 更新又会覆盖掉自动说明——它只留下污染的中间态，纯负作用，故移除。
           body_path: release-notes.md
-          make_latest: true
+          # prerelease 绝不能占 latest：/releases/latest 是正式版通道，被 beta 占了会把所有
+          # 没开「接收测试版」的用户推到测试版上去。
+          make_latest: ${{ env.IS_PRERELEASE == 'true' && 'false' || 'true' }}
           overwrite_files: true
           files: |
             dist/ClashAuto-*-linux-*
@@ -780,7 +814,7 @@ jobs:
   gateway-selftest:
     name: Gateway self-test (Linux netstack)
     needs: [linux]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    if: github.event_name == 'push'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -825,6 +859,8 @@ jobs:
     # 只依赖 windows（release 由它创建，mac DMG 随后追加）；mac 构建与 linux 无关，
     # 不因 linux 失败被 skip。
     needs: [windows]
+    # ★ 只在主分支触发。外部签名仓库(integemjack/schat.build)会把公证好的 DMG 覆盖到
+    #   release 上，beta 也走这条就会拿测试版的包盖掉正式版 —— 所以测试版**不出 macOS DMG**。
     if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     steps:
