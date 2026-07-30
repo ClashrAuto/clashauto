@@ -73,9 +73,32 @@ endif()
 # CI 需提供 msquic(预编译包,见 QuicTransport.cpp 的集成说明);本地 MinGW/QEMU 无 → 默认关。
 # 用 -Dmsquic_DIR=... 或 -DCOAST_MSQUIC_ROOT=... 指向 SDK。TUIC token 需 msquic>=2.6 的 preview 特性。
 set(COAST_HAVE_QUIC OFF)
+set(COAST_MSQUIC_LINK "")
+# 先试 CMake config 包（自己源码编的 msquic 会装 msquicConfig.cmake）。
 find_package(msquic QUIET)
 if(msquic_FOUND)
     set(COAST_HAVE_QUIC ON)
+    set(COAST_MSQUIC_LINK msquic)
+else()
+    # ★ 再手工找：**发行版/官方源装来的 msquic 不带 CMake config**。
+    #   实测 microsoft/msquic 的 GitHub Release **一个预编译资产都没有**（v2.5.9 assets=0），
+    #   Linux 侧的正路是 packages.microsoft.com 的 `libmsquic`（jammy/amd64 与 noble/arm64 都有 2.5.9，
+    #   正对上 CI 的 ubuntu-22.04 / ubuntu-24.04-arm 两个 runner），它只装 msquic.h + libmsquic.so，
+    #   没有 CMake config → 只靠 find_package 会永远找不到。
+    #   也可用 -DCOAST_MSQUIC_ROOT=<sdk> 指一份自备的（含 include/ 与 lib/）。
+    find_path(COAST_MSQUIC_INCLUDE_DIR msquic.h
+              HINTS ${COAST_MSQUIC_ROOT} $ENV{COAST_MSQUIC_ROOT}
+              PATH_SUFFIXES include)
+    find_library(COAST_MSQUIC_LIBRARY NAMES msquic
+                 HINTS ${COAST_MSQUIC_ROOT} $ENV{COAST_MSQUIC_ROOT}
+                 PATH_SUFFIXES lib lib64)
+    if(COAST_MSQUIC_INCLUDE_DIR AND COAST_MSQUIC_LIBRARY)
+        set(COAST_HAVE_QUIC ON)
+        set(COAST_MSQUIC_LINK ${COAST_MSQUIC_LIBRARY})
+        message(STATUS "msquic 手工定位: ${COAST_MSQUIC_LIBRARY} (include: ${COAST_MSQUIC_INCLUDE_DIR})")
+    endif()
+endif()
+if(COAST_HAVE_QUIC)
     message(STATUS "msquic found → CoastCore QUIC (Hysteria2/TUIC) enabled")
 else()
     message(STATUS "msquic NOT found → CoastCore QUIC disabled (hysteria2/tuic fall back to mihomo)")
@@ -337,7 +360,10 @@ if(COAST_HAVE_QUIC)
         src/net/core/transport/QuicTransport.cpp  src/net/core/transport/QuicTransport.h
         src/net/core/proto/Hysteria2Outbound.cpp  src/net/core/proto/Hysteria2Outbound.h
         src/net/core/proto/TuicOutbound.cpp       src/net/core/proto/TuicOutbound.h)
-    target_link_libraries(clashauto-qml PRIVATE msquic)
+    target_link_libraries(clashauto-qml PRIVATE ${COAST_MSQUIC_LINK})
+    if(COAST_MSQUIC_INCLUDE_DIR)
+        target_include_directories(clashauto-qml PRIVATE ${COAST_MSQUIC_INCLUDE_DIR})
+    endif()
     target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_QUIC QUIC_API_ENABLE_PREVIEW_FEATURES)
 
     # TUIC 的 token 要 msquic 的 keying-material exporter。**别只靠 QUIC_API_ENABLE_PREVIEW_FEATURES
@@ -349,8 +375,11 @@ if(COAST_HAVE_QUIC)
     include(CMakePushCheckState)
     include(CheckCXXSourceCompiles)
     cmake_push_check_state(RESET)
-    set(CMAKE_REQUIRED_LIBRARIES msquic)
+    set(CMAKE_REQUIRED_LIBRARIES ${COAST_MSQUIC_LINK})
     set(CMAKE_REQUIRED_DEFINITIONS -DQUIC_API_ENABLE_PREVIEW_FEATURES)
+    if(COAST_MSQUIC_INCLUDE_DIR)
+        set(CMAKE_REQUIRED_INCLUDES ${COAST_MSQUIC_INCLUDE_DIR})
+    endif()
     check_cxx_source_compiles("
         #include <msquic.h>
         int main() {
