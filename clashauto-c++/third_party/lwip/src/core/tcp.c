@@ -111,6 +111,9 @@
 #include "lwip/ip6.h"
 #include "lwip/ip6_addr.h"
 #include "lwip/nd6.h"
+/* Coast 诊断补丁：静默丢 SYN / 静默杀连接 的计数器（定义在本文件，声明见头）。 */
+#include "coast_lwip_diag.h"
+struct coast_lwip_diag coast_lwip_diag;
 
 #include <string.h>
 
@@ -1742,6 +1745,7 @@ tcp_kill_prio(u8_t prio)
     }
   }
   if (inactive != NULL) {
+    coast_lwip_diag.prio_killed++; /* Coast 诊断补丁：活连接被挤掉（设备侧看到连接凭空断） */
     LWIP_DEBUGF(TCP_DEBUG, ("tcp_kill_prio: killing oldest PCB %p (%"S32_F")\n",
                             (void *)inactive, inactivity));
     tcp_abort(inactive);
@@ -1773,6 +1777,10 @@ tcp_kill_state(enum tcp_state state)
     }
   }
   if (inactive != NULL) {
+    /* Coast 诊断补丁：LAST_ACK 被杀 = 半关闭连接积压到把池子挤爆了。 */
+    if (state == LAST_ACK) {
+      coast_lwip_diag.lastack_killed++;
+    }
     LWIP_DEBUGF(TCP_DEBUG, ("tcp_kill_closing: killing oldest %s PCB %p (%"S32_F")\n",
                             tcp_state_str[state], (void *)inactive, inactivity));
     /* Don't send a RST, since no data is lost. */
@@ -1794,12 +1802,14 @@ tcp_kill_timewait(void)
   inactive = NULL;
   /* Go through the list of TIME_WAIT pcbs and get the oldest pcb. */
   for (pcb = tcp_tw_pcbs; pcb != NULL; pcb = pcb->next) {
+    coast_lwip_diag.tw_scan++; /* Coast 诊断补丁：这条 O(TIME_WAIT 表长) 的扫描每条新连接走一遍 */
     if ((u32_t)(tcp_ticks - pcb->tmr) >= inactivity) {
       inactivity = tcp_ticks - pcb->tmr;
       inactive = pcb;
     }
   }
   if (inactive != NULL) {
+    coast_lwip_diag.tw_killed++; /* Coast 诊断补丁 */
     LWIP_DEBUGF(TCP_DEBUG, ("tcp_kill_timewait: killing oldest TIME-WAIT PCB %p (%"S32_F")\n",
                             (void *)inactive, inactivity));
     tcp_abort(inactive);
@@ -1888,6 +1898,9 @@ tcp_alloc(u8_t prio)
       /* adjust err stats: memp_malloc failed above */
       MEMP_STATS_DEC(err, MEMP_TCP_PCB);
     }
+  }
+  if (pcb == NULL) {
+    coast_lwip_diag.alloc_fail++; /* Coast 诊断补丁：降级链走完仍没拿到 pcb → 这条 SYN 被丢 */
   }
   if (pcb != NULL) {
     /* zero out the whole pcb, so there is no need to initialize members to zero */

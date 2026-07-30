@@ -31,9 +31,12 @@ extern "C" {
 #include "lwip/nd6.h"
 #include "lwip/netif.h"
 #include "lwip/stats.h"
+#include "lwip/priv/tcp_priv.h" // tcp_active_pcbs / tcp_tw_pcbs：pcb 按状态普查（见 lwipStatsLine）
 #include "lwip/tcp.h"
 #include "lwip/timeouts.h"
 #include "netif/ethernet.h"
+
+#include "coast_lwip_diag.h" // Coast 打进 lwIP 的「静默丢 SYN / 静默杀连接」计数器
 }
 
 // lwIP(NO_SYS) 需要单调毫秒时钟。
@@ -1034,6 +1037,57 @@ QString lwipStatsLine()
                .arg(uint(lwip_stats.mem.used))
                .arg(uint(lwip_stats.mem.max))
                .arg(uint(lwip_stats.mem.err));
+
+    // ★ pcb 普查：**光有 used 说明不了任何问题**。真机压测里 pcb 顶到 2048/2048 而 err 恒 0
+    //   （err 会被 tcp_alloc 的 MEMP_STATS_DEC 减回去），当时唯一能做的就是猜「那两千个 pcb
+    //   到底卡在哪个状态」。这一栏把它变成事实：TIME_WAIT 堆着 = 主动关闭方的正常代价、
+    //   要靠 TCP_MSL 和池容量对齐来解；FIN_WAIT/LAST_ACK/CLOSING 堆着 = **我们自己的关闭
+    //   路径有洞**，调大池子只是把崩溃时间往后推。
+    //   成本：一次链表全遍历（池上限 2048），每个诊断采样窗口（默认 10s）走一次，可忽略。
+    {
+        int st[16] = {};
+        int active = 0;
+        for (struct tcp_pcb *p = tcp_active_pcbs; p != nullptr; p = p->next) {
+            ++active;
+            if (p->state >= 0 && p->state < 16)
+                ++st[p->state];
+        }
+        int tw = 0;
+        for (struct tcp_pcb *p = tcp_tw_pcbs; p != nullptr; p = p->next)
+            ++tw;
+        int bound = 0;
+        for (struct tcp_pcb *p = tcp_bound_pcbs; p != nullptr; p = p->next)
+            ++bound;
+        out += QStringLiteral(" pcbst=synr%1/est%2/fw1_%3/fw2_%4/cw%5/closing%6/lastack%7/tw%8/bound%9")
+                   .arg(st[SYN_RCVD]).arg(st[ESTABLISHED]).arg(st[FIN_WAIT_1]).arg(st[FIN_WAIT_2])
+                   .arg(st[CLOSE_WAIT]).arg(st[CLOSING]).arg(st[LAST_ACK]).arg(tw).arg(bound);
+        // 监听 backlog 的占用：accepts_pending 顶到 backlog 时 tcp_listen_input 直接静默丢 SYN
+        //（不分配 pcb、不发 SYN-ACK、不回调上层）——是本栈第一条「网关完全停止接受连接」的路径。
+        if (g_impl && g_impl->listener) {
+            const auto *lp = reinterpret_cast<const struct tcp_pcb_listen *>(g_impl->listener);
+            out += QStringLiteral(" backlog=%1/%2").arg(uint(lp->accepts_pending)).arg(uint(lp->backlog));
+        }
+    }
+
+    // Coast 诊断补丁（third_party/lwip + lwip_port/coast_lwip_diag.h）的窗口增量。
+    // 这几栏全是「lwIP 静默做掉、上层永远收不到回调」的事件，见那个头文件的说明。
+    {
+        static struct coast_lwip_diag prev = {};
+        const struct coast_lwip_diag now = coast_lwip_diag;
+        const auto d32 = [](unsigned int a, unsigned int b) { return uint(a - b); };
+        out += QStringLiteral(" synDropBacklog=%1 synHitTw=%2 twRecyc=%9 twRst=%3 twKill=%4 laKill=%5"
+                              " prioKill=%6 allocFail=%7 twScan=%8")
+                   .arg(d32(now.syn_drop_backlog, prev.syn_drop_backlog))
+                   .arg(d32(now.syn_hit_timewait, prev.syn_hit_timewait))
+                   .arg(d32(now.tw_rst, prev.tw_rst))
+                   .arg(d32(now.tw_killed, prev.tw_killed))
+                   .arg(d32(now.lastack_killed, prev.lastack_killed))
+                   .arg(d32(now.prio_killed, prev.prio_killed))
+                   .arg(d32(now.alloc_fail, prev.alloc_fail))
+                   .arg(d32(now.tw_scan, prev.tw_scan))
+                   .arg(d32(now.tw_recycled, prev.tw_recycled));
+        prev = now;
+    }
     return out;
 }
 
