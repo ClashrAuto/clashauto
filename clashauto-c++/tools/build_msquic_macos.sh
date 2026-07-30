@@ -55,8 +55,10 @@ for arch in x86_64 arm64; do
 done
 
 # 产物路径随版本/生成器会变，别写死 —— 找真文件（跳过符号链接）。
+# 注意不用 `find | head -1`：pipefail 下 head 提前关管道会让 find 吃 SIGPIPE，
+# 整条流水线非零 → set -e 让脚本**无声退出**，一行报错都不留。sed 读完全部输入，没这毛病。
 dylib_of() {
-  find "$1" -type f -name 'libmsquic*.dylib' | head -1
+  find "$1" -type f -name 'libmsquic*.dylib' | sed -n 1p
 }
 X="$(dylib_of "build-x86_64")"
 A="$(dylib_of "build-arm64")"

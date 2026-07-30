@@ -495,9 +495,23 @@ jobs:
         #   而且 msquic 在 Darwin **不支持一次编出 universal**（它给 quictls 传的 Configure 目标按
         #   CMAKE_OSX_ARCHITECTURES 精确匹配，多架构会走进 "WTF" 分支）→ 只能各编一次再 lipo。
         #   具体逻辑放在仓库里的脚本，便于外部签名仓库(schat.build)复用同一份（那边才是发布 DMG 的构建者）。
+        # ★ 失败时把 cmake/clang/ninja 的 error 行抬成 ::error:: 注解，理由同各 Build 步骤：
+        #   本仓库读不到 Actions 日志（要 admin，实测 403），注解却是公开可读的。上一轮这步
+        #   失败只留下 "exit code 1"，正是因为没接这套机制。grep 不中时兜底抬日志末尾几行，
+        #   保证任何失败形态（git clone 挂、lipo 挂……）都能留下真报错。
         if: steps.msquic-cache.outputs.cache-hit != 'true'
         shell: bash
-        run: bash clashauto-c++/tools/build_msquic_macos.sh "$HOME/msquic-sdk" "$MSQUIC_VERSION"
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/msquic-build.log"
+          if ! bash clashauto-c++/tools/build_msquic_macos.sh "$HOME/msquic-sdk" "$MSQUIC_VERSION" 2>&1 | tee "$log"; then
+            err="$RUNNER_TEMP/msquic-err.txt"
+            grep -E "error:|Error|FAILED:|fatal" "$log" | head -25 > "$err" || true
+            # grep 一行没中就取日志末尾，宁可糙一点也不能空手而归
+            [ -s "$err" ] || tail -n 12 "$log" > "$err"
+            while IFS= read -r line; do echo "::error::${line//::/：}"; done < "$err"
+            exit 1
+          fi
 
       - name: Verify msquic SDK
         shell: bash

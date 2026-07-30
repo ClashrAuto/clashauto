@@ -377,6 +377,15 @@ if(COAST_HAVE_QUIC)
         src/net/core/proto/Hysteria2Outbound.cpp  src/net/core/proto/Hysteria2Outbound.h
         src/net/core/proto/TuicOutbound.cpp       src/net/core/proto/TuicOutbound.h)
     target_link_libraries(clashauto-qml PRIVATE ${COAST_MSQUIC_LINK})
+    # Windows 还得链 ntdll：msquic 的 msquic_winuser.h 里 QuicAddrFromString 是**头文件内联**实现，
+    # 内部调用 RtlIpv4StringToAddressExA / RtlIpv6StringToAddressExA —— 这俩符号只在 ntdll.lib 里。
+    # QuicTransport.cpp 用了 QuicAddrFromString（openConnection 把 IP 字面量钉成
+    # QUIC_PARAM_CONN_REMOTE_ADDRESS），于是这个依赖被内联进**我们的**目标文件，不链 ntdll
+    # 就 LNK2019（CI 两个架构实测都挂）。注意这是**链接期**问题：MinGW 本地 -fsyntax-only
+    # 语法检查复现不出来 —— 不是我们直接调的 API，别删。
+    if(WIN32)
+        target_link_libraries(clashauto-qml PRIVATE ntdll)
+    endif()
     if(COAST_MSQUIC_INCLUDE_DIR)
         target_include_directories(clashauto-qml PRIVATE ${COAST_MSQUIC_INCLUDE_DIR})
     endif()
