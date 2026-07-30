@@ -31,6 +31,7 @@
 #endif
 #include "net/core/RuleEngine.h"             // COAST_RULE_SELFTEST：分流规则匹配自测
 #include "net/core/ProxyConfigBuilder.h"     // COAST_PROXYCFG_SELFTEST：proxies YAML → ProxyNode 解析自测
+#include "net/core/DnsMessage.h"            // COAST_DNS_SELFTEST：DNS 报文层 KAT
 #ifdef COAST_HAVE_QUIC
 #include "net/core/proto/Hysteria2Outbound.h"   // COAST_QUIC_SELFTEST：Hy2 的 QPACK/Huffman KAT
 #include "net/core/transport/QuicTransport.h"   // COAST_QUIC_SELFTEST：msquic 运行时可加载性
@@ -176,6 +177,16 @@ int main(int argc, char *argv[])
     // 全过返回 0。纯解析、不建 GUI、不碰网络（见 net/core/ProxyConfigBuilder.cpp）。
     if (qEnvironmentVariableIsSet("COAST_PROXYCFG_SELFTEST"))
         return coastcore::proxyConfigSelfTest() ? 0 : 1;
+
+    // DNS 报文层自检（COAST_DNS_SELFTEST=1）：解析设备查询 / 合成 fake-ip 应答两个方向逐字节比对。
+    // 网关自己出 DNS 应答之后，报文写错的后果是「上网时好时坏」这种最难查的形态 —— 必须有向量钉住。
+    if (qEnvironmentVariableIsSet("COAST_DNS_SELFTEST")) {
+        QString why;
+        const bool ok = coastcore::dnsSelfTest(&why);
+        fprintf(stderr, "DNS message KAT : %s%s\n", ok ? "PASS" : "FAIL",
+                ok ? "" : qUtf8Printable(QStringLiteral("  ") + why));
+        return ok ? 0 : 1;
+    }
 
 #ifdef COAST_HAVE_QUIC
     // QUIC 自检（COAST_QUIC_SELFTEST=1）：**发布前的守门人**，回答两个只有跑起来才知道的问题：

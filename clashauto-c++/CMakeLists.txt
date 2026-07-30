@@ -194,6 +194,8 @@ set(BACKEND_SOURCES
     # 分流规则引擎（mihomo 风格首命中 + 自带只读 mmdb GEOIP 查询）+ DNS 解析器（A/AAAA 缓存 + fake-ip 池）。
     src/net/core/RuleEngine.cpp  src/net/core/RuleEngine.h
     src/net/core/DnsResolver.cpp src/net/core/DnsResolver.h
+    # DNS 报文层（解析设备的查询 / 合成 fake-ip 应答）——让网关的 DNS 这一环不再依赖核心
+    src/net/core/DnsMessage.cpp  src/net/core/DnsMessage.h
     src/net/LanGateway.h
     # 数据面诊断日志（<userDir>/logs/gateway-diag.log）。跨平台编译：main_qml.cpp 要调 setLogDir，
     # 而计数器只有 POSIX 上的网关才真的往里写。
