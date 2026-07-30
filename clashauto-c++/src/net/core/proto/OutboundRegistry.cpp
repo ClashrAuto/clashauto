@@ -50,6 +50,12 @@ IOutboundUdp *OutboundRegistry::createUdp(const ProxyNode &node, QObject *parent
 #include "TrojanOutbound.h"      // registerTrojan      —— "trojan" (TLS)
 #include "VlessOutbound.h"       // registerVless       —— "vless" (tcp/tls/ws)
 #include "VmessOutbound.h"       // registerVmess       —— "vmess" (VMessAEAD)
+#include "RealityOutbound.h"     // registerReality     —— "reality" (uTLS+REALITY over 自建 TLS1.3)
+
+#ifdef COAST_HAVE_QUIC
+#include "Hysteria2Outbound.h"   // registerHysteria2   —— "hysteria2"/"hy2" (QUIC)
+#include "TuicOutbound.h"        // registerTuic        —— "tuic" (QUIC)
+#endif
 
 void registerBuiltinProtocols(OutboundRegistry &reg)
 {
@@ -57,5 +63,11 @@ void registerBuiltinProtocols(OutboundRegistry &reg)
     registerTrojan(reg);
     registerVless(reg);
     registerVmess(reg);
-    // TODO(后续单元)：Hysteria2 / TUIC(QUIC)、REALITY/uTLS 落地后在此续注册。
+    registerReality(reg);
+#ifdef COAST_HAVE_QUIC
+    // QUIC 系仅在构建带上 msquic 时编入(CMake find_package(msquic) 成功 → 定义 COAST_HAVE_QUIC)。
+    // 否则 hysteria2/tuic 未注册 → 具名节点回退 mihomo,不影响其余协议。
+    registerHysteria2(reg);
+    registerTuic(reg);
+#endif
 }

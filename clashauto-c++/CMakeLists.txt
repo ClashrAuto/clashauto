@@ -32,6 +32,20 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sq
 # 本地 MinGW 自带（头 opt/include、库 opt/lib）；CI 里由工具链/aqt 提供。用 -DOPENSSL_ROOT_DIR 提示。
 find_package(OpenSSL REQUIRED)
 
+# msquic —— CoastCore 的 QUIC 系出站(Hysteria2 / TUIC,见 src/net/core/transport/QuicTransport.cpp)。
+# **可选**:找到才编入 QUIC 协议并定义 COAST_HAVE_QUIC;找不到则 hysteria2/tuic 不注册、具名节点回退
+# mihomo,其余协议不受影响(与 QtDBus 一样的「缺了就降级、别让构建失败」策略)。
+# CI 需提供 msquic(预编译包,见 QuicTransport.cpp 的集成说明);本地 MinGW/QEMU 无 → 默认关。
+# 用 -Dmsquic_DIR=... 或 -DCOAST_MSQUIC_ROOT=... 指向 SDK。TUIC token 需 msquic>=2.6 的 preview 特性。
+set(COAST_HAVE_QUIC OFF)
+find_package(msquic QUIET)
+if(msquic_FOUND)
+    set(COAST_HAVE_QUIC ON)
+    message(STATUS "msquic found → CoastCore QUIC (Hysteria2/TUIC) enabled")
+else()
+    message(STATUS "msquic NOT found → CoastCore QUIC disabled (hysteria2/tuic fall back to mihomo)")
+endif()
+
 # Linux 的睡眠/唤醒事件走 systemd-logind 的 D-Bus 信号 PrepareForSleep（外加一把 delay 抑制锁，
 # 保证我们能在挂起前把被代理设备的 ARP 还回去）。QtDBus 属 qtbase，装了 Qt 基本就有；**故意做成
 # 可选**——万一某个构建环境缺它，只是这条链路降级为不可用，不该让整个构建失败。
@@ -98,12 +112,15 @@ set(BACKEND_SOURCES
     src/net/core/crypto/CryptoSelfTest.cpp src/net/core/crypto/CryptoSelfTest.h
     src/net/core/transport/TlsClient.cpp  src/net/core/transport/TlsClient.h
     src/net/core/transport/WsClient.cpp   src/net/core/transport/WsClient.h
+    # uTLS 指纹 + 自建最小 TLS1.3 客户端（REALITY 用；QSslSocket 无法控制 ClientHello 指纹）——用 OpenSSL EVP 做原语
+    src/net/core/transport/UtlsClient.cpp src/net/core/transport/UtlsClient.h
     src/net/core/proto/OutboundRegistry.cpp src/net/core/proto/OutboundRegistry.h
     # 进程内出站协议实现（各自实现 IOutbound*，经 OutboundRegistry 注册 type→构造器）。
     src/net/core/proto/ShadowsocksOutbound.cpp src/net/core/proto/ShadowsocksOutbound.h
     src/net/core/proto/TrojanOutbound.cpp      src/net/core/proto/TrojanOutbound.h
     src/net/core/proto/VlessOutbound.cpp       src/net/core/proto/VlessOutbound.h
     src/net/core/proto/VmessOutbound.cpp       src/net/core/proto/VmessOutbound.h
+    src/net/core/proto/RealityOutbound.cpp     src/net/core/proto/RealityOutbound.h
     # 分流规则引擎（mihomo 风格首命中 + 自带只读 mmdb GEOIP 查询）+ DNS 解析器（A/AAAA 缓存 + fake-ip 池）。
     src/net/core/RuleEngine.cpp  src/net/core/RuleEngine.h
     src/net/core/DnsResolver.cpp src/net/core/DnsResolver.h
@@ -264,6 +281,18 @@ target_link_libraries(clashauto-qml PRIVATE
 if(Qt6DBus_FOUND)
     target_link_libraries(clashauto-qml PRIVATE Qt6::DBus)
     target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_DBUS)
+endif()
+
+# CoastCore QUIC 系（Hysteria2 / TUIC）：仅在找到 msquic 时编入 + 定义 COAST_HAVE_QUIC（见
+# src/net/core/proto/OutboundRegistry.cpp 的 #ifdef）。找不到则整块不编，hysteria2/tuic 未注册、回退 mihomo。
+if(COAST_HAVE_QUIC)
+    target_sources(clashauto-qml PRIVATE
+        src/net/core/transport/QuicTransport.cpp  src/net/core/transport/QuicTransport.h
+        src/net/core/proto/Hysteria2Outbound.cpp  src/net/core/proto/Hysteria2Outbound.h
+        src/net/core/proto/TuicOutbound.cpp       src/net/core/proto/TuicOutbound.h)
+    target_link_libraries(clashauto-qml PRIVATE msquic)
+    # TUIC token 用 ConnectionExportKeyingMaterial，需 msquic 的 preview 特性开关（>=2.6）。
+    target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_QUIC QUIC_API_ENABLE_PREVIEW_FEATURES)
 endif()
 
 target_compile_options(clashauto-qml PRIVATE

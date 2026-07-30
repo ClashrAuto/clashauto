@@ -44,6 +44,12 @@ struct ProxyNode
     QString wsHost;   // ws 传输的 Host 头
     bool tls = false; // 是否叠 TLS
     bool skipCertVerify = false; // 是否跳过证书校验（自签场景）
+    QString alpn;     // ALPN（逗号分隔，如 "h3" / "h2,http/1.1"）；TUIC/QUIC 与部分 TLS 传输用
+    // —— REALITY / uTLS（type=vless + reality 时用；见 proto/RealityOutbound）——
+    QString realityPublicKey; // REALITY 服务端公钥（base64 或 hex，32B x25519）
+    QString realityShortId;   // REALITY short-id（hex，0..8B）
+    QString fingerprint;      // uTLS 指纹（"chrome" 等；空=chrome）
+    QString flow;             // xtls flow（如 "xtls-rprx-vision"；当前未实现，占位）
 
     // 是否为内建 DIRECT 节点（type=="direct"）——拨号侧据此走 DirectOutbound 而非任何协议实现。
     bool isDirect() const { return type == QStringLiteral("direct"); }
