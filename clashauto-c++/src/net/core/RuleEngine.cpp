@@ -483,6 +483,64 @@ QString RuleEngine::typeToString(Type t)
     return QStringLiteral("UNKNOWN");
 }
 
+namespace {
+
+// 解 YAML **双引号**标量里的转义序列。只做真会遇到的那几种。
+//
+// ★★ 为什么非做不可：ConfigBuilder 生成的 full.yaml 把策略组名写成转义形式 ——
+//     `- "GEOIP,CN,\U0001F3AF 全球直连"`。剥掉引号后我们拿到的 target 是**字面量**
+//     `\U0001F3AF 全球直连`（14 个 ASCII 字符 + 中文），而 groupToNode 的键来自核心 REST API，
+//     是**真正的 emoji** `🎯 全球直连`。两者永远匹配不上 → resolveTarget 恒返回空 →
+//     **凡是 emoji 命名的策略组，规则一律解析失败、整类流量回退 mihomo**。
+//     真实订阅几乎清一色用 emoji 组名，所以这一条卡死了 Rule 模式的绝大部分进程内路由
+//     （真机诊断：cc=4/7/…，CCROUTE 显示 target=🎯 全球直连 而 node= 空）。
+//   只在**双引号**标量里解：单引号 YAML 标量里反斜杠是字面量，解了反而错。
+QString decodeYamlEscapes(const QString &in)
+{
+    if (!in.contains(QLatin1Char('\\')))
+        return in; // 绝大多数规则没有转义，直接走
+    QString out;
+    out.reserve(in.size());
+    for (int i = 0; i < in.size(); ++i) {
+        const QChar c = in.at(i);
+        if (c != QLatin1Char('\\') || i + 1 >= in.size()) {
+            out.append(c);
+            continue;
+        }
+        const QChar e = in.at(++i);
+        int hex = 0;
+        switch (e.unicode()) {
+        case 'U': hex = 8; break;   // \U0001F3AF —— 码点，可能超出 BMP（emoji 全在这一档）
+        case 'u': hex = 4; break;   // \u4E2D
+        case 'x': hex = 2; break;   // \x41
+        case 'n': out.append(QLatin1Char('\n')); continue;
+        case 't': out.append(QLatin1Char('\t')); continue;
+        case 'r': out.append(QLatin1Char('\r')); continue;
+        case '0': out.append(QChar(0)); continue;
+        case '\\': case '"': case '\'': case '/': out.append(e); continue;
+        default:
+            // 不认识的转义：**原样保留**（连反斜杠一起），绝不吞字符 —— 宁可不解也别改错规则。
+            out.append(QLatin1Char('\\')).append(e);
+            continue;
+        }
+        if (i + hex >= in.size()) { // 位数不够 = 不是合法转义，原样保留
+            out.append(QLatin1Char('\\')).append(e);
+            continue;
+        }
+        bool ok = false;
+        const uint cp = in.mid(i + 1, hex).toUInt(&ok, 16);
+        if (!ok || cp > 0x10FFFF) {
+            out.append(QLatin1Char('\\')).append(e);
+            continue;
+        }
+        out.append(QString::fromUcs4(reinterpret_cast<const char32_t *>(&cp), 1));
+        i += hex;
+    }
+    return out;
+}
+
+} // namespace
+
 RuleEngine::Rule RuleEngine::parseRule(const QString &line)
 {
     Rule r;
@@ -500,9 +558,14 @@ RuleEngine::Rule RuleEngine::parseRule(const QString &line)
     //   诊断显示 target 恒空、needsResolve 恒 false）。单引号同理。
     if (s.size() >= 2 && ((s.startsWith('"') && s.endsWith('"'))
                           || (s.startsWith('\'') && s.endsWith('\'')))) {
+        const bool wasDoubleQuoted = s.startsWith('"');
         s = s.mid(1, s.size() - 2).trimmed();
         if (s.isEmpty()) {
             return r;
+        }
+        // 双引号标量里的 \Uxxxxxxxx / \uxxxx 必须解开，否则 emoji 组名永远匹配不上（见 decodeYamlEscapes）。
+        if (wasDoubleQuoted) {
+            s = decodeYamlEscapes(s);
         }
     }
     const QStringList f = s.split(',');
@@ -791,7 +854,37 @@ bool RuleEngine::selfTest()
         }
     }
 
-    // ⑤ **带引号的规则行**必须能解析：ConfigBuilder 生成的 full.yaml 每条规则都是带引号的标量
+    // ⑤★ **YAML 转义**必须解开：ConfigBuilder 把组名写成 "\U0001F3AF 全球直连"，而 groupToNode 的
+    //    键来自核心 REST API、是真 emoji。不解转义两边永远匹配不上 → 凡是 emoji 命名的策略组，
+    //    规则全部解析失败、整类流量回退 mihomo（真机诊断 cc=4/7/… 就是这么定位到的）。
+    //    真实订阅几乎清一色用 emoji 组名，所以这条一错，Rule 模式的进程内路由基本全废。
+    {
+        const Rule esc = parseRule(QString::fromUtf8("\"GEOIP,CN,\\U0001F3AF 全球直连\""));
+        const QString want = QString::fromUtf8("\xF0\x9F\x8E\xAF 全球直连");
+        if (esc.target != want) {
+            qWarning("selfTest FAIL: YAML \\U 转义没解开 (got=%s)", qUtf8Printable(esc.target));
+            return false;
+        }
+        const Rule u4 = parseRule(QString::fromUtf8("\"MATCH,\\u4E2D国\""));
+        if (u4.target != QString::fromUtf8("中国")) {
+            qWarning("selfTest FAIL: \\u 转义没解开 (got=%s)", qUtf8Printable(u4.target));
+            return false;
+        }
+        // 不认识的转义要**原样保留**（宁可不解，也别把字符吞掉改错规则）
+        const Rule keep = parseRule(QString::fromUtf8("\"MATCH,a\\qb\""));
+        if (keep.target != QString::fromUtf8("a\\qb")) {
+            qWarning("selfTest FAIL: 不认识的转义应原样保留 (got=%s)", qUtf8Printable(keep.target));
+            return false;
+        }
+        // 单引号 YAML 标量里反斜杠是字面量，**不该**解
+        const Rule sq = parseRule(QString::fromUtf8("'MATCH,a\\u4E2Db'"));
+        if (!sq.target.contains(QString::fromUtf8("\\u4E2D"))) {
+            qWarning("selfTest FAIL: 单引号标量不该解转义 (got=%s)", qUtf8Printable(sq.target));
+            return false;
+        }
+    }
+
+    // ⑥ **带引号的规则行**必须能解析：ConfigBuilder 生成的 full.yaml 每条规则都是带引号的标量
     //    （target 含 emoji/空格），真机上就是因为没剥引号导致整表被丢、Rule 模式恒不命中。
     {
         RuleEngine e3;
