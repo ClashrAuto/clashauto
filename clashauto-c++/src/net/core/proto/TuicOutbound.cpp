@@ -4,6 +4,7 @@
 #include "../transport/QuicTransport.h"
 
 #include <QAbstractSocket>
+#include <QDateTime>
 #include <QHash>
 #include <QRandomGenerator>
 
@@ -17,6 +18,10 @@ constexpr quint8 kCmdAuthenticate = 0x00;
 constexpr quint8 kCmdConnect = 0x01;
 constexpr quint8 kCmdPacket = 0x02;
 constexpr int kUdpHeadGuess = 512;
+
+// —— 下行分片重组表的淘汰参数(防丢包长连接内存单调涨 + pktId 回绕跨包混帧)——
+constexpr qint64 kReasmTtlMs = 10000; // 分片集 10s 内未集齐 → 丢弃
+constexpr int kReasmMaxEntries = 256; // 在途重组项硬上限
 
 // 端口大端 2 字节
 void appendBe16(QByteArray &b, quint16 v)
@@ -176,6 +181,10 @@ public:
     void onConnected()
     {
         // 1) 认证:导出 token 并经单向流发 Authenticate。
+        if (uuid.size() != 16) { // fromHex 解析失败/UUID 非法 → 命令头长度会错, 提前失败
+            fail(QStringLiteral("tuic: invalid uuid (need 16 bytes)"));
+            return;
+        }
         if (!coastcore::QuicTransport::keyingMaterialSupported()) {
             fail(QStringLiteral("tuic: msquic keying material export unavailable (need preview/v2.6+)"));
             return;
@@ -338,8 +347,27 @@ public:
         quint16 port = 0;
         bool haveAddr = false;
         QHash<quint8, QByteArray> frags;
+        qint64 ts = 0; // 建项时刻, 用于超时淘汰
     };
     QHash<quint16, Reasm> reasm; // key = pktId
+
+    // 淘汰过期(超 TTL 未集齐)与超上限的重组项。每次收到分片时调用。
+    void evictStaleReasm(qint64 nowMs)
+    {
+        for (auto it = reasm.begin(); it != reasm.end();) {
+            if (nowMs - it->ts > kReasmTtlMs)
+                it = reasm.erase(it);
+            else
+                ++it;
+        }
+        while (reasm.size() > kReasmMaxEntries) {
+            auto oldest = reasm.begin();
+            for (auto it = reasm.begin(); it != reasm.end(); ++it)
+                if (it->ts < oldest->ts)
+                    oldest = it;
+            reasm.erase(oldest);
+        }
+    }
 
     void fail(const QString &reason)
     {
@@ -360,6 +388,10 @@ public:
 
     void onConnected()
     {
+        if (uuid.size() != 16) {
+            fail(QStringLiteral("tuic udp: invalid uuid (need 16 bytes)"));
+            return;
+        }
         if (!coastcore::QuicTransport::keyingMaterialSupported()) {
             fail(QStringLiteral("tuic udp: msquic keying material export unavailable"));
             return;
@@ -415,15 +447,27 @@ public:
                 emit q->datagramReceived(ip, port, payload);
             return;
         }
+        if (fragId >= fragTotal) // 越界 fragId:拒绝(否则污染重组 / 让 size()>=fragTotal 误判集齐)
+            return;
+
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        evictStaleReasm(nowMs);
+
         Reasm &r = reasm[pktId];
-        r.fragTotal = fragTotal;
+        // 新建 / 陈旧残片 / fragTotal 不一致 → 先清空重来。同时消除 pktId(quint16)回绕撞旧残片的跨包混帧。
+        if (r.fragTotal != fragTotal || (nowMs - r.ts) > kReasmTtlMs) {
+            r.frags.clear();
+            r.haveAddr = false;
+            r.fragTotal = fragTotal;
+            r.ts = nowMs;
+        }
         if (fragId == 0) {
             r.ip = ip;
             r.port = port;
             r.haveAddr = haveIp;
         }
         r.frags.insert(fragId, payload);
-        if (r.frags.size() >= int(fragTotal)) {
+        if (r.frags.size() >= int(fragTotal)) { // fragId<fragTotal 已保证:集齐即全片到达
             QByteArray full;
             for (quint8 i = 0; i < fragTotal; ++i)
                 full += r.frags.value(i);

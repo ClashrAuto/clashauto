@@ -1,6 +1,8 @@
 #include "WsClient.h"
 
 #include <QCryptographicHash>
+#include <QMetaObject>
+#include <QPointer>
 #include <QRandomGenerator>
 
 // —— RFC6455 要点（本实现只覆盖「当字节流用」所需的最小子集）——
@@ -37,6 +39,10 @@ void WsClient::start(QAbstractSocket *sock, const QString &host, const QString &
         fail(QStringLiteral("ws: 传入的 socket 为空"));
         return;
     }
+
+    // 读缓冲上限（对齐裸 TCP/TLS 的 64 KiB）：背压暂停时不再读，缓冲满后内核收窗关闭压住远端。
+    // 无上限（默认 0）时 Qt 会一直往上抽，暂停也就无从谈起。
+    m_sock->setReadBufferSize(64 * 1024);
 
     connect(m_sock, &QAbstractSocket::readyRead, this, [this] { onReadyRead(); });
     connect(m_sock, &QAbstractSocket::disconnected, this, [this] {
@@ -80,11 +86,14 @@ void WsClient::onReadyRead()
     if (!m_established) {
         onHandshakeBytes();
         // 握手可能刚在本次里完成；若响应之后还捎带了数据帧，onHandshakeBytes 已把余下字节转入 m_inbuf，
-        // established 置位后这里继续解帧。
-        if (m_established && !m_inbuf.isEmpty())
+        // established 置位后这里继续解帧（背压暂停中则留待恢复）。
+        if (m_established && !m_inbuf.isEmpty() && !m_readPaused)
             parseFrames();
         return;
     }
+    // 背压中：一个字节都不读，数据滞留内核（读缓冲上限已设）→ TCP 窗口关闭压住远端；恢复时补读。
+    if (m_readPaused)
+        return;
     m_inbuf += m_sock->readAll();
     parseFrames();
 }
@@ -142,8 +151,14 @@ void WsClient::onHandshakeBytes()
 
 void WsClient::parseFrames()
 {
+    // emit dataReceived 可能被上层同步「拆掉本对象」或「触发背压(setReadPaused(true))」，用 QPointer
+    // 守护并在每次 emit 后 re-check：对象没了立即收手（勿再触碰成员），转入暂停则把剩余完整帧留在
+    // m_inbuf 待恢复续解。
+    QPointer<WsClient> guard(this);
     // 尽量多解：一次 readyRead 可能带来多个完整帧，也可能只带来半个（等下一拍）。
     for (;;) {
+        if (m_readPaused)
+            return; // 背压：停止解帧，剩余留在 m_inbuf，恢复时续解
         if (m_inbuf.size() < 2)
             return; // 连基本帧头都不够
         const auto *p = reinterpret_cast<const unsigned char *>(m_inbuf.constData());
@@ -196,8 +211,13 @@ void WsClient::parseFrames()
         case 0x1: // 文本
         case 0x2: // 二进制
             // 字节流语义：一律拼进入方向流（不理会 FIN/分片边界）。
-            if (!payload.isEmpty())
+            if (!payload.isEmpty()) {
                 emit dataReceived(payload);
+                if (!guard)
+                    return; // 上层槽同步销毁了本对象：勿再触碰任何成员
+                if (m_readPaused)
+                    return; // 上层槽触发背压：剩余帧留在 m_inbuf，恢复时续解
+            }
             break;
         case 0x8: // close
             if (!m_closed) {
@@ -271,6 +291,36 @@ qint64 WsClient::write(const QByteArray &data)
 qint64 WsClient::bytesToWrite() const
 {
     return m_sock ? m_sock->bytesToWrite() : 0;
+}
+
+void WsClient::setReadPaused(bool paused)
+{
+    if (m_readPaused == paused)
+        return;
+    m_readPaused = paused;
+    if (paused)
+        return; // 暂停即时生效：onReadyRead/parseFrames 都会据 m_readPaused 停手
+    if (m_resumeScheduled || m_closed || !m_sock)
+        return;
+    // 恢复：排队补读（同 Direct/Socks5）。补读会同步 emit dataReceived，上层槽可能当场拆掉本对象，
+    // 故延到事件循环下一拍；对象若已析构，排队事件随之丢弃。
+    m_resumeScheduled = true;
+    QMetaObject::invokeMethod(
+        this,
+        [this] {
+            m_resumeScheduled = false;
+            if (m_readPaused || m_closed || !m_sock)
+                return;
+            // 先续解暂停时滞留在 m_inbuf 的完整帧，再补读底层积压（readyRead 只在有新数据到达时才发，
+            // 远端此刻若已发完就永远卡住 → 主动补读一次）。两者都进 m_inbuf FIFO，顺序天然一致。
+            if (!m_established) {
+                onReadyRead();
+                return;
+            }
+            m_inbuf += m_sock->readAll();
+            parseFrames();
+        },
+        Qt::QueuedConnection);
 }
 
 void WsClient::close()

@@ -11,6 +11,7 @@
 #include <QtEndian>
 
 #include <openssl/evp.h>
+#include <openssl/x509.h> // REALITY 服务端证书解析（d2i_X509 / 取 Ed25519 公钥 / 取签名）
 
 // ================================================================================================
 // 实现说明 —— 读这段再读代码。
@@ -23,11 +24,13 @@
 //   (C) 记录层 AEAD（复用 coastcore::Aead）+ HKDF/Transcript（Qt SHA-256/384）。
 //
 // ★★ 明确的「未做 / 需真机」清单（务必与调用者/审阅者对齐）★★
-//   1. REALITY 服务端证书的 **AuthKey 签名核验** 未实现 —— 见 handleServerHello 之后的 TODO。
-//      现在的实现「完成 TLS1.3 握手就认为成功」，不校验对端是不是真 REALITY 服务端（也不校验证书链）。
-//      这在安全上是缺口：无法区分「被 REALITY 接管」与「被透明转发到真实站点」。上线前必须补。
+//   1. REALITY 服务端证书的 **AuthKey 签名核验** 已实现（verifyRealityCertificate）：解析服务端
+//      Certificate，取 leaf 证书的 Ed25519 公钥 pub，算 HMAC-SHA512(authKey, pub) 与证书 Signature
+//      比对；只有匹配才认「对端握有 REALITY 私钥」，否则在 emit connected()/发任何内层头**之前**中止。
+//      这挡住了「TLS1.3 握手成功≠真 REALITY 服务端」——被透明转发到真实站点/被 MITM 的对端算不出
+//      该签名，会被拒。**注意：这不是 X.509 证书链校验**（REALITY 故意用自签证书 + AuthKey 代替 PKI）。
 //   2. 不处理 HelloRetryRequest（服务端若要求换 group 就直接失败）。
-//   3. 不处理 CertificateVerify 的签名校验、不做证书链验证。
+//   3. 不处理 CertificateVerify 的签名校验（TLS 层）；服务端真实性改由 (1) 的 REALITY AuthKey 核验保证。
 //   4. 不处理 KeyUpdate、不处理握手消息跨多条记录的复杂分片（仅做了基础的按长度重组）。
 //   5. Chrome 指纹是「够像」而非 uTLS 那样逐版本、随机化 GREASE —— 用固定 GREASE。REALITY 的认证
 //      不依赖指纹精确（AAD=我们自己发出的 ClientHello 全文，自洽），但抗审查伪装度取决于它。
@@ -38,8 +41,13 @@ namespace coastcore {
 
 namespace {
 
-// —— 固定 GREASE 值（uTLS 会随机挑一个 0x?a?a；这里取常见的 0x0a0a，够用且确定）——
+// —— 固定 GREASE 值（uTLS 会随机挑 0x?a?a；这里取两个确定值）——
+// RFC 8446 §4.2：同一扩展块内**不得**出现两个相同 type 的扩展。ClientHello 头尾各有一个 GREASE
+// 扩展，必须用**不同**的 GREASE 码点，否则严格服务端会因扩展类型重复而 abort。故头用 kGrease、
+// 尾用 kGrease2。（列表内的 GREASE 占位——supported_groups/key_share/supported_versions/cipher_suites——
+// 是「值」而非「扩展类型」，同值复用不违规，沿用 kGrease。）
 constexpr quint16 kGrease = 0x0a0a;
+constexpr quint16 kGrease2 = 0x1a1a;
 
 // —— 小工具：大端写入 ——
 void put8(QByteArray &b, quint8 v) { b.append(char(v)); }
@@ -390,8 +398,8 @@ QByteArray UtlsClient::buildClientHello()
         put16(c, 0x0002);
         addExt(0x001b, c);
     }
-    // 收尾 GREASE（payload 0x00）
-    addExt(kGrease, QByteArray(1, '\0'));
+    // 收尾 GREASE（payload 0x00）—— 必须与头部 GREASE 用**不同**码点（见 kGrease2 说明）。
+    addExt(kGrease2, QByteArray(1, '\0'));
 
     // —— cipher_suites —— GREASE + 三个 TLS1.3 套件
     QByteArray ciphers;
@@ -439,7 +447,7 @@ bool UtlsClient::applyRealityAuth(QByteArray &helloMsg, int sidOffset, int rando
 {
     if (m_serverPub.size() != 32) {
         // publicKey 缺失/长度不对：无法认证。诚实失败而非静默发出无效认证。
-        // 注意：ProxyNode 目前没有 publicKey 字段，主控接好该字段前这里会走到（见报告）。
+        // （publicKey 由主控从 ProxyNode.realityPublicKey 解码后经 setReality 传入。）
         return false;
     }
     // 1) ECDH：临时私钥 × 服务端 REALITY 公钥 → 共享密钥。
@@ -452,6 +460,8 @@ bool UtlsClient::applyRealityAuth(QByteArray &helloMsg, int sidOffset, int rando
     const QByteArray nonce = helloMsg.mid(randomOffset + 20, 12);   // random[20:32]
     const QByteArray prk = hkdfExtract(/*sha384=*/false, salt, ecdh);
     const QByteArray authKey = hkdfExpand(false, prk, QByteArray("REALITY"), 32);
+    // 存起来：既用于本函数密封 session_id，也用于握手末尾 verifyRealityCertificate 的 HMAC-SHA512。
+    m_authKey = authKey;
 
     // 3) 结构化 sid16 = [ver(3) reserved(1) timestamp(4,BE) shortId(8, 右侧补零)]
     QByteArray sid16(16, '\0');
@@ -486,6 +496,11 @@ bool UtlsClient::applyRealityAuth(QByteArray &helloMsg, int sidOffset, int rando
 void UtlsClient::onReadyRead()
 {
     if (!m_sock)
+        return;
+    // 真背压：应用数据阶段被暂停时**不从 socket 抽字节**——字节滞留在 Qt 读缓冲（受 setReadBufferSize
+    // 上限约束），填满后 TCP 接收窗口关闭、远端停发。恢复时由 setReadPaused(false) 主动补抽一次。
+    // 握手阶段(state!=Connected)永远读：握手不受上层流控影响，暂停握手会死锁。
+    if (m_readPaused && m_state == State::Connected)
         return;
     m_recvBuf += m_sock->readAll();
     feedSocket();
@@ -669,10 +684,25 @@ void UtlsClient::onFlight2Message(quint8 hsType, const QByteArray &msgFull, cons
 {
     switch (hsType) {
     case 0x08: // EncryptedExtensions
+        m_transcript += msgFull;
+        break;
     case 0x0b: // Certificate
+        // 先计入 transcript（server Finished 的 MAC 覆盖 CH..CertificateVerify，缺一不可）。
+        m_transcript += msgFull;
+        // ★ REALITY 服务端认证：仅完成 TLS1.3 握手**不足以**证明对端是真 REALITY 服务端——任何 TLS1.3
+        //   对端都能让 Finished MAC 通过。真正的鉴别在这里：leaf 证书的 Ed25519 公钥 pub 满足
+        //   HMAC-SHA512(authKey, pub) == 证书 Signature（只有握 REALITY 私钥者能派生 authKey→伪造该签名）。
+        //   被透明转发到真实站点/被 MITM 的对端算不出，会在此被拒（emit failed，绝不进 Connected）。
+        if (m_reality) {
+            if (!verifyRealityCertificate(body)) {
+                return fail(QStringLiteral(
+                    "utls: REALITY 服务端证书 AuthKey 核验失败（非 REALITY 服务端 / 被转发到真实站 / MITM）"));
+            }
+            m_realityAuthOk = true;
+        }
+        break;
     case 0x0f: // CertificateVerify
-        // ★ TODO(安全)：Certificate/CertificateVerify 未做任何校验（证书链 + 签名 + REALITY AuthKey 核验）。
-        //   REALITY 的核心安全性正来自「用 AuthKey 验证服务端证书是真 REALITY 服务端签的」——此处缺失。
+        // TLS 层的 CertificateVerify 签名此实现不校验；服务端真实性由上面的 REALITY AuthKey 核验保证。
         m_transcript += msgFull;
         break;
     case 0x14: { // Finished（服务端）
@@ -697,8 +727,85 @@ void UtlsClient::onFlight2Message(quint8 hsType, const QByteArray &msgFull, cons
     }
 }
 
+// REALITY 服务端认证 —— 解析 TLS1.3 Certificate 消息体，核验 leaf 证书。
+//   Certificate 消息体(RFC 8446 §4.4.2)：
+//     opaque certificate_request_context<0..2^8-1>;   // 服务端证书里恒空
+//     CertificateEntry certificate_list<0..2^24-1>;   // 每项: cert_data<1..2^24-1> + extensions<0..2^16-1>
+//   leaf = certificate_list 的第一项的 cert_data（DER 编码的 X.509 证书）。
+// xray REALITY：取 leaf 的 Ed25519 公钥 pub，判 HMAC-SHA512(authKey, pub) == 证书 Signature 字段。
+bool UtlsClient::verifyRealityCertificate(const QByteArray &certMsgBody)
+{
+    if (m_authKey.size() != 32)
+        return false; // 没有 authKey（未走 REALITY 认证注入）——无从核验。
+
+    const uchar *b = reinterpret_cast<const uchar *>(certMsgBody.constData());
+    const int n = certMsgBody.size();
+    int p = 0;
+    auto need = [&](int k) { return p + k <= n; };
+
+    if (!need(1))
+        return false;
+    const int ctxLen = b[p];
+    p += 1;
+    if (!need(ctxLen))
+        return false;
+    p += ctxLen; // certificate_request_context（服务端恒空）
+    if (!need(3))
+        return false;
+    const int listLen = (int(b[p]) << 16) | (int(b[p + 1]) << 8) | int(b[p + 2]);
+    p += 3;
+    if (!need(listLen) || listLen < 3)
+        return false;
+    // 第一项 CertificateEntry：cert_data<1..2^24-1>
+    const int certLen = (int(b[p]) << 16) | (int(b[p + 1]) << 8) | int(b[p + 2]);
+    p += 3;
+    if (certLen <= 0 || !need(certLen))
+        return false;
+    const QByteArray der = certMsgBody.mid(p, certLen);
+
+    // —— 用 OpenSSL 解析 DER 证书，取 Ed25519 公钥与签名字段 ——
+    const unsigned char *dp = reinterpret_cast<const unsigned char *>(der.constData());
+    X509 *cert = d2i_X509(nullptr, &dp, long(der.size()));
+    if (!cert)
+        return false;
+
+    bool ok = false;
+    EVP_PKEY *pk = X509_get_pubkey(cert);
+    if (pk && EVP_PKEY_base_id(pk) == EVP_PKEY_ED25519) {
+        unsigned char pub[32];
+        size_t publen = sizeof(pub);
+        if (EVP_PKEY_get_raw_public_key(pk, pub, &publen) == 1 && publen == 32) {
+            // 证书的签名字段（REALITY 服务端把它填成 HMAC-SHA512(authKey, pub)，64B）。
+            const ASN1_BIT_STRING *psig = nullptr;
+            const X509_ALGOR *palg = nullptr;
+            X509_get0_signature(&psig, &palg, cert);
+            if (psig) {
+                const QByteArray sig(reinterpret_cast<const char *>(ASN1_STRING_get0_data(psig)),
+                                     ASN1_STRING_length(psig));
+                const QByteArray pubBa(reinterpret_cast<const char *>(pub), 32);
+                const QByteArray expected = QMessageAuthenticationCode::hash(
+                    pubBa, m_authKey, QCryptographicHash::Sha512); // 64B
+                // 定长（都是 64B）比较；QByteArray::operator== 对内容比较即可。
+                ok = (!expected.isEmpty() && sig == expected);
+            }
+        }
+    }
+    if (pk)
+        EVP_PKEY_free(pk);
+    X509_free(cert);
+    return ok;
+}
+
 void UtlsClient::finishHandshake()
 {
+    // ★ REALITY 门禁：REALITY 模式下必须已通过服务端证书 AuthKey 核验，才允许进入应用数据阶段。
+    //   走到这里但 m_realityAuthOk==false，意味着对端没送可认证的证书（或根本不是 REALITY 服务端）——
+    //   在 emit connected() / 发任何内层 VLESS 头之前中止，避免把 UUID+真实目的地泄露给非 REALITY 对端。
+    if (m_reality && !m_realityAuthOk) {
+        fail(QStringLiteral("utls: REALITY 未通过服务端认证（未收到可核验的服务端证书）"));
+        return;
+    }
+
     // transcript 定格在「CH..server Finished」，用它导出应用流量密钥并算 client Finished。
     m_transcriptThroughServerFinished = m_transcript;
     deriveAppKeys();
@@ -864,11 +971,19 @@ qint64 UtlsClient::write(const QByteArray &data)
 {
     if (m_state != State::Connected || !m_sock)
         return -1;
-    // 单条 application_data 记录承载全部（大块应按 ~16KB 分片，见 TODO）。
-    // ★ TODO：超过 TLS 记录上限(2^14) 的写入应拆成多条记录；本实现未拆，超大写入会被对端拒绝。
-    const QByteArray rec = encryptRecord(23, data, m_cApKey, m_cApIv, m_cApSeq);
-    m_sock->write(rec);
-    return data.size();
+    // TLS1.3 记录明文上限 = 2^14 字节(RFC 8446 §5.2 TLSPlaintext.length ≤ 16384)。超过就必须拆成
+    // 多条 application_data 记录，否则对端 record_overflow。这里按 ≤16384 明文/条切分逐条加密发出。
+    constexpr int kMaxRecordPlaintext = 16384;
+    const int total = int(data.size());
+    int off = 0;
+    while (off < total) {
+        const int n = qMin(kMaxRecordPlaintext, total - off);
+        const QByteArray rec =
+            encryptRecord(23, data.mid(off, n), m_cApKey, m_cApIv, m_cApSeq);
+        m_sock->write(rec);
+        off += n;
+    }
+    return total; // total==0 时不发空记录，直接返回 0
 }
 
 QByteArray UtlsClient::readAll()
@@ -892,6 +1007,17 @@ void UtlsClient::setReadBufferSize(qint64 size)
 {
     if (m_sock)
         m_sock->setReadBufferSize(size);
+}
+
+void UtlsClient::setReadPaused(bool paused)
+{
+    if (m_readPaused == paused)
+        return;
+    m_readPaused = paused;
+    // 恢复时：readyRead 对**已到达**的字节不会重新触发，故主动补抽一次（等价于 TlsClient/Socks5
+    // 恢复后的一次补读）。onReadyRead 内部已因 m_readPaused==false 而正常抽取并解密下发。
+    if (!paused && m_sock && m_state == State::Connected)
+        onReadyRead();
 }
 
 void UtlsClient::abort()

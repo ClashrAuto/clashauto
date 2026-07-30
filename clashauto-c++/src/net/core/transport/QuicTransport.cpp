@@ -135,7 +135,10 @@ public:
         case QUIC_STREAM_EVENT_RECEIVE: {
             // 把本次事件里的所有 QUIC_BUFFER 拼成一个 QByteArray(拷贝走, 事件返回后其内存即失效)。
             QByteArray chunk;
-            chunk.reserve(int(ev->RECEIVE.TotalBufferLength));
+            // reserve 前给个界:TotalBufferLength 是 uint64, 直接 int() 可能溢出成负值 → reserve 语义混乱;
+            //   过大值 reserve 又可能 bad_alloc。单次 RECEIVE 受流控窗口约束, 实际很小, 这里只作防御。
+            if (ev->RECEIVE.TotalBufferLength > 0 && ev->RECEIVE.TotalBufferLength <= (64u << 20))
+                chunk.reserve(int(ev->RECEIVE.TotalBufferLength));
             for (uint32_t i = 0; i < ev->RECEIVE.BufferCount; ++i) {
                 const QUIC_BUFFER &b = ev->RECEIVE.Buffers[i];
                 chunk.append(reinterpret_cast<const char *>(b.Buffer), int(b.Length));
@@ -357,10 +360,19 @@ QuicTransport::QuicTransport(QObject *parent) : QObject(parent), d(new Priv(this
 
 QuicTransport::~QuicTransport()
 {
+    // ★ 关键收尾顺序(见头文件)：msquic 里 stream 句柄是 connection 的子对象, ConnectionClose 后即失效。
+    //   若把 QuicStream 交给 ~QObject 去删, 那发生在本函数体(已 ConnectionClose)之后 → StreamClose
+    //   在 ConnectionClose 之后跑 = UAF。故这里必须 **先** 显式删光所有子 QuicStream(各自析构里做
+    //   StreamShutdown(ABORT)+StreamClose), 再 ConnectionShutdown/ConnectionClose。
+    //   createStream() 恒以本 transport 为 parent, 故子 QuicStream 都能由 findChildren 找到。
+    const QList<QuicStream *> streams = findChildren<QuicStream *>(QString(), Qt::FindDirectChildrenOnly);
+    for (QuicStream *s : streams)
+        delete s; // ~QuicStream: StreamShutdown+StreamClose(阻塞式, 返回后该流不再回调)
+
     if (d->conn) {
         const QUIC_API_TABLE *api = Api();
         if (api) {
-            // 先 Shutdown(silent 静默不发 close 帧亦可), 再阻塞式 ConnectionClose(返回后不再回调)。
+            // 所有流已 StreamClose 完毕。先 Shutdown, 再阻塞式 ConnectionClose(返回后不再回调)。
             api->ConnectionShutdown(d->conn, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
             api->ConnectionClose(d->conn);
         }
@@ -421,13 +433,30 @@ void QuicTransport::openConnection(const QString &host, quint16 port, const QByt
     const uint8_t one = 1;
     api->SetParam(d->conn, QUIC_PARAM_CONN_DATAGRAM_RECEIVE_ENABLED, sizeof(one), &one);
 
-    // ServerName 同时用于 DNS 解析与 TLS SNI。
-    // ★TODO/需真机:当 host 是 IP 字面量而 sni 是另一个域名(域前置式)时, msquic 把 ServerName 既做
-    //   连接目标又做 SNI, 无法二者分离。此处以 host 为准保证连得上;若必须自定义 SNI 需另设 TLS 参数。
-    const QByteArray serverName = (sni.isEmpty() ? host : host).toUtf8();
-    Q_UNUSED(sni);
+    // TLS ServerName(=SNI/证书校验名)：优先用 sni, 空才回落 host。
+    const QByteArray sniName = (sni.isEmpty() ? host : sni).toUtf8();
+    const QByteArray hostUtf8 = host.toUtf8();
+
+    // 连接目标固定为 host:port。当 host 是 IP 字面量时, 显式把对端地址钉在这个 IP 上
+    //   (QUIC_PARAM_CONN_REMOTE_ADDRESS), 这样传给 ConnectionStart 的 ServerName 就只当 TLS SNI /
+    //   证书校验用, 不会被拿去做 DNS —— 从而「server=IP + sni=域名」能真正工作(域前置)。
+    //   host 是域名时无法在此免解析地钉地址, 只能把 host 交给 ConnectionStart 做 DNS(见下)。
+    QUIC_ADDR remoteAddr;
+    std::memset(&remoteAddr, 0, sizeof(remoteAddr));
+    const bool hostIsIp = QuicAddrFromString(hostUtf8.constData(), port, &remoteAddr) != FALSE;
+    const char *serverName = nullptr;
+    if (hostIsIp) {
+        api->SetParam(d->conn, QUIC_PARAM_CONN_REMOTE_ADDRESS, sizeof(remoteAddr), &remoteAddr);
+        serverName = sniName.constData(); // 连到已钉住的 IP, SNI 用 sniName(可为域名)
+    } else {
+        // host 是域名:ConnectionStart 用它做 DNS + SNI。msquic 只有一个 ServerName 参数, 无法在走 DNS
+        //   的同时用另一个名字做 SNI;此场景下 sni≠host 时以 host 为准保证连得上(见报告)。
+        serverName = hostUtf8.constData();
+    }
+    // 注:serverName 指向本作用域内的 sniName / hostUtf8, 二者活到本函数返回;ConnectionStart 内部会
+    //     复制 ServerName, 故调用期间有效即可。
     const QUIC_STATUS st = api->ConnectionStart(d->conn, d->config, QUIC_ADDRESS_FAMILY_UNSPEC,
-                                                serverName.constData(), port);
+                                                serverName, port);
     if (QUIC_FAILED(st)) {
         d->post([this] { d->emitFailed(QStringLiteral("quic ConnectionStart failed")); });
     }
@@ -501,14 +530,19 @@ QByteArray QuicTransport::exportKeyingMaterial(const QByteArray &label, const QB
     const QUIC_API_TABLE *api = Api();
     if (!api || !d->conn || outLen <= 0)
         return {};
-    // ★TODO/需真机:QUIC_KEYING_MATERIAL_CONFIG.Label 是 **null 结尾的 const char***, 而 TUIC 的
-    //   exporter label = 16 字节 UUID 原文(可能含 0x00)。若 UUID 含 0x00, strlen 会截断 → token 错。
-    //   多数 UUID 无 0x00, 常规可用;但这是与 quinn/rustls(label 为任意字节切片)的一处语义差, 须真机比对。
-    QByteArray labelZ = label;
-    labelZ.append('\0');
+    // ★ msquic 的 QUIC_KEYING_MATERIAL_CONFIG.Label 是 **_Field_z_ 的 NUL 结尾 const char***, 结构体里
+    //   没有 LabelLength 字段;底层 OpenSSL 后端要给 SSL_export_keying_material 传 llen, 只能对该 C 串
+    //   取 strlen。而 TUIC v5 的 exporter label = 16 字节 UUID 原文(RFC5705, 见 tuic SPEC), 可能含
+    //   0x00。若 UUID 含内嵌 0x00, msquic 会在第一个 0x00 处截断 label → 导出的 token 与 quinn/rustls
+    //   (label 为任意字节切片)不一致 → 服务器认证失败。随机 UUID 命中 0x00 的概率 ≈ 1-(255/256)^16 ≈ 6%。
+    //   经此公有 API **无法** 忠实导出含内嵌 NUL 的 label(需要一个带 LabelLength 的 exporter, 属 msquic
+    //   侧改动 —— 见报告)。这里的正确做法是:检测到内嵌 NUL 就 **明确失败**(返回空), 让上层 TUIC 立刻
+    //   报「keying material export failed」而不是拿着错 token 静默去认证、最终被服务器动断而难以定位。
+    if (label.contains('\0'))
+        return {};
     QUIC_KEYING_MATERIAL_CONFIG cfg;
     std::memset(&cfg, 0, sizeof(cfg));
-    cfg.Label = labelZ.constData();
+    cfg.Label = label.constData(); // QByteArray::constData() 保证以 '\0' 结尾;上面已排除内嵌 NUL
     cfg.Context = reinterpret_cast<const uint8_t *>(context.constData());
     cfg.ContextLength = uint32_t(context.size());
     cfg.OutputLength = uint32_t(outLen);

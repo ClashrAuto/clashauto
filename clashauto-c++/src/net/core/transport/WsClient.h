@@ -48,6 +48,15 @@ public:
     // 底层尚未发出的字节数（背压用；透传底层 socket->bytesToWrite）。
     qint64 bytesToWrite() const;
 
+    // —— 下行背压（真闸）——
+    // WsClient 本是「推」模型（无条件读底层 socket、解帧后 emit dataReceived）。给上层（VLESS/VMess 的
+    // ws/wss 传输）一个真正的读暂停：paused=true 时停止从底层 socket 读、停止解帧上抛，底层 socket 的读
+    // 缓冲被 setReadBufferSize 限死 → 缓冲满后内核收窗关闭 → TCP 窗口自然压住远端（与裸 TCP/TLS 的真背压
+    // 同源）。paused=false 时排队补读（QueuedConnection，不同步重入）：补读底层积压 + 续解 m_inbuf 里剩下
+    // 的完整帧，按序 emit dataReceived。语义对齐 Direct/Socks5 的排队补读。
+    void setReadPaused(bool paused);
+    bool isReadPaused() const { return m_readPaused; }
+
     // 主动关闭：发一个 close 帧（若已握手）并让上层收到 closed()。
     void close();
 
@@ -74,6 +83,9 @@ private:
     QByteArray m_httpResp;       // 握手期累积的 HTTP 响应字节
     QByteArray m_inbuf;          // 数据期累积的帧字节（可能半帧，凑够再解）
     QByteArray m_pendingOut;     // established 前排队的出方向应用字节
+
+    bool m_readPaused = false;      // 下行背压：暂停时不读底层 socket、不解帧上抛
+    bool m_resumeScheduled = false; // 恢复补读已排队（去重，避免重复投递）
 };
 
 } // namespace coastcore

@@ -12,12 +12,14 @@
 // ★ type 归一：主控把订阅里的 `type:vless + reality-opts` 映射进 ProxyNode 时应把 type 设为 "reality"
 //   （见文件尾 registerReality 与本仓报告）。
 //
-// ★★ 需主控给 ProxyNode 补的字段（现无来源，parseRealityParams 只能留空）★★
-//     · publicKey  —— REALITY 服务端 X25519 公钥（配置里是 base64 或 hex；解码成 32B 裸公钥）
-//     · shortId    —— REALITY shortId（配置里是 hex；解码成 0..8B 裸字节）
-//     · fingerprint—— uTLS 指纹（"chrome"/"firefox"/…；默认 chrome）
-//     · flow       —— "xtls-rprx-vision"（本单元未实现 vision 流量整形，见 TODO）
-//   在这些字段补齐前，parseRealityParams().valid==false，start() 会诚实失败并给出明确原因。
+// ★★ REALITY 所需字段 ★★：ProxyConfig.h 现已有 realityPublicKey / realityShortId / fingerprint / flow，
+//   parseRealityParams 直接读取并解码：
+//     · realityPublicKey —— REALITY 服务端 X25519 公钥（配置里是 base64 或 hex；解码成 32B 裸公钥）
+//     · realityShortId   —— REALITY shortId（配置里是 hex；解码成 0..8B 裸字节，可空）
+//     · fingerprint      —— uTLS 指纹（"chrome"/…；空=chrome）
+//     · flow             —— "xtls-rprx-vision"（本单元未实现 vision 流量整形，见 TODO）
+//   publicKey 缺失/解码后非 32B 时 parseRealityParams().valid==false，start() 会诚实失败并给出明确原因
+//   （绝不发无效认证）。握手末尾还会核验服务端证书 AuthKey（见 UtlsClient::verifyRealityCertificate）。
 
 namespace {
 
@@ -40,7 +42,7 @@ bool parseUuid(const QString &uuid, QByteArray &out)
     return out.size() == 16;
 }
 
-// 从 ProxyNode 抽 REALITY 参数。★ publicKey/shortId/fingerprint/flow 现无对应字段 → 留空/默认。
+// 从 ProxyNode 抽 REALITY 参数（realityPublicKey/realityShortId/fingerprint/flow 均已在 ProxyConfig.h）。
 RealityParams parseRealityParams(const ProxyNode &n)
 {
     RealityParams rp;
@@ -121,9 +123,9 @@ void RealityStream::start(quint8 cmd, const QString &dstHost, quint16 dstPort)
         return;
     }
     if (!m_rp.valid) {
-        // publicKey 缺失（ProxyNode 尚无该字段）——诚实失败，绝不发无效认证。
+        // publicKey 缺失或解码后非 32B——诚实失败，绝不发无效认证。
         QTimer::singleShot(0, this, [this] {
-            finishFailed(QStringLiteral("reality: 缺 publicKey（需主控给 ProxyNode 补 reality 字段）"));
+            finishFailed(QStringLiteral("reality: publicKey 无效（realityPublicKey 缺失或非 32B x25519 公钥）"));
         });
         return;
     }
@@ -237,6 +239,10 @@ void RealityStream::setReadPaused(bool paused)
 {
     if (paused) {
         m_readPaused = true;
+        // ★ 透传到底层：让 UtlsClient 真正停止从 socket 抽字节（TCP 窗口自然关），否则它会继续解密
+        //   并把明文堆进 m_appReadBuf → 慢消费者下无界增长。这才是真背压（对齐 TlsClient/Socks5）。
+        if (m_tls)
+            m_tls->setReadPaused(true);
         return;
     }
     if (!m_readPaused || m_resumeScheduled)
@@ -250,6 +256,7 @@ void RealityStream::setReadPaused(bool paused)
             if (!m_readPaused || m_finished)
                 return;
             m_readPaused = false;
+            // 先 flush 暂停期间缓存的较旧下行，保证顺序。
             if (!m_downPending.isEmpty()) {
                 const QByteArray p = m_downPending;
                 m_downPending.clear();
@@ -257,7 +264,12 @@ void RealityStream::setReadPaused(bool paused)
             }
             if (m_finished)
                 return;
-            // UtlsClient 是「解密即 emit readyRead 并缓存」的推模型；此刻缓冲里可能已有存货，补读一次。
+            // 再解除底层读暂停：UtlsClient 会补抽 socket、解密并（经 readyRead）按序下发较新的字节。
+            if (m_tls)
+                m_tls->setReadPaused(false);
+            if (m_finished)
+                return;
+            // 兜底：UtlsClient 是「解密即缓存」的推模型，缓冲里可能仍有已解密存货，再补读一次。
             if (m_tls && m_tls->bytesAvailable() > 0)
                 feedDown(m_tls->readAll());
         },

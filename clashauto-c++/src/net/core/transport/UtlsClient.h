@@ -28,8 +28,11 @@
 // ★★★ 诚实声明（务必连同代码一起看）★★★
 //   TLS1.3 握手 + REALITY 认证是**字节级敏感**的密码学协议，且本机**无法**做端到端验证（本项目也没有
 //   TLS 测试床）。本文件是「结构完整 + 关键密码学/密钥调度按 RFC 8446 / REALITY 源码实现」，但：
-//     · 只实现 happy path：不处理 HelloRetryRequest、不处理 key_update、不处理跨记录分片的复杂重组、
-//       不做证书链校验，也**尚未**实现 REALITY 服务端证书的「AuthKey 签名」核验（见 .cpp 的 TODO）。
+//     · 只实现 happy path：不处理 HelloRetryRequest、不处理 key_update、不处理跨记录分片的复杂重组，
+//       也**不做 X.509 证书链校验**（改用 REALITY 的 AuthKey 核验代替，见下）。
+//     · REALITY 服务端证书的「AuthKey 签名」核验**已实现**（onFlight2Message 解析服务端 Certificate，
+//       取 leaf 证书的 Ed25519 公钥，算 HMAC-SHA512(authKey, pub) 与证书 Signature 比对；只有匹配才
+//       视为握到 REALITY 私钥的真服务端，否则在 emit connected()/发任何内层 VLESS 头之前 emit failed）。
 //     · uTLS 指纹是「够像 Chrome」而非 uTLS 那样每次随机化 GREASE —— 用固定 GREASE 值（见 .cpp）。
 //   凡此种种在 .cpp 中逐点用 TODO / 「需真机验证」标出。**上线前必须对 xray REALITY 服务端做真机联调。**
 
@@ -80,6 +83,11 @@ public:
     qint64 bytesAvailable() const;
     qint64 bytesToWrite() const;                 // 底层 socket 未排空的密文字节
     void setReadBufferSize(qint64 size);
+    // 真背压：暂停时**不再从底层 socket 抽字节**，Qt 读缓冲填满后 TCP 接收窗口自然关闭，远端停发；
+    // 恢复时补抽一次（对已到达的字节 readyRead 不会重新触发）。仅在应用数据阶段(Connected)生效，
+    // 握手阶段永远读（握手不受上层流控影响）。语义对齐 TlsClient/Socks5 的「暂停即不读」。
+    void setReadPaused(bool paused);
+    bool isReadPaused() const { return m_readPaused; }
     void abort();
     void close();
     bool isEncrypted() const { return m_state == State::Connected; }
@@ -129,6 +137,9 @@ private:
     void handleHandshakeBytes(const QByteArray &bytes); // 累积并逐条解析 handshake 消息
     void handleServerHello(const QByteArray &body);
     void onFlight2Message(quint8 hsType, const QByteArray &msgFull, const QByteArray &body);
+    // REALITY 服务端认证：解析 TLS1.3 Certificate 消息体，取 leaf 证书的 Ed25519 公钥，算
+    // HMAC-SHA512(m_authKey, pub) 与证书 Signature 比对。匹配返回 true（真 REALITY 服务端）。
+    bool verifyRealityCertificate(const QByteArray &certMsgBody);
     void finishHandshake();
 
     // 记录层收发（AEAD）。encryptRecord：把 (contentType, plaintext) 封成 application_data 记录字节。
@@ -156,6 +167,11 @@ private:
     bool m_reality = false;
     QByteArray m_serverPub;  // 32B
     QByteArray m_shortId;    // 0..8B
+    // REALITY 认证密钥：HKDF-SHA256(ecdh, salt=random[:20], info="REALITY") 的 32B 输出。
+    // applyRealityAuth 里既用它 AES-256-GCM 密封 session_id，也在 verifyRealityCertificate 里
+    // 作为 HMAC-SHA512 的 key 核验服务端证书（xray REALITY：只有握 REALITY 私钥者能派生它）。
+    QByteArray m_authKey;
+    bool m_realityAuthOk = false; // 服务端证书 AuthKey 核验通过（REALITY 模式下未通过即中止握手）
 
     // 本次握手的临时 X25519 密钥（key_share 用的就是它；REALITY 的 ECDH 也用它）。
     EVP_PKEY *m_ephemeral = nullptr;
@@ -186,6 +202,7 @@ private:
 
     bool m_serverFinishedSeen = false;
     bool m_errored = false;
+    bool m_readPaused = false; // 应用数据阶段的读暂停（真背压，见 setReadPaused）
 };
 
 } // namespace coastcore

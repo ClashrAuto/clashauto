@@ -168,6 +168,8 @@ void VlessStream::startWs()
             [this](const QString &r) { onTransportError(r); });
     const QString wsHost = m_node.wsHost.isEmpty() ? m_node.server : m_node.wsHost;
     m_ws->start(m_bottom, wsHost, m_node.wsPath, m_node.port);
+    if (m_readPaused)
+        m_ws->setReadPaused(true); // 建 ws 前上层已请求暂停：同步到 WsClient
 }
 
 void VlessStream::onStreamUp()
@@ -249,8 +251,8 @@ void VlessStream::onTlsReadyRead()
 
 void VlessStream::onWsData(const QByteArray &d)
 {
-    // ws 是「推」模型：WsClient 无条件读底层 socket 并解帧推给我们，无法在此真正暂停读。
-    // 背压期间只能把已推来的字节缓进 m_downPending（软背压）。feedDown 内按 m_readPaused 决定缓冲/上抛。
+    // WsClient 现有真背压：暂停期间它不读底层 socket、不解帧上抛，故此槽在暂停期不会被触发。
+    // feedDown 内仍保留 m_readPaused 分支作二次兜底（万一暂停切换与在途信号有微小交叠，落 m_downPending）。
     if (!d.isEmpty())
         feedDown(d);
 }
@@ -286,15 +288,16 @@ void VlessStream::setReadPaused(bool paused)
 {
     if (paused) {
         m_readPaused = true;
+        if (m_useWs && m_ws)
+            m_ws->setReadPaused(true); // ws/wss：真背压下沉到 WsClient（停读底层 socket、停解帧上抛）
         return;
     }
     if (!m_readPaused || m_resumeScheduled)
         return;
     // 恢复延到事件循环下一拍：本函数常从 lwIP tcp_sent 回调里被调到，同步补读会 emit data 而上层槽
     // 可能当场把整条连接（含本对象）拆掉（同 Direct/Socks5 的排队补读）。
-    // 另外故意**不**在此同步清 m_readPaused：ws 推模型下，若同步清标志，尚在事件队列里的旧 onWsData
-    // 会抢在本次 flush 之前直接上抛，把顺序打乱；保持暂停到本闭包运行，期间到达的字节继续缓冲，
-    // 最后一次性按序 flush。
+    // 另外故意**不**在此同步清 m_readPaused：若同步清标志，仍可能被抢跑打乱顺序；保持暂停到本闭包运行，
+    // 期间到达的字节继续留在 WsClient / 内核缓冲，最后一次性按序 flush。
     m_resumeScheduled = true;
     QMetaObject::invokeMethod(
         this,
@@ -303,7 +306,7 @@ void VlessStream::setReadPaused(bool paused)
             if (!m_readPaused || m_finished)
                 return; // 期间又被暂停 / 已终结
             m_readPaused = false;
-            // 先 flush 较旧的缓冲下行，再补读较新的 socket 存货，保证顺序。
+            // 先 flush 较旧的软缓冲下行（历史残留，ws 真背压后一般为空），再放开较新的存货，保证顺序。
             if (!m_downPending.isEmpty()) {
                 const QByteArray p = m_downPending;
                 m_downPending.clear();
@@ -311,11 +314,17 @@ void VlessStream::setReadPaused(bool paused)
             }
             if (m_finished)
                 return;
-            // 裸TCP/TLS：readyRead 只在有新数据到达时才发，远端此刻若已发完就永远卡住 → 主动补读一次。
-            if (!m_useWs && m_tcp && m_tcp->bytesAvailable() > 0)
+            if (m_useWs) {
+                // ws/wss：交回 WsClient 自行排队补读+续解上抛（其恢复亦走 QueuedConnection，不同步重入，
+                // 排在本次 flush 之后 → 顺序天然一致）。
+                if (m_ws)
+                    m_ws->setReadPaused(false);
+            } else if (m_tcp && m_tcp->bytesAvailable() > 0) {
+                // 裸TCP/TLS：readyRead 只在有新数据到达时才发，远端此刻若已发完就永远卡住 → 主动补读一次。
                 feedDown(m_tcp->readAll());
-            else if (!m_useWs && m_tls && m_tls->bytesAvailable() > 0)
+            } else if (m_tls && m_tls->bytesAvailable() > 0) {
                 feedDown(m_tls->readAll());
+            }
         },
         Qt::QueuedConnection);
 }

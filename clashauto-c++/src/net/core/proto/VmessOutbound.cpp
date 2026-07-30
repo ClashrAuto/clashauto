@@ -15,6 +15,7 @@
 #include <QMessageAuthenticationCode>
 #include <QMetaObject>
 #include <QNetworkProxy>
+#include <QPointer>
 #include <QRandomGenerator>
 #include <QTcpSocket>
 #include <QTimer>
@@ -493,7 +494,6 @@ public:
     bool closedEmitted = false;
     bool readPaused = false;
     QByteArray pending;      // established 前的上行 app 字节
-    QByteArray heldInbound;  // ws 专用：暂停期间被推来的下行字节（裸 TCP/TLS 走 socket 缓冲，不用它）
 
     // —— 传输无关封装 ——
     void transportWrite(const QByteArray &b)
@@ -589,32 +589,41 @@ public:
         QList<QByteArray> payloads;
         bool eof = false;
         QString err;
-        if (!codec.feed(bytes, &payloads, &eof, &err)) {
+        const bool ok = codec.feed(bytes, &payloads, &eof, &err);
+        // ★ 每个 payload 一次 emit：上层槽可能同步析构本出站（Priv 随 q 一并释放），故用 QPointer 守护、
+        //   每次 emit 后 re-check 存活；guard 失效即立刻收手，绝不再触碰任何成员（q/d/eof 皆已悬垂）。
+        //   与 DirectOutbound「可能销毁自身的 emit 之后不再碰成员」纪律一致。q 是成员，先存本地再用。
+        VmessOutboundTcp *self = q;
+        QPointer<VmessOutboundTcp> guard(self);
+        for (const QByteArray &p : payloads) {
+            emit self->dataReceived(p);
+            if (!guard)
+                return;
+        }
+        // 已解出的先 emit（上面），再报错：同一缓冲里失败 chunk 之前的分块都已 AEAD 校验通过，不该丢。
+        if (!ok) {
             fail(err);
             return;
         }
-        for (const QByteArray &p : payloads)
-            emit q->dataReceived(p);
         if (eof)
-            emitClosed();
+            emitClosed(); // 可能销毁自身 —— 作为最后一句
     }
 
     void startWs(QAbstractSocket *sock)
     {
         ws = new WsClient(q);
         QObject::connect(ws, &WsClient::established, q, [this] { onTransportConnected(); });
-        QObject::connect(ws, &WsClient::dataReceived, q, [this](const QByteArray &b) {
-            if (readPaused) {
-                heldInbound += b; // 暂停：先攒着（ws 是推模式，无法留在内核缓冲）
-                return;
-            }
-            feedTransport(b);
-        });
+        // ws/wss 现有真背压（WsClient::setReadPaused）：暂停期间 WsClient 不读底层 socket、不上抛，
+        // 故此处直接 feedTransport，不再进程内软缓冲。
+        QObject::connect(ws, &WsClient::dataReceived, q,
+                         [this](const QByteArray &b) { feedTransport(b); });
         QObject::connect(ws, &WsClient::closed, q,
                          [this] { established ? emitClosed() : fail(QStringLiteral("ws 关闭")); });
         QObject::connect(ws, &WsClient::errorOccurred, q,
                          [this](const QString &r) { established ? emitClosed() : fail(r); });
         ws->start(sock, wsHost.isEmpty() ? serverHost : wsHost, wsPath, serverPort);
+        if (readPaused)
+            ws->setReadPaused(true); // 建 ws 前上层已请求暂停：同步到 WsClient
     }
 
     void setupTransport()
@@ -753,26 +762,24 @@ void VmessOutboundTcp::setReadPaused(bool paused)
     if (d->readPaused == paused)
         return;
     d->readPaused = paused;
+    if (d->ws) {
+        // ws/wss：透传到 WsClient 的真背压（暂停停读底层 socket、停解帧；恢复排队补读+续解，不同步重入）。
+        d->ws->setReadPaused(paused);
+        return;
+    }
     if (paused)
         return;
-    // 恢复：排队补读（同 DirectOutbound —— 补读会同步 emit dataReceived，上层槽可能当场拆掉本对象，
-    // 故延到事件循环里做；对象若已析构，排队事件随之丢弃）。
+    // 裸 TCP/TLS：readyRead 槽在暂停期直接 return（真背压靠 setReadBufferSize + 不读压住远端），恢复时
+    // 排队补读一次（同 DirectOutbound —— 补读会同步 emit dataReceived，上层槽可能当场拆掉本对象，故延到
+    // 事件循环里做；对象若已析构，排队事件随之丢弃）。
     QMetaObject::invokeMethod(
         this,
         [this] {
             if (d->readPaused)
                 return;
-            if (d->ws) {
-                if (!d->heldInbound.isEmpty()) {
-                    const QByteArray b = d->heldInbound;
-                    d->heldInbound.clear();
-                    d->feedTransport(b);
-                }
-            } else {
-                const QByteArray b = d->transportReadAll();
-                if (!b.isEmpty())
-                    d->feedTransport(b);
-            }
+            const QByteArray b = d->transportReadAll();
+            if (!b.isEmpty())
+                d->feedTransport(b);
         },
         Qt::QueuedConnection);
 }
@@ -889,14 +896,23 @@ public:
         QList<QByteArray> payloads;
         bool eof = false;
         QString err;
-        if (!codec.feed(bytes, &payloads, &eof, &err)) {
-            fail(err);
+        const bool ok = codec.feed(bytes, &payloads, &eof, &err);
+        // UAF 守护同 TCP：emit 可能同步析构本出站。q/targetIp/targetPort 都是成员，先存本地再用。
+        VmessOutboundUdp *self = q;
+        const QHostAddress src = targetIp;
+        const quint16 srcPort = targetPort;
+        QPointer<VmessOutboundUdp> guard(self);
+        for (const QByteArray &p : payloads) {
+            emit self->datagramReceived(src, srcPort, p); // 每块一份 datagram，源=会话目标
+            if (!guard)
+                return;
+        }
+        if (!ok) {
+            fail(err); // 先 emit 已解出的，再报错（同 TCP）
             return;
         }
-        for (const QByteArray &p : payloads)
-            emit q->datagramReceived(targetIp, targetPort, p); // 每块一份 datagram，源=会话目标
         if (eof)
-            emitClosed();
+            emitClosed(); // 可能销毁自身 —— 作为最后一句
     }
 
     void startWs(QAbstractSocket *sock)

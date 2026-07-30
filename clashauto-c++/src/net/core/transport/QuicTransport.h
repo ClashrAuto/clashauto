@@ -19,8 +19,15 @@
 //   · 统一 msquic 的全局初始化(MsQuicOpen2 + Registration)成一个进程级单例(见 .cpp 的 MsQuicLib)。
 //
 // ★ 线程/生命周期(务必真机验证 —— 见报告的「需真机验证」清单)：
-//   析构顺序是关键：先 StreamShutdown/ConnectionShutdown 停掉数据面，再调 **阻塞式** 的
-//   StreamClose/ConnectionClose(msquic 保证其返回后不再有该句柄的回调在飞)，最后才让 QObject 析构。
+//   析构顺序是关键，且 msquic 里 **stream 句柄是 connection 句柄的子对象** —— ConnectionClose 之后
+//   一切 stream 句柄立即失效，此时再 StreamClose 即 UAF。故 ~QuicTransport 必须严格按：
+//     ① 逐个 StreamShutdown(ABORT) + StreamClose 关掉 **所有** 子 QuicStream(阻塞式, 返回后不再回调)；
+//     ② ConnectionShutdown 停连接数据面；
+//     ③ ConnectionClose(阻塞式)；
+//     ④ 之后才允许 QObject(及基类)析构。
+//   ★ 关键前提：QuicStream 虽是 QuicTransport 的 QObject 子对象, 但 **不能** 依赖 ~QObject 去删它们
+//     —— 那发生在 ~QuicTransport 函数体(已 ConnectionClose)之后, 顺序就反了。所以 ~QuicTransport
+//     函数体里必须先显式删光子 QuicStream, 再 ConnectionClose(见 .cpp)。
 //   如此「回调仍在 msquic 线程里跑」与「本对象正在析构」不会并发。
 //
 // 跨平台：msquic 的 TLS 后端在 Windows 上可用 Schannel、其它平台用 quictls/OpenSSL3(见报告的 CMake 建议)。
@@ -89,7 +96,9 @@ public:
 
     // 发起到 host:port 的 QUIC 连接。
     //   alpn       —— ALPN 协议名(Hy2 恒 "h3"; TUIC 默认无特定, 按需)。单个 ALPN 即够用。
-    //   sni        —— TLS ServerName; 空则回落用 host。
+    //   sni        —— TLS ServerName(=SNI/证书校验名); 空则回落用 host。
+    //                 当 host 是 IP 字面量时, 连接目标钉在 host:port(QUIC_PARAM_CONN_REMOTE_ADDRESS),
+    //                 sni 仅用作 TLS SNI —— 支持「server=IP + sni=域名」的域前置式配置。
     //   skipVerify —— true=不校验服务器证书(自签场景)。
     // 握手成功 → connected(); 失败 → connectionFailed()。
     void openConnection(const QString &host, quint16 port, const QByteArray &alpn,

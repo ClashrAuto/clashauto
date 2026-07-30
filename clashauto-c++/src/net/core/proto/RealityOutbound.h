@@ -14,8 +14,9 @@
 //   本实现）。主控在把订阅里的 `type:vless + reality-opts` 映射进 ProxyNode 时，应把 type 归一为
 //   "reality"（详见 .cpp 顶部与本仓报告）。
 //
-// ★★★ 诚实声明 ★★★：底层 TLS1.3/REALITY 握手由 UtlsClient 完成，**本机无法做字节级验证**，且存在
-//   已知未实现项（REALITY 证书 AuthKey 核验、xtls-rprx-vision flow 的流量整形、HRR 等）——详见
+// ★★★ 诚实声明 ★★★：底层 TLS1.3/REALITY 握手由 UtlsClient 完成，**本机无法做字节级验证**。
+//   REALITY 服务端证书的 AuthKey 核验**已实现**（UtlsClient::verifyRealityCertificate，认证失败即中止，
+//   不会泄露内层 VLESS 头）；仍有已知未实现项（xtls-rprx-vision flow 的流量整形、HRR 等）——详见
 //   UtlsClient.cpp 与本文件 .cpp 的 TODO。上线前必须对 xray REALITY 服务端真机联调。
 //
 // —— 内层线格式（= VLESS，与 VlessOutbound 完全一致）——
@@ -37,18 +38,18 @@ class UtlsClient;
 }
 
 // —— 从 ProxyNode 抽取 REALITY 所需参数 ——
-// ★ ProxyNode 目前**没有** publicKey/shortId/fingerprint/flow 字段（见报告「需主控补的字段」）。
-//   在主控补上之前，parse 只能取到 server/port/uuid/sni，pubKey/shortId 会是空 → 握手会诚实失败。
+// ★ 字段来源：ProxyConfig.h 的 ProxyNode 已有 realityPublicKey / realityShortId / fingerprint / flow，
+//   parseRealityParams 直接解码填充（见 .cpp）。publicKey 解码后非 32B 时 valid==false，start() 诚实失败。
 struct RealityParams
 {
     QString server;
     quint16 port = 0;
     QString uuid;
     QString sni;          // = dest / 伪装目标站 ServerName
-    QByteArray publicKey; // 32B 裸公钥（从 base64/hex 解码后）—— 现无来源，见报告
-    QByteArray shortId;   // 0..8B 裸字节（从 hex 解码后）—— 现无来源，见报告
-    QString fingerprint;  // "chrome" 等 —— 现无来源，默认 chrome
-    QString flow;         // "xtls-rprx-vision" 等 —— 现无来源；vision 未实现
+    QByteArray publicKey; // 32B 裸公钥（从 realityPublicKey 的 base64/hex 解码后）
+    QByteArray shortId;   // 0..8B 裸字节（从 realityShortId 的 hex 解码后，可空）
+    QString fingerprint;  // "chrome" 等（空=chrome）
+    QString flow;         // "xtls-rprx-vision" 等；vision 流量整形未实现
     bool valid = false;   // publicKey 是否就绪（决定能否真正认证）
 };
 
