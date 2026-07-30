@@ -25,8 +25,24 @@
 // 见 nd6.c 的 Coast 补丁）。所以回程根本不需要路由器把包送到我们这——只投毒设备一侧即可。（记录在案，
 // 这是相对 ArpSpoofer「双向都投」的一处**有意简化**。）
 //
+// 为什么**只投毒路由器链路本地地址不够**（真机实证补的洞）：设备的默认路由走路由器的**链路本地**
+// 地址（`default via fe80::…`），所以一般 off-link 上网流量确实靠 (a)(b) 那条 LL 投毒就覆盖了。但
+// 设备的 **v6 DNS 服务器**通常是路由器的**全局地址**（RA 的 RDNSS 选项 / DHCPv6 下发的那个），而那是
+// 一个**链上(on-link)地址**——设备**直接对它发 NS 解析、根本不经默认路由器**。我们只抢答「路由器 LL 在哪」
+// 就压根碰不到这类 NS，真路由器如常应答 → 设备的 v6 DNS（乃至发往路由器全局地址的一切流量，如管理页）
+// **整段绕过网关且完全无声**（诊断里 dns=0/dnsLocal=0/0 就是这么来的）。所以必须把投毒/抢答/还原的
+// 目标从「单个路由器 LL」扩成「LL + 路由器的若干链上全局地址」。
+//   这些全局地址从哪学？—— **RA 的 RDNSS 选项(option type 25)**。理由：RA 是**组播**到 ff02::1 的，
+//   我们一定看得到；而路由器对设备 NS 的 solicited NA 是**单播**给设备的，交换机环境下我们**很可能看不到**，
+//   「旁听路由器 NA 来学」不可靠。RDNSS 里的地址正是设备会拿来做 DNS 的那个，精准命中、爆炸半径最小。
+//   为防伪造 RA 喂进无关地址：只收**本网卡链上前缀内**（前缀已知时）或退而求其次的**全局单播**地址
+//   （前缀未知时），并设条数上限。过滤在 LanGateway::learnRouterFromRa 做（它掌握前缀），本类
+//   setRouterExtraAddrs 再兜一层上限/去重。
+//
 // 安全红线：**必须可靠还原**（同 ArpSpoofer）。停止/析构/退出时给每个 victim 重发数遍「路由器在真实
-// 路由器 MAC」的 NA（heal），否则设备的 v6 邻居缓存仍指向本机 → 该设备 v6 断网。
+// 路由器 MAC」的 NA（heal），否则设备的 v6 邻居缓存仍指向本机 → 该设备 v6 断网。**★ 学到的每个额外
+// 全局地址也必须一并还原**：漏了它，撤劫持/退出后设备连不上路由器自身（含 v6 DNS）——IPv4 侧吃过一模
+// 一样的亏（见「重启后代理恢复四修」）。heal 那条对 LL 与额外地址走**同一套**还原路径，绝不各写一份。
 //
 // 本类**跨平台可编译**：只拼 QByteArray 以太帧交给 IL2Endpoint::send()，不含任何系统调用。端点由外部
 // 持有（本类不拥有）。未配置（缺路由器 LL / 路由器 MAC 等）时所有操作 no-op + qWarning。
@@ -36,6 +52,7 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 class IL2Endpoint;
 class QTimer;
@@ -50,6 +67,14 @@ public:
     // 配置本机拓扑。localMac/routerMac = "aa:bb:..:ff"；routerLinkLocal = v6 默认路由器的**链路本地**
     // 地址串（"fe80::…"）。解析失败视为未配置（后续操作 no-op）。网段/路由器变化时可重配。
     void configure(const QString &localMac, const QString &routerLinkLocal, const QString &routerMac);
+
+    // 设置**除路由器 LL 外**还要一并投毒/抢答/还原的路由器地址集合（16 字节 v6，通常是从 RA 的 RDNSS
+    // 学到、由调用方按本网卡前缀筛过的**链上全局地址**）。可随 RA 更新反复调用：
+    //   · 内部再兜一层——规整长度、去重、剔掉与 LL 相同的、并强制上限（防伪造 RA 灌爆）；
+    //   · **被移除的地址会立刻对所有在册 victim 发还原 NA**（否则设备邻居缓存仍指向本机 → 断这台设备
+    //     访问该地址，与漏 heal 同罪）；
+    //   · 新增的地址立刻抢投一次，不必等下个周期。
+    void setRouterExtraAddrs(const QVector<QByteArray> &addrs);
 
     // 开始劫持某设备：只需其 MAC（投毒 NA 靠 L2 单播送达，不需要设备的 v6 地址）。立即投一次。
     void startSpoof(const QString &victimMac);
@@ -72,12 +97,16 @@ public:
     //                缺失则回落到以太头源 MAC
     //   prefixNet/prefixLen —— Prefix Information 选项(type 3) 里的**on-link** 前缀（供 LAN 内
     //                v6 直连旁路用）。没有该选项时不填（prefixLen 置 -1），不影响前两项。
+    //   rdnss    —— RDNSS 选项(type 25, RFC 8106) 里的**递归 DNS 服务器地址**（每条 16 字节，原样
+    //                追加；不在这里做前缀/全局过滤——调用方掌握本网卡前缀，由它筛，见类顶注释）。
+    //                这些正是「设备直接 NS 解析的路由器链上地址」，是把 v6 DNS 引进网关的关键信号。
     // 拒绝条件（按 RFC 4861 的安全要求 + 本用途的语义）：
     //   · 不是 RA / 帧太短 / 选项越界；
     //   · IPv6 跳数限制 != 255（NDP 强制，防跨网段伪造）；
     //   · Router Lifetime == 0 —— 这台只提供前缀信息、**不是默认路由器**，拿它当投毒目标是错的。
     static bool parseRouterAdvert(const QByteArray &frame, QString *routerLL, QString *routerMac,
-                                  QByteArray *prefixNet, int *prefixLen);
+                                  QByteArray *prefixNet, int *prefixLen,
+                                  QVector<QByteArray> *rdnss = nullptr);
 
     // 只判「是不是 RA」（parseRouterAdvert 的轻量前置判据，避免对每个 NA 都走完整解析）。
     static bool isRouterAdvert(const QByteArray &frame);
@@ -104,8 +133,14 @@ public:
 private:
     void tick();                 // 周期给所有 victim 重投毒
     void boostTick();            // 唤醒沿高频窗口内重投
-    void sendSpoof(const QByteArray &victimMac6); // 给一个 victim 发一帧投毒 NA
-    void healOne(const QByteArray &victimMac6);    // 给一个 victim 发数遍还原 NA
+    void sendSpoof(const QByteArray &victimMac6); // 给一个 victim 投毒（LL + 所有额外目标各一帧）
+    void healOne(const QByteArray &victimMac6);    // 给一个 victim 还原（LL + 所有额外目标）
+    // 把「某个路由器目标地址」在某 victim 上还原回真路由器 MAC（heal 的单目标原语，LL 与额外地址共用）。
+    void healTarget(const QByteArray &victimMac6, const QByteArray &targetIp6);
+    // 拼一帧「维持型」投毒 NA（L3=ff02::1 组播、L2=victim 单播、target=某路由器地址、TLLA=本机、R+O）。
+    QByteArray buildSpoofNa(const QByteArray &victimMac6, const QByteArray &targetIp6) const;
+    // frame 里 NS 的 target 是否是我们要冒充的某个路由器地址（LL 或额外集合内）。
+    bool isSpoofedTarget(const QByteArray &target16) const;
     bool configured() const;
     bool hasVictimMac(const QByteArray &mac6) const;
 
@@ -132,6 +167,9 @@ private:
     QByteArray m_localMac;    // 6 字节（本机 = 冒充的“路由器”）
     QByteArray m_routerLL;    // 16 字节（v6 默认路由器的链路本地地址）
     QByteArray m_routerMac;   // 6 字节（真实路由器 MAC，heal 时用）
+    // 除 LL 外还要投毒/抢答/还原的路由器地址（各 16 字节；多为路由器的链上全局地址，从 RA 的 RDNSS
+    // 学到并按前缀筛过）。有上限（见 .cpp 的 kMaxRouterExtra）——防伪造 RA 把无关地址灌进来。
+    QVector<QByteArray> m_routerExtra;
     QHash<QString, QByteArray> m_victims; // key = 小写 victimMac，value = 6 字节 MAC
     // victim mac6(6B) → 上次抢答其 NS 时学到的**链路本地源地址**(16B)。heal 时要向它**单播**一条
     // solicited NA 才能覆盖设备「已 REACHABLE」的网关表项（组播 solicited NA 是非法帧、会被丢）。

@@ -16,6 +16,12 @@ static constexpr int kBoostIntervalMs = 50;
 static constexpr int kBoostTicks = 8;
 static constexpr int kAnswerBurstDelay1Ms = 5;
 static constexpr int kAnswerBurstDelay2Ms = 18;
+// 除路由器 LL 外，最多额外投毒/抢答/还原多少个路由器地址（从 RA 的 RDNSS 学到）。设上限的目的是
+// **限爆炸半径**：即便调用方的前缀过滤被伪造 RA 绕过，也顶多多喷这么几条，不至于被灌爆内存/带宽。
+// 家用/企业路由器给的 RDNSS 一般 1~2 个，8 足够宽松。
+static constexpr int kMaxRouterExtra = 8;
+// 解析 RA 的 RDNSS 时最多抽多少个地址（纯限工作量；真正的取舍/上限在调用方筛完后 setRouterExtraAddrs）。
+static constexpr int kMaxRdnssParse = 16;
 
 // ICMPv6 NDP 帧各字段偏移（含 14 字节以太头）。NDP 报文永远没有扩展头，next header 恒在固定位置。
 static constexpr int kEthLen = 14;
@@ -119,6 +125,81 @@ void NdpSpoofer::configure(const QString &localMac, const QString &routerLinkLoc
     }
 }
 
+bool NdpSpoofer::isSpoofedTarget(const QByteArray &target16) const
+{
+    if (target16.size() != 16)
+        return false;
+    if (m_routerLL.size() == 16 && target16 == m_routerLL)
+        return true;
+    for (const QByteArray &e : m_routerExtra)
+        if (target16 == e)
+            return true;
+    return false;
+}
+
+void NdpSpoofer::setRouterExtraAddrs(const QVector<QByteArray> &addrs)
+{
+    // 规整：只留 16 字节、剔掉与 LL 重复的、去重、并强制上限（防伪造 RA 灌爆——调用方已按前缀筛过，
+    // 这里是纵深防御的最后一道）。
+    QVector<QByteArray> next;
+    for (const QByteArray &a : addrs) {
+        if (a.size() != 16)
+            continue;
+        if (m_routerLL.size() == 16 && a == m_routerLL)
+            continue; // LL 已由主路径覆盖，不重复
+        bool dup = false;
+        for (const QByteArray &e : next)
+            if (e == a) {
+                dup = true;
+                break;
+            }
+        if (dup)
+            continue;
+        next.append(a);
+        if (next.size() >= kMaxRouterExtra)
+            break;
+    }
+
+    // ★ 安全关键：**被移除的地址必须先还原**。若某地址这次不再在集合里，而我们之前一直在投毒它，
+    //   不 heal 就会把「该地址 → 本机 MAC」永久留在设备邻居缓存里 → 该设备连不上这个地址（含 v6 DNS）。
+    //   与漏 healOne 同罪，所以这里对每个在册 victim 逐个还原被摘掉的地址。
+    if (configured()) {
+        for (const QByteArray &old : m_routerExtra) {
+            bool kept = false;
+            for (const QByteArray &e : next)
+                if (e == old) {
+                    kept = true;
+                    break;
+                }
+            if (!kept)
+                for (auto it = m_victims.constBegin(); it != m_victims.constEnd(); ++it)
+                    healTarget(it.value(), old);
+        }
+    }
+
+    // 找出新增的地址（用于立刻抢投），再切换集合。
+    QVector<QByteArray> added;
+    for (const QByteArray &a : next) {
+        bool existed = false;
+        for (const QByteArray &e : m_routerExtra)
+            if (e == a) {
+                existed = true;
+                break;
+            }
+        if (!existed)
+            added.append(a);
+    }
+    m_routerExtra = next;
+
+    // 新增地址：立刻对所有 victim 抢投一份，不必等下个 1s tick（否则新学到的 DNS 地址要慢一拍才被劫）。
+    if (configured() && m_endpoint && !added.isEmpty()) {
+        for (auto it = m_victims.constBegin(); it != m_victims.constEnd(); ++it)
+            for (const QByteArray &a : added)
+                m_endpoint->send(buildSpoofNa(it.value(), a));
+        m_endpoint->flushTx();
+    }
+}
+
 void NdpSpoofer::startSpoof(const QString &victimMac)
 {
     if (!configured()) {
@@ -183,8 +264,11 @@ bool NdpSpoofer::answerNeighborSolicit(const QByteArray &frame)
         return false;
     if (f[kOffIcmp6Type] != kIcmp6TypeNs)
         return false;
-    // 只对「问的正是我们冒充的那个路由器 LL」抢答。
-    if (std::memcmp(f + kOffNsTarget, m_routerLL.constData(), 16) != 0)
+    // 只对「问的正是我们冒充的某个路由器地址」抢答：路由器 LL，**或**从 RA 学到的路由器链上全局地址。
+    // ★ 后者是这次补洞的关键：设备的 v6 DNS 服务器是路由器的链上全局地址，它**直接 NS 解析该地址**
+    //   （不经默认路由器），只有在这里抢答才能把它的 v6 DNS 引进网关；否则真路由器应答、整段绕过。
+    const QByteArray target(reinterpret_cast<const char *>(f + kOffNsTarget), 16);
+    if (!isSpoofedTarget(target))
         return false;
 
     const QByteArray senderMac(reinterpret_cast<const char *>(f + 6), 6);
@@ -202,9 +286,9 @@ bool NdpSpoofer::answerNeighborSolicit(const QByteArray &frame)
     // 记住 victim 的链路本地源地址：heal 时要向它**单播** solicited NA 才能覆盖 REACHABLE 表项。
     m_victimLL.insert(senderMac, senderIp);
 
-    // 回一帧 solicited NA：dst = 发起者，src = 路由器 LL，target = 路由器 LL，TLLA = 本机 MAC，
-    // R+S+O 全置 → 设备把「路由器在本机 MAC」采信为最新。
-    const QByteArray na = buildNa(senderMac, m_localMac, m_routerLL, senderIp, m_routerLL,
+    // 回一帧 solicited NA：dst = 发起者，src/target = **被问的那个路由器地址**（LL 或额外全局地址），
+    // TLLA = 本机 MAC，R+S+O 全置 → 设备把「该地址在本机 MAC」采信为最新。
+    const QByteArray na = buildNa(senderMac, m_localMac, target, senderIp, target,
                                   m_localMac, kNaRouter | kNaSolicited | kNaOverride);
     // 短促连发（同 ArpSpoofer）：当场两帧 + 5ms/18ms 各补一帧，压过真路由器对同一 NS 的应答。
     m_endpoint->send(na);
@@ -283,7 +367,8 @@ bool NdpSpoofer::isRouterAdvert(const QByteArray &frame)
 }
 
 bool NdpSpoofer::parseRouterAdvert(const QByteArray &frame, QString *routerLL, QString *routerMac,
-                                   QByteArray *prefixNet, int *prefixLen)
+                                   QByteArray *prefixNet, int *prefixLen,
+                                   QVector<QByteArray> *rdnss)
 {
     if (prefixLen)
         *prefixLen = -1;
@@ -341,6 +426,17 @@ bool NdpSpoofer::parseRouterAdvert(const QByteArray &frame, QString *routerLL, Q
                 *prefixNet = QByteArray(reinterpret_cast<const char *>(f) + p + 16, 16);
                 *prefixLen = plen;
             }
+        } else if (type == 25 && optLen >= 24 && rdnss) { // RDNSS（RFC 8106）：递归 DNS 服务器地址
+            // 布局：type(1) len(1) reserved(2) lifetime(4) 之后 N×16 字节地址；地址数 = (len8-1)/2。
+            // 这些正是设备会拿去做 DNS 的地址（常为路由器**链上全局地址**）。原样抽出，**不在这里做
+            // 前缀/全局过滤**——调用方掌握本网卡前缀，由它筛（见类顶注释与 LanGateway::learnRouterFromRa）。
+            const int naddr = (len8 - 1) / 2;
+            for (int i = 0; i < naddr && rdnss->size() < kMaxRdnssParse; ++i) {
+                const int off = p + 8 + i * 16;
+                if (off + 16 > frame.size())
+                    break;
+                rdnss->append(QByteArray(reinterpret_cast<const char *>(f) + off, 16));
+            }
         }
         p += optLen;
     }
@@ -360,19 +456,29 @@ void NdpSpoofer::tick()
         sendSpoof(it.value());
 }
 
-void NdpSpoofer::sendSpoof(const QByteArray &victimMac6)
+QByteArray NdpSpoofer::buildSpoofNa(const QByteArray &victimMac6, const QByteArray &targetIp6) const
 {
-    if (!m_endpoint || !configured())
-        return;
-    // 周期投毒 NA：L3 目的 = ff02::1（all-nodes 组播，设备是成员必处理），L2 目的 = victim 单播 MAC
-    //（只此设备收得到，不污染全网）。target = 路由器 LL、TLLA = 本机 MAC、R+O。src = 路由器 LL。
+    // 「维持型」投毒 NA：L3 目的 = ff02::1（all-nodes 组播，设备是成员必处理），L2 目的 = victim 单播
+    //  MAC（只此设备收得到，不污染全网）。target/src = 某路由器地址、TLLA = 本机 MAC、R+O。
     // ★ 这里**只用非请求(S=0)**：solicited NA 必须单播（组播 solicited 是非法帧、会被丢），所以周期
     //   组播 NA 不能带 S。它的作用是「维持」——把设备**非 REACHABLE**（STALE 等）的表项持续压在本机
     //   MAC 上。真正把 REACHABLE 表项翻过来的是抢答 NS 那条**单播 solicited** NA（answerNeighborSolicit）
     //   和 heal 的单播 NA。这与设备实际会主动 NS 解析网关（首用/老化后）相吻合。
-    const QByteArray na = buildNa(victimMac6, m_localMac, m_routerLL, allNodes(), m_routerLL,
-                                  m_localMac, kNaRouter | kNaOverride);
-    m_endpoint->send(na);
+    return buildNa(victimMac6, m_localMac, targetIp6, allNodes(), targetIp6, m_localMac,
+                   kNaRouter | kNaOverride);
+}
+
+void NdpSpoofer::sendSpoof(const QByteArray &victimMac6)
+{
+    if (!m_endpoint || !configured())
+        return;
+    // 主目标：路由器**链路本地**地址——默认路由走它，一般 off-link 上网流量靠这条覆盖。
+    m_endpoint->send(buildSpoofNa(victimMac6, m_routerLL));
+    // ★ 额外目标：路由器的**链上(on-link)全局地址**（从 RA 的 RDNSS 学到）。设备的 v6 DNS 服务器
+    //   常是这个地址；它是链上地址，设备会**直接 NS 解析、不经默认路由器**，所以必须单独持续投毒，
+    //   否则 v6 DNS（乃至发往路由器全局地址的一切流量）整段绕过网关。
+    for (const QByteArray &t : m_routerExtra)
+        m_endpoint->send(buildSpoofNa(victimMac6, t));
     m_endpoint->flushTx(); // 由 1s tick / 50ms boost 两个定时器回调驱动，不在收帧排空路径上
 }
 
@@ -380,8 +486,22 @@ void NdpSpoofer::healOne(const QByteArray &victimMac6)
 {
     if (!m_endpoint)
         return;
-    // 把设备的网关表项从「本机 MAC」还原回「真实路由器 MAC」——发一条**非请求 override NA**
-    //（target=路由器 LL、TLLA=真实路由器 MAC、O 置位）。这是 v4 侧无偿 ARP heal 的 v6 对应物：带
+    // 主目标：路由器链路本地地址。
+    healTarget(victimMac6, m_routerLL);
+    // ★ 学到的每个额外路由器地址（RDNSS 链上全局地址）也**必须一并还原**回真路由器 MAC。漏这条 =
+    //   撤劫持/退出后设备邻居缓存里「路由器全局地址 → 本机 MAC」残留，设备再也连不上路由器自身
+    //   （含 v6 DNS）——IPv4 侧吃过一模一样的亏（见「重启后代理恢复四修」）。与 LL 走同一套还原逻辑。
+    for (const QByteArray &t : m_routerExtra)
+        healTarget(victimMac6, t);
+}
+
+void NdpSpoofer::healTarget(const QByteArray &victimMac6, const QByteArray &targetIp6)
+{
+    if (!m_endpoint || targetIp6.size() != 16 || m_localMac.size() != 6 || m_routerMac.size() != 6)
+        return;
+    // 把设备缓存里「targetIp6 → 本机 MAC」还原回「targetIp6 → 真实路由器 MAC」——发一条 override NA
+    //（target=targetIp6、TLLA=真实路由器 MAC、O 置位）。targetIp6 可能是路由器 LL，也可能是学到的额外
+    //   链上全局地址（RDNSS）——两者共用本函数，绝不各写一份。这是 v4 侧无偿 ARP heal 的 v6 对应物：带
     //   Override 的 NA 会被内核当权威更新，直接把邻居缓存那条改回真路由器 MAC，**即使表项当前是
     //   REACHABLE**。真机实测（真路由器 + REACHABLE 投毒态）两大客户端族都**即时翻回、无死 MAC 窗口**：
     //     · macOS（BSD 邻居栈）：单播 solicited+override 到设备 LL → 直接 REACHABLE，实测 +0.24s 翻回；
@@ -393,9 +513,9 @@ void NdpSpoofer::healOne(const QByteArray &victimMac6)
     //   (L2 单播 victim) override。eth-src 用本机真实 MAC（NDP 只按载荷校验，与 eth 源无关）。
     const QByteArray ll = m_victimLL.value(victimMac6);
     const QByteArray na = (ll.size() == 16)
-            ? buildNa(victimMac6, m_localMac, m_routerLL, ll, m_routerLL, m_routerMac,
+            ? buildNa(victimMac6, m_localMac, targetIp6, ll, targetIp6, m_routerMac,
                       kNaRouter | kNaSolicited | kNaOverride)
-            : buildNa(victimMac6, m_localMac, m_routerLL, allNodes(), m_routerLL, m_routerMac,
+            : buildNa(victimMac6, m_localMac, targetIp6, allNodes(), targetIp6, m_routerMac,
                       kNaRouter | kNaOverride);
     for (int i = 0; i < kHealRepeat; ++i)
         m_endpoint->send(na);

@@ -16,6 +16,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QVector>
 #include <QtGlobal>
 
 #include <cerrno>
@@ -292,6 +293,8 @@ struct RaSpec {
     quint8 prefixLen = 64;
     quint8 prefixFlags = 0x80;    // bit7 = on-link(L)
     bool zeroLenOption = false;   // 构造 len==0 的畸形选项（必须被拒且不死循环）
+    bool withRdnss = false;       // 带 RDNSS 选项（type 25，携带递归 DNS 服务器地址）
+    int rdnssCount = 1;           // RDNSS 里放几个地址（每个 16 字节）
 };
 
 QByteArray buildRa(const RaSpec &s)
@@ -352,6 +355,20 @@ QByteArray buildRa(const RaSpec &s)
         pfx[1] = char(0x08);                                        // 2408:: 之类的运营商前缀
         f.append(pfx);
     }
+    if (s.withRdnss && s.rdnssCount > 0) {
+        // RDNSS（RFC 8106）：type(1) len(1) reserved(2) lifetime(4) + N×16 字节地址。len = 1 + 2N。
+        f.append(char(25));                                         // type = RDNSS
+        f.append(char(1 + 2 * s.rdnssCount));                       // len（单位 8 字节）
+        f.append(QByteArray::fromHex("0000"));                      // reserved
+        f.append(QByteArray::fromHex("00000e10"));                  // lifetime
+        for (int i = 0; i < s.rdnssCount; ++i) {
+            QByteArray dns(16, char(0));
+            dns[0] = char(0x24);
+            dns[1] = char(0x08);                                    // 与前缀同段：路由器链上全局地址
+            dns[15] = char(0x01 + i);                               // ...::1, ...::2 …
+            f.append(dns);
+        }
+    }
     return f;
 }
 
@@ -399,6 +416,30 @@ int runNdpRaSelfTest()
         check(NdpSpoofer::parseRouterAdvert(buildRa(s), nullptr, nullptr, &pfx, &plen), "应仍解析成功");
         check(plen == -1, "非 on-link 前缀不应被采纳");
     }
+    // 3b) RDNSS 选项：解析器把递归 DNS 服务器地址原样抽出（前缀/全局过滤在调用方做，不在这里）。
+    {
+        RaSpec s;
+        s.withRdnss = true;
+        s.rdnssCount = 2;
+        QVector<QByteArray> rd;
+        check(NdpSpoofer::parseRouterAdvert(buildRa(s), nullptr, nullptr, nullptr, nullptr, &rd),
+              "带 RDNSS 的 RA 应解析成功");
+        check(rd.size() == 2, "应抽出 2 个 RDNSS 地址");
+        if (rd.size() == 2) {
+            check(rd[0].size() == 16 && quint8(rd[0][0]) == 0x24 && quint8(rd[0][15]) == 0x01,
+                  "第 1 个 RDNSS 地址内容不对");
+            check(quint8(rd[1][15]) == 0x02, "第 2 个 RDNSS 地址内容不对");
+        }
+    }
+    // 3c) 不传 rdnss 出参（老调用方）也不能崩；SLLA/前缀照常解析。
+    {
+        RaSpec s;
+        s.withRdnss = true;
+        QString ll;
+        check(NdpSpoofer::parseRouterAdvert(buildRa(s), &ll, nullptr, nullptr, nullptr),
+              "rdnss 出参省略也应解析成功");
+        check(ll == QStringLiteral("fe80::1"), "省略 rdnss 时其它字段应照常");
+    }
     // 4) 四个必须拒绝的用例。
     {
         RaSpec s;
@@ -429,15 +470,21 @@ int runNdpRaSelfTest()
               "len==0 选项不应让解析崩掉");
         check(ll == QStringLiteral("fe80::1"), "len==0 选项前已解析出的字段应保留");
     }
-    // 5) 截断帧不得越界（逐字节截断跑一遍，主要靠 ASAN/崩溃暴露问题）。
+    // 5) 截断帧不得越界（逐字节截断跑一遍，主要靠 ASAN/崩溃暴露问题）。带 RDNSS 的帧也跑一遍，
+    //    专门压 RDNSS 地址逐个读取的边界（naddr 与 off+16 的越界判定）。
     {
-        const QByteArray full = buildRa({});
-        for (int n = 0; n < full.size(); ++n)
-            NdpSpoofer::parseRouterAdvert(full.left(n), nullptr, nullptr, nullptr, nullptr);
+        RaSpec s;
+        s.withRdnss = true;
+        s.rdnssCount = 3;
+        const QByteArray full = buildRa(s);
+        for (int n = 0; n < full.size(); ++n) {
+            QVector<QByteArray> rd;
+            NdpSpoofer::parseRouterAdvert(full.left(n), nullptr, nullptr, nullptr, nullptr, &rd);
+        }
     }
 
     if (g_fail == 0)
-        std::fprintf(stderr, "NDP-RA-SELFTEST: PASS（解析 + SLLA 优先 + on-link 判据 + 4 个拒绝用例 + 截断）\n");
+        std::fprintf(stderr, "NDP-RA-SELFTEST: PASS（解析 + SLLA 优先 + on-link 判据 + RDNSS 抽取 + 4 个拒绝用例 + 截断）\n");
     else
         std::fprintf(stderr, "NDP-RA-SELFTEST: %d 个断言失败\n", g_fail);
     std::fflush(stderr);

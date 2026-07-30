@@ -214,6 +214,10 @@ struct GwNic {
     QString learnedRouterMac6;
     QByteArray learnedPrefix6Net;
     int learnedPrefix6Len = -1;
+    // 从 RA 的 RDNSS 学到、并按本网卡前缀筛过的路由器**链上全局地址**（各 16 字节）。设备的 v6 DNS
+    // 服务器就是这些地址，且它们是链上地址——设备直接 NS 解析、不经默认路由器，必须单独投毒/抢答/还原，
+    // 否则 v6 DNS 整段绕过网关（真机实证：dns=0/dnsLocal=0/0）。存这里是为了「只在集合变化时才重配投毒器」。
+    QVector<QByteArray> learnedRdnss6;
     // v6 拓扑的**唯一取用口径**：扫描（本机路由表）优先，缺则用从 RA 学到的。
     // routerMac6 再缺则回落 v4 网关 MAC（同一路由器 v4/v6 常共用一个 NIC MAC）。
     QString effectiveRouterLL6() const
@@ -385,7 +389,8 @@ void GatewayWorker::learnRouterFromRa(GwNic *n, const QByteArray &frame)
     QString ll, mac;
     QByteArray pfx;
     int pfxLen = -1;
-    if (!NdpSpoofer::parseRouterAdvert(frame, &ll, &mac, &pfx, &pfxLen))
+    QVector<QByteArray> rdnss; // RA 里 RDNSS 选项给出的递归 DNS 服务器地址（原始，未过滤）
+    if (!NdpSpoofer::parseRouterAdvert(frame, &ll, &mac, &pfx, &pfxLen, &rdnss))
         return; // 不是可用的 RA（hop limit≠255 / lifetime==0 / 源地址非 LL 等，判据见解析函数）
     if (ll.isEmpty() || mac.isEmpty())
         return;
@@ -398,6 +403,77 @@ void GatewayWorker::learnRouterFromRa(GwNic *n, const QByteArray &frame)
             n->prefix6Net = pfx;
             n->prefix6Len = pfxLen;
             qInfo() << "网关: 从 RA 学到 v6 前缀" << n->spec.ifname << pfxLen;
+        }
+    }
+
+    // ———— RDNSS：学路由器的**链上全局地址**（设备 v6 DNS 用的那个），单独投毒/抢答/还原 ————
+    // ★ 这段**必须在下面 LL/MAC 的 early-return 之前**跑：RDNSS 可能在 LL 不变时变化，放到 return
+    //   之后就永远学不到。为什么要单独处理它见 NdpSpoofer 类顶注释——设备直接 NS 解析这个链上地址、
+    //   不经默认路由器，只投毒 LL 碰不到它，v6 DNS 整段绕过网关（真机实证 dns=0/dnsLocal=0/0）。
+    {
+        // 过滤：只留可安全投毒的路由器链上全局地址，**防伪造 RA 灌入无关地址**。
+        //   · 拒组播(ff00::/8)、链路本地(fe80::/10)、未指定/回环；
+        //   · 前缀已知 → 必须落在本网卡链上前缀内（最紧，精准命中路由器自身的链上全局地址、爆炸半径最小）；
+        //   · 前缀未知（少见）→ 退而求其次要求是全局单播(2000::/3)，至少排除 LL/ULA/组播。
+        QVector<QByteArray> extras;
+        const bool havePrefix = (n->prefix6Len > 0 && n->prefix6Net.size() == 16);
+        for (const QByteArray &a : std::as_const(rdnss)) {
+            if (a.size() != 16)
+                continue;
+            const quint8 b0 = quint8(a[0]);
+            const quint8 b1 = quint8(a[1]);
+            if (b0 == 0xFF) // 组播
+                continue;
+            if (b0 == 0xFE && (b1 & 0xC0) == 0x80) // 链路本地 fe80::/10
+                continue;
+            bool allZero = true;
+            for (int i = 0; i < 16; ++i)
+                if (a[i]) {
+                    allZero = false;
+                    break;
+                }
+            if (allZero) // ::（未指定）；::1 回环也被下面两条门挡掉
+                continue;
+            if (havePrefix) {
+                if (!ip6InPrefix(reinterpret_cast<const uchar *>(a.constData()), n->prefix6Net,
+                                 n->prefix6Len))
+                    continue;
+            } else if ((b0 & 0xE0) != 0x20) { // 非全局单播 2000::/3
+                continue;
+            }
+            bool dup = false;
+            for (const QByteArray &e : extras)
+                if (e == a) {
+                    dup = true;
+                    break;
+                }
+            if (!dup && extras.size() < 8) // 上限 8：与 NdpSpoofer::kMaxRouterExtra 呼应
+                extras.append(a);
+        }
+        // 只在集合**变化时**才重配（RDNSS 是周期广播，别每条都动投毒器/刷日志/写状态文件）。
+        auto sameSet = [](const QVector<QByteArray> &x, const QVector<QByteArray> &y) {
+            if (x.size() != y.size())
+                return false;
+            for (const QByteArray &a : x) {
+                bool found = false;
+                for (const QByteArray &b : y)
+                    if (a == b) {
+                        found = true;
+                        break;
+                    }
+                if (!found)
+                    return false;
+            }
+            return true;
+        };
+        if (!sameSet(extras, n->learnedRdnss6)) {
+            n->learnedRdnss6 = extras;
+            n->ndp->setRouterExtraAddrs(extras); // 内部会 heal 掉被移除的、抢投新增的（见其实现）
+            qInfo() << "网关: 从 RA 的 RDNSS 学到" << extras.size() << "个路由器链上地址"
+                    << n->spec.ifname;
+            // ★ 崩溃恢复清单要带上这些地址：漏了它，异常退出后无法还原「路由器全局地址→本机 MAC」，
+            //   被劫持设备连不上路由器自身（含 v6 DNS）——与 v4「重启后代理恢复四修」同类的坑。
+            persist();
         }
     }
 
@@ -498,6 +574,15 @@ void GatewayWorker::persist() const
             // 被劫持设备的 v6 会一直指着本机（断网）直到表项老化。
             o["routerLL6"] = n->effectiveRouterLL6();
             o["routerMac6"] = n->effectiveRouterMac6();
+            // v6 崩溃恢复的**第二段**：从 RDNSS 学到的路由器链上全局地址也要能被还原（否则异常退出后
+            // 「路由器全局地址→本机 MAC」残留，设备连不上路由器/DNS）。存成 16 字节地址的 hex 串数组。
+            if (!n->learnedRdnss6.isEmpty()) {
+                QJsonArray ex;
+                for (const QByteArray &a : n->learnedRdnss6)
+                    if (a.size() == 16)
+                        ex.append(QString::fromLatin1(a.toHex()));
+                o["routerExtra6"] = ex;
+            }
         }
         arr.append(o);
     }
@@ -1196,6 +1281,19 @@ void GatewayWorker::healPending()
         const QString rmac6 = field("routerMac6").isEmpty() ? field("gatewayMac")
                                                             : field("routerMac6");
         ndpHealer.configure(field("localMac"), field("routerLL6"), rmac6);
+        // ★ 额外 v6 目标（RDNSS 链上全局地址）也要还原——只 heal LL 会把「路由器全局地址→本机 MAC」
+        //   留在设备缓存里，设备连不上路由器/DNS。取自状态文件里存的 16 字节地址 hex 串数组。
+        {
+            QVector<QByteArray> extra;
+            const QJsonArray ex = first["routerExtra6"].toArray();
+            for (const QJsonValue &ev : ex) {
+                const QByteArray b = QByteArray::fromHex(ev.toString().toLatin1());
+                if (b.size() == 16)
+                    extra.append(b);
+            }
+            if (!extra.isEmpty())
+                ndpHealer.setRouterExtraAddrs(extra); // 之后 startSpoof/stopSpoof 会连这些一并 heal
+        }
         // 网关 MAC 没记下来（老版本状态文件 / 上次也没解析出来）→ healer 未配置，stopSpoof 是
         // 静默 no-op，等于**没还原**。这种也要留着重试：下一轮扫描后拓扑就有了。
         const bool healable = healer.configured();
