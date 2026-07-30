@@ -62,6 +62,7 @@ class DevicesController final : public QObject
     Q_PROPERTY(QVariantList securityAlerts READ securityAlerts NOTIFY securityChanged)
     // 灰度：进程内出站（实验）。默认关 = 零行为变化（网关全走 mihomo）。设置页开关绑定它。
     Q_PROPERTY(bool coastCoreEnabled READ coastCoreEnabled WRITE setCoastCoreEnabled NOTIFY coastCoreEnabledChanged)
+    Q_PROPERTY(bool coastCoreStrict READ coastCoreStrict WRITE setCoastCoreStrict NOTIFY coastCoreStrictChanged)
 
 public:
     DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
@@ -104,8 +105,11 @@ public:
 
     // —— 灰度：进程内出站（实验；10c）——
     bool coastCoreEnabled() const { return m_coastCore; }
+    bool coastCoreStrict() const { return m_coastStrict; }
     // 落盘 config.yaml + 重建快照 + 把开关意图推给网关数据面。默认关时网关全走 mihomo（零行为变化）。
     Q_INVOKABLE void setCoastCoreEnabled(bool on);
+    // 严格模式：判不了的连接拒绝回退核心、直接失败。只有 coastCoreEnabled 开着时才有意义。
+    Q_INVOKABLE void setCoastCoreStrict(bool on);
 
 signals:
     void scanningChanged();
@@ -119,6 +123,7 @@ signals:
     void securityChanged();                    // 安全告警集合变化 → 横幅/徽标刷新
     void securityAlertRaised(const QString &title, const QString &body); // 新威胁 → main 连托盘通知
     void coastCoreEnabledChanged();            // 灰度开关变化 → 设置页开关刷新
+    void coastCoreStrictChanged();
 
 private:
     void onDiscovered(const QVector<class DeviceRecord> &devices);
@@ -143,6 +148,7 @@ private:
     // rebuildCoastCoreConfig + 重新把开关意图推给网关（保持热更新）。仅在灰度开着时才动作。
     void refreshCoastCore();
     void persistCoastCore(bool on); // 只改 config.yaml 的 coastcore 键，保留其余内容
+    void persistCoastCoreStrict(bool on); // 同上，改 coastcore_strict 键
 
     DeviceStore *m_store = nullptr;
     ClashService *m_clash = nullptr;
@@ -228,6 +234,7 @@ private:
     // —— 灰度：进程内出站 ——
     QString m_configDir;                          // config.yaml / full.yaml 所在（构造时从 AppConfig 取）
     bool m_coastCore = false;                     // 灰度开关（默认关 = 零行为变化）
+    bool m_coastStrict = false;                   // 严格模式（默认关）
     std::shared_ptr<ProxyConfigStore> m_pcfgStore; // 出站配置快照持有者（app 生命周期常驻，与网关 worker 共享）
     std::shared_ptr<RuleEngine> m_ruleEngine;   // 分流规则引擎（本单元备用；Rule 模式回退核心）
     // DNS 旁听器：交给网关装到 NetStack 上，学核心分配的 fake-ip → 域名（见 LanGateway::setCoastCore）。

@@ -548,16 +548,20 @@ Item {
                             icon: ""
                             title: qsTr("网关")
 
-                            SettingRow { label: qsTr("进程内出站（实验）")
+                            SettingRow { label: qsTr("进程内内核（实验）")
                                 ThemedSwitch { id: coastCoreSwitch; checked: devices.coastCoreEnabled
                                     onToggled: devices.setCoastCoreEnabled(checked) } }
+                            SettingRow { label: qsTr("严格模式（不回退到 mihomo）")
+                                ThemedSwitch { id: coastStrictSwitch; enabled: devices.coastCoreEnabled
+                                    checked: devices.coastCoreStrict
+                                    onToggled: devices.setCoastCoreStrict(checked) } }
                             Label {
                                 Layout.fillWidth: true
                                 Layout.topMargin: 2
                                 wrapMode: Text.WordWrap
                                 color: Theme.textMuted
                                 font.pixelSize: 11
-                                text: qsTr("实验性：仅「直连 / 全局」模式在本进程内生效，规则模式仍走核心；协议未经完整真机验证。默认关闭时行为不变（网关全走核心）。")
+                                text: qsTr("开启后网关这条数据面（DNS + TCP + UDP）整条都在本进程内跑，不再经过 mihomo：直连/全局/规则三种模式都在进程内分流，设备的 DNS 也由本程序直接应答。个别判不了的情形（协议未编入、规则需先解析 IP）仍会回退 mihomo，回退次数与原因见日志的 cc= 一栏。\n严格模式：连这些也不回退，直接让该连接失败——用来暴露「还差什么」，代价是那些连接会断。默认两个都关闭时行为不变（网关全走核心）。")
                             }
                         }
 

@@ -31,10 +31,16 @@ struct AppConfig {
     // 接收测试版：更新检查与「一键更新」改用 prerelease 频道。CI 对**非主分支**的每次推送都会发
     // 一个 prerelease（tag 带 -beta.<sha>），主分支才发正式版。默认关 —— 普通用户不该被卷进测试流。
     bool receiveBeta = false;
-    // 灰度：把出站搬进程内（CoastCore 的 CoreDialerFactory 接进网关数据面）。默认关 = 零行为变化，
-    // 网关仍全走 mihomo。开时仅「直连/全局」模式在进程内生效，规则模式与未注册协议一律回退 mihomo。
-    // 协议未经完整真机验证，绝不能默认改路由——所以默认 false（config.yaml 键 `coastcore`）。
+    // 把网关这条数据面搬进本进程（CoastCore）。默认关 = 零行为变化，网关全走 mihomo。
+    // 开启后 **DNS + TCP + UDP 整条都不经核心**：直连/全局/规则三种模式都在进程内分流，
+    // 设备的 :53 由我们自己答（fake-ip 当场合成，见 NetStack::answerDnsLocally）。
+    // 判不了的情形（协议没编进来、规则要先解析 IP、fake-ip 没反查到）仍**回退** mihomo，
+    // 回退按原因记账，见 GatewayDiag 的 cc=… 那几栏。（config.yaml 键 `coastcore`）
     bool coastcore = false;
+    // 严格模式：上面那些「判不了」的情形**拒绝回退**，直接让该连接失败。默认关。
+    // 用途是把「离完全替换 mihomo 还差多少」暴露出来 —— 静默回退会把差距藏起来。
+    // 代价是这些连接会断，所以单独一个开关。（config.yaml 键 `coastcore_strict`）
+    bool coastcoreStrict = false;
     QString language = "zh-CN";
 
     QString clashExecutable() const;

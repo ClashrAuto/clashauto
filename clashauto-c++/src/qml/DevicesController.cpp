@@ -32,7 +32,8 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
                                     LanGateway *gateway, HistoryStore *history,
                                     const AppConfig &config, QObject *parent)
     : QObject(parent), m_store(store), m_clash(clash), m_core(core), m_gateway(gateway),
-      m_history(history), m_configDir(config.configDir), m_coastCore(config.coastcore)
+      m_history(history), m_configDir(config.configDir), m_coastCore(config.coastcore),
+      m_coastStrict(config.coastcoreStrict)
 {
     m_scanner = new LanScanner(this);
 
@@ -145,7 +146,7 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
     if (m_coastCore) {
         rebuildCoastCoreConfig();
         if (m_gateway)
-            m_gateway->setCoastCore(true, m_pcfgStore, m_ruleEngine, m_dnsResolver);
+            m_gateway->setCoastCore(true, m_coastStrict, m_pcfgStore, m_ruleEngine, m_dnsResolver);
     }
 }
 
@@ -1070,6 +1071,28 @@ void DevicesController::persistCoastCore(bool on)
     }
 }
 
+void DevicesController::persistCoastCoreStrict(bool on)
+{
+    // 只改 config.yaml 的 coastcore_strict 键、保留其余内容（复刻 SettingsController::persistConfigScalar）。
+    const QString path = QDir(m_configDir).filePath(QStringLiteral("config.yaml"));
+    QString yaml = readFileText(path);
+    const QString line = QStringLiteral("coastcore_strict: %1").arg(on ? QStringLiteral("true")
+                                                               : QStringLiteral("false"));
+    static const QRegularExpression re(QStringLiteral("(?m)^coastcore_strict:.*$"));
+    if (re.match(yaml).hasMatch()) {
+        yaml.replace(re, line);
+    } else {
+        if (!yaml.isEmpty() && !yaml.endsWith('\n'))
+            yaml += '\n';
+        yaml += line + '\n';
+    }
+    QFile out(path);
+    if (out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        out.write(yaml.toUtf8());
+        out.close();
+    }
+}
+
 void DevicesController::setCoastCoreEnabled(bool on)
 {
     if (on == m_coastCore)
@@ -1078,6 +1101,18 @@ void DevicesController::setCoastCoreEnabled(bool on)
     persistCoastCore(on);
     rebuildCoastCoreConfig(); // 先把快照建好，再切开关，避免开的那一刻拿到空快照
     if (m_gateway)
-        m_gateway->setCoastCore(on, m_pcfgStore, m_ruleEngine, m_dnsResolver);
+        m_gateway->setCoastCore(on, m_coastStrict, m_pcfgStore, m_ruleEngine, m_dnsResolver);
     emit coastCoreEnabledChanged();
+}
+
+void DevicesController::setCoastCoreStrict(bool on)
+{
+    if (on == m_coastStrict)
+        return;
+    m_coastStrict = on;
+    persistCoastCoreStrict(on);
+    // 热切换：只有进程内内核本身开着时才需要把新意图推给网关（关着时下次开启会带上）。
+    if (m_gateway && m_coastCore)
+        m_gateway->setCoastCore(true, m_coastStrict, m_pcfgStore, m_ruleEngine, m_dnsResolver);
+    emit coastCoreStrictChanged();
 }

@@ -271,7 +271,7 @@ public:
     void recoverLocal();
     void teardownLocal(); // 还原全部 ARP + 销毁 NetStack/端点/ArpSpoofer（幂等）。退出/析构走它。
     // 灰度：记下「是否把出站搬进程内」的意图 + 配置快照来源，并据此装/撤 CoreDialerFactory。
-    void setCoastCoreLocal(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+    void setCoastCoreLocal(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
                            std::shared_ptr<DnsResolver> dns,
                            std::shared_ptr<RuleEngine> rules);
 
@@ -320,6 +320,7 @@ private:
     // 使 CoreDialerFactory 内部裸指针 store 与 router 捕获的 shared_ptr 全程存活。
     bool m_coastCore = false;
     std::shared_ptr<ProxyConfigStore> m_pcfgStore;
+    bool m_coastStrict = false; // 严格模式：判不了就断，不回退核心
     std::shared_ptr<RuleEngine> m_ruleEngine;
     std::shared_ptr<DnsResolver> m_dnsResolver; // DNS 旁听器：见 applyCoastCoreLocal 里 setDnsLearner
     bool m_torndown = false;
@@ -553,6 +554,7 @@ void GatewayWorker::applyCoastCoreLocal()
     if (m_coastCore && m_pcfgStore) {
         // 回退工厂 = 照旧拨每设备 SOCKS(7899) → mihomo 靠 IN-USER 分流。CoreDialerFactory 取得其所有权。
         auto *factory = new CoreDialerFactory(m_pcfgStore.get(), new Socks5OutboundFactory(m_socksPort));
+        factory->setStrict(m_coastStrict); // 严格模式：拒绝回退，让差距暴露出来（见 setStrict 的说明）
         // router 捕获 store 的 shared_ptr（保活），据当前快照的模式选出站；判据见 setCoastCore 的注释。
         const std::shared_ptr<ProxyConfigStore> store = m_pcfgStore;
         const std::shared_ptr<RuleEngine> rules = m_ruleEngine; // Rule 模式要用它做首命中匹配
@@ -629,11 +631,13 @@ void GatewayWorker::applyCoastCoreLocal()
     }
 }
 
-void GatewayWorker::setCoastCoreLocal(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+void GatewayWorker::setCoastCoreLocal(bool enabled, bool strict,
+                                      std::shared_ptr<ProxyConfigStore> store,
                                       std::shared_ptr<DnsResolver> dns,
                                       std::shared_ptr<RuleEngine> rules)
 {
     m_coastCore = enabled;
+    m_coastStrict = strict;
     m_pcfgStore = std::move(store);
     m_ruleEngine = std::move(rules);
     m_dnsResolver = std::move(dns);
@@ -1390,7 +1394,7 @@ QStringList LanGateway::activeDevices() const
     return d->shared->active;
 }
 
-void LanGateway::setCoastCore(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+void LanGateway::setCoastCore(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
                              std::shared_ptr<RuleEngine> rules, std::shared_ptr<DnsResolver> dns)
 {
     if (!d->workerReady())
@@ -1400,7 +1404,9 @@ void LanGateway::setCoastCore(bool enabled, std::shared_ptr<ProxyConfigStore> st
     // NetStack、不反向阻塞等 GUI ⇒ 不可能死锁（论证同 configure）。
     QMetaObject::invokeMethod(
         d->worker,
-        [w = d->worker, enabled, store, rules, dns] { w->setCoastCoreLocal(enabled, store, dns, rules); },
+        [w = d->worker, enabled, strict, store, rules, dns] {
+            w->setCoastCoreLocal(enabled, strict, store, dns, rules);
+        },
         Qt::BlockingQueuedConnection);
 }
 

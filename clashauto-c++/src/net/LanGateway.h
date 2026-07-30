@@ -83,7 +83,8 @@ public:
     // 可重入：切节点/改模式/换订阅后重复调即热更新（配合 ProxyConfigStore::reload 的原子换手）。
     // dns：DNS 旁听器（可空）。装上后 NetStack 会把 DNS 劫持应答里学到的「核心分配的 fake-ip → 域名」
     //   用于 accept 时改写拨号目标——否则进程内出站拿到假 IP 原样拨、节点必然 i/o timeout（真机实测）。
-    void setCoastCore(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+    // strict：判不了的连接**拒绝回退核心**、直接失败（默认关）。见 CoreDialerFactory::setStrict。
+    void setCoastCore(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
                       std::shared_ptr<RuleEngine> rules, std::shared_ptr<DnsResolver> dns);
 
     QStringList activeDevices() const; // 当前被劫持的 mac 列表

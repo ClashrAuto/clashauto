@@ -22,6 +22,6 @@ void LanGateway::disableDevice(const QString &) {}
 void LanGateway::disableAll() {}
 void LanGateway::recoverFromCrash() {}
 // 非 Linux 无网关数据面 → CoastCore 进程内出站无处可接，空实现（shared_ptr 按值析构，无需完整类型）。
-void LanGateway::setCoastCore(bool, std::shared_ptr<ProxyConfigStore>, std::shared_ptr<RuleEngine>,
-                              std::shared_ptr<DnsResolver>) {}
+void LanGateway::setCoastCore(bool, bool, std::shared_ptr<ProxyConfigStore>,
+                              std::shared_ptr<RuleEngine>, std::shared_ptr<DnsResolver>) {}
 QStringList LanGateway::activeDevices() const { return {}; }
