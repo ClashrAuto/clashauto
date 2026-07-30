@@ -544,6 +544,23 @@ Item {
                                 PillButton { text: qsTr("卸载"); onClicked: settings.uninstallMacHelper() } }
                         }
 
+                        SettingCard {
+                            icon: ""
+                            title: qsTr("网关")
+
+                            SettingRow { label: qsTr("进程内出站（实验）")
+                                ThemedSwitch { id: coastCoreSwitch; checked: devices.coastCoreEnabled
+                                    onToggled: devices.setCoastCoreEnabled(checked) } }
+                            Label {
+                                Layout.fillWidth: true
+                                Layout.topMargin: 2
+                                wrapMode: Text.WordWrap
+                                color: Theme.textMuted
+                                font.pixelSize: 11
+                                text: qsTr("实验性：仅「直连 / 全局」模式在本进程内生效，规则模式仍走核心；协议未经完整真机验证。默认关闭时行为不变（网关全走核心）。")
+                            }
+                        }
+
                         Item { Layout.preferredHeight: 0 } // 占位：列 spacing 10 即为末卡距底距离
                     }
                 }

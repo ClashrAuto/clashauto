@@ -107,6 +107,7 @@ AppConfig AppConfigLoader::load()
     config.autoLanguage = boolFromYaml(yaml, "autoLanguage", config.autoLanguage);
     config.mirror = boolFromYaml(yaml, "mirror", config.mirror);
     config.receiveBeta = boolFromYaml(yaml, "beta", config.receiveBeta);
+    config.coastcore = boolFromYaml(yaml, "coastcore", config.coastcore); // 灰度：进程内出站（默认关）
     config.language = valueFromYaml(yaml, "language", config.language);
     config.secret = valueFromYaml(yaml, "secret", QString());
 

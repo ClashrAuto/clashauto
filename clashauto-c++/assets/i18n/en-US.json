@@ -198,6 +198,8 @@
   "代理网络": "Proxy network",
   "本机": "This PC",
   "网关": "Gateway",
+  "进程内出站（实验）": "In-process outbound (experimental)",
+  "实验性：仅「直连 / 全局」模式在本进程内生效，规则模式仍走核心；协议未经完整真机验证。默认关闭时行为不变（网关全走核心）。": "Experimental: only Direct / Global modes take effect in-process; Rule mode still goes through the core. Protocols are not fully hardware-verified. Off by default (gateway routes entirely through the core), so behavior is unchanged.",
   "策略": "Policy",
   "型号": "Model",
   "主机名": "Hostname",

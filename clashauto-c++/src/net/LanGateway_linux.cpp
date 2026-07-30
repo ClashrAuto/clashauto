@@ -37,6 +37,10 @@
 #include "IL2Endpoint.h"
 #include "NdpSpoofer.h"
 #include "NetStack.h"
+#include "Socks5Client.h"           // Socks5OutboundFactory：CoreDialerFactory 的回退工厂（照旧拨 mihomo）
+#include "core/CoreDialerFactory.h" // 灰度：按(目的地/设备)选出站的拨号工厂（默认全部回退 Socks5）
+#include "core/ProxyConfig.h"       // ProxyConfigStore/ProxyConfig：出站配置不可变快照 + 热重载
+#include "core/RuleEngine.h"        // RuleEngine：分流规则（本单元 Rule 模式回退 mihomo，仅持有备用）
 
 #include <QDateTime>
 #include <QDir>
@@ -257,7 +261,7 @@ public:
     }
     ~GatewayWorker() override { teardownLocal(); }
 
-    // 以下六个方法皆在工作线程执行。
+    // 以下方法皆在工作线程执行。
     void configureLocal(const QVector<LanGateway::NicSpec> &specs, quint16 socksPort);
     bool enableDeviceLocal(const QString &mac, const QString &ip, const QString &socksUser,
                            QString *err);
@@ -265,6 +269,9 @@ public:
     void disableAllLocal();
     void recoverLocal();
     void teardownLocal(); // 还原全部 ARP + 销毁 NetStack/端点/ArpSpoofer（幂等）。退出/析构走它。
+    // 灰度：记下「是否把出站搬进程内」的意图 + 配置快照来源，并据此装/撤 CoreDialerFactory。
+    void setCoastCoreLocal(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+                           std::shared_ptr<RuleEngine> rules);
 
 signals:
     void deviceError(const QString &mac, const QString &message);
@@ -286,6 +293,8 @@ private:
     void healPending();
     // 把当前状态刷进 GUI 可读的快照（每次改状态后调用一次）。
     void publishSnapshot();
+    // 依 m_coastCore 给 m_net 装/撤 CoreDialerFactory（仅在 m_net 存在时动手；必在工作线程调）。
+    void applyCoastCoreLocal();
 
     NetStack *m_net = nullptr;               // 共用（lwIP 单实例，多 netif）
     QHash<QString, GwNic *> m_nics;          // ifname → 套件
@@ -304,6 +313,12 @@ private:
     // 从线上观察到的 RA 学 v6 路由器（不依赖本机 accept_ra / 路由表）。详见实现处的说明。
     void learnRouterFromRa(GwNic *n, const QByteArray &frame);
     std::shared_ptr<GwShared> m_shared;
+    // 灰度：进程内出站的意图 + 数据源。默认 m_coastCore=false → applyCoastCoreLocal 永不动 NetStack，
+    // 数据面保持默认 Socks5OutboundFactory（零行为变化）。store/rules 由本 worker 持有（跨线程共享），
+    // 使 CoreDialerFactory 内部裸指针 store 与 router 捕获的 shared_ptr 全程存活。
+    bool m_coastCore = false;
+    std::shared_ptr<ProxyConfigStore> m_pcfgStore;
+    std::shared_ptr<RuleEngine> m_ruleEngine;
     bool m_torndown = false;
     // 诊断计数（COAST_GATEWAY_DEBUG）：设备帧在 frameReceived 里各分支的去向。
     long long m_dbgDropNonVictim = 0, m_dbgBypassLan = 0, m_dbgFedLwip = 0, m_dbgArpAnswered = 0,
@@ -521,6 +536,51 @@ void GatewayWorker::publishSnapshot()
     m_shared->active = active;
 }
 
+// ———————————————————————————— 灰度：进程内出站接线（10b）————————————————————————————
+// 全在工作线程执行（NetStack::setOutboundFactory 硬性要求本线程调用，见 NetStack.h）。
+void GatewayWorker::applyCoastCoreLocal()
+{
+    if (!m_net)
+        return; // 协议栈还没建（首轮 configure 前）：意图已记在成员里，configureLocal 建栈后会再调一次
+    if (m_coastCore && m_pcfgStore) {
+        // 回退工厂 = 照旧拨每设备 SOCKS(7899) → mihomo 靠 IN-USER 分流。CoreDialerFactory 取得其所有权。
+        auto *factory = new CoreDialerFactory(m_pcfgStore.get(), new Socks5OutboundFactory(m_socksPort));
+        // router 捕获 store 的 shared_ptr（保活），据当前快照的模式选出站；判据见 setCoastCore 的注释。
+        const std::shared_ptr<ProxyConfigStore> store = m_pcfgStore;
+        factory->setRouter([store](const QString &dstHost, const QString &user) -> QString {
+            Q_UNUSED(dstHost);
+            Q_UNUSED(user);
+            const std::shared_ptr<const ProxyConfig> cfg = store->current();
+            if (!cfg)
+                return QString(); // 无配置 → 回退 mihomo（安全）
+            switch (cfg->mode()) {
+            case ProxyConfig::Mode::Direct:
+                return QStringLiteral("DIRECT"); // 直连恒正确 → 进程内 DirectOutbound
+            case ProxyConfig::Mode::Global:
+                return cfg->selected(); // 单选节点；协议未注册时 CoreDialerFactory 自动回退 mihomo
+            case ProxyConfig::Mode::Rule:
+                return QString(); // ★ 回退 mihomo：无 geosite 无法安全镜像首命中，误路由=泄露（TODO）
+            }
+            return QString();
+        });
+        m_net->setOutboundFactory(factory); // 取得所有权：delete 掉旧工厂
+        qInfo() << "网关: CoastCore 进程内出站已启用（回退端口" << m_socksPort << "）";
+    } else {
+        // 撤回默认（全走 mihomo）——与「从未启用」完全一致。
+        m_net->setOutboundFactory(new Socks5OutboundFactory(m_socksPort));
+        qInfo() << "网关: CoastCore 进程内出站已停用（恢复默认 SOCKS 全走核心）";
+    }
+}
+
+void GatewayWorker::setCoastCoreLocal(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+                                      std::shared_ptr<RuleEngine> rules)
+{
+    m_coastCore = enabled;
+    m_pcfgStore = std::move(store);
+    m_ruleEngine = std::move(rules);
+    applyCoastCoreLocal();
+}
+
 void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, quint16 socksPort)
 {
     m_socksPort = socksPort;
@@ -535,6 +595,10 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             m_net = nullptr;
             return;
         }
+        // 新建的 NetStack 是默认 Socks5OutboundFactory。若灰度已开着（重启/重连场景），在这里补装
+        // CoreDialerFactory，别让「重连丢状态」。默认关（m_coastCore=false）时**完全不碰** NetStack。
+        if (m_coastCore)
+            applyCoastCoreLocal();
     }
 
     QSet<QString> seen;
@@ -1265,6 +1329,20 @@ QStringList LanGateway::activeDevices() const
 {
     QMutexLocker lk(&d->shared->mutex);
     return d->shared->active;
+}
+
+void LanGateway::setCoastCore(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+                             std::shared_ptr<RuleEngine> rules)
+{
+    if (!d->workerReady())
+        return;
+    // 投到工作线程执行（NetStack 调用必须在其所属线程）。BlockingQueued：与 configure 同一套投递方式，
+    // 返回后状态已生效；shared_ptr 按值捕获跨线程安全传递（引用计数保活）。worker 处理时只碰自己的
+    // NetStack、不反向阻塞等 GUI ⇒ 不可能死锁（论证同 configure）。
+    QMetaObject::invokeMethod(
+        d->worker,
+        [w = d->worker, enabled, store, rules] { w->setCoastCoreLocal(enabled, store, rules); },
+        Qt::BlockingQueuedConnection);
 }
 
 #include "LanGateway_linux.moc"

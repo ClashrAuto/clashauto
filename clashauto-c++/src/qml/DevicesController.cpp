@@ -1,4 +1,5 @@
 #include "DevicesController.h"
+#include "../AppConfig.h"
 #include "../ClashService.h"
 #include "../ConfigBuilder.h" // localGlobal6Prefixes()：与生成配置同一份实现
 #include "../CoreController.h"
@@ -6,8 +7,13 @@
 #include "../HistoryStore.h"
 #include "../LanScanner.h"
 #include "../net/LanGateway.h"
+#include "../net/core/ProxyConfig.h"        // ProxyConfigStore/ProxyConfig（灰度：进程内出站快照）
+#include "../net/core/ProxyConfigBuilder.h" // coastcore::buildProxyConfig
+#include "../net/core/RuleEngine.h"         // RuleEngine（灰度：分流规则，本单元备用）
 
 #include <QDateTime>
+#include <QDir>
+#include <QRegularExpression>
 
 #include <cstdio>
 #include <QFile>
@@ -22,11 +28,16 @@
 #include <algorithm>
 
 DevicesController::DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
-                                    LanGateway *gateway, HistoryStore *history, QObject *parent)
+                                    LanGateway *gateway, HistoryStore *history,
+                                    const AppConfig &config, QObject *parent)
     : QObject(parent), m_store(store), m_clash(clash), m_core(core), m_gateway(gateway),
-      m_history(history)
+      m_history(history), m_configDir(config.configDir), m_coastCore(config.coastcore)
 {
     m_scanner = new LanScanner(this);
+
+    // 灰度：进程内出站快照持有者 + 规则引擎（app 生命周期常驻；与网关工作线程共享同一实例）。
+    m_pcfgStore = std::make_shared<ProxyConfigStore>();
+    m_ruleEngine = std::make_shared<RuleEngine>();
 
     connect(m_scanner, &LanScanner::discovered, this, &DevicesController::onDiscovered);
     connect(m_scanner, &LanScanner::scanningChanged, this, [this](bool s) {
@@ -70,6 +81,20 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
                 [this](bool, bool, bool core) { onCoreRunningChanged(core); });
     }
 
+    // 灰度：进程内出站热更新。切节点 / 改模式 / 换订阅最终都会经核心热重载后由 pollNodes 反映到
+    // nodesUpdated（selected/mode 变化）。仅在灰度开着时才据变化重建快照 + 重新推给网关。默认关时
+    // 这个回调直接 return，一步不动 —— 零行为变化。
+    if (m_clash) {
+        connect(m_clash, &ClashService::nodesUpdated, this,
+                [this](const QVector<NodeInfo> &, const QString &selected) {
+                    if (!m_coastCore)
+                        return;
+                    if (selected == m_ccSelected && m_clash->mode() == m_ccMode)
+                        return; // 模式/选中都没变 → 无需重建（避免每轮轮询白重建）
+                    refreshCoastCore();
+                });
+    }
+
     m_secClock.start();
     m_secTimer = new QTimer(this);
     m_secTimer->setInterval(30000); // 30s 巡检一次，把停了的威胁清出横幅/徽标
@@ -106,6 +131,14 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
             scan();
             m_livenessTimer->start(); // 之后跟着 IP/在线态变化持续补劫持
         });
+    }
+
+    // 灰度：按 AppConfig.coastcore 初始把开关意图推给网关一次。默认关时 setCoastCore(false,...) 是
+    // no-op（网关根本不建 CoreDialerFactory）——**只在开着时**才建快照 + 装工厂，确保默认关=零行为变化。
+    if (m_coastCore) {
+        rebuildCoastCoreConfig();
+        if (m_gateway)
+            m_gateway->setCoastCore(true, m_pcfgStore, m_ruleEngine);
     }
 }
 
@@ -900,4 +933,121 @@ void DevicesController::aggregate(const QVariantList &conns)
     refreshModel();
     rebuildSelected();
     emit overviewChanged();
+}
+
+// ———————————————————————— 灰度：进程内出站（10b/10c）————————————————————————
+namespace {
+QString readFileText(const QString &path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+        return QString();
+    const QString s = QString::fromUtf8(f.readAll());
+    f.close();
+    return s;
+}
+// 从 full.yaml 文本里抽出 `rules:` 段的整行规则（去掉「  - 」列表前缀）。best-effort：喂给 RuleEngine
+// 备用；本单元 Rule 模式回退核心，不靠它做进程内路由。拿不到就返回空。
+QStringList extractRuleLines(const QString &yaml)
+{
+    QStringList out;
+    const QStringList lines = yaml.split('\n');
+    bool inRules = false;
+    static const QRegularExpression rulesKey(QStringLiteral("^rules\\s*:"));
+    for (QString line : lines) {
+        line.remove('\r');
+        if (!inRules) {
+            if (rulesKey.match(line).hasMatch())
+                inRules = true;
+            continue;
+        }
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || trimmed.startsWith('#'))
+            continue;
+        // 回到列首（下一个顶层键）→ rules 段结束。
+        if (!line.startsWith(' ') && !line.startsWith('\t'))
+            break;
+        if (trimmed.startsWith(QStringLiteral("- ")))
+            out << trimmed.mid(2).trimmed();
+    }
+    return out;
+}
+} // namespace
+
+void DevicesController::rebuildCoastCoreConfig()
+{
+    if (!m_pcfgStore)
+        return;
+    // 节点表取自 full.yaml：其 proxies 的节点名与核心/选中节点一致（subscribe.yaml 的裸名少了
+    // 「 - 订阅名」后缀，对不上 selected）。full.yaml 缺失时退回 subscribe.yaml（名可能对不上 →
+    // Global 找不到节点即回退 mihomo，安全）。
+    QString proxiesYaml = readFileText(QDir(m_configDir).filePath(QStringLiteral("full.yaml")));
+    if (proxiesYaml.trimmed().isEmpty())
+        proxiesYaml = readFileText(QDir(m_configDir).filePath(QStringLiteral("subscribe.yaml")));
+
+    // 模式 + 选中：从 ClashService 的当前快照读（无网络往返）。拿不到时按 Rule / 空处理 → 回退，安全。
+    const QString modeStr = m_clash ? m_clash->mode() : QString();
+    const QString selected = m_clash ? m_clash->selectedNode() : QString();
+    ProxyConfig::Mode mode = ProxyConfig::Mode::Rule;
+    if (modeStr.compare(QStringLiteral("Global"), Qt::CaseInsensitive) == 0)
+        mode = ProxyConfig::Mode::Global;
+    else if (modeStr.compare(QStringLiteral("Direct"), Qt::CaseInsensitive) == 0)
+        mode = ProxyConfig::Mode::Direct;
+
+    std::shared_ptr<const ProxyConfig> cfg = coastcore::buildProxyConfig(proxiesYaml, selected, mode);
+    m_pcfgStore->reload(cfg); // 原子换手：在途连接留旧快照，新连接吃新快照（无停顿热更新）
+
+    // 规则喂给引擎（备用；Rule 模式本单元回退核心）。
+    if (m_ruleEngine)
+        m_ruleEngine->setRulesFromLines(extractRuleLines(proxiesYaml));
+
+    m_ccMode = modeStr;
+    m_ccSelected = selected;
+}
+
+void DevicesController::refreshCoastCore()
+{
+    if (!m_coastCore)
+        return; // 关着 → 什么都不动（零行为变化）
+    // 热更新只需 rebuildCoastCoreConfig() —— 它内部 m_pcfgStore->reload() 是原子换手：已装在网关上的
+    // CoreDialerFactory 的 router 每建一条新连接都现读 store->current()，因此换掉快照即刻对新连接生效，
+    // 在途连接留旧快照，全程无停顿。这里**不**重新 setCoastCore（那会整体换掉出站工厂、多此一举，且
+    // 工厂析构会 delete 其回退工厂——虽然 NetStack 的 ACCEPT 回调把 createTcp/connectTo 同步做完、
+    // 换工厂只在事件循环间隙发生故实际安全，但直接 reload 更简、无此顾虑）。store 对象贯穿 app 生命
+    // 周期不变，装一次即可。
+    rebuildCoastCoreConfig();
+}
+
+void DevicesController::persistCoastCore(bool on)
+{
+    // 只改 config.yaml 的 coastcore 键、保留其余内容（复刻 SettingsController::persistConfigScalar）。
+    const QString path = QDir(m_configDir).filePath(QStringLiteral("config.yaml"));
+    QString yaml = readFileText(path);
+    const QString line = QStringLiteral("coastcore: %1").arg(on ? QStringLiteral("true")
+                                                               : QStringLiteral("false"));
+    static const QRegularExpression re(QStringLiteral("(?m)^coastcore:.*$"));
+    if (re.match(yaml).hasMatch()) {
+        yaml.replace(re, line);
+    } else {
+        if (!yaml.isEmpty() && !yaml.endsWith('\n'))
+            yaml += '\n';
+        yaml += line + '\n';
+    }
+    QFile out(path);
+    if (out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        out.write(yaml.toUtf8());
+        out.close();
+    }
+}
+
+void DevicesController::setCoastCoreEnabled(bool on)
+{
+    if (on == m_coastCore)
+        return;
+    m_coastCore = on;
+    persistCoastCore(on);
+    rebuildCoastCoreConfig(); // 先把快照建好，再切开关，避免开的那一刻拿到空快照
+    if (m_gateway)
+        m_gateway->setCoastCore(on, m_pcfgStore, m_ruleEngine);
+    emit coastCoreEnabledChanged();
 }

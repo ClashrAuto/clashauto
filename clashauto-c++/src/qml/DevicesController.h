@@ -19,12 +19,17 @@
 #include <QVariantMap>
 #include <QVector>
 
+#include <memory>
+
+struct AppConfig;
 class DeviceStore;
 class LanScanner;
 class ClashService;
 class CoreController;
 class LanGateway;
 class HistoryStore;
+class ProxyConfigStore; // CoastCore 出站配置快照持有者（灰度）
+class RuleEngine;       // CoastCore 分流规则引擎（灰度）
 class QTimer;
 
 class DevicesController final : public QObject
@@ -54,10 +59,13 @@ class DevicesController final : public QObject
     Q_PROPERTY(bool underAttack READ underAttack NOTIFY securityChanged)
     // 当前活动的安全告警列表（每项 {kind,offenderMac,subjectIp,mac,name}），供横幅展开显示。
     Q_PROPERTY(QVariantList securityAlerts READ securityAlerts NOTIFY securityChanged)
+    // 灰度：进程内出站（实验）。默认关 = 零行为变化（网关全走 mihomo）。设置页开关绑定它。
+    Q_PROPERTY(bool coastCoreEnabled READ coastCoreEnabled WRITE setCoastCoreEnabled NOTIFY coastCoreEnabledChanged)
 
 public:
     DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
-                      LanGateway *gateway, HistoryStore *history, QObject *parent = nullptr);
+                      LanGateway *gateway, HistoryStore *history, const AppConfig &config,
+                      QObject *parent = nullptr);
 
     DeviceListModel *model() { return &m_model; }
     DeviceConnectionsModel *connModel() { return &m_connModel; }
@@ -93,6 +101,11 @@ public:
     QVariantList securityAlerts() const;
     Q_INVOKABLE void dismissSecurityAlerts(); // 用户手动关掉横幅（威胁若仍在，下次观察到会重新出现）
 
+    // —— 灰度：进程内出站（实验；10c）——
+    bool coastCoreEnabled() const { return m_coastCore; }
+    // 落盘 config.yaml + 重建快照 + 把开关意图推给网关数据面。默认关时网关全走 mihomo（零行为变化）。
+    Q_INVOKABLE void setCoastCoreEnabled(bool on);
+
 signals:
     void scanningChanged();
     void topologyChanged();
@@ -104,6 +117,7 @@ signals:
     void csvExported(const QString &path);     // 导出完成 → QML 可提示路径
     void securityChanged();                    // 安全告警集合变化 → 横幅/徽标刷新
     void securityAlertRaised(const QString &title, const QString &body); // 新威胁 → main 连托盘通知
+    void coastCoreEnabledChanged();            // 灰度开关变化 → 设置页开关刷新
 
 private:
     void onDiscovered(const QVector<class DeviceRecord> &devices);
@@ -119,6 +133,15 @@ private:
     // ②设备换了 IP（DHCP 续租）——按旧 IP 的劫持已经失效，得按新 IP 重上。
     void resumeProxies();
     bool hasProxiedDevices() const; // 台账里是否还有开着代理的设备
+
+    // —— 灰度：进程内出站（10b）——
+    // 读 full.yaml 的 proxies（其节点名与核心/选中节点一致，subscribe.yaml 的裸名少了「- 订阅名」后缀，
+    // 对不上 selected）+ 当前模式/选中 → 组装 ProxyConfig 快照灌进 m_pcfgStore（原子换手热更新），
+    // 并把规则喂给 m_ruleEngine（本单元 Rule 模式回退核心，规则仅备用）。
+    void rebuildCoastCoreConfig();
+    // rebuildCoastCoreConfig + 重新把开关意图推给网关（保持热更新）。仅在灰度开着时才动作。
+    void refreshCoastCore();
+    void persistCoastCore(bool on); // 只改 config.yaml 的 coastcore 键，保留其余内容
 
     DeviceStore *m_store = nullptr;
     ClashService *m_clash = nullptr;
@@ -200,4 +223,12 @@ private:
     // 每连接 id → 上次累计字节 (down,up)：逐连接取增量，避免连接关闭时和值回退。
     QHash<QString, QPair<qint64, qint64>> m_connBytes;
     QElapsedTimer m_clock;
+
+    // —— 灰度：进程内出站 ——
+    QString m_configDir;                          // config.yaml / full.yaml 所在（构造时从 AppConfig 取）
+    bool m_coastCore = false;                     // 灰度开关（默认关 = 零行为变化）
+    std::shared_ptr<ProxyConfigStore> m_pcfgStore; // 出站配置快照持有者（app 生命周期常驻，与网关 worker 共享）
+    std::shared_ptr<RuleEngine> m_ruleEngine;      // 分流规则引擎（本单元备用；Rule 模式回退核心）
+    QString m_ccMode;      // 上次构建时的模式（Rule/Global/Direct）——变了才热更新，避免每次轮询白重建
+    QString m_ccSelected;  // 上次构建时的全局选中节点名
 };

@@ -22,6 +22,11 @@
 #include <QStringList>
 #include <QVector>
 
+#include <memory>
+
+class ProxyConfigStore; // CoastCore 出站配置快照的持有者（不完整类型，只经 shared_ptr 透传给工作线程）
+class RuleEngine;       // CoastCore 分流规则引擎（同上）
+
 class LanGateway : public QObject
 {
     Q_OBJECT
@@ -67,6 +72,16 @@ public:
 
     // 启动时调用：若上次异常退出留有劫持清单，先给这些设备发还原 ARP（panic-restore）。
     void recoverFromCrash();
+
+    // 灰度：把 CoastCore 的进程内出站接进数据面（#10 的 10b/10c）。默认关时**不装** CoreDialerFactory，
+    // NetStack 保持默认 Socks5OutboundFactory —— 与现状完全一致（零行为变化）。
+    //   enabled=true  → 给 NetStack 装 CoreDialerFactory(store, 回退=Socks5OutboundFactory(每设备 7899))，
+    //                   并 setRouter：cfg.mode() Direct→"DIRECT"、Global→cfg.selected()、Rule→""（回退 mihomo）。
+    //   enabled=false → 撤回默认 Socks5OutboundFactory（全走 mihomo）。
+    // store/rules 用 shared_ptr 跨线程安全传递（数据面在专用工作线程；本调用投递到该线程执行）。
+    // 可重入：切节点/改模式/换订阅后重复调即热更新（配合 ProxyConfigStore::reload 的原子换手）。
+    void setCoastCore(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+                      std::shared_ptr<RuleEngine> rules);
 
     QStringList activeDevices() const; // 当前被劫持的 mac 列表
 

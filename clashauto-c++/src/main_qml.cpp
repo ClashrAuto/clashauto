@@ -508,7 +508,7 @@ int main(int argc, char *argv[])
     auto *lanGateway = new LanGateway(&app);
     // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
     lanGateway->recoverFromCrash();
-    auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, history, &app);
+    auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, history, config, &app);
     // Npcap 安装引导（Windows 专用；其它平台 supported()=false，设备页那条提示条不显示）。
     // 状态页「今日流量」卡的数据源（小时柱 + 进程/设备/域名 Top5）——同样是后置注入。
     bridge.setHistoryStore(history);

@@ -31,6 +31,10 @@ struct AppConfig {
     // 接收测试版：更新检查与「一键更新」改用 prerelease 频道。CI 对**非主分支**的每次推送都会发
     // 一个 prerelease（tag 带 -beta.<sha>），主分支才发正式版。默认关 —— 普通用户不该被卷进测试流。
     bool receiveBeta = false;
+    // 灰度：把出站搬进程内（CoastCore 的 CoreDialerFactory 接进网关数据面）。默认关 = 零行为变化，
+    // 网关仍全走 mihomo。开时仅「直连/全局」模式在进程内生效，规则模式与未注册协议一律回退 mihomo。
+    // 协议未经完整真机验证，绝不能默认改路由——所以默认 false（config.yaml 键 `coastcore`）。
+    bool coastcore = false;
     QString language = "zh-CN";
 
     QString clashExecutable() const;
