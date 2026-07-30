@@ -175,6 +175,14 @@ void GatewayDiag::sample(const QString &extra)
                 .arg(d(c.dnsFakeIpResolved, g_prev.dnsFakeIpResolved))
                 .arg(d(c.dnsLocalFake, g_prev.dnsLocalFake))
                 .arg(d(c.dnsLocalForward, g_prev.dnsLocalForward));
+    // cc=<进程内>/<无路由>/<节点缺>/<协议缺>/<UDP不支持>/<严格拒绝>
+    line += QStringLiteral(" cc=%1/%2/%3/%4/%5/%6")
+                .arg(d(c.ccInProcess, g_prev.ccInProcess))
+                .arg(d(c.fbNoRoute, g_prev.fbNoRoute))
+                .arg(d(c.fbNodeMissing, g_prev.fbNodeMissing))
+                .arg(d(c.fbProtoMissing, g_prev.fbProtoMissing))
+                .arg(d(c.fbUdpUnsupported, g_prev.fbUdpUnsupported))
+                .arg(d(c.ccStrictRefused, g_prev.ccStrictRefused));
     line += QStringLiteral(" pump=%1 late=%2 maxLagMs=%3")
                 .arg(d(c.pumpTicks, g_prev.pumpTicks))
                 .arg(d(c.pumpLateTicks, g_prev.pumpLateTicks))

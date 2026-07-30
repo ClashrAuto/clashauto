@@ -37,11 +37,17 @@ public:
     //（典型实现 = 读 store->current() 这份不可变快照做判定，天然无锁安全）。
     void setRouter(Router router);
 
+    // 严格模式：**拒绝回退核心** —— 判不了/协议缺/规则要解析 IP 时直接让该连接失败，而不是
+    // 静默交给 mihomo。默认关。存在的理由是「离完全替换核心还差多少」这个问题：静默回退会把
+    // 差距藏起来，开着它差距就变成明确的失败 + GatewayDiag 里 cc=… 的原因分布。
+    void setStrict(bool on) { m_strict = on; }
+
     IOutboundTcp *createTcp(QObject *parent) override;
     IOutboundUdp *createUdp(QObject *parent) override;
 
 private:
     ProxyConfigStore *m_store = nullptr; // 不持有
     OutboundFactory *m_fallback = nullptr; // 持有，dtor delete
+    bool m_strict = false;
     Router m_router;                       // 空 = 全部回退
 };

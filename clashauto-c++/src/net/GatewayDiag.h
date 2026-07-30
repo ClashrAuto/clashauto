@@ -105,6 +105,15 @@ public:
         // 这两栏 >0 就说明「DNS 这一环已经不经 mihomo」；一直是 0 = 还在走核心的 fake-ip。
         qint64 dnsLocalFake;    // 本地当场合成 fake-ip 应答的查询数（含给 AAAA 回 NODATA 的）
         qint64 dnsLocalForward; // 本地看不懂/不该 fake → 转发给上游的查询数
+        // —— 进程内出站 vs 回退核心：**「离完全替换 mihomo 还差多少」的唯一凭据** ——
+        // ccInProcess 之外那几栏全是 0，才说明这条数据面已经不需要核心了。分原因记账是因为
+        // 「回退」这一个数说明不了任何问题：缺协议、规则判不了、fake-ip 没反查到，对策完全不同。
+        qint64 ccInProcess;      // 走进程内出站的连接数（TCP+UDP）
+        qint64 fbNoRoute;        // router 没给节点：fake-ip 没反查到 / 无配置快照 / 规则需先解析 IP
+        qint64 fbNodeMissing;    // 给了节点名，但当前快照里查不到它
+        qint64 fbProtoMissing;   // 协议没注册（缺 msquic/OpenSSL，或该 type 尚未实现）
+        qint64 fbUdpUnsupported; // 节点协议没有 UDP 出站实现
+        qint64 ccStrictRefused;  // 严格模式下**拒绝回退**而直接失败的连接数
         // 由旁听到的 DNS 映射把 fake-ip 目的地成功改写成域名的连接数（见 NetStack 的 accept）。
         // 它 >0 才说明「域名类流量真的能进进程内出站」；一直是 0 = 改写没生效，域名类还在回退核心。
         qint64 dnsFakeIpResolved;

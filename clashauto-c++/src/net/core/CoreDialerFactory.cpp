@@ -1,5 +1,7 @@
 #include "CoreDialerFactory.h"
 
+#include "../GatewayDiag.h" // 回退原因记账：离「完全替换 mihomo」还差多少
+
 #include "DirectOutbound.h"
 #include "ProxyConfig.h"
 #include "proto/OutboundRegistry.h"
@@ -22,12 +24,14 @@ namespace {
 
 // 把 router 给出的节点名解析成一个具体的内层 IOutboundTcp。parent 传包装器自身，随其一同析构。
 IOutboundTcp *makeInnerTcp(const QString &node, ProxyConfigStore *store, OutboundFactory *fallback,
-                           QObject *parent)
+                           QObject *parent, bool strict)
 {
     if (node.isEmpty()) {
-        return fallback->createTcp(parent); // 无路由 = 照旧走 mihomo（默认路径，行为不变）
+        ++GatewayDiag::c.fbNoRoute;
+        return strict ? nullptr : fallback->createTcp(parent); // 无路由 = 照旧走 mihomo
     }
     if (node == QStringLiteral("DIRECT")) {
+        ++GatewayDiag::c.ccInProcess;
         return new DirectOutboundTcp(parent); // 进程内直连
     }
     // 具名节点：查快照拿到它的完整参数（type/server/port/cipher/…）。
@@ -35,27 +39,35 @@ IOutboundTcp *makeInnerTcp(const QString &node, ProxyConfigStore *store, Outboun
         if (const std::shared_ptr<const ProxyConfig> cfg = store->current()) {
             if (const ProxyNode *n = cfg->nodeByName(node)) {
                 if (n->isDirect()) {
+                    ++GatewayDiag::c.ccInProcess;
                     return new DirectOutboundTcp(parent); // 内建直连
                 }
                 // 协议出站：查注册表。已注册该 type 就用进程内协议实现；createTcp 可能返回 null
                 // （creator 为空 / 内部拒绝），那时照样回退 fallback，绝不缺失功能。
                 if (OutboundRegistry::instance().has(n->type)) {
                     if (IOutboundTcp *proto = OutboundRegistry::instance().createTcp(*n, parent)) {
+                        ++GatewayDiag::c.ccInProcess;
                         return proto;
                     }
                 }
+                ++GatewayDiag::c.fbProtoMissing; // 有这个节点，但协议没编进来/没注册
+            } else {
+                ++GatewayDiag::c.fbNodeMissing;  // router 给了名字，快照里却没有
             }
         }
     }
     // 未注册的协议 / 查不到节点 / 协议实现拒绝 → 回退 fallback（拨 mihomo），保证功能不缺失。
-    return fallback->createTcp(parent);
+    // ★ 严格模式：**不回退**，返回 nullptr 让上层明确失败并记账 —— 这样「还差什么」会立刻暴露，
+    //   而不是被静默回退掩盖。代价是这些连接会断，所以它是个显式的二级开关，默认不开。
+    return strict ? nullptr : fallback->createTcp(parent);
 }
 
 IOutboundUdp *makeInnerUdp(const QString &node, ProxyConfigStore *store, OutboundFactory *fallback,
-                           QObject *parent)
+                           QObject *parent, bool strict)
 {
     if (node.isEmpty()) {
-        return fallback->createUdp(parent);
+        ++GatewayDiag::c.fbNoRoute;
+        return strict ? nullptr : fallback->createUdp(parent);
     }
     if (node == QStringLiteral("DIRECT")) {
         return new DirectOutboundUdp(parent);
@@ -76,24 +88,35 @@ IOutboundUdp *makeInnerUdp(const QString &node, ProxyConfigStore *store, Outboun
             }
         }
     }
-    // 未注册 / 该协议不支持 UDP / 查不到节点 → 回退 fallback。
-    return fallback->createUdp(parent);
+    // 未注册 / 该协议不支持 UDP / 查不到节点 → 回退 fallback。严格模式下不回退（见 makeInnerTcp）。
+    ++GatewayDiag::c.fbUdpUnsupported;
+    return strict ? nullptr : fallback->createUdp(parent);
 }
 
 // 一条 TCP 连接的路由包装器。connectTo 时才据 router 选内层，之后全权委托内层。
 class RoutingOutboundTcp final : public IOutboundTcp
 {
 public:
-    RoutingOutboundTcp(CoreDialerFactory::Router router, ProxyConfigStore *store,
+    RoutingOutboundTcp(bool strict, CoreDialerFactory::Router router, ProxyConfigStore *store,
                        OutboundFactory *fallback, QObject *parent)
-        : IOutboundTcp(parent), m_router(std::move(router)), m_store(store), m_fallback(fallback)
+        : IOutboundTcp(parent), m_strict(strict), m_router(std::move(router)), m_store(store),
+          m_fallback(fallback)
     {
     }
 
     void connectTo(const QString &dstHost, quint16 dstPort, const QString &user) override
     {
         const QString node = m_router ? m_router(dstHost, user) : QString();
-        m_inner = makeInnerTcp(node, m_store, m_fallback, this);
+        m_inner = makeInnerTcp(node, m_store, m_fallback, this, m_strict);
+        if (!m_inner) {
+            // 严格模式下 makeInner* 拒绝回退 → 这条连接明确失败。**故意不静默回退**：
+            // 「还差什么」只有暴露出来才补得上（原因分布见 GatewayDiag 的 cc=… 那几栏）。
+            ++GatewayDiag::c.ccStrictRefused;
+            QMetaObject::invokeMethod(this, [this] {
+                emit failed(QStringLiteral("严格模式：该连接无法走进程内出站（已拒绝回退核心）"));
+            }, Qt::QueuedConnection);
+            return;
+        }
         // 内层信号 → 原样转发为本对象（基类）信号，NetStack 连的是本对象。
         connect(m_inner, &IOutboundTcp::established, this, [this] { emit established(); });
         connect(m_inner, &IOutboundTcp::dataReceived, this,
@@ -147,6 +170,7 @@ public:
     }
 
 private:
+    bool m_strict = false; // 严格模式：不回退核心，见 makeInnerTcp
     CoreDialerFactory::Router m_router;
     ProxyConfigStore *m_store = nullptr;
     OutboundFactory *m_fallback = nullptr;
@@ -162,9 +186,10 @@ private:
 class RoutingOutboundUdp final : public IOutboundUdp
 {
 public:
-    RoutingOutboundUdp(CoreDialerFactory::Router router, ProxyConfigStore *store,
+    RoutingOutboundUdp(bool strict, CoreDialerFactory::Router router, ProxyConfigStore *store,
                        OutboundFactory *fallback, QObject *parent)
-        : IOutboundUdp(parent), m_router(std::move(router)), m_store(store), m_fallback(fallback)
+        : IOutboundUdp(parent), m_strict(strict), m_router(std::move(router)), m_store(store),
+          m_fallback(fallback)
     {
     }
 
@@ -172,7 +197,14 @@ public:
     {
         // dstHost 传空：UDP 会话此刻无单一目的地（见类注释）。
         const QString node = m_router ? m_router(QString(), user) : QString();
-        m_inner = makeInnerUdp(node, m_store, m_fallback, this);
+        m_inner = makeInnerUdp(node, m_store, m_fallback, this, m_strict);
+        if (!m_inner) { // 严格模式：拒绝回退，明确失败（理由同 TCP 侧）
+            ++GatewayDiag::c.ccStrictRefused;
+            QMetaObject::invokeMethod(this, [this] {
+                emit failed(QStringLiteral("严格模式：该 UDP 会话无法走进程内出站（已拒绝回退核心）"));
+            }, Qt::QueuedConnection);
+            return;
+        }
         connect(m_inner, &IOutboundUdp::ready, this, [this] { emit ready(); });
         connect(m_inner, &IOutboundUdp::datagramReceived, this,
                 [this](const QHostAddress &ip, quint16 port, const QByteArray &d) {
@@ -200,6 +232,7 @@ public:
     bool isReady() const override { return m_inner && m_inner->isReady(); }
 
 private:
+    bool m_strict = false; // 严格模式：不回退核心，见 makeInnerTcp
     CoreDialerFactory::Router m_router;
     ProxyConfigStore *m_store = nullptr;
     OutboundFactory *m_fallback = nullptr;
@@ -225,10 +258,10 @@ void CoreDialerFactory::setRouter(Router router)
 
 IOutboundTcp *CoreDialerFactory::createTcp(QObject *parent)
 {
-    return new RoutingOutboundTcp(m_router, m_store, m_fallback, parent);
+    return new RoutingOutboundTcp(m_strict, m_router, m_store, m_fallback, parent);
 }
 
 IOutboundUdp *CoreDialerFactory::createUdp(QObject *parent)
 {
-    return new RoutingOutboundUdp(m_router, m_store, m_fallback, parent);
+    return new RoutingOutboundUdp(m_strict, m_router, m_store, m_fallback, parent);
 }
