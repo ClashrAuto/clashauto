@@ -1,0 +1,20 @@
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:19192
+listeners:
+  - name: ss-node
+    type: shadowsocks
+    listen: 127.0.0.1
+    port: 18388
+    cipher: aes-128-gcm
+    password: testpass123
+  - name: vmess-node
+    type: vmess
+    listen: 127.0.0.1
+    port: 18389
+    users:
+      - username: t
+        uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+        alterId: 0
+rules:
+  - MATCH,DIRECT

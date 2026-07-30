@@ -1,0 +1,24 @@
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:19193
+listeners:
+  - name: trojan-in
+    type: trojan
+    listen: 127.0.0.1
+    port: 18390
+    users:
+      - username: t
+        password: trojanpass123
+    certificate: /tmp/nodesrv2/cert.pem
+    private-key: /tmp/nodesrv2/key.pem
+  - name: vless-in
+    type: vless
+    listen: 127.0.0.1
+    port: 18391
+    users:
+      - username: t
+        uuid: b831381d-6324-4d53-ad4f-8cda48b30811
+    certificate: /tmp/nodesrv2/cert.pem
+    private-key: /tmp/nodesrv2/key.pem
+rules:
+  - MATCH,DIRECT
