@@ -23,10 +23,12 @@
 //     见 IL2Endpoint.h 的信号注释；跨线程队列连接会让指针在投递后失效。
 //
 // **回退路径**：TPACKET_v3 要内核 ≥ 3.2，建环还要一大块连续内核内存。setsockopt(PACKET_VERSION)
-// / setsockopt(PACKET_RX_RING) / mmap 任何一步失败，都原样退回逐帧 recvfrom（drainSocket），
-// 功能完全不变、只是少了这层优化。老到连头文件都不认识 TPACKET_v3 的构建环境，则整段代码被
-// COAST_HAVE_TPACKET_V3 编译期摘掉。CI 要出 x64 和 arm64 两个 Linux 包、用户内核版本不可控，
-// 这条回退不能省。
+// / setsockopt(PACKET_RX_RING) / mmap 任何一步失败，都退回 drainSocket()，功能完全不变、只是
+// 少了零拷贝那层。回退路径**本身也批量化**：不是逐帧 recv，而是 recvmmsg() —— 一次系统调用收
+// 一批帧（上限 kRxBatchMax），把「每帧一次进出内核」摊薄成「每批一次」。再老到连 recvmmsg 都
+// 没有（内核 < 2.6.33，ENOSYS）就退到 drainSocketSingle() 的逐帧 recv。老到连头文件都不认识
+// TPACKET_v3 的构建环境，则整段环代码被 COAST_HAVE_TPACKET_V3 编译期摘掉（recvmmsg 回退仍在）。
+// CI 要出 x64 和 arm64 两个 Linux 包、用户内核版本不可控，这几层回退不能省。
 //
 // ——————————————————— 发方：加大 SO_SNDBUF + 积压队列（别再静默丢帧）———————————————————
 //
@@ -51,6 +53,14 @@
 //      缓冲膨胀，交给 lwIP 重传更划算）。
 //   3) 丢帧（发方队列溢出 / 收方内核环溢出）一律计数并节流打日志 —— 这类故障不可见才是最贵的。
 //
+// 发方的**批量化**在积压排空（drainTx）这一段：lwIP 是一帧一帧交下来的（lwipLinkOutput→send()），
+// 未拥塞时直接一次 sendto 发走、无从聚批；但内核缓冲一满，帧就攒进积压队列——这时队列里就同时
+// 躺着多帧，排空时用 sendmmsg() 一次系统调用提交一批（上限 kTxBatchMax），把「每帧一次 sendto」
+// 摊薄成「每批一次」。sendmmsg 缺失（内核 < 3.0，ENOSYS）退回 drainTxSingle() 的逐帧 sendto。
+// 拥塞正是设备侧变慢的时刻，这一刀省的 syscall 直接还给数据面。GatewayDiag 的 txBatches 现在
+// Linux 也记（每次提交 syscall +1，直发算一批 1 帧），fpb=txFrames/txBatches 即每次 syscall 的
+// 平均帧数——未拥塞≈1，拥塞排空时 > 1，直接量出批量效果（usPerTx 仍是 Windows 专用，Linux 恒 0）。
+//
 // 权限：需要 CAP_NET_RAW / root，否则 socket() 直接 EPERM。open() 失败时置 *err 并清理半开 fd。
 //
 // 本文件在所有平台都参与编译：非 Linux 时只保留一个返回 nullptr 的工厂（LanGateway 据此判不可用）。
@@ -61,6 +71,7 @@
 #include "GatewayDiag.h" // 数据面计数（热路径上就是一条 inc，见该头文件的开销说明）
 
 #include <sys/socket.h>
+#include <sys/uio.h>      // struct iovec（recvmmsg/sendmmsg 的 msg_iov 用）
 #include <sys/ioctl.h>
 #include <sys/mman.h>     // mmap/munmap（RX 环）
 #include <net/if.h>
@@ -198,6 +209,24 @@ constexpr qint64 kTxBacklogMaxBytes = 1 * 1024 * 1024;
 constexpr qint64 kDropReportMinIntervalMs = 30000;
 // 内核收方丢包计数（PACKET_STATISTICS）的采样间隔。读一次即清零，故按固定间隔累加。
 constexpr qint64 kRxStatsPollIntervalMs = 5000;
+
+// —— 批量收发参数（只作用在**回退路径**：drainSocket 的 recvmmsg / drainTx 的 sendmmsg；
+//    主路径 RX 走 TPACKET_v3 环，不经这里）——
+//
+// kRxBatchMax：recvmmsg 一次最多收多少帧。取 16 —— 已把「每帧一次 recv」摊薄到「每 16 帧一次」，
+//   再大边际收益骤减，却线性吃 kRxSlotBytes×N 的常驻回退缓冲。收到不足 kRxBatchMax 即视为抽干；
+//   否则继续下一批，直到 EAGAIN 或达 kRxMaxFramesPerWake。
+// kRxSlotBytes：每帧缓冲上限，64 KiB —— 与老 drainSocketSingle 的栈缓冲一致，容得下巨帧、不截断。
+//   这块按 kRxBatchMax×kRxSlotBytes = 1 MiB **惰性**分配（只有真走回退路径才占，主路径环一字节不分配）。
+// kRxMaxFramesPerWake：单次可读唤醒收帧硬上限（防事件循环饿死）。QSocketNotifier 是 level-triggered，
+//   到顶就返回、把 CPU 交回事件循环，内核缓冲里剩下的帧下一轮唤醒再收——既不丢帧也不独占工作线程。
+//   取 4096（256 批）：远高于常态一次唤醒的帧数，只在异常泛洪时才触顶。
+constexpr int kRxBatchMax = 16;
+constexpr int kRxSlotBytes = 64 * 1024;
+constexpr qint64 kRxMaxFramesPerWake = 4096;
+// kTxBatchMax：sendmmsg 一次最多提交多少帧（积压排空时）。栈上 mmsghdr/iovec/sockaddr_ll 各一份，
+//   32 帧 ≈ 3 KiB 栈，够把常见拥塞积压一两次 syscall 清掉。
+constexpr int kTxBatchMax = 32;
 
 // Linux 二层端点：一张网卡一个 AF_PACKET 原始套接字。
 // 注意：本类不加 Q_OBJECT——它不声明新信号/槽，只重写基类虚函数并 emit 基类的 frameReceived，
@@ -523,6 +552,7 @@ private:
             if (n == static_cast<ssize_t>(frame.size())) {
                 ++GatewayDiag::c.txFrames;
                 GatewayDiag::c.txBytes += frame.size();
+                ++GatewayDiag::c.txBatches; // 直发 = 一批 1 帧（一次提交 syscall），与 sendmmsg 同口径
                 return 1;
             }
             if (n >= 0)
@@ -561,7 +591,78 @@ private:
     }
 
     // fd 可写 → 把积压尽量灌进内核；空了就关掉写通知器（不关会在可写时空转烧 CPU）。
+    // 批量化：一次 sendmmsg 提交队头的一批帧（上限 kTxBatchMax），摊薄逐帧 sendto 的 syscall。
+    // sendmmsg 缺失（老内核 ENOSYS）永久退回 drainTxSingle 的逐帧 sendto。
     void drainTx()
+    {
+        if (m_sendmmsgUnavailable) {
+            drainTxSingle();
+            return;
+        }
+
+        struct mmsghdr msgs[kTxBatchMax];
+        struct iovec iovs[kTxBatchMax];
+        struct sockaddr_ll addrs[kTxBatchMax];
+
+        while (!m_txQueue.empty()) {
+            // 从队头攒一批。iovec 直接指向 QByteArray 的自有内存（send() 契约保证是自有内存，
+            // 非 fromRawData 视图），本次 syscall 期间队列不动、指针稳定。
+            int count = 0;
+            for (auto it = m_txQueue.begin();
+                 it != m_txQueue.end() && count < kTxBatchMax; ++it, ++count) {
+                const QByteArray &f = *it;
+                std::memset(&addrs[count], 0, sizeof(addrs[count]));
+                addrs[count].sll_family = AF_PACKET;
+                addrs[count].sll_ifindex = m_ifIndex;
+                addrs[count].sll_halen = 6;
+                std::memcpy(addrs[count].sll_addr, f.constData(), 6); // dst MAC = 帧头前 6 字节
+                iovs[count].iov_base = const_cast<char *>(f.constData());
+                iovs[count].iov_len = static_cast<size_t>(f.size());
+                std::memset(&msgs[count], 0, sizeof(msgs[count]));
+                msgs[count].msg_hdr.msg_name = &addrs[count];
+                msgs[count].msg_hdr.msg_namelen = sizeof(addrs[count]);
+                msgs[count].msg_hdr.msg_iov = &iovs[count];
+                msgs[count].msg_hdr.msg_iovlen = 1;
+            }
+
+            const int sent = ::sendmmsg(m_fd, msgs, static_cast<unsigned int>(count), 0);
+            if (sent < 0) {
+                if (errno == EINTR)
+                    continue; // 一帧都没提交，原样重来（队列未动）
+                if (errno == ENOSYS) {
+                    m_sendmmsgUnavailable = true; // 内核太老不认识 sendmmsg：永久退回逐帧
+                    drainTxSingle();
+                    return;
+                }
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)
+                    return; // 内核缓冲满：留队列、等下次可写（顺序不乱）
+                // 其它硬错误（网卡 down 等）：丢队头一帧防止永久堵住队头，计数后继续。
+                ++GatewayDiag::c.txDropped;
+                reportDropsThrottled();
+                m_txQueuedBytes -= m_txQueue.front().size();
+                m_txQueue.pop_front();
+                continue;
+            }
+
+            // sendmmsg 按数组顺序发，返回被内核接收的帧数（1..count）。恰好出队这么多，
+            // 顺序与 TCP 段序一致；未发出的仍留在队头。
+            ++GatewayDiag::c.txBatches; // 一次提交 syscall = 一批
+            for (int i = 0; i < sent; ++i) {
+                ++GatewayDiag::c.txFrames;
+                GatewayDiag::c.txBytes += m_txQueue.front().size();
+                m_txQueuedBytes -= m_txQueue.front().size();
+                m_txQueue.pop_front();
+            }
+            if (sent < count)
+                return; // 第 sent 帧会阻塞（内核缓冲刚满）：等下次可写
+        }
+
+        if (m_txNotifier)
+            m_txNotifier->setEnabled(false);
+    }
+
+    // 逐帧发的回退（sendmmsg 不可用时）：语义与批量版一致，只是一次一帧。
+    void drainTxSingle()
     {
         while (!m_txQueue.empty()) {
             const QByteArray &f = m_txQueue.front();
@@ -641,9 +742,67 @@ private:
         m_inDrain = false;
     }
 
-    // 回退路径：fd 可读时把内核缓冲里所有帧一次性抽干（每帧一次 recv、一次 QByteArray）。
-    // 只在 RX 环没建起来时才会被用到。
+    // 回退路径（RX 环没建起来时才用）：一次可读事件里把内核缓冲**尽量抽干**。
+    // 批量化：用 recvmmsg 一次系统调用收一批帧（上限 kRxBatchMax），把老写法「每帧一次 recv」
+    // 摊薄成「每批一次」。收到不足一批 = 抽干；否则继续，直到 EAGAIN 或达 kRxMaxFramesPerWake
+    // （防饿死；level-triggered 会在下一轮唤醒补上剩余的帧）。recvmmsg 缺失（老内核 ENOSYS）
+    // 永久退回 drainSocketSingle 的逐帧 recv。
     void drainSocket()
+    {
+        if (m_recvmmsgUnavailable) {
+            drainSocketSingle();
+            return;
+        }
+
+        // 批量缓冲**惰性**分配：主路径走环时这块始终是空的（一字节不占），只有真走回退才占 1 MiB。
+        const std::size_t want = std::size_t(kRxBatchMax) * kRxSlotBytes;
+        if (m_rxBatchBuf.size() != want)
+            m_rxBatchBuf.resize(want);
+
+        struct mmsghdr msgs[kRxBatchMax];
+        struct iovec iovs[kRxBatchMax];
+        std::memset(msgs, 0, sizeof(msgs));
+        for (int i = 0; i < kRxBatchMax; ++i) {
+            iovs[i].iov_base = m_rxBatchBuf.data() + std::size_t(i) * kRxSlotBytes;
+            iovs[i].iov_len = kRxSlotBytes;
+            msgs[i].msg_hdr.msg_iov = &iovs[i];
+            msgs[i].msg_hdr.msg_iovlen = 1;
+        }
+
+        qint64 total = 0;
+        for (;;) {
+            const int n = ::recvmmsg(m_fd, msgs, kRxBatchMax, MSG_DONTWAIT, nullptr);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;              // 被信号打断，重来（本批未消费）
+                if (errno == ENOSYS) {     // 内核太老不认识 recvmmsg：永久退回逐帧 recv
+                    m_recvmmsgUnavailable = true;
+                    drainSocketSingle();
+                    return;
+                }
+                break;                     // EAGAIN/EWOULDBLOCK 或其它错误：结束本轮
+            }
+            if (n == 0)
+                break;
+            for (int i = 0; i < n; ++i) {
+                const int len = static_cast<int>(msgs[i].msg_len); // 本帧实际收到的字节数
+                if (len <= 0)
+                    continue;              // 长度异常（含被截断成 0）：跳过，别 emit 空帧
+                ++GatewayDiag::c.rxFrames;
+                GatewayDiag::c.rxBytes += len;
+                emit frameReceived(QByteArray(
+                    static_cast<const char *>(iovs[i].iov_base), len));
+            }
+            total += n;
+            if (n < kRxBatchMax)
+                break;                     // 收到不足一批 → 内核缓冲已抽干
+            if (total >= kRxMaxFramesPerWake)
+                break;                     // 防饿死：交回事件循环，剩余帧下一轮唤醒再收
+        }
+    }
+
+    // 逐帧收的回退（recvmmsg 不可用时）：每帧一次 recv、一次 QByteArray，抽干到 EAGAIN。
+    void drainSocketSingle()
     {
         char buf[65536]; // 单帧上限，容得下巨帧
         for (;;) {
@@ -794,6 +953,11 @@ private:
     QSocketNotifier *m_txNotifier = nullptr;
     std::deque<QByteArray> m_txQueue;
     qint64 m_txQueuedBytes = 0;
+    // 批量收发的回退状态。m_rxBatchBuf 惰性分配（只有走 recvmmsg 回退才占内存）；两个 bool 记
+    // 「本机内核不认识 recvmmsg/sendmmsg（ENOSYS）」，一旦命中就永久退到逐帧路径，不再每次重试。
+    std::vector<char> m_rxBatchBuf;
+    bool m_recvmmsgUnavailable = false;
+    bool m_sendmmsgUnavailable = false;
     // 丢帧的**累计**数不在这里——放 GatewayDiag::c 里，好让它一起进采样日志（多网卡时是合计值）。
     qint64 m_lastDropReportMs = -kDropReportMinIntervalMs;
     qint64 m_lastRxStatsMs = 0;
