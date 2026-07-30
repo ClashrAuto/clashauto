@@ -99,6 +99,14 @@ set(BACKEND_SOURCES
     src/net/core/transport/TlsClient.cpp  src/net/core/transport/TlsClient.h
     src/net/core/transport/WsClient.cpp   src/net/core/transport/WsClient.h
     src/net/core/proto/OutboundRegistry.cpp src/net/core/proto/OutboundRegistry.h
+    # 进程内出站协议实现（各自实现 IOutbound*，经 OutboundRegistry 注册 type→构造器）。
+    src/net/core/proto/ShadowsocksOutbound.cpp src/net/core/proto/ShadowsocksOutbound.h
+    src/net/core/proto/TrojanOutbound.cpp      src/net/core/proto/TrojanOutbound.h
+    src/net/core/proto/VlessOutbound.cpp       src/net/core/proto/VlessOutbound.h
+    src/net/core/proto/VmessOutbound.cpp       src/net/core/proto/VmessOutbound.h
+    # 分流规则引擎（mihomo 风格首命中 + 自带只读 mmdb GEOIP 查询）+ DNS 解析器（A/AAAA 缓存 + fake-ip 池）。
+    src/net/core/RuleEngine.cpp  src/net/core/RuleEngine.h
+    src/net/core/DnsResolver.cpp src/net/core/DnsResolver.h
     src/net/LanGateway.h
     # 数据面诊断日志（<userDir>/logs/gateway-diag.log）。跨平台编译：main_qml.cpp 要调 setLogDir，
     # 而计数器只有 POSIX 上的网关才真的往里写。

@@ -1,0 +1,755 @@
+#include "RuleEngine.h"
+
+#include <QFile>
+#include <QStringList>
+#include <QtGlobal>
+
+#include <climits>
+#include <cstring>
+
+// 本文件三块：
+//   1) RuleGeoDb —— 一个**最小只读 MaxMind DB 阅读器**。MmdbFile 只做校验/落盘、没有查询 API
+//      （见 MmdbFile.h），所以 GEOIP 规则要的「IP→ISO 国家码」得自己走一遍 mmdb 的搜索树 + 数据段。
+//      只解到 country.iso_code 这一条路径，不做通用 mmdb 解码器。
+//   2) RuleSnapshot —— 一份**已编译**的规则表（域名哈希 / 预解析 CIDR / 关键字表 / GEOIP 表 / MATCH），
+//      每条都带原表序号 order；match() 取所有命中项里 order 最小者的 target（= mihomo 首命中语义）。
+//   3) RuleEngine —— 门面：parse/编译/原子换快照 + 数据面 match()。线程模型见头文件。
+
+// ============================================================================
+//  RuleGeoDb —— 最小 MaxMind DB 只读阅读器（IP → ISO 国家码）
+// ============================================================================
+//
+// MaxMind DB 布局：[搜索树][16 字节全零分隔符][数据段][metadata]。metadata 前有魔数
+// "\xab\xcd\xef" "MaxMind.com"。搜索树每个 node 含 2 条 record，每条 record_size 位（24/28/32）：
+//   record < node_count  → 下一个 node 的编号（继续下沉）
+//   record == node_count → 该 IP 无数据
+//   record > node_count  → 指向数据段：绝对偏移 = searchTreeSize + (record - node_count)
+// 数据段用「控制字节 + 变长」编码；指针型(type 1) 的目标 = dataSectionStart + value。
+class RuleGeoDb
+{
+public:
+    // 打开并解析一个 mmdb 文件；任何结构不自洽都返回 null（GEOIP 规则随之恒失配，安全降级）。
+    static std::shared_ptr<RuleGeoDb> open(const QString &path)
+    {
+        auto db = std::shared_ptr<RuleGeoDb>(new RuleGeoDb());
+        if (!db->load(path)) {
+            return nullptr;
+        }
+        return db;
+    }
+
+    // 查 IP 的 ISO 国家码（如 "CN"）；无数据 / 不支持返回空串。线程安全（纯只读，构造后不改）。
+    QString country(const QHostAddress &ip) const
+    {
+        if (m_nodeCount == 0) {
+            return QString();
+        }
+        quint8 addr[16];
+        int nbits = 0;
+        const bool v6db = (m_ipVersion == 6);
+        if (ip.protocol() == QAbstractSocket::IPv4Protocol) {
+            const quint32 v = ip.toIPv4Address();
+            if (v6db) {
+                // v6 库里查 v4：走 ::a.b.c.d（前 96 位为 0，等价 libmaxminddb 的 ipv4 起始节点路径）。
+                std::memset(addr, 0, 16);
+                addr[12] = quint8((v >> 24) & 0xFF);
+                addr[13] = quint8((v >> 16) & 0xFF);
+                addr[14] = quint8((v >> 8) & 0xFF);
+                addr[15] = quint8(v & 0xFF);
+                nbits = 128;
+            } else {
+                addr[0] = quint8((v >> 24) & 0xFF);
+                addr[1] = quint8((v >> 16) & 0xFF);
+                addr[2] = quint8((v >> 8) & 0xFF);
+                addr[3] = quint8(v & 0xFF);
+                nbits = 32;
+            }
+        } else if (ip.protocol() == QAbstractSocket::IPv6Protocol) {
+            if (!v6db) {
+                return QString();
+            }
+            const Q_IPV6ADDR a6 = ip.toIPv6Address();
+            std::memcpy(addr, a6.c, 16);
+            nbits = 128;
+        } else {
+            return QString();
+        }
+
+        quint32 node = 0;
+        for (int i = 0; i < nbits; ++i) {
+            if (node >= m_nodeCount) {
+                break;
+            }
+            const int bit = (addr[i >> 3] >> (7 - (i & 7))) & 1;
+            const quint32 rec = readRecord(node, bit);
+            if (rec == m_nodeCount) {
+                return QString(); // 无数据
+            }
+            if (rec > m_nodeCount) {
+                return decodeCountry(m_searchTreeSize + qsizetype(rec) - qsizetype(m_nodeCount));
+            }
+            node = rec; // 继续下沉
+        }
+        return QString();
+    }
+
+private:
+    RuleGeoDb() = default;
+
+    QByteArray m_data;
+    quint32 m_nodeCount = 0;
+    quint32 m_recordSize = 0; // bits：24 / 28 / 32
+    quint32 m_ipVersion = 0;  // 4 / 6
+    qsizetype m_bytesPerNode = 0;
+    qsizetype m_searchTreeSize = 0;
+    qsizetype m_dataSectionStart = 0; // searchTreeSize + 16
+    qsizetype m_ptrBase = 0;          // 指针型解码的基准（数据段解码时 = dataSectionStart）
+
+    quint8 byteAt(qsizetype o) const
+    {
+        return (o >= 0 && o < m_data.size()) ? quint8(m_data.at(o)) : quint8(0);
+    }
+
+    bool load(const QString &path)
+    {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+        m_data = f.readAll();
+        f.close();
+        if (m_data.size() < 32) {
+            return false;
+        }
+
+        static const QByteArray kMarker =
+            QByteArrayLiteral("\xab\xcd\xef") + QByteArrayLiteral("MaxMind.com");
+        const qsizetype markerPos = m_data.lastIndexOf(kMarker);
+        if (markerPos < 0) {
+            return false;
+        }
+        const qsizetype metaStart = markerPos + kMarker.size();
+
+        // metadata 段里的指针相对 metadata 起点。
+        m_ptrBase = metaStart;
+        const qsizetype nodeCountOff = findKeyInMap(metaStart, QByteArrayLiteral("node_count"));
+        const qsizetype recordSizeOff = findKeyInMap(metaStart, QByteArrayLiteral("record_size"));
+        const qsizetype ipVersionOff = findKeyInMap(metaStart, QByteArrayLiteral("ip_version"));
+        if (nodeCountOff < 0 || recordSizeOff < 0 || ipVersionOff < 0) {
+            return false;
+        }
+        m_nodeCount = quint32(decodeUint(nodeCountOff));
+        m_recordSize = quint32(decodeUint(recordSizeOff));
+        m_ipVersion = quint32(decodeUint(ipVersionOff));
+
+        if ((m_recordSize != 24 && m_recordSize != 28 && m_recordSize != 32) || m_nodeCount == 0) {
+            return false;
+        }
+        m_bytesPerNode = qsizetype(m_recordSize) / 4;              // 24→6 / 28→7 / 32→8
+        m_searchTreeSize = qsizetype(m_nodeCount) * m_bytesPerNode;
+        m_dataSectionStart = m_searchTreeSize + 16;
+        if (m_dataSectionStart >= metaStart || m_searchTreeSize > m_data.size()) {
+            return false; // 树/数据段与文件长度不自洽
+        }
+        // 之后所有查询都在数据段里，指针基准切到数据段起点。
+        m_ptrBase = m_dataSectionStart;
+        return true;
+    }
+
+    // 读 node 的第 which(0=左/1=右) 条 record，返回其值。
+    quint32 readRecord(quint32 node, int which) const
+    {
+        const qsizetype b = qsizetype(node) * m_bytesPerNode;
+        if (m_recordSize == 24) {
+            const qsizetype o = b + (which ? 3 : 0);
+            return (quint32(byteAt(o)) << 16) | (quint32(byteAt(o + 1)) << 8) | byteAt(o + 2);
+        }
+        if (m_recordSize == 28) {
+            if (which == 0) {
+                return (quint32(byteAt(b + 3) & 0xF0) << 20) | (quint32(byteAt(b)) << 16)
+                     | (quint32(byteAt(b + 1)) << 8) | byteAt(b + 2);
+            }
+            return (quint32(byteAt(b + 3) & 0x0F) << 24) | (quint32(byteAt(b + 4)) << 16)
+                 | (quint32(byteAt(b + 5)) << 8) | byteAt(b + 6);
+        }
+        // 32 bit
+        const qsizetype o = b + (which ? 4 : 0);
+        return (quint32(byteAt(o)) << 24) | (quint32(byteAt(o + 1)) << 16)
+             | (quint32(byteAt(o + 2)) << 8) | byteAt(o + 3);
+    }
+
+    // 数据段解码原语 —————————————————————————————————————————————
+
+    // 若 off 处是指针型：解出目标绝对偏移(*target)与指针自身占用后的偏移(*after)，返回 true。
+    bool asPointer(qsizetype off, qsizetype *target, qsizetype *after) const
+    {
+        const quint8 ctrl = byteAt(off);
+        if ((ctrl >> 5) != 1) {
+            return false;
+        }
+        const int ps = (ctrl >> 3) & 0x3;
+        quint32 v = 0;
+        if (ps == 0) {
+            v = (quint32(ctrl & 0x7) << 8) | byteAt(off + 1);
+            *after = off + 2;
+        } else if (ps == 1) {
+            v = (quint32(ctrl & 0x7) << 16) | (quint32(byteAt(off + 1)) << 8) | byteAt(off + 2);
+            v += 2048;
+            *after = off + 3;
+        } else if (ps == 2) {
+            v = (quint32(ctrl & 0x7) << 24) | (quint32(byteAt(off + 1)) << 16)
+              | (quint32(byteAt(off + 2)) << 8) | byteAt(off + 3);
+            v += 526336;
+            *after = off + 4;
+        } else {
+            v = (quint32(byteAt(off + 1)) << 24) | (quint32(byteAt(off + 2)) << 16)
+              | (quint32(byteAt(off + 3)) << 8) | byteAt(off + 4);
+            *after = off + 5;
+        }
+        *target = m_ptrBase + qsizetype(v);
+        return true;
+    }
+
+    qsizetype resolve(qsizetype off) const
+    {
+        qsizetype t = 0, a = 0;
+        return asPointer(off, &t, &a) ? t : off;
+    }
+
+    // 读控制字节：得到 type(1..15) 与 size（payload 长度 / map·array 的元素个数），返回 payload 起点偏移。
+    // 指针型(type 1) 不该走这里（size 无意义）；调用方在此之前已 resolve 掉指针。
+    qsizetype readCtrl(qsizetype off, int *type, quint32 *size) const
+    {
+        const quint8 ctrl = byteAt(off);
+        ++off;
+        int t = ctrl >> 5;
+        if (t == 0) { // 扩展类型：真类型 = 7 + 下一个字节
+            t = 7 + int(byteAt(off));
+            ++off;
+        }
+        quint32 sz = ctrl & 0x1F;
+        if (t == 1) { // 指针：不在这里展开
+            *type = 1;
+            *size = 0;
+            return off;
+        }
+        if (sz >= 29) {
+            if (sz == 29) {
+                sz = 29 + quint32(byteAt(off));
+                off += 1;
+            } else if (sz == 30) {
+                sz = 285 + ((quint32(byteAt(off)) << 8) | byteAt(off + 1));
+                off += 2;
+            } else { // 31
+                sz = 65821
+                   + ((quint32(byteAt(off)) << 16) | (quint32(byteAt(off + 1)) << 8) | byteAt(off + 2));
+                off += 3;
+            }
+        }
+        *type = t;
+        *size = sz;
+        return off;
+    }
+
+    // 跳过一个完整的值，返回其后的偏移。指针只消费自身字节（不追目标）。
+    qsizetype skipValue(qsizetype off) const
+    {
+        qsizetype t = 0, a = 0;
+        if (asPointer(off, &t, &a)) {
+            return a;
+        }
+        int type = 0;
+        quint32 size = 0;
+        qsizetype p = readCtrl(off, &type, &size);
+        if (type == 7) { // map：size 个 key/value 对
+            for (quint32 i = 0; i < size; ++i) {
+                p = skipValue(p);
+                p = skipValue(p);
+            }
+            return p;
+        }
+        if (type == 11) { // array：size 个元素
+            for (quint32 i = 0; i < size; ++i) {
+                p = skipValue(p);
+            }
+            return p;
+        }
+        if (type == 14) { // bool：size 即取值(0/1)，无 payload
+            return p;
+        }
+        return p + qsizetype(size);
+    }
+
+    QByteArray decodeBytes(qsizetype off) const
+    {
+        off = resolve(off);
+        int type = 0;
+        quint32 size = 0;
+        const qsizetype p = readCtrl(off, &type, &size);
+        if ((type == 2 || type == 4) && p >= 0 && p + qsizetype(size) <= m_data.size()) {
+            return m_data.mid(int(p), int(size));
+        }
+        return QByteArray();
+    }
+
+    quint64 decodeUint(qsizetype off) const
+    {
+        off = resolve(off);
+        int type = 0;
+        quint32 size = 0;
+        const qsizetype p = readCtrl(off, &type, &size);
+        quint64 v = 0;
+        for (quint32 i = 0; i < size; ++i) {
+            v = (v << 8) | byteAt(p + qsizetype(i));
+        }
+        return v;
+    }
+
+    // 在 map(off) 里找 key==want 的值，返回该值的偏移（可能是指针，调用方再 resolve）；找不到返回 -1。
+    qsizetype findKeyInMap(qsizetype off, const QByteArray &want) const
+    {
+        off = resolve(off);
+        int type = 0;
+        quint32 size = 0;
+        qsizetype p = readCtrl(off, &type, &size);
+        if (type != 7) {
+            return -1;
+        }
+        for (quint32 i = 0; i < size; ++i) {
+            if (p < 0 || p >= m_data.size()) {
+                return -1;
+            }
+            const QByteArray key = decodeBytes(p);
+            p = skipValue(p); // 跨过 key
+            const qsizetype valOff = p;
+            p = skipValue(p); // 跨过 value
+            if (key == want) {
+                return valOff;
+            }
+        }
+        return -1;
+    }
+
+    QString decodeCountry(qsizetype dataOff) const
+    {
+        const qsizetype countryOff = findKeyInMap(dataOff, QByteArrayLiteral("country"));
+        if (countryOff < 0) {
+            return QString();
+        }
+        const qsizetype isoOff = findKeyInMap(countryOff, QByteArrayLiteral("iso_code"));
+        if (isoOff < 0) {
+            return QString();
+        }
+        return QString::fromUtf8(decodeBytes(isoOff));
+    }
+};
+
+// ============================================================================
+//  RuleSnapshot —— 已编译规则表
+// ============================================================================
+
+struct RuleSnapshot
+{
+    struct Hit {
+        int order = INT_MAX;
+        QString target;
+    };
+    struct KeywordRule {
+        QString kw; // 已小写
+        int order = 0;
+        QString target;
+    };
+    struct CidrRule {
+        QHostAddress net;
+        int prefix = 0;
+        bool v6 = false;
+        int order = 0;
+        QString target;
+    };
+    struct GeoRule {
+        QString country; // 已大写
+        int order = 0;
+        QString target;
+    };
+
+    QHash<QString, Hit> domainExact;  // key 已小写
+    QHash<QString, Hit> domainSuffix; // key 已小写
+    QVector<KeywordRule> keywords;
+    QVector<CidrRule> cidrs;
+    QVector<GeoRule> geoips;
+    bool hasMatch = false;
+    int matchOrder = INT_MAX;
+    QString matchTarget;
+    bool needsGeo = false; // 是否含 GEOIP 规则（决定 match 里要不要查国家码）
+};
+
+namespace {
+
+// 把 payload "a.b.c.d/n" / "2001:db8::/32" 解析成 (net, prefix, v6)。失败返回 false。
+bool parseCidr(const QString &payload, QHostAddress *net, int *prefix, bool *v6)
+{
+    const int slash = payload.indexOf('/');
+    const QString ipPart = slash >= 0 ? payload.left(slash) : payload;
+    QHostAddress a;
+    if (!a.setAddress(ipPart.trimmed())) {
+        return false;
+    }
+    const bool isV6 = (a.protocol() == QAbstractSocket::IPv6Protocol);
+    int pfx = isV6 ? 128 : 32;
+    if (slash >= 0) {
+        bool ok = false;
+        pfx = payload.mid(slash + 1).trimmed().toInt(&ok);
+        if (!ok || pfx < 0 || pfx > (isV6 ? 128 : 32)) {
+            return false;
+        }
+    }
+    *net = a;
+    *prefix = pfx;
+    *v6 = isV6;
+    return true;
+}
+
+bool v4InCidr(quint32 ip, quint32 net, int prefix)
+{
+    if (prefix <= 0) {
+        return true;
+    }
+    if (prefix >= 32) {
+        return ip == net;
+    }
+    const quint32 mask = 0xFFFFFFFFu << (32 - prefix);
+    return (ip & mask) == (net & mask);
+}
+
+bool v6InCidr(const Q_IPV6ADDR &ip, const Q_IPV6ADDR &net, int prefix)
+{
+    int fullBytes = prefix / 8;
+    const int remBits = prefix % 8;
+    for (int i = 0; i < fullBytes; ++i) {
+        if (ip.c[i] != net.c[i]) {
+            return false;
+        }
+    }
+    if (remBits) {
+        const quint8 mask = quint8(0xFF << (8 - remBits));
+        if ((ip.c[fullBytes] & mask) != (net.c[fullBytes] & mask)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+// ============================================================================
+//  RuleEngine
+// ============================================================================
+
+RuleEngine::RuleEngine() = default;
+RuleEngine::~RuleEngine() = default;
+
+RuleEngine::Type RuleEngine::typeFromString(const QString &s)
+{
+    const QString u = s.trimmed().toUpper();
+    if (u == QLatin1String("DOMAIN")) return Type::Domain;
+    if (u == QLatin1String("DOMAIN-SUFFIX")) return Type::DomainSuffix;
+    if (u == QLatin1String("DOMAIN-KEYWORD")) return Type::DomainKeyword;
+    if (u == QLatin1String("IP-CIDR")) return Type::IpCidr;
+    if (u == QLatin1String("IP-CIDR6")) return Type::IpCidr6;
+    if (u == QLatin1String("GEOIP")) return Type::GeoIp;
+    if (u == QLatin1String("MATCH")) return Type::Match;
+    return Type::Unknown;
+}
+
+QString RuleEngine::typeToString(Type t)
+{
+    switch (t) {
+    case Type::Domain: return QStringLiteral("DOMAIN");
+    case Type::DomainSuffix: return QStringLiteral("DOMAIN-SUFFIX");
+    case Type::DomainKeyword: return QStringLiteral("DOMAIN-KEYWORD");
+    case Type::IpCidr: return QStringLiteral("IP-CIDR");
+    case Type::IpCidr6: return QStringLiteral("IP-CIDR6");
+    case Type::GeoIp: return QStringLiteral("GEOIP");
+    case Type::Match: return QStringLiteral("MATCH");
+    case Type::Unknown: break;
+    }
+    return QStringLiteral("UNKNOWN");
+}
+
+RuleEngine::Rule RuleEngine::parseRule(const QString &line)
+{
+    Rule r;
+    QString s = line.trimmed();
+    if (s.startsWith('-')) { // 容忍 YAML 列表项前缀 "- "
+        s = s.mid(1).trimmed();
+    }
+    if (s.isEmpty() || s.startsWith('#')) {
+        return r; // Unknown
+    }
+    const QStringList f = s.split(',');
+    if (f.isEmpty()) {
+        return r;
+    }
+    const Type t = typeFromString(f.at(0));
+    r.type = t;
+    if (t == Type::Match) {
+        if (f.size() >= 2) {
+            r.target = f.at(1).trimmed();
+        } else {
+            r.type = Type::Unknown;
+        }
+        return r;
+    }
+    if (t == Type::Unknown) {
+        return r;
+    }
+    if (f.size() < 3) {
+        r.type = Type::Unknown;
+        return r;
+    }
+    r.payload = f.at(1).trimmed();
+    r.target = f.at(2).trimmed();
+    for (int i = 3; i < f.size(); ++i) {
+        if (f.at(i).trimmed().compare(QLatin1String("no-resolve"), Qt::CaseInsensitive) == 0) {
+            r.noResolve = true;
+        }
+    }
+    return r;
+}
+
+void RuleEngine::setRules(QVector<Rule> rules)
+{
+    auto snap = std::make_shared<RuleSnapshot>();
+    int order = 0;
+    for (const Rule &r : rules) {
+        const int o = order++;
+        switch (r.type) {
+        case Type::Domain: {
+            const QString k = r.payload.toLower();
+            RuleSnapshot::Hit &h = snap->domainExact[k];
+            if (o < h.order) { // 保首命中：同 key 取更靠前的
+                h.order = o;
+                h.target = r.target;
+            }
+            break;
+        }
+        case Type::DomainSuffix: {
+            const QString k = r.payload.toLower();
+            RuleSnapshot::Hit &h = snap->domainSuffix[k];
+            if (o < h.order) {
+                h.order = o;
+                h.target = r.target;
+            }
+            break;
+        }
+        case Type::DomainKeyword:
+            snap->keywords.push_back({r.payload.toLower(), o, r.target});
+            break;
+        case Type::IpCidr:
+        case Type::IpCidr6: {
+            QHostAddress net;
+            int prefix = 0;
+            bool v6 = false;
+            if (parseCidr(r.payload, &net, &prefix, &v6)) {
+                snap->cidrs.push_back({net, prefix, v6, o, r.target});
+            }
+            break;
+        }
+        case Type::GeoIp:
+            snap->geoips.push_back({r.payload.toUpper(), o, r.target});
+            snap->needsGeo = true;
+            break;
+        case Type::Match:
+            if (o < snap->matchOrder) {
+                snap->matchOrder = o;
+                snap->matchTarget = r.target;
+                snap->hasMatch = true;
+            }
+            break;
+        case Type::Unknown:
+            break; // 丢弃
+        }
+    }
+    QMutexLocker lock(&m_mutex);
+    m_snapshot = std::move(snap);
+}
+
+void RuleEngine::setRulesFromLines(const QStringList &lines)
+{
+    QVector<Rule> rules;
+    rules.reserve(lines.size());
+    for (const QString &line : lines) {
+        Rule r = parseRule(line);
+        if (r.type != Type::Unknown) {
+            rules.push_back(r);
+        }
+    }
+    setRules(std::move(rules));
+}
+
+void RuleEngine::setGeoipDatabasePath(const QString &mmdbPath)
+{
+    std::shared_ptr<const RuleGeoDb> geo;
+    if (!mmdbPath.isEmpty()) {
+        geo = RuleGeoDb::open(mmdbPath); // 打不开/不合法 → 保持 null（GEOIP 恒失配）
+    }
+    QMutexLocker lock(&m_mutex);
+    m_geo = std::move(geo);
+}
+
+void RuleEngine::setCountryResolver(CountryResolver resolver)
+{
+    QMutexLocker lock(&m_mutex);
+    m_resolver = std::move(resolver);
+}
+
+std::shared_ptr<const RuleSnapshot> RuleEngine::snapshot() const
+{
+    QMutexLocker lock(&m_mutex);
+    return m_snapshot;
+}
+
+QString RuleEngine::lookupCountry(const QHostAddress &ip) const
+{
+    CountryResolver res;
+    std::shared_ptr<const RuleGeoDb> geo;
+    {
+        QMutexLocker lock(&m_mutex);
+        res = m_resolver;
+        geo = m_geo;
+    }
+    if (res) {
+        return res(ip); // 外部注入优先
+    }
+    if (geo) {
+        return geo->country(ip);
+    }
+    return QString();
+}
+
+QString RuleEngine::match(const QString &host, const QHostAddress &ip) const
+{
+    const std::shared_ptr<const RuleSnapshot> snap = snapshot();
+    if (!snap) {
+        return QString();
+    }
+
+    int bestOrder = INT_MAX;
+    QString bestTarget;
+    auto consider = [&](int order, const QString &target) {
+        if (order < bestOrder) {
+            bestOrder = order;
+            bestTarget = target;
+        }
+    };
+
+    // —— 域名规则 ——
+    if (!host.isEmpty()) {
+        const QString h = host.toLower();
+        const auto exact = snap->domainExact.constFind(h);
+        if (exact != snap->domainExact.constEnd()) {
+            consider(exact->order, exact->target);
+        }
+        // 后缀：host 自身及每一级父域（按标签边界）
+        QString cur = h;
+        for (;;) {
+            const auto sit = snap->domainSuffix.constFind(cur);
+            if (sit != snap->domainSuffix.constEnd()) {
+                consider(sit->order, sit->target);
+            }
+            const int dot = cur.indexOf('.');
+            if (dot < 0) {
+                break;
+            }
+            cur = cur.mid(dot + 1);
+        }
+        // 关键字：只能线性扫
+        for (const RuleSnapshot::KeywordRule &k : snap->keywords) {
+            if (k.order < bestOrder && h.contains(k.kw)) {
+                consider(k.order, k.target);
+            }
+        }
+    }
+
+    // —— IP / GEOIP 规则 ——
+    if (!ip.isNull()) {
+        const bool ipIsV6 = (ip.protocol() == QAbstractSocket::IPv6Protocol);
+        if (ipIsV6) {
+            const Q_IPV6ADDR v6 = ip.toIPv6Address();
+            for (const RuleSnapshot::CidrRule &c : snap->cidrs) {
+                if (c.v6 && c.order < bestOrder && v6InCidr(v6, c.net.toIPv6Address(), c.prefix)) {
+                    consider(c.order, c.target);
+                }
+            }
+        } else if (ip.protocol() == QAbstractSocket::IPv4Protocol) {
+            const quint32 v4 = ip.toIPv4Address();
+            for (const RuleSnapshot::CidrRule &c : snap->cidrs) {
+                if (!c.v6 && c.order < bestOrder
+                    && v4InCidr(v4, c.net.toIPv4Address(), c.prefix)) {
+                    consider(c.order, c.target);
+                }
+            }
+        }
+        if (snap->needsGeo) {
+            const QString country = lookupCountry(ip); // 每次 match 至多查一次
+            if (!country.isEmpty()) {
+                for (const RuleSnapshot::GeoRule &g : snap->geoips) {
+                    if (g.order < bestOrder && g.country == country) {
+                        consider(g.order, g.target);
+                    }
+                }
+            }
+        }
+    }
+
+    // —— MATCH 兜底 ——
+    if (snap->hasMatch) {
+        consider(snap->matchOrder, snap->matchTarget);
+    }
+
+    return (bestOrder == INT_MAX) ? QString() : bestTarget;
+}
+
+bool RuleEngine::selfTest()
+{
+    RuleEngine e;
+    e.setRulesFromLines(QStringList{
+        QStringLiteral("DOMAIN-SUFFIX,google.com,PROXY"),
+        QStringLiteral("DOMAIN,example.com,DIRECT"),
+        QStringLiteral("DOMAIN-KEYWORD,facebook,PROXY"),
+        QStringLiteral("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"),
+        QStringLiteral("IP-CIDR6,fd00::/8,DIRECT"),
+        QStringLiteral("MATCH,FALLBACK"),
+    });
+
+    struct Case {
+        QString host;
+        QString ip;
+        QString want;
+    };
+    const Case cases[] = {
+        {QStringLiteral("www.google.com"), QString(), QStringLiteral("PROXY")},
+        {QStringLiteral("google.com"), QString(), QStringLiteral("PROXY")},
+        {QStringLiteral("notgoogle.com"), QString(), QStringLiteral("FALLBACK")}, // 边界：非子域不命中后缀
+        {QStringLiteral("example.com"), QString(), QStringLiteral("DIRECT")},
+        {QStringLiteral("sub.example.com"), QString(), QStringLiteral("FALLBACK")}, // DOMAIN 精确不含子域
+        {QStringLiteral("x.facebook.net"), QString(), QStringLiteral("PROXY")},
+        {QString(), QStringLiteral("192.168.1.1"), QStringLiteral("DIRECT")},
+        {QString(), QStringLiteral("8.8.8.8"), QStringLiteral("FALLBACK")},
+        {QString(), QStringLiteral("fd00::1"), QStringLiteral("DIRECT")},
+        {QString(), QStringLiteral("2001:4860::1"), QStringLiteral("FALLBACK")},
+    };
+
+    bool ok = true;
+    for (const Case &c : cases) {
+        const QHostAddress ip = c.ip.isEmpty() ? QHostAddress() : QHostAddress(c.ip);
+        const QString got = e.match(c.host, ip);
+        if (got != c.want) {
+            ok = false;
+            qWarning("RuleEngine::selfTest FAIL host=%s ip=%s got=%s want=%s",
+                     qUtf8Printable(c.host), qUtf8Printable(c.ip), qUtf8Printable(got),
+                     qUtf8Printable(c.want));
+        }
+    }
+    return ok;
+}

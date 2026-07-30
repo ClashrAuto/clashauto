@@ -44,15 +44,18 @@ IOutboundUdp *OutboundRegistry::createUdp(const ProxyNode &node, QObject *parent
 }
 
 // —— 内建协议注册点 ——
-// 后续每个「协议出站」单元在这里加**一行**：先 #include 自己的头，再调 registerXxx(reg)。例如：
-//   #include "ShadowsocksOutbound.h"   // 提供 void registerShadowsocks(OutboundRegistry&);
-//   #include "TrojanOutbound.h"        // 提供 void registerTrojan(OutboundRegistry&);
-//   ...
-//   registerShadowsocks(reg);
-//   registerTrojan(reg);
-// 现在故意留空：本骨架单元没有任何协议实现，注册表为空 → 具名节点全部回退 fallback，行为不变。
+// 每个「协议出站」单元在这里加一行：#include 自己的头 + 调 registerXxx(reg)。
+// 已注册的协议在拨号侧(CoreDialerFactory)会被进程内实现接管；未注册/未来协议仍回退 fallback(mihomo)。
+#include "ShadowsocksOutbound.h" // registerShadowsocks —— "ss" (AEAD)
+#include "TrojanOutbound.h"      // registerTrojan      —— "trojan" (TLS)
+#include "VlessOutbound.h"       // registerVless       —— "vless" (tcp/tls/ws)
+#include "VmessOutbound.h"       // registerVmess       —— "vmess" (VMessAEAD)
+
 void registerBuiltinProtocols(OutboundRegistry &reg)
 {
-    Q_UNUSED(reg);
-    // TODO(协议出站单元)：在此逐行注册内建协议（Shadowsocks / Trojan / VMess / VLESS / …）。
+    registerShadowsocks(reg);
+    registerTrojan(reg);
+    registerVless(reg);
+    registerVmess(reg);
+    // TODO(后续单元)：Hysteria2 / TUIC(QUIC)、REALITY/uTLS 落地后在此续注册。
 }
