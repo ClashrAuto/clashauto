@@ -26,6 +26,9 @@ ClashService::ClashService(QObject *parent) : QObject(parent)
 {
     connect(&m_trafficTimer, &QTimer::timeout, this, &ClashService::ensureTrafficStream);
     connect(&m_connectionsTimer, &QTimer::timeout, this, &ClashService::pollConnections);
+    // 模式复查搭在 2s 的 connections 定时器上（/configs 很小，不值得单开一个定时器）：核心重启、
+    // 配置热重载、或外部改模式后都能自动跟上，CoastCore 灰度据此判 Direct/Global。
+    connect(&m_connectionsTimer, &QTimer::timeout, this, &ClashService::pollMode);
     connect(&m_nodesTimer, &QTimer::timeout, this, &ClashService::pollNodes);
 }
 
@@ -67,6 +70,7 @@ void ClashService::start()
     emit logUpdated("Connecting to Clash API...");
     startTrafficStream(); // /traffic 常开单流（不能每秒 GET，见头文件说明）
     pollConnections();
+    pollMode(); // 先读回核心的真实模式（见 pollMode 的说明），再拉节点：主组随模式而定
     pollNodes();
     m_trafficTimer.start(2000);      // 看门狗：流断了就重连（核心重启/端口变更）
     m_connectionsTimer.start(2000);  // /connections 全量拉取开销大、只用到数量与 downloadTotal，2s 足够
@@ -437,6 +441,32 @@ void ClashService::pollConnections()
         emit connectionsUpdated(conns.size(), obj.value("downloadTotal").toInteger());
         emit connectionsSnapshot(conns); // 历史库消费同一份数据，不再多发一次请求
     }, [this] { m_connectionsInFlight = false; }); // finished：成功/失败/超时都在此清在途标志
+}
+
+void ClashService::pollMode()
+{
+    sendGet(QUrl(QString("http://%1:%2/configs").arg(m_host).arg(m_port)),
+            [this](const QJsonDocument &doc) {
+                const QString raw = doc.object().value("mode").toString();
+                if (raw.isEmpty())
+                    return; // 拿不到就不动（核心没起/字段缺失），绝不把模式猜成别的
+                // 核心返回小写 rule/global/direct → 归一成本类对外用的 Rule/Global/Direct。
+                QString norm;
+                if (raw.compare("global", Qt::CaseInsensitive) == 0)
+                    norm = QStringLiteral("Global");
+                else if (raw.compare("direct", Qt::CaseInsensitive) == 0)
+                    norm = QStringLiteral("Direct");
+                else if (raw.compare("rule", Qt::CaseInsensitive) == 0)
+                    norm = QStringLiteral("Rule");
+                else
+                    return; // 未知模式串：保持原值
+                if (norm == m_mode)
+                    return;
+                m_mode = norm;
+                m_selectedGroup.clear(); // 模式变了，主选择组要重选（与 setMode 一致）
+                emit logUpdated(QString("Mode (from core): %1").arg(norm));
+                pollNodes(); // 立刻刷新一次：让 selectedNode/主组与新模式对齐，并驱动下游重建
+            });
 }
 
 void ClashService::pollNodes()

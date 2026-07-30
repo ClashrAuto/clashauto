@@ -41,6 +41,7 @@
 #include "core/CoreDialerFactory.h" // 灰度：按(目的地/设备)选出站的拨号工厂（默认全部回退 Socks5）
 #include "core/ProxyConfig.h"       // ProxyConfigStore/ProxyConfig：出站配置不可变快照 + 热重载
 #include "core/RuleEngine.h"        // RuleEngine：分流规则（本单元 Rule 模式回退 mihomo，仅持有备用）
+#include "core/DnsResolver.h"       // DnsResolver::isFakeIp：fake-ip 目的地必须回退核心（见 router）
 
 #include <QDateTime>
 #include <QDir>
@@ -548,8 +549,19 @@ void GatewayWorker::applyCoastCoreLocal()
         // router 捕获 store 的 shared_ptr（保活），据当前快照的模式选出站；判据见 setCoastCore 的注释。
         const std::shared_ptr<ProxyConfigStore> store = m_pcfgStore;
         factory->setRouter([store](const QString &dstHost, const QString &user) -> QString {
-            Q_UNUSED(dstHost);
             Q_UNUSED(user);
+            // ★★ fake-ip 目的地必须回退 mihomo ★★（真机联调实测踩到，见下）
+            //   设备的 DNS 被劫持到**核心**的 dns.listen(1053)，于是「域名 ↔ 198.18.x.x」这张表在
+            //   **核心手里**，本进程无从反查。若把 fake-ip 当普通目的地交给进程内出站，出站会把
+            //   198.18.x.x **原样**当目标发给节点，节点当然路由不到 → 全部 i/o timeout
+            //   （树莓派实测：节点侧 55 次 dial 198.18.x.x 失败）。核心自己知道映射，交给它才对。
+            //   注：本进程的 DnsResolver 有自己的 fake-ip 池，但它还没接进 NetStack 的 DNS 劫持路径；
+            //   等接上（届时映射在本进程内）才能把这类目的地也收进进程内出站。
+            if (!dstHost.isEmpty()) {
+                const QHostAddress dst(dstHost);
+                if (!dst.isNull() && DnsResolver::isFakeIp(dst))
+                    return QString();
+            }
             const std::shared_ptr<const ProxyConfig> cfg = store->current();
             if (!cfg)
                 return QString(); // 无配置 → 回退 mihomo（安全）

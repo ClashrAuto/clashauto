@@ -75,6 +75,11 @@ private:
     void ensureTrafficStream(); // 流断了（核心重启/端口变更）就重连
     void pollConnections();
     void pollNodes();
+    // 从核心读回**真实**代理模式（GET /configs）。必要性:m_mode 原先只在 setMode()(=用户在本 app 里改)
+    // 时才更新,于是「核心配置里本来就是 global/direct」或「模式被外部改过」时,m_mode 一直停在默认 "Rule"
+    // ——CoastCore 灰度的 router 靠 mode() 判 Direct/Global,读错就永远回退核心、进程内出站等于没启用
+    // （真机联调实测正是这样)。失败/无核心时保持原值,不误判。
+    void pollMode();
     void applyAuth(QNetworkRequest &req) const; // secret 非空时给发往核心的请求加 Authorization: Bearer 头（统一入口，避免遗漏）
     void sendGet(const QUrl &url, std::function<void(const QJsonDocument &)> onJson, std::function<void()> onFinished = {});
     void sendJsonRequest(const QUrl &url, const QByteArray &method, const QJsonObject &payload, std::function<void(bool, QString)> onDone);
