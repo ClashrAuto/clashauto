@@ -214,9 +214,12 @@ jobs:
 
       - name: Build
         shell: pwsh
-        # ★ 失败时把编译器的 error 行抬成 ::error:: 注解：本仓库**读不到 Actions 日志**
-        #   (download job logs 需要 admin，实测 403)，而注解是公开可读的。没有这一步，
-        #   一个 MSVC-only 的编译错误就只能靠反复推送去猜。
+        # ★ 失败时把编译器的 error 行抬成 ::error:: 注解。两个用处：
+        #   ① 注解**公开可读**（无需任何凭据），日志则要带 token（匿名取 job logs 是 403；
+        #      用本机 git 凭据里的那个 token 可以读——别再误以为日志完全拿不到）；
+        #   ② 报错直接摆在 run 页面顶部，不用翻几千行日志。
+        #   Windows 那次 LNK2019 就是靠它一眼定位的（本地 MinGW -fsyntax-only 复现不出来，
+        #   因为那是链接期问题）。
         run: |
           $log = "$env:RUNNER_TEMP\build.log"
           cmake --build $env:BUILD_DIR --config Release --parallel 2>&1 | Tee-Object -FilePath $log
@@ -496,8 +499,9 @@ jobs:
         #   CMAKE_OSX_ARCHITECTURES 精确匹配，多架构会走进 "WTF" 分支）→ 只能各编一次再 lipo。
         #   具体逻辑放在仓库里的脚本，便于外部签名仓库(schat.build)复用同一份（那边才是发布 DMG 的构建者）。
         # ★ 失败时把 cmake/clang/ninja 的 error 行抬成 ::error:: 注解，理由同各 Build 步骤：
-        #   本仓库读不到 Actions 日志（要 admin，实测 403），注解却是公开可读的。上一轮这步
-        #   失败只留下 "exit code 1"，正是因为没接这套机制。grep 不中时兜底抬日志末尾几行，
+        #   注解公开可读、且直接摆在 run 页面顶部（日志要带 token 才能取，匿名是 403）。
+        #   上一轮这步失败只留下 "exit code 1"，正是因为没接这套机制 —— 而真因是脚本里
+        #   `$arch` 后紧跟全角括号被 bash 吃进变量名。grep 不中时兜底抬日志末尾几行，
         #   保证任何失败形态（git clone 挂、lipo 挂……）都能留下真报错。
         if: steps.msquic-cache.outputs.cache-hit != 'true'
         shell: bash
@@ -551,7 +555,7 @@ jobs:
       - name: Build
         shell: bash
         # ★ 失败时把编译器的 error 行抬成 ::error:: 注解，理由同 windows job：
-        #   本仓库读不到 Actions 日志（要 admin，实测 403），注解却是公开可读的。
+        #   注解公开可读、且直接摆在 run 页面顶部（日志要带 token 才能取，匿名是 403）。
         run: |
           set -o pipefail
           if ! cmake --build "$BUILD_DIR" --parallel 2>&1 | tee "$RUNNER_TEMP/build.log"; then
@@ -927,7 +931,7 @@ jobs:
       - name: Build
         shell: bash
         # ★ 失败时把编译器的 error 行抬成 ::error:: 注解，理由同 windows job：
-        #   本仓库读不到 Actions 日志（要 admin，实测 403），注解却是公开可读的。
+        #   注解公开可读、且直接摆在 run 页面顶部（日志要带 token 才能取，匿名是 403）。
         run: |
           set -o pipefail
           if ! cmake --build "$BUILD_DIR" --parallel 2>&1 | tee "$RUNNER_TEMP/build.log"; then
