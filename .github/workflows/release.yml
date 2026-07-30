@@ -636,6 +636,22 @@ jobs:
             || { echo "::error::libmsquic.dylib 未进 bundle，拒绝出包"; exit 1; }
           echo "msquic 已入 bundle: $(lipo -archs "$APP/Contents/Frameworks/libmsquic.dylib")"
 
+          # —— offscreen 平台插件：headless 自检的前提 ——
+          # macdeployqt 只往 .app 里部署 cocoa 平台插件；下面的 QUIC self-test（以及将来
+          # 可能的其它 headless 自检）用 QT_QPA_PLATFORM=offscreen 跑打包后的可执行，
+          # 没有这个插件 Qt 直接 abort（"Could not find the Qt platform plugin offscreen"）。
+          # Linux 包是整目录 cp plugins/ 所以天生带 offscreen，macOS 得手动补。
+          # 顺带也给用户留了 QT_QPA_PLATFORM=offscreen 的应急后路；插件很小，随包无害。
+          # ★ 同样必须在 codesign 之前 —— 签完再塞文件会破坏签名。
+          # 目标路径按 macdeployqt 约定放 Contents/PlugIns/platforms/。
+          OFFSCREEN_SRC="$QT_ROOT/plugins/platforms/libqoffscreen.dylib"
+          test -f "$OFFSCREEN_SRC" \
+            || { echo "::error::Qt 安装里找不到 offscreen 平台插件（${OFFSCREEN_SRC}）——没有它 headless 自检必挂，拒绝静默跳过"; exit 1; }
+          mkdir -p "$APP/Contents/PlugIns/platforms"
+          cp -f "$OFFSCREEN_SRC" "$APP/Contents/PlugIns/platforms/"
+          # 只打印依赖便于日后排查（应全是 @rpath/QtGui.framework/... 之类，bundle 里已有 Frameworks + rpath）
+          otool -L "$APP/Contents/PlugIns/platforms/libqoffscreen.dylib"
+
           # 资源已内嵌 exe(qrc)，不再往 bundle 塞 Contents/Clashr-Auto —— app 自包含。
 
           # 签名（公证必需硬化运行时 + 安全时间戳）。macdeployqt 之后再签：install_name_tool 改写会破坏更早签名。
