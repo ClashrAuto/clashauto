@@ -31,41 +31,34 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sq
 # src/net/core/crypto/Aead.cpp）+ REALITY 的 X25519。只用 libcrypto 的 EVP（哈希/HMAC 走 Qt）。
 #
 # ★ **可选**（与 msquic / QtDBus 同策略：缺了就降级，绝不让构建失败）。曾经写成 REQUIRED，
-#   结果 **macOS universal 与 Windows arm64 两个 job 直接构建失败**：
+#   结果 **macOS universal 与 Windows arm64 两个 job 直接构建失败**（CI 实测）：
 #     · macOS 要 `-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64` 出通用二进制，而 brew 的 libcrypto 是
 #       **单架构**的 → 即便 find 得到也链不进通用二进制；
-#     · Windows arm64 是交叉编译，环境里没有 arm64 的 OpenSSL（找到的是 x64 → 架构不匹配）。
+#     · Windows arm64 是交叉编译，环境里没有 arm64 的 OpenSSL，find_package 会找到**宿主 x64** 的
+#       → 架构不匹配、编译过而链接炸（这一条正是「只按平台猜」的写法漏掉的，故改用下面的真链测试）。
 #   降级后果**很轻**：只有「需要裸 AEAD/X25519 的三个协议」(ss / vmess / reality) 不编入、不注册，
 #   拨号侧照旧回退 mihomo（功能不缺，只是不走进程内）；direct / trojan / vless 仍是进程内（它们只用
 #   QSslSocket + Qt 哈希）。本地 MinGW 自带（opt/include、opt/lib），可用 -DOPENSSL_ROOT_DIR 提示。
 set(COAST_HAVE_OPENSSL OFF)
 find_package(OpenSSL QUIET)
 if(OPENSSL_FOUND)
-    set(COAST_HAVE_OPENSSL ON)
-    # Apple 通用构建（多架构）下还要确认 libcrypto 本身是通用的，否则链接必炸——单架构就当没有。
-    if(APPLE)
-        list(LENGTH CMAKE_OSX_ARCHITECTURES _coast_osx_archs)
-        if(_coast_osx_archs GREATER 1)
-            set(COAST_HAVE_OPENSSL OFF)
-            foreach(_lib IN LISTS OPENSSL_CRYPTO_LIBRARY)
-                if(EXISTS "${_lib}")
-                    execute_process(COMMAND lipo -archs "${_lib}"
-                                    OUTPUT_VARIABLE _coast_lipo OUTPUT_STRIP_TRAILING_WHITESPACE
-                                    ERROR_QUIET RESULT_VARIABLE _coast_lipo_rc)
-                    if(_coast_lipo_rc EQUAL 0)
-                        set(COAST_HAVE_OPENSSL ON)
-                        foreach(_a IN LISTS CMAKE_OSX_ARCHITECTURES)
-                            if(NOT _coast_lipo MATCHES "${_a}")
-                                set(COAST_HAVE_OPENSSL OFF)
-                            endif()
-                        endforeach()
-                    endif()
-                endif()
-            endforeach()
-            if(NOT COAST_HAVE_OPENSSL)
-                message(STATUS "OpenSSL 非通用二进制（需 ${CMAKE_OSX_ARCHITECTURES}）→ 按缺失处理")
-            endif()
-        endif()
+    # ★「找到」≠「能用」：交叉编译/通用构建里 find_package 很可能给出**另一个架构**的 libcrypto
+    #   —— Windows arm64 交叉编译会找到宿主的 x64 库、macOS 通用构建拿到的 brew 库是单架构。
+    #   这种情况下编译能过、**链接必炸**（实测 CI 上就是这么挂的）。所以别猜平台，直接**真链一次**：
+    #   编译+链接一个调用 EVP 的最小程序，过了才认。这一招同时覆盖架构不匹配、通用构建、装坏了的库。
+    include(CMakePushCheckState)
+    include(CheckCXXSourceCompiles)
+    cmake_push_check_state(RESET)
+    set(CMAKE_REQUIRED_LIBRARIES OpenSSL::Crypto)
+    check_cxx_source_compiles("
+        #include <openssl/evp.h>
+        int main() { return EVP_aes_128_gcm() != nullptr ? 0 : 1; }
+    " COAST_OPENSSL_LINKS)
+    cmake_pop_check_state()
+    if(COAST_OPENSSL_LINKS)
+        set(COAST_HAVE_OPENSSL ON)
+    else()
+        message(STATUS "OpenSSL 找到了但链不上（架构不匹配/装坏）→ 按缺失处理")
     endif()
 endif()
 if(COAST_HAVE_OPENSSL)
