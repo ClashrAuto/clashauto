@@ -737,12 +737,23 @@ jobs:
           # 全部 Qt6 共享库 + ICU（-a 保留符号链接与 so 版本号链）
           cp -a "$QT_ROOT"/lib/libQt6*.so* "$app_dir/lib/"
           cp -a "$QT_ROOT"/lib/libicu*.so* "$app_dir/lib/" 2>/dev/null || true
-          # libmsquic：装上了才有（见上面的 Install msquic）。**必须随包带走**——它来自
+          # libmsquic：QUIC 编进来了才有（见上面的 Install msquic）。**必须随包带走**——它来自
           #   packages.microsoft.com，不在 Debian/Ubuntu 官方源，靠 .deb Depends 用户根本装不上；
-          #   主程序 RPATH 已是 $ORIGIN/lib，放进来就能被找到。没装上就什么都不拷（QUIC 本也未编入）。
-          for msq in /usr/lib/*/libmsquic.so* /usr/lib/libmsquic.so*; do
-            [ -e "$msq" ] && cp -a "$msq" "$app_dir/lib/" || true
-          done
+          #   主程序 RPATH 已是 $ORIGIN/lib，放进来就能被加载器找到。
+          # ★ 用 ldd 问二进制**实际依赖的是哪个文件**，而不是拿 /usr/lib/*/ 去猜路径：上一版就是靠通配
+          #   猜路径，结果库没拷进去、而二进制已经硬依赖 libmsquic.so.2 → 发出去的包在用户机上直接起不来
+          #   （下载 release 产物核验才发现）。ldd 给的就是加载器会用的那条路径，拿它 cp -L 最准。
+          msq_path="$(ldd "$app_dir/coast" 2>/dev/null | awk '/libmsquic/ {print $3}' | head -1)"
+          if [ -n "${msq_path:-}" ] && [ -e "$msq_path" ]; then
+            cp -L "$msq_path" "$app_dir/lib/"
+            echo "bundled msquic: $msq_path -> $app_dir/lib/$(basename "$msq_path")"
+          fi
+          # ★ 硬断言：二进制若 NEEDED libmsquic 而包里没有，**当场失败**，绝不发一个起不来的包。
+          if ldd "$app_dir/coast" 2>/dev/null | grep -q libmsquic; then
+            need="$(ldd "$app_dir/coast" | awk '/libmsquic/ {print $1}' | head -1)"
+            test -e "$app_dir/lib/$need" || { echo "::error::coast 依赖 $need 但未打包，拒绝出包"; exit 1; }
+            echo "msquic 依赖校验通过: lib/$need"
+          fi
           # 插件整目录拷更稳：platforms/libqxcb、tls(openssl 后端，HTTPS 订阅/更新必需)、
           # imageformats、iconengines、xcbglintegrations、platforminputcontexts 等
           cp -a "$QT_ROOT"/plugins/. "$app_dir/plugins/"
