@@ -90,6 +90,20 @@ public:
     // host 可为空（只有 IP 的裸连接）；ip 可为 null（只有域名、尚未解析）。
     QString match(const QString &host, const QHostAddress &ip) const;
 
+    // 同 match，但**多告诉调用方一件事：这次到底判得了判不了**。
+    //
+    // ★ 为什么需要它：mihomo 对**不带 no-resolve** 的 IP 类规则会先把域名解析成 IP 再比对。我们只有
+    //   域名（ip 为 null）时无从得知那条规则会不会命中；若它排在我们最佳命中之前，谁赢就取决于那次
+    //   解析 —— 这时**任何自作结论都可能与核心不一致（=误路由）**。needsResolve=true 就是这个信号，
+    //   调用方应据此**回退核心**（核心会解析，结论必然对）。
+    //   带 no-resolve 的 IP 规则在无 ip 时 mihomo 也跳过 → 我们跳过=零分歧，不算歧义。
+    //   实测本项目规则表 312 条 IP 类规则中 311 条带 no-resolve，唯一不带的是 `GEOIP,CN`。
+    struct MatchOutcome {
+        QString target;           // 命中的 target（策略组名/节点名/DIRECT…）；判不了或没命中为空
+        bool needsResolve = false; // true = 需要先解析域名才能判 → 调用方回退核心
+    };
+    MatchOutcome matchEx(const QString &host, const QHostAddress &ip) const;
+
     // 可选：headless 自测（env COAST_RULE_SELFTEST 时由集成侧调用）。跑几条 IP-CIDR / DOMAIN-SUFFIX
     // 断言，全过返回 true，否则 qWarning 打出失败项并返回 false。纯同步、不依赖事件循环。
     static bool selfTest();

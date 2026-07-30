@@ -381,6 +381,13 @@ struct RuleSnapshot
     int matchOrder = INT_MAX;
     QString matchTarget;
     bool needsGeo = false; // 是否含 GEOIP 规则（决定 match 里要不要查国家码）
+    // 「最靠前的、**不带 no-resolve** 的 IP 类规则」的序号（没有则 INT_MAX）。
+    // ★ 这一项是 matchEx 判「判定不了」的唯一依据，来由见 matchEx 的注释：
+    //   mihomo 对不带 no-resolve 的 IP 规则**会先把域名解析成 IP 再比对**；我们手上只有域名时无从得知
+    //   它会不会命中，于是只要这样的规则排在我们已有最佳命中之前，整条决策就是**歧义**的。
+    //   实测本项目规则表：312 条 IP 类规则里 311 条带 no-resolve（与 mihomo 零分歧），
+    //   唯一不带的是 `GEOIP,CN,🎯 全球直连`。
+    int minUnresolvedIpOrder = INT_MAX;
 };
 
 namespace {
@@ -486,6 +493,18 @@ RuleEngine::Rule RuleEngine::parseRule(const QString &line)
     if (s.isEmpty() || s.startsWith('#')) {
         return r; // Unknown
     }
+    // ★ 必须剥掉整条规则外面的引号。ConfigBuilder 生成的 full.yaml 把**每一条**规则都写成带引号的
+    //   标量（`- "DOMAIN-SUFFIX,51.la,🚀 节点选择"`，因为 target 里有 emoji/空格）。不剥的话第一段
+    //   变成 `"DOMAIN-SUFFIX`，typeFromString 认不出 → 整表 1393 条全成 Unknown 被丢掉 → 规则表为空、
+    //   连 MATCH 兜底都没有 → Rule 模式的进程内路由永远命中不了（真机联调就是这么发现的：
+    //   诊断显示 target 恒空、needsResolve 恒 false）。单引号同理。
+    if (s.size() >= 2 && ((s.startsWith('"') && s.endsWith('"'))
+                          || (s.startsWith('\'') && s.endsWith('\'')))) {
+        s = s.mid(1, s.size() - 2).trimmed();
+        if (s.isEmpty()) {
+            return r;
+        }
+    }
     const QStringList f = s.split(',');
     if (f.isEmpty()) {
         return r;
@@ -552,12 +571,18 @@ void RuleEngine::setRules(QVector<Rule> rules)
             bool v6 = false;
             if (parseCidr(r.payload, &net, &prefix, &v6)) {
                 snap->cidrs.push_back({net, prefix, v6, o, r.target});
+                if (!r.noResolve && o < snap->minUnresolvedIpOrder) {
+                    snap->minUnresolvedIpOrder = o; // 见 minUnresolvedIpOrder 的说明
+                }
             }
             break;
         }
         case Type::GeoIp:
             snap->geoips.push_back({r.payload.toUpper(), o, r.target});
             snap->needsGeo = true;
+            if (!r.noResolve && o < snap->minUnresolvedIpOrder) {
+                snap->minUnresolvedIpOrder = o; // 同上（本项目里正是这条 GEOIP,CN 触发）
+            }
             break;
         case Type::Match:
             if (o < snap->matchOrder) {
@@ -629,9 +654,14 @@ QString RuleEngine::lookupCountry(const QHostAddress &ip) const
 
 QString RuleEngine::match(const QString &host, const QHostAddress &ip) const
 {
+    return matchEx(host, ip).target; // 老接口：只要结论，不区分「判定不了」
+}
+
+RuleEngine::MatchOutcome RuleEngine::matchEx(const QString &host, const QHostAddress &ip) const
+{
     const std::shared_ptr<const RuleSnapshot> snap = snapshot();
     if (!snap) {
-        return QString();
+        return {};
     }
 
     int bestOrder = INT_MAX;
@@ -707,7 +737,16 @@ QString RuleEngine::match(const QString &host, const QHostAddress &ip) const
         consider(snap->matchOrder, snap->matchTarget);
     }
 
-    return (bestOrder == INT_MAX) ? QString() : bestTarget;
+    // ★★ 「判定不了」的判据（务必与 mihomo 的首命中语义对齐）★★
+    //   mihomo 遇到**不带 no-resolve** 的 IP 类规则时，会把域名解析成 IP 再比对；我们此刻只有域名
+    //   （ip 为空），无从得知它会不会命中。只要这样的规则**排在我们最佳命中之前**，谁赢就取决于那次
+    //   解析结果 —— 这就是歧义。此时绝不能拿自己的结论去路由（那可能与核心不一致 = 误路由），
+    //   而应告诉调用方「我判不了」，让它回退核心（核心会解析，结论必然正确）。
+    //   带 no-resolve 的 IP 规则在无 ip 时 mihomo 同样跳过，故上面直接跳过=零分歧，不算歧义。
+    if (ip.isNull() && snap->minUnresolvedIpOrder < bestOrder) {
+        return {QString(), true};
+    }
+    return {(bestOrder == INT_MAX) ? QString() : bestTarget, false};
 }
 
 bool RuleEngine::selfTest()
@@ -718,7 +757,7 @@ bool RuleEngine::selfTest()
         QStringLiteral("DOMAIN,example.com,DIRECT"),
         QStringLiteral("DOMAIN-KEYWORD,facebook,PROXY"),
         QStringLiteral("IP-CIDR,192.168.0.0/16,DIRECT,no-resolve"),
-        QStringLiteral("IP-CIDR6,fd00::/8,DIRECT"),
+        QStringLiteral("IP-CIDR6,fd00::/8,DIRECT,no-resolve"),
         QStringLiteral("MATCH,FALLBACK"),
     });
 
@@ -749,6 +788,76 @@ bool RuleEngine::selfTest()
             qWarning("RuleEngine::selfTest FAIL host=%s ip=%s got=%s want=%s",
                      qUtf8Printable(c.host), qUtf8Printable(c.ip), qUtf8Printable(got),
                      qUtf8Printable(c.want));
+        }
+    }
+
+    // ⑤ **带引号的规则行**必须能解析：ConfigBuilder 生成的 full.yaml 每条规则都是带引号的标量
+    //    （target 含 emoji/空格），真机上就是因为没剥引号导致整表被丢、Rule 模式恒不命中。
+    {
+        RuleEngine e3;
+        e3.setRulesFromLines(QStringList{
+            QStringLiteral("  - \"DOMAIN-SUFFIX,telegram.org,ð èç¹éæ©\""),
+            QStringLiteral("  - \"IP-CIDR,91.108.0.0/16,PROXY,no-resolve\""),
+            QStringLiteral("  - \"MATCH,FALLBACK\""),
+        });
+        const QString hit = e3.match(QStringLiteral("x.telegram.org"), QHostAddress());
+        if (hit.isEmpty() || hit == QStringLiteral("FALLBACK")) {
+            ok = false;
+            qWarning("selfTest FAIL: 带引号的规则行没解析出来 (got=%s)", qUtf8Printable(hit));
+        }
+        const QString ipHit = e3.match(QString(), QHostAddress(QStringLiteral("91.108.4.5")));
+        if (ipHit != QStringLiteral("PROXY")) {
+            ok = false;
+            qWarning("selfTest FAIL: 带引号的 IP-CIDR 规则没命中 (got=%s)", qUtf8Printable(ipHit));
+        }
+        if (e3.match(QStringLiteral("nothing.example"), QHostAddress()) != QStringLiteral("FALLBACK")) {
+            ok = false;
+            qWarning("selfTest FAIL: 带引号的 MATCH 兜底没生效");
+        }
+    }
+
+    // —— matchEx 的「判定不了」语义（见 matchEx 注释）——
+    // ① 上面这张表里所有 IP 规则都带 no-resolve → 只有域名时它们被跳过，决策仍然是确定的：
+    //    needsResolve 必须恒为 false（否则等于把本可进程内的流量白白推回核心）。
+    {
+        const RuleEngine::MatchOutcome mo = e.matchEx(QStringLiteral("notgoogle.com"), QHostAddress());
+        if (mo.needsResolve || mo.target != QStringLiteral("FALLBACK")) {
+            ok = false;
+            qWarning("selfTest FAIL: no-resolve 的 IP 规则在无 ip 时应被跳过并落到 MATCH "
+                     "(got target=%s needsResolve=%d)",
+                     qUtf8Printable(mo.target), int(mo.needsResolve));
+        }
+    }
+    // ② 有一条**不带** no-resolve 的 IP 规则排在 MATCH 之前：只有域名时判不了 → needsResolve=true 且 target 空。
+    {
+        RuleEngine e2;
+        e2.setRulesFromLines(QStringList{
+            QStringLiteral("DOMAIN-SUFFIX,google.com,PROXY"),
+            QStringLiteral("GEOIP,CN,DIRECT"), // 不带 no-resolve：mihomo 会先解析再判
+            QStringLiteral("MATCH,FALLBACK"),
+        });
+        const RuleEngine::MatchOutcome amb = e2.matchEx(QStringLiteral("unknown-host.example"),
+                                                        QHostAddress());
+        if (!amb.needsResolve || !amb.target.isEmpty()) {
+            ok = false;
+            qWarning("selfTest FAIL: 不带 no-resolve 的 IP 规则在无 ip 时应报 needsResolve "
+                     "(got target=%s needsResolve=%d)",
+                     qUtf8Printable(amb.target), int(amb.needsResolve));
+        }
+        // ③ 命中更靠前的域名规则时不算歧义（那条 IP 规则排在后面，赢不了）。
+        const RuleEngine::MatchOutcome dec = e2.matchEx(QStringLiteral("www.google.com"),
+                                                        QHostAddress());
+        if (dec.needsResolve || dec.target != QStringLiteral("PROXY")) {
+            ok = false;
+            qWarning("selfTest FAIL: 更靠前的域名命中应直接判定 (got target=%s needsResolve=%d)",
+                     qUtf8Printable(dec.target), int(dec.needsResolve));
+        }
+        // ④ 给了 ip 就不存在歧义（IP 规则能真判）：CN 段的 IP 应落 DIRECT。
+        const RuleEngine::MatchOutcome withIp = e2.matchEx(QString(),
+                                                           QHostAddress(QStringLiteral("114.114.114.114")));
+        if (withIp.needsResolve) {
+            ok = false;
+            qWarning("selfTest FAIL: 有 ip 时不应报 needsResolve");
         }
     }
     return ok;

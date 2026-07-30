@@ -232,6 +232,9 @@ private:
     std::shared_ptr<RuleEngine> m_ruleEngine;   // 分流规则引擎（本单元备用；Rule 模式回退核心）
     // DNS 旁听器：交给网关装到 NetStack 上，学核心分配的 fake-ip → 域名（见 LanGateway::setCoastCore）。
     std::shared_ptr<DnsResolver> m_dnsResolver;
+    static QString groupFingerprint(const QHash<QString, QString> &m); // 组映射指纹（见 .cpp）
+
     QString m_ccMode;      // 上次构建时的模式（Rule/Global/Direct）——变了才热更新，避免每次轮询白重建
     QString m_ccSelected;  // 上次构建时的全局选中节点名
+    QString m_ccGroupFp;   // 上次构建时的「组→叶子」映射指纹（组内换节点也要触发重建）
 };

@@ -45,6 +45,9 @@ public:
     // 无网络往返。
     QString mode() const { return m_mode; }
     QString selectedNode() const { return m_selectedNode; }
+    // 「策略组 → 沿 now 链走到底的叶子（节点名或 DIRECT/REJECT）」的进程内快照，pollNodes 每轮刷新。
+    // CoastCore 的 Rule 模式据此把规则里的组名解析成能拨的东西（见 ProxyConfig::resolveTarget）。
+    QHash<QString, QString> groupLeafMap() const { return m_groupLeaf; }
     void setSelectedGroup(const QString &group);
     void setClearConnectionsOnSwitch(bool enabled);
     void selectNode(const QString &name);
@@ -111,6 +114,7 @@ private:
     QString m_secret;       // external-controller secret；空 = 不加鉴权头（兼容未设 secret 的老核心）
     QString m_selectedGroup; // 空 = 未定；首轮 pollNodes 选主组（按模式：Rule→🚀 节点选择, Global→GLOBAL）
     QString m_mode = "Rule";  // 当前代理模式，决定主选择组（对齐旧项目 getProxies）
+    QHash<QString, QString> m_groupLeaf; // 策略组 → 叶子（见 groupLeafMap）
     QString m_selectedNode;
     bool m_clearOnSwitch = true;
     bool m_autoTested = false; // 核心起来后自动测一次延迟（异步，非阻塞）；核心掉线后重置以便重测

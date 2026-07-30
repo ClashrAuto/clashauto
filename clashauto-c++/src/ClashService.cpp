@@ -515,12 +515,21 @@ void ClashService::pollNodes()
         QString groupName = m_selectedGroup;
         QJsonObject group = proxies.value(groupName).toObject();
         QStringList groups;
+        // 顺手维护「策略组 → 沿 now 链走到底的叶子」映射（复用上面的 resolveFinalName，零额外请求）。
+        // CoastCore 的 Rule 模式靠它把规则给出的**组名**（🎯 全球直连 / 🚀 节点选择 …）解析成能拨的
+        // 节点或 DIRECT/REJECT —— 没有它，进程内拨号永远 nodeByName 失配、整类回退核心。
+        QHash<QString, QString> groupLeaf;
         for (auto it = proxies.begin(); it != proxies.end(); ++it) {
             const QJsonObject candidate = it.value().toObject();
             if (!candidate.value("all").toArray().isEmpty()) {
                 groups.push_back(it.key());
+                const QString leaf = resolveFinalName(it.key());
+                if (!leaf.isEmpty() && leaf != it.key()) {
+                    groupLeaf.insert(it.key(), leaf);
+                }
             }
         }
+        m_groupLeaf = std::move(groupLeaf);
 
         if (group.value("all").toArray().isEmpty()) {
             // 主组按模式选（对齐旧项目 getProxies）：Global 用 GLOBAL；否则（Rule）用主选择组

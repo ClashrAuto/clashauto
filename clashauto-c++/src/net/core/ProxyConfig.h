@@ -14,6 +14,7 @@
 //       current() 拿到的已是新快照。新旧快照的生命周期各由自己的 shared_ptr 引用计数管理，最后一个
 //       持有者走完时旧快照自动释放 —— 全程没有一个读者被阻塞，也没有一条在途连接被打断。
 //   这正是 mihomo 热重载配置时「已建立的连接留用旧规则、新连接吃新规则」的等价物，只是搬进了本进程。
+#include <QHash>
 #include <QMutex>
 #include <QObject>
 #include <QString>
@@ -79,11 +80,48 @@ public:
         : m_nodes(std::move(nodes)), m_selected(std::move(selected)), m_mode(mode)
     {
     }
+    // 带「策略组 → 具体节点」映射的重载（Rule 模式要用它把规则给出的组名解析成能拨的东西）。
+    ProxyConfig(QVector<ProxyNode> nodes, QString selected, Mode mode,
+                QHash<QString, QString> groupToNode)
+        : m_nodes(std::move(nodes)), m_selected(std::move(selected)), m_mode(mode),
+          m_groupToNode(std::move(groupToNode))
+    {
+    }
 
     // —— 只读访问器 ——
     const QVector<ProxyNode> &nodes() const { return m_nodes; }
     const QString &selected() const { return m_selected; }
     Mode mode() const { return m_mode; }
+
+    // 把「规则/选择给出的名字」解析成**能拨的东西**。
+    // ★ 为什么需要：规则表里的 target 绝大多数是**策略组名**（本项目实测：`🎯 全球直连` 803 条、
+    //   `🚀 节点选择` 580 条、MATCH→`🐟 漏网之鱼`），而本快照只装节点。不解析的话 Rule 模式永远
+    //   nodeByName 失配 → 整类回退核心。映射由 ClashService 沿各组的 now 链走到叶子后灌进来。
+    // 规则：本身就是节点名 → 原样；是已知策略组 → 返回其叶子（可能是节点名或内建 DIRECT/REJECT）；
+    //       内建 DIRECT/REJECT → 原样（调用方自己决定 REJECT 怎么办）；都不是 → 空（调用方回退核心）。
+    QString resolveTarget(const QString &nameOrGroup) const
+    {
+        if (nameOrGroup.isEmpty()) {
+            return QString();
+        }
+        if (nameOrGroup == QStringLiteral("DIRECT") || nameOrGroup == QStringLiteral("REJECT")) {
+            return nameOrGroup;
+        }
+        if (nodeByName(nameOrGroup)) {
+            return nameOrGroup; // 已经是具体节点
+        }
+        const QString leaf = m_groupToNode.value(nameOrGroup);
+        if (leaf.isEmpty()) {
+            return QString(); // 不认识（组名未知/映射还没到）→ 让调用方回退核心
+        }
+        if (leaf == QStringLiteral("DIRECT") || leaf == QStringLiteral("REJECT")
+            || nodeByName(leaf)) {
+            return leaf;
+        }
+        return QString(); // 叶子既不是内建也不在节点表里（订阅刚变？）→ 回退核心
+    }
+
+    const QHash<QString, QString> &groupToNode() const { return m_groupToNode; }
 
     // 按名字查节点；找不到返回 nullptr（指向内部 QVector 的元素，快照不可变故指针在快照存活期内有效）。
     const ProxyNode *nodeByName(const QString &name) const
@@ -99,6 +137,8 @@ private:
     QVector<ProxyNode> m_nodes; // 全部可选出站节点（含内建 DIRECT）
     QString m_selected;         // 当前选中的节点名（Global 模式下的目标）
     Mode m_mode = Mode::Rule;
+    // 策略组/策略名 → 沿 now 链走到底的叶子（节点名或 DIRECT/REJECT）。见 resolveTarget。
+    QHash<QString, QString> m_groupToNode;
 };
 
 // 「当前生效的出站配置」的持有者 + 热重载入口。数据面读 current()，控制面调 reload()，两者靠原子换手交接。

@@ -93,8 +93,11 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
                 [this](const QVector<NodeInfo> &, const QString &selected) {
                     if (!m_coastCore)
                         return;
-                    if (selected == m_ccSelected && m_clash->mode() == m_ccMode)
-                        return; // 模式/选中都没变 → 无需重建（避免每轮轮询白重建）
+                    // 组映射也要比：用户在组内换了节点时 mode/selected 可能都没变，但 Rule 模式
+                    // 该拨的叶子已经不同了——不比这一项就会继续拨旧节点。
+                    if (selected == m_ccSelected && m_clash->mode() == m_ccMode
+                        && groupFingerprint(m_clash->groupLeafMap()) == m_ccGroupFp)
+                        return; // 三项都没变 → 无需重建（避免每轮轮询白重建）
                     refreshCoastCore();
                 });
     }
@@ -968,11 +971,15 @@ QStringList extractRuleLines(const QString &yaml)
         const QString trimmed = line.trimmed();
         if (trimmed.isEmpty() || trimmed.startsWith('#'))
             continue;
-        // 回到列首（下一个顶层键）→ rules 段结束。
-        if (!line.startsWith(' ') && !line.startsWith('\t'))
+        // ★ 段结束的判据必须是「**顶层新键**」= 列首 且 不是列表项。
+        //   之前写成「列首即结束」，而 ConfigBuilder 生成的 full.yaml 恰恰把 rules 的列表项写在
+        //   **列首**（`- IP-CIDR,10.0.0.0/8,DIRECT,no-resolve`，无缩进、无引号）→ 第一条就 break、
+        //   一条规则都取不到 → RuleEngine 表为空 → Rule 模式永远命中不了（真机诊断实测：target 恒空）。
+        //   种子 default.yaml 用的是另一种写法（缩进 + 带引号，target 含 emoji）——两种都得吃下。
+        if (!line.startsWith(' ') && !line.startsWith('\t') && !trimmed.startsWith('-'))
             break;
-        if (trimmed.startsWith(QStringLiteral("- ")))
-            out << trimmed.mid(2).trimmed();
+        if (trimmed.startsWith('-'))
+            out << trimmed.mid(1).trimmed(); // 去掉列表项的 '-'；外层引号由 RuleEngine::parseRule 剥
     }
     return out;
 }
@@ -998,15 +1005,34 @@ void DevicesController::rebuildCoastCoreConfig()
     else if (modeStr.compare(QStringLiteral("Direct"), Qt::CaseInsensitive) == 0)
         mode = ProxyConfig::Mode::Direct;
 
-    std::shared_ptr<const ProxyConfig> cfg = coastcore::buildProxyConfig(proxiesYaml, selected, mode);
+    std::shared_ptr<const ProxyConfig> base = coastcore::buildProxyConfig(proxiesYaml, selected, mode);
+    // 把「策略组 → 叶子节点」映射一并装进快照：Rule 模式的规则 target 绝大多数是**组名**
+    //（🎯 全球直连 / 🚀 节点选择 …），没这张表就 nodeByName 必失配、整类回退核心。
+    const QHash<QString, QString> groupLeaf = m_clash ? m_clash->groupLeafMap() : QHash<QString, QString>();
+    std::shared_ptr<const ProxyConfig> cfg =
+        base ? std::make_shared<const ProxyConfig>(base->nodes(), base->selected(), base->mode(),
+                                                   groupLeaf)
+             : base;
     m_pcfgStore->reload(cfg); // 原子换手：在途连接留旧快照，新连接吃新快照（无停顿热更新）
 
-    // 规则喂给引擎（备用；Rule 模式本单元回退核心）。
+    // 规则喂给引擎：Rule 模式的进程内路由**就靠它**（matchEx 判不了时回退核心，见 LanGateway 的 router）。
     if (m_ruleEngine)
         m_ruleEngine->setRulesFromLines(extractRuleLines(proxiesYaml));
 
     m_ccMode = modeStr;
     m_ccSelected = selected;
+    m_ccGroupFp = groupFingerprint(groupLeaf);
+}
+
+// 「策略组 → 叶子」映射的指纹：排序后拼串，用来判断这张表有没有变（每秒轮询都比一次，必须便宜）。
+QString DevicesController::groupFingerprint(const QHash<QString, QString> &m)
+{
+    QStringList parts;
+    parts.reserve(m.size());
+    for (auto it = m.constBegin(); it != m.constEnd(); ++it)
+        parts << (it.key() + QLatin1Char('') + it.value());
+    parts.sort();
+    return parts.join(QLatin1Char(''));
 }
 
 void DevicesController::refreshCoastCore()
