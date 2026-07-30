@@ -516,7 +516,12 @@ int QuicTransport::datagramMaxSendLength() const { return d->dgramMaxLen.loadAcq
 
 bool QuicTransport::keyingMaterialSupported()
 {
-#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+    // ★ 判据是 **COAST_HAVE_QUIC_KEYING**（由 CMake 真编译探测决定），不是 QUIC_API_ENABLE_PREVIEW_FEATURES。
+    //   踩过的坑：那个宏只是「请求打开 preview 分支」，**被定义 ≠ 这套 API 真的存在**——用 msquic 的
+    //   最新发布版 v2.5.9 真头编译（树莓派实测）时，即便定义了它，QUIC_KEYING_MATERIAL_CONFIG 与
+    //   QUIC_API_TABLE::ConnectionExportKeyingMaterial 依然**不存在**，于是整个 QuicTransport.cpp 编不过。
+    //   所以改成由 CMake 拿真头 try_compile 探一次，探到才定义 COAST_HAVE_QUIC_KEYING。
+#ifdef COAST_HAVE_QUIC_KEYING
     return true;
 #else
     return false;
@@ -526,7 +531,7 @@ bool QuicTransport::keyingMaterialSupported()
 QByteArray QuicTransport::exportKeyingMaterial(const QByteArray &label, const QByteArray &context,
                                                int outLen)
 {
-#ifdef QUIC_API_ENABLE_PREVIEW_FEATURES
+#ifdef COAST_HAVE_QUIC_KEYING
     const QUIC_API_TABLE *api = Api();
     if (!api || !d->conn || outLen <= 0)
         return {};
@@ -555,7 +560,9 @@ QByteArray QuicTransport::exportKeyingMaterial(const QByteArray &label, const QB
     Q_UNUSED(label);
     Q_UNUSED(context);
     Q_UNUSED(outLen);
-    return {}; // 编译期无 preview 特性 → TUIC token 不可用(见报告 TODO)
+    // 这套 exporter API 在当前 msquic 里不存在（v2.5.9 就没有；见 keyingMaterialSupported 的说明）→
+    // TUIC 的 token 导不出来。上层 TuicOutbound 会因 token.size()!=32 明确失败，而不是拿错 token 静默认证。
+    return {};
 #endif
 }
 

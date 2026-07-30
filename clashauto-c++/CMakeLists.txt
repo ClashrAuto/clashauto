@@ -338,8 +338,34 @@ if(COAST_HAVE_QUIC)
         src/net/core/proto/Hysteria2Outbound.cpp  src/net/core/proto/Hysteria2Outbound.h
         src/net/core/proto/TuicOutbound.cpp       src/net/core/proto/TuicOutbound.h)
     target_link_libraries(clashauto-qml PRIVATE msquic)
-    # TUIC token 用 ConnectionExportKeyingMaterial，需 msquic 的 preview 特性开关（>=2.6）。
     target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_QUIC QUIC_API_ENABLE_PREVIEW_FEATURES)
+
+    # TUIC 的 token 要 msquic 的 keying-material exporter。**别只靠 QUIC_API_ENABLE_PREVIEW_FEATURES
+    # 判断**——那个宏只表示「请求打开 preview 分支」，被定义 ≠ 这套 API 真的存在：拿最新发布版
+    # msquic v2.5.9 的真头编译（树莓派实测）时，即便定义了它，QUIC_KEYING_MATERIAL_CONFIG 与
+    # QUIC_API_TABLE::ConnectionExportKeyingMaterial 依然不存在，QuicTransport.cpp 直接编不过。
+    # 所以照 OpenSSL 那套「真试一次」的办法：能编过才定义 COAST_HAVE_QUIC_KEYING；
+    # 探不到时 TUIC 会在 token 长度检查处明确失败（Hysteria2 不受影响，它不用 exporter）。
+    include(CMakePushCheckState)
+    include(CheckCXXSourceCompiles)
+    cmake_push_check_state(RESET)
+    set(CMAKE_REQUIRED_LIBRARIES msquic)
+    set(CMAKE_REQUIRED_DEFINITIONS -DQUIC_API_ENABLE_PREVIEW_FEATURES)
+    check_cxx_source_compiles("
+        #include <msquic.h>
+        int main() {
+            QUIC_KEYING_MATERIAL_CONFIG cfg{};
+            const QUIC_API_TABLE *t = nullptr;
+            return (t && t->ConnectionExportKeyingMaterial && cfg.OutputLength) ? 0 : 1;
+        }
+    " COAST_QUIC_KEYING_OK)
+    cmake_pop_check_state()
+    if(COAST_QUIC_KEYING_OK)
+        target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_QUIC_KEYING)
+        message(STATUS "msquic keying-material exporter 可用 → TUIC token 可导出")
+    else()
+        message(STATUS "msquic 无 keying-material exporter → TUIC 认证不可用(Hysteria2 不受影响)")
+    endif()
 endif()
 
 target_compile_options(clashauto-qml PRIVATE
