@@ -232,6 +232,16 @@ struct GwNic {
             return learnedRouterMac6;
         return spec.gatewayMac;
     }
+    // dst16 是不是我们**正在投毒的路由器链上全局地址**之一（= learnedRdnss6，设备的 v6 DNS）。
+    // 它是 v4 侧 `dst != gatewayIp4` 的 v6 对应物：这些地址落在链上前缀内，会被「同前缀旁路」误伤，
+    // 必须在旁路之前单独放行。集合最多 8 个（kMaxRouterExtra），逐条 memcmp 的代价可以忽略。
+    bool isPoisonedRouterAddr6(const uchar *dst16) const
+    {
+        for (const QByteArray &a : learnedRdnss6)
+            if (a.size() == 16 && std::memcmp(dst16, a.constData(), 16) == 0)
+                return true;
+        return false;
+    }
     bool ready = false;      // ep 已打开且 netif 已挂上协议栈
     int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
     int order = 0;           // configure 传入的 specs 次序（LanScanner 保证 index 0 = 主网卡）。
@@ -921,8 +931,15 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     // 同前缀（同一 /64 内的另一台 LAN 设备的全局地址）也旁路——否则本机会把设备间的
                     // LAN 内 v6 直连也终结掉。仅在前缀已知时生效；未知时无法判定，只能放行进栈
                     //（记录在案：prefix6 发现失败的少见情况下，全局-到-全局的 LAN 内 v6 会被误代理）。
+                    // ★ 但**发往路由器自身链上全局地址的帧必须放行进栈**（v4 侧 `dst != gatewayIp4`
+                    //   的 v6 对应物）。设备的 v6 DNS 服务器正是这个地址（RA 的 RDNSS 给的，本例
+                    //   240e:…:bbc3::1），而它当然落在链上 /64 前缀内 —— 少这一条，NDP 投毒把 DNS
+                    //   查询的帧成功引到本机之后，会在这里被「同前缀旁路」原地丢掉：既不喂 lwIP、也
+                    //   不进 NetStack::handleUdpFrame6，于是 answerDnsLocally 根本没被调到，设备侧
+                    //   表现为 dig 超时而网关侧诊断一片安静（真机实证 dns=0/dnsLocal=0/0）。
                     if (n->prefix6Len >= 0 && ip6Len >= 40
-                        && ip6InPrefix(p6 + 24, n->prefix6Net, n->prefix6Len))
+                        && ip6InPrefix(p6 + 24, n->prefix6Net, n->prefix6Len)
+                        && !n->isPoisonedRouterAddr6(p6 + 24))
                         return;
                     ++GatewayDiag::c.fedLwip;
                     if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
