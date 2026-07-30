@@ -1150,7 +1150,12 @@ LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl)
     connect(d->worker, &GatewayWorker::deviceError, this, &LanGateway::deviceError);
     connect(d->worker, &GatewayWorker::statusChanged, this, &LanGateway::statusChanged);
     connect(d->worker, &GatewayWorker::securityAlert, this, &LanGateway::securityAlert);
-    d->thread->start();
+    // 数据面线程抬到 HighPriority：lwIP 泵 + 二层收发是每包都要及时跑的热路径,被 GUI/其它线程抢占
+    // 会直接表现为泵迟到(GatewayDiag 的 pumpLag/maxLagMs 上涨 → 吞吐掉、延迟抖)。抬优先级把这类
+    // 「本机算得过来却没被调度上」的迟到压下去。best-effort:Linux 上无 RT 权限时 Qt 退化为普通 nice
+    // 调整、不失败;不用 TimeCriticalPriority(会过度饿死其它线程)。真正的「单线程 lwIP 是否成为 CPU
+    // 天花板」要靠 Pi 台按 pumpLag 实测后再决定是否投入更重的降本(见提交说明)。
+    d->thread->start(QThread::HighPriority);
 }
 
 LanGateway::~LanGateway()
