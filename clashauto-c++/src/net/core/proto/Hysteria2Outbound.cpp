@@ -881,8 +881,11 @@ void Hysteria2OutboundUdp::associate(const QString &)
 
 void Hysteria2OutboundUdp::sendTo(const QHostAddress &dstIp, quint16 dstPort, const QByteArray &payload)
 {
-    if (!d->ready || !d->quic)
+    if (!d->ready || !d->quic) {
+        if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+            fprintf(stderr, "[HY2] sendTo 丢弃: ready=%d quic=%d\n", int(d->ready), d->quic ? 1 : 0);
         return;
+    }
     const QByteArray addr = hostPortString(dstIp, dstPort);
     const quint16 pktId = d->nextPktId++;
 
@@ -905,6 +908,10 @@ void Hysteria2OutboundUdp::sendTo(const QHostAddress &dstIp, quint16 dstPort, co
         dg += addrLenVi;
         dg += addr;
         dg += part;
+        if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+            fprintf(stderr, "[HY2] UDP→ sid=%u pkt=%u frag=%u/%u addr=%s len=%d dg=%s\n",
+                    unsigned(d->sessionId), unsigned(pktId), unsigned(fragId), unsigned(fragCount),
+                    addr.constData(), int(dg.size()), dg.left(24).toHex(' ').constData());
         d->quic->sendDatagram(dg);
     };
 

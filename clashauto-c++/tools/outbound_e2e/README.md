@@ -58,6 +58,10 @@ VLESS   PASS  est=1 bytes=1670  status='HTTP/1.1 200 OK'
   必须给 certificate + private-key（本台就是这么做的，出站侧 `tls=true` + `skipCertVerify=true`）。
 - 远端别用 `pkill -f "<含 /tmp/nodesrv 的串>"` 停服务：那个模式会**匹配到自己这条 ssh 命令行**、
   把当前 shell 一起杀掉（表现为命令莫名截断）。用 `systemctl stop <unit>`。
+- **harness 自己的坑**：用例的超时守卫不能用 `QTimer::singleShot(ms, lambda捕获&loop)` ——
+  用例提前成功后它并不会被取消，稍后会在**下一个用例**的事件循环里触发，去 quit 一个早已析构的
+  `QEventLoop` → **段错误**。加了耗时更长的 UDP 用例后才炸出来（栈顶是 `QEventLoop::exit`，
+  第 1 帧却是上一个用例的 lambda）。改用**栈上的 QTimer**，随本帧销毁而取消。
 
 ## 覆盖范围
 
@@ -68,7 +72,8 @@ VLESS   PASS  est=1 bytes=1670  status='HTTP/1.1 200 OK'
 | Trojan (over TLS) | ✅ 已验 |
 | VLESS (over TLS) | ✅ 已验 |
 | REALITY (自建 TLS1.3 + uTLS) | ✅ 已验（对真 xray 25.6.8；**dest 必须支持 TLS 1.3**，见下） |
-| Hysteria2 (QUIC + HTTP/3 认证) | ✅ 已验（对**官方 hysteria 2.10.0 服务端**；不能拿 mihomo 当服务端，见下） |
+| Hysteria2 TCP (QUIC + HTTP/3 认证) | ✅ 已验（对**官方 hysteria 2.10.0 服务端**；不能拿 mihomo 当服务端，见下） |
+| Hysteria2 UDP (QUIC 数据报中继) | ✅ 已验（经中继查真 DNS，校验 ID/QR/ANCOUNT） |
 | TUIC | ⛔ 上游卡住：token 要 msquic 的 keying-material exporter，**msquic 最新发行版 v2.5.9 没有**（见下） |
 | VLESS over ws/grpc | ❌ 未覆盖（ws 传输本身有独立实现，grpc 尚未实现） |
 
@@ -97,7 +102,22 @@ cmake -B build -G Ninja -DCOAST_MSQUIC_ROOT=/opt/msquic && cmake --build build
 LD_LIBRARY_PATH=/opt/msquic/lib ./build/obh
 ```
 
-期望：`QPACK PASS` + `HY2 PASS`（TUIC 见下，会 SKIP）。
+期望：`QPACK PASS` + `HY2 PASS` + `HY2UDP PASS`（TUIC 见下，会 SKIP）。
+
+`HY2UDP` 是经 Hy2 的 UDP 中继向真 DNS 服务器（默认 223.5.5.5，可用 `./build/obh <dns-ip>` 覆盖）
+发一条查询，校验回包的 ID/QR/ANCOUNT —— 一次同时验了「请求出得去」和「回包按源地址还原得回来」。
+
+排 UDP 问题时的参照（**先确认它是绿的再怀疑自己**）：官方 hysteria 客户端自带 UDP 转发，
+```yaml
+# hy2cli.yaml
+server: 127.0.0.1:18395
+auth: hy2pass123
+tls: { sni: test.local, insecure: true }
+udpForwarding:
+  - { listen: 127.0.0.1:15353, remote: 223.5.5.5:53 }
+```
+`./hysteria client -c hy2cli.yaml` 然后 `dig www.baidu.com @127.0.0.1 -p 15353`，
+服务端应打出 `UDP request ... reqAddr: 223.5.5.5:53`。
 
 ### ★★ 坑一：msquic 的 2^60 off-by-one —— **不能拿 mihomo/sing-box 当 hy2 服务端**
 
@@ -134,7 +154,18 @@ LD_LIBRARY_PATH=/opt/msquic/lib ./build/obh
    修法：显式设 `PeerUnidiStreamCount=16`（双向仍保持 0），并**接住**对端开过来的流（`sDrainPeerStream`）。
 2. **QPACK 解码碰到解不开的 Huffman 就整块放弃**。hysteria 的认证响应里有 `Hysteria-UDP` 这类头，
    排在 `:status` 前面 → 整个字段块解析失败。修法：内容解不开**不算结构错**，按长度跳过继续找。
-3. **Huffman 数字表写错**（最隐蔽的一个）。原实现假设 `'0'..'9'` 都是 5 位码、码值等于数字 ——
+3. **QUIC 数据报的 QUIC_BUFFER 放在了栈上**（UDP 不通的真凶，最难查的一个）。
+   msquic 要求「载荷 **和 QUIC_BUFFER 数组本身**」都活到发送完成 —— `QuicStream::send` 早就把两者
+   一起放进堆上的 `SendCtx` 了，唯独 `sendDatagram` 只把载荷放堆上、`QUIC_BUFFER` 留在栈里。
+   函数一返回栈被复用，msquic 按那个指针取 Buffer/Length，**发出去的是垃圾**。
+   现象为什么这么难查：QUIC 层一切正常（`DatagramSend` 返回成功，msquic 还报告对端 **ACK 了**），
+   而 hysteria2 服务端的 `ParseUDPMessage` 解不开就**静默跳过**（官方代码注释原文：
+   "Invalid message, this is fine - just wait for the next"）→ **两头都没有一行日志**，
+   只表现为「UDP 就是不通」。
+   定位路径：`COAST_HY2_DEBUG` 确认我们确实发了、字节也对 → `COAST_QUIC_DEBUG` 确认数据报被 ACK
+   → 官方 hysteria 客户端做参照（`udpForwarding` + dig）确认服务端 UDP 是好的 → 只剩「我们发的
+   内容不是我们以为的内容」这一种可能 → 查生命周期。
+4. **Huffman 数字表写错**（最隐蔽的一个）。原实现假设 `'0'..'9'` 都是 5 位码、码值等于数字 ——
    但 RFC 7541 附录 B 里 5 位码只有 `'0''1''2'`，接着是 `'a''c''e''i''o''s''t'`；`'3'..'9'` 是 **6 位**码。
    于是 hy2 认证成功回的 `:status=233`（Huffman 编码 `13 2c ff`）被解成失败，
    **服务端日志明明写着 `client connected`，客户端却报 `auth rejected (status=-1)`**。

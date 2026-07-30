@@ -6,6 +6,8 @@
 #include <QMutex>
 #include <QPointer>
 
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 
 #include <msquic.h>
@@ -61,6 +63,24 @@ private:
 };
 
 inline const QUIC_API_TABLE *Api() { return MsQuicLib::instance().api(); }
+
+// COAST_QUIC_DEBUG=1 → 把 QUIC 层「静默发生」的事(数据报被丢、协商状态)打到 stderr。
+bool quicDbgOn()
+{
+    static const bool on = qEnvironmentVariableIsSet("COAST_QUIC_DEBUG");
+    return on;
+}
+void quicDbg(const char *fmt, ...)
+{
+    if (!quicDbgOn())
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "[QUIC] ");
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+    va_end(ap);
+}
 
 } // namespace
 
@@ -344,6 +364,13 @@ public:
     QAtomicInt dgramSendEnabled{0};
     QAtomicInteger<int> dgramMaxLen{0};
 
+    // 一次 DatagramSend 的挂起上下文。★ QUIC_BUFFER 必须和载荷一起放在这里（堆上），
+    //   msquic 在发送完成前会一直引用这个数组 —— 放栈上就是 use-after-free（见 sendDatagram）。
+    struct DgramCtx {
+        QByteArray data;
+        QUIC_BUFFER buf;
+    };
+
     template <typename F>
     void post(F &&fn)
     {
@@ -420,13 +447,17 @@ public:
             const int maxLen = int(ev->DATAGRAM_STATE_CHANGED.MaxSendLength);
             dgramSendEnabled.storeRelease(en ? 1 : 0);
             dgramMaxLen.storeRelease(maxLen);
+            quicDbg("数据报协商: sendEnabled=%d maxSendLength=%d", int(en), maxLen);
             post([this, en, maxLen] { emitDgramState(en, maxLen); });
             break;
         }
         case QUIC_CONNECTION_EVENT_DATAGRAM_SEND_STATE_CHANGED: {
             // 发送侧数据报的持有缓冲(sendDatagram 里 new 的 QByteArray)在其状态终结时释放。
+            quicDbg("数据报发送状态: %d (0=SENT 1=LOST_SUSPECT 2=LOST_DISCARDED 3=ACKED "
+                    "4=ACKED_SPURIOUS 5=CANCELED)",
+                    int(ev->DATAGRAM_SEND_STATE_CHANGED.State));
             if (QUIC_DATAGRAM_SEND_STATE_IS_FINAL(ev->DATAGRAM_SEND_STATE_CHANGED.State)) {
-                auto *hold = static_cast<QByteArray *>(ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
+                auto *hold = static_cast<DgramCtx *>(ev->DATAGRAM_SEND_STATE_CHANGED.ClientContext);
                 delete hold;
             }
             break;
@@ -605,21 +636,35 @@ QuicStream *QuicTransport::openUniStream() { return createStream(true); }
 void QuicTransport::sendDatagram(const QByteArray &payload)
 {
     const QUIC_API_TABLE *api = Api();
-    if (!api || !d->conn || d->dgramSendEnabled.loadAcquire() == 0)
+    if (!api || !d->conn || d->dgramSendEnabled.loadAcquire() == 0) {
+        // ★ 丢包路径**不能全是静默的**：Hy2/TUIC 的 UDP 全走数据报，一旦这里悄悄丢，
+        //   现象是「UDP 就是不通、两头都没日志」。COAST_QUIC_DEBUG=1 打开可见。
+        quicDbg("sendDatagram 丢弃: conn=%d 已协商=%d len=%d", d->conn ? 1 : 0,
+                int(d->dgramSendEnabled.loadAcquire()), int(payload.size()));
         return;
+    }
     const int maxLen = d->dgramMaxLen.loadAcquire();
-    if (maxLen > 0 && payload.size() > maxLen)
+    if (maxLen > 0 && payload.size() > maxLen) {
+        quicDbg("sendDatagram 丢弃: 超长 len=%d > max=%d", int(payload.size()), maxLen);
         return; // 超长:UDP 语义直接丢(上层可自行分片, 见 Hy2/TUIC 的分片逻辑)
-    // 数据报也要求缓冲活到发送完成:复用一个持有 QByteArray 的上下文, 在连接回调的
-    // DATAGRAM_SEND_STATE_CHANGED(final) 里释放。此处为简洁用一次性 new+主动 leak-safe:
-    auto *hold = new QByteArray(payload);
-    QUIC_BUFFER buf;
-    buf.Buffer = reinterpret_cast<uint8_t *>(const_cast<char *>(hold->constData()));
-    buf.Length = uint32_t(hold->size());
-    // ClientSendContext = hold;缓冲在 handleConnEvent 的 DATAGRAM_SEND_STATE_CHANGED(final) 里释放。
-    const QUIC_STATUS st = api->DatagramSend(d->conn, &buf, 1, QUIC_SEND_FLAG_NONE, hold);
-    if (QUIC_FAILED(st))
+    }
+    // ★★ 数据报要求「载荷 **和 QUIC_BUFFER 数组本身**」都活到发送完成。
+    //   曾经这里的 QUIC_BUFFER 是**栈变量**，只把 QByteArray 放到了堆上 —— 函数一返回，栈就被复用，
+    //   msquic 之后按那个指针去取 Buffer/Length，发出去的是垃圾。
+    //   真机现象极其难查：QUIC 层一切正常(DatagramSend 成功、对端还 ACK 了)，但 hysteria2 服务端的
+    //   ParseUDPMessage 解不开就**静默跳过**(官方实现注释写着 "Invalid message, this is fine")，
+    //   于是两头都没有任何日志，表现为「UDP 就是不通」。
+    //   正确做法与 QuicStream::send 的 SendCtx 一致：QUIC_BUFFER 与载荷放在同一个堆上下文里，
+    //   在 DATAGRAM_SEND_STATE_CHANGED(final) 里一起释放。
+    auto *hold = new Priv::DgramCtx;
+    hold->data = payload; // 隐式共享
+    hold->buf.Buffer = reinterpret_cast<uint8_t *>(const_cast<char *>(hold->data.constData()));
+    hold->buf.Length = uint32_t(hold->data.size());
+    const QUIC_STATUS st = api->DatagramSend(d->conn, &hold->buf, 1, QUIC_SEND_FLAG_NONE, hold);
+    if (QUIC_FAILED(st)) {
+        quicDbg("DatagramSend 失败: status=0x%x len=%d", unsigned(st), int(hold->data.size()));
         delete hold;
+    }
 }
 
 bool QuicTransport::datagramSendEnabled() const { return d->dgramSendEnabled.loadAcquire() != 0; }
