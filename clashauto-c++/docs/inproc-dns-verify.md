@@ -27,8 +27,36 @@ NETSTACK fakeip 198.18.0.4 -> www.baidu.com   ← 我们自己发的假 IP，acc
 把设备钉到 v4 DNS（`resolvectl dns ens18 192.168.20.1`）后才有了上面那些数字。
 
 这不是本次改动引入的问题（`dns=0` 证明旧路径同样从未生效），但它是「完全替换 mihomo」路上一个
-独立的真缺口：**双栈环境里 fake-ip 分流对这类设备直接失效**。要么让 v6 的 NDP 投毒覆盖 DNS 流量，
-要么在 RA/DHCPv6 里把自己宣告成 DNS。
+独立的真缺口：**双栈环境里 fake-ip 分流对这类设备直接失效**。
+
+### 根因（已定位到代码，未修）
+
+`NdpSpoofer` **只投毒路由器的链路本地地址**：
+
+- `sendSpoof()` / `heal()` 发的 NA，Target Address 恒为 `m_routerLL`；
+- `answerNeighborSolicit()` 更是明确拒绝：`if (memcmp(f + kOffNsTarget, m_routerLL, 16) != 0) return;`
+  —— 只抢答针对 LL 的 NS。
+
+而设备的 DNS 服务器是路由器的**全局**地址（本例 `240e:3a1:7ed1:bbc3::1`，来自 RA 的 RDNSS/DHCPv6）。
+那是个**链上（on-link）地址**，设备**不会**经默认路由器转发，而是直接 NS 解析它 →
+我们不应答 → 真路由器应答 → **这条流量整段绕过网关**。
+
+注意影响面**不止 DNS**：任何发往路由器全局地址的流量（路由器 Web 管理页、它自身跑的服务）
+都同样绕过。一般上网流量不受影响——那些是 off-link，走默认路由器，而默认路由器的地址来自 RA
+的**源地址（链路本地）**，正好在我们已投毒的范围内。
+
+### 修法（下次直接开工）
+
+拓扑结构里目前**没有** `routerGlobal6` 字段（`NicSpec` 只有 `routerLinkLocal6` / `routerMac6` /
+`localGlobal6` / `prefix6`），所以要**学**：
+
+1. 旁听线上的 NA/NS，**源 MAC == `m_routerMac`** 的帧所声称的 Target Address，记为"也是路由器的地址"；
+2. 把这些地址加入投毒集合：`answerNeighborSolicit` 对它们同样抢答，周期 NA 也为它们各发一份；
+3. `heal()` 时同样要把它们还原回真路由器 MAC ——**否则撤劫持后设备会连不上路由器本身**，
+   这一条务必和 LL 走同一套还原路径（v4 侧的教训见 memory 里"重启后代理恢复四修"那条）。
+
+风险点：投毒集合会随网络里出现的地址增长，需要设上限并只接受**本网卡前缀内**的地址，
+避免被伪造 NA 喂进无关地址。
 
 ### 2. 策略组解析不出叶子 → 绝大多数连接仍回退核心
 
