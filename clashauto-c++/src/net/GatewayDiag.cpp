@@ -165,12 +165,16 @@ void GatewayDiag::sample(const QString &extra)
     line += QStringLiteral(" upThrottle=%1 downPause=%2")
                 .arg(d(c.upThrottleHits, g_prev.upThrottleHits))
                 .arg(d(c.downPauseHits, g_prev.downPauseHits));
-    line += QStringLiteral(" udpNew=%1 udpEvict=%2 dns=%3 dnsNoReply=%4 fakeipResolved=%5")
+    // dnsLocalFake/dnsLocalForward：进程内 DNS 的两栏。前者 >0 = DNS 已不经 mihomo。
+    line += QStringLiteral(" udpNew=%1 udpEvict=%2 dns=%3 dnsNoReply=%4 fakeipResolved=%5"
+                           " dnsLocal=%6/%7")
                 .arg(d(c.udpFlowsCreated, g_prev.udpFlowsCreated))
                 .arg(d(c.udpFlowsEvicted, g_prev.udpFlowsEvicted))
                 .arg(d(c.dnsHijacked, g_prev.dnsHijacked))
                 .arg(d(c.dnsNoReply, g_prev.dnsNoReply))
-                .arg(d(c.dnsFakeIpResolved, g_prev.dnsFakeIpResolved));
+                .arg(d(c.dnsFakeIpResolved, g_prev.dnsFakeIpResolved))
+                .arg(d(c.dnsLocalFake, g_prev.dnsLocalFake))
+                .arg(d(c.dnsLocalForward, g_prev.dnsLocalForward));
     line += QStringLiteral(" pump=%1 late=%2 maxLagMs=%3")
                 .arg(d(c.pumpTicks, g_prev.pumpTicks))
                 .arg(d(c.pumpLateTicks, g_prev.pumpLateTicks))

@@ -50,6 +50,11 @@ public:
     // 故跨线程共享安全；本 NetStack 所属线程调用即可。
     void setDnsLearner(std::shared_ptr<DnsResolver> learner);
 
+    // 进程内 DNS 开关：开 = 设备的 :53 查询由**我们自己**答（fake-ip 当场合成，其余转发上游），
+    // 关 = 老行为（转投 mihomo 的 fake-ip DNS）。这是「网关整条数据面不再依赖 mihomo」的最后一环 ——
+    // 在此之前，即便进程内出站开着，DNS 仍然恒走核心。需要 setDnsLearner 装过解析器才生效。
+    void setLocalDnsEnabled(bool on);
+
     // 换出站工厂（取得所有权：delete 掉旧的，存下新的）。默认工厂 = 构造时按 socksPort 建的
     // Socks5OutboundFactory（全走 mihomo）。CoastCore 落地后由 CoreController 装一个 CoreDialerFactory
     //（内部包着 Socks5OutboundFactory 做回退），从而把「按目的地/设备选出站」接进来。
@@ -96,10 +101,19 @@ private:
     // v4/v6 共用：回程 UDP 到设备。按会话记录的 v4/v6 走对应的封包/校验和。
     void onUdpResponse(const QString &victimIp, quint16 vport, const QHostAddress &fromIp,
                        quint16 fromPort, const QByteArray &payload);
-    // DNS 劫持：把设备的 :53 查询转投 mihomo 的 DNS(127.0.0.1:1053) 而非原样中继到设备配置的 DNS
-    //（常是网关/路由器 IP，经用户态栈中继到它走不通 → 名字解析时断时通）。见 .cpp。v6=true 按 v6 回封。
-    void hijackDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
-                   const QByteArray &query, bool v6);
+    // DNS 转发：把设备的 :53 查询发给 upstream，应答**源地址伪装成设备原本查的那台 DNS**
+    //（origServer:53）回封给它 —— 对设备完全透明。两种上游：
+    //   · 默认 127.0.0.1:1053 = mihomo 的 fake-ip DNS（未开进程内 DNS 时的老行为）；
+    //   · 进程内 DNS 开着但本地答不了（看不懂的报文/不该 fake 的域名）时 = origServer:53 直发，
+    //     这条路**完全不经 mihomo**。原样中继给设备配置的 DNS 走用户态栈不通，但从宿主发是通的。
+    void forwardDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
+                    const QByteArray &query, bool v6, const QHostAddress &upstream,
+                    quint16 upstreamPort);
+
+    // 进程内 DNS：自己出应答（该走代理的域名当场发 fake-ip），不再投给 mihomo。
+    // 返回 true = 已处理；false = 没接管（调用方按老路转投核心）。
+    bool answerDnsLocally(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
+                          const QByteArray &query, bool v6);
 
     Impl *d;
 };

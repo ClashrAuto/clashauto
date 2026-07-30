@@ -99,8 +99,12 @@ public:
         // —— UDP ——
         qint64 udpFlowsCreated;
         qint64 udpFlowsEvicted; // 撞上限被淘汰（可能是活流被顶掉 → QUIC 莫名卡住）
-        qint64 dnsHijacked;     // 转投 mihomo DNS 的查询数
+        qint64 dnsHijacked;     // 转投上游 DNS 的查询数（本地模式下上游=设备原本查的那台；否则=mihomo）
         qint64 dnsNoReply;      // 5s 兜底回收时仍没等到应答
+        // —— 进程内 DNS（coastcore 开着时接管 :53，见 NetStack::answerDnsLocally）——
+        // 这两栏 >0 就说明「DNS 这一环已经不经 mihomo」；一直是 0 = 还在走核心的 fake-ip。
+        qint64 dnsLocalFake;    // 本地当场合成 fake-ip 应答的查询数（含给 AAAA 回 NODATA 的）
+        qint64 dnsLocalForward; // 本地看不懂/不该 fake → 转发给上游的查询数
         // 由旁听到的 DNS 映射把 fake-ip 目的地成功改写成域名的连接数（见 NetStack 的 accept）。
         // 它 >0 才说明「域名类流量真的能进进程内出站」；一直是 0 = 改写没生效，域名类还在回退核心。
         qint64 dnsFakeIpResolved;

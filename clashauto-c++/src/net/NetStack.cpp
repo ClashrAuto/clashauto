@@ -1,6 +1,7 @@
 #include "NetStack.h"
 #include "IL2Endpoint.h"
 #include "Socks5Client.h"
+#include "core/DnsMessage.h"  // DNS 报文层：解析设备查询 / 合成 fake-ip 应答
 #include "core/DnsResolver.h" // 旁听核心分配的 fake-ip，accept 时把假 IP 目的地改写成域名
 
 #include <QDebug>
@@ -164,6 +165,9 @@ constexpr qint64 kUdpDnsIdleMs = 15000;
 // 被劫持设备的 UDP :53 查询不再原样中继到「设备配置的 DNS（常是网关/路由器 IP，经用户态栈中继到
 // 它走不通 → 名字解析时断时通）」，而是转投 mihomo 自己的 fake-ip DNS，走它的国内外分流后再回封给设备。
 constexpr quint16 kDnsHijackPort = 1053;
+// 我们自己发的 fake-ip 应答的 TTL。取小值：换节点/改规则后设备能较快换用新映射；
+// 又不能太小，否则设备每条连接前都重查一次 DNS，白白多一轮往返。
+constexpr quint32 kFakeIpTtlSec = 60;
 
 // lwIP 定时器泵的周期，以及「UDP 流老化 + 内存池诊断」相对它的分频比（详见 NetStack::init）。
 // 25ms × 8 = 200ms，老化/诊断的实际节奏与改动前一致。
@@ -247,6 +251,8 @@ struct NetStack::Impl {
     OutboundFactory *factory = nullptr;
     // DNS 旁听器（可空）：学核心分配的 fake-ip → 域名，供 accept 改写拨号目标（见 setDnsLearner）。
     std::shared_ptr<DnsResolver> dnsLearner;
+    // 进程内 DNS 开关（见 setLocalDnsEnabled）。关 = 老行为：:53 全部转投 mihomo。
+    bool localDns = false;
     NetStack *owner = nullptr;
     struct tcp_pcb *listener = nullptr;
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的 netif 上下文
@@ -860,7 +866,11 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
     if (g_impl->dnsLearner) {
         const QHostAddress dstAddr(serverIp);
         if (!dstAddr.isNull() && DnsResolver::isFakeIp(dstAddr)) {
-            const QString learned = g_impl->dnsLearner->domainForLearnedIp(dstAddr);
+            // 先问「是不是我们自己发出去的假 IP」（进程内 DNS 模式），再问旁听 mihomo 学来的。
+            // 两者是不同的表：前者由 fakeFor() 分配，后者从核心的应答里学 —— 同时开着时都要认。
+            QString learned = g_impl->dnsLearner->domainForFake(dstAddr);
+            if (learned.isEmpty())
+                learned = g_impl->dnsLearner->domainForLearnedIp(dstAddr);
             if (!learned.isEmpty()) {
                 dialHost = learned;
                 ++GatewayDiag::c.dnsFakeIpResolved;
@@ -1181,6 +1191,11 @@ NetStack::~NetStack()
 void NetStack::setDnsLearner(std::shared_ptr<DnsResolver> learner)
 {
     d->dnsLearner = std::move(learner);
+}
+
+void NetStack::setLocalDnsEnabled(bool on)
+{
+    d->localDns = on;
 }
 
 void NetStack::setOutboundFactory(OutboundFactory *f)
@@ -1565,11 +1580,14 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         d->udp.insert(srcIp, s);
     }
 
-    // ★ DNS 劫持：设备的 :53 查询转投 mihomo 的 fake-ip DNS（见 kDnsHijackPort / hijackDns），
+    // ★ DNS：进程内 DNS 开着时由 answerDnsLocally 当场答（fake-ip），否则转投 mihomo 的 fake-ip DNS，
     //   不建 UdpFlow、不原样中继到「设备配置的 DNS」（常是网关/路由器 IP，经用户态栈中继到它走不通
     //   → 名字解析时断时通）。回封的源地址伪装成设备原本查询的那个 DNS（dstIpV4:53），设备才收。
     if (dport == 53) {
-        hijackDns(srcIp, sport, QHostAddress(dstIpV4), payload, false);
+        // 进程内 DNS 开着就自己答（fake-ip 当场合成）；没接管才按老路转投 mihomo。
+        if (!answerDnsLocally(srcIp, sport, QHostAddress(dstIpV4), payload, false))
+            forwardDns(srcIp, sport, QHostAddress(dstIpV4), payload, false,
+                       QHostAddress(QStringLiteral("127.0.0.1")), kDnsHijackPort);
         return;
     }
 
@@ -1679,9 +1697,11 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
         d->udp.insert(srcIp, s);
     }
 
-    // DNS 劫持（v6，与 v4 同）：设备 :53 转投 mihomo 的 DNS，回封源伪装成设备查询的那个 v6 DNS。
+    // DNS（v6，与 v4 同）：进程内 DNS 开着就自己答，否则转投 mihomo。回封源伪装成设备查询的那个 v6 DNS。
     if (dport == 53) {
-        hijackDns(srcIp, sport, dstAddr, payload, true);
+        if (!answerDnsLocally(srcIp, sport, dstAddr, payload, true))
+            forwardDns(srcIp, sport, dstAddr, payload, true,
+                       QHostAddress(QStringLiteral("127.0.0.1")), kDnsHijackPort);
         return;
     }
 
@@ -1776,8 +1796,78 @@ void NetStack::onUdpResponse(const QString &victimIp, quint16 vport, const QHost
 // 源地址伪装成设备原本查询的那个 DNS 服务器(origServer:53)——对设备完全透明，于是设备拿到的是 mihomo
 // 的 fake-ip 结果，随后连 fake-ip 又经网关回到 mihomo，按国内外分流。用一次性 QUdpSocket（一问一答，
 // 5s 兜底回收），不建 UdpFlow。应答到达时按 victimIp **重新查** UdpSess（防设备中途被摘除留下的悬垂）。
-void NetStack::hijackDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
-                         const QByteArray &query, bool v6)
+// —————————————————————— 进程内 DNS ——————————————————————
+// 设备的 :53 查询由**我们自己**答，不再投给 mihomo —— 这是「网关整条数据面不依赖核心」的最后一环。
+//
+// 判定很保守，三条一起构成安全底线（拿不准就转发上游，绝不自作主张）：
+//   ① 报文看不懂（多问题段/压缩指针/非标准查询/截断）→ 转发；
+//   ② 不是 A/AAAA、或不是 IN 类 → 转发（MX/TXT/SRV/PTR 这些我们没有答案）；
+//   ③ 域名不像"公网域名"→ 转发。**这条最要紧**：给 .local/.lan/单标签主机名发 fake-ip 会让
+//      局域网设备互访、打印机发现、mDNS 这类**当场坏掉**，而它们本来就该走本地 DNS。
+// 剩下的（公网域名的 A 查询）当场合成 fake-ip 应答：设备随后连这个假 IP，栈在 accept 时用
+// domainForFake() 反查回域名交给出站按域名去连 —— 全程零外部依赖、零往返，比转投核心还快一跳。
+// AAAA 回 NODATA（不是 NXDOMAIN，见 DnsMessage.h 的说明）让设备回落 v4，从而也走 fake-ip。
+static bool looksLikePublicDomain(const QString &name)
+{
+    if (name.isEmpty() || !name.contains(QLatin1Char('.')))
+        return false; // 单标签主机名（"nas"、"printer"）= 局域网名字
+    static const char *kLocalSuffix[] = { ".local", ".lan", ".home", ".internal", ".localdomain",
+                                          ".arpa", ".invalid", ".test", ".example" };
+    for (const char *suf : kLocalSuffix) {
+        if (name.endsWith(QLatin1String(suf)))
+            return false;
+    }
+    return true;
+}
+
+bool NetStack::answerDnsLocally(const QString &victimIp, quint16 vport,
+                                const QHostAddress &origServer, const QByteArray &query, bool v6)
+{
+    if (!d->localDns || !d->dnsLearner)
+        return false; // 没开 / 没装解析器 → 老路
+
+    const coastcore::DnsQuestion q = coastcore::parseDnsQuestion(query);
+    const bool fakeable = q.ok && q.qclass == 1 && looksLikePublicDomain(q.qname)
+            && (q.qtype == coastcore::kDnsTypeA || q.qtype == coastcore::kDnsTypeAAAA);
+    if (!fakeable) {
+        // 转发给设备原本查的那台 DNS（从宿主直发，通的）。**不经 mihomo**。
+        ++GatewayDiag::c.dnsLocalForward;
+        forwardDns(victimIp, vport, origServer, query, v6, origServer, 53);
+        return true;
+    }
+
+    QByteArray resp;
+    if (q.qtype == coastcore::kDnsTypeA) {
+        const QHostAddress fake = d->dnsLearner->fakeFor(q.qname);
+        if (fake.isNull()) { // 池满等异常 → 保守转发
+            ++GatewayDiag::c.dnsLocalForward;
+            forwardDns(victimIp, vport, origServer, query, v6, origServer, 53);
+            return true;
+        }
+        resp = coastcore::buildDnsAnswerA(query, q, fake, kFakeIpTtlSec);
+    } else {
+        resp = coastcore::buildDnsNoData(query, q, kFakeIpTtlSec);
+    }
+    if (resp.isEmpty()) { // 合成失败（理论上不会）→ 保守转发
+        ++GatewayDiag::c.dnsLocalForward;
+        forwardDns(victimIp, vport, origServer, query, v6, origServer, 53);
+        return true;
+    }
+
+    UdpSess *s = d->udp.value(victimIp);
+    if (!s || !s->nic)
+        return true; // 设备刚被摘掉：查询丢弃即可（UDP 语义），别再往下走
+    ++GatewayDiag::c.dnsLocalFake;
+    if (v6)
+        sendUdpResponse6(s, vport, origServer, 53, resp);
+    else
+        sendUdpResponse4(s, vport, origServer, 53, resp);
+    return true;
+}
+
+void NetStack::forwardDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
+                          const QByteArray &query, bool v6, const QHostAddress &upstream,
+                          quint16 upstreamPort)
 {
     ++GatewayDiag::c.dnsHijacked;
     // 「有没有等到应答」要在两个 lambda 之间共享，而它们的生命周期都挂在 ds 上 —— 用 shared_ptr
@@ -1807,7 +1897,7 @@ void NetStack::hijackDns(const QString &victimIp, quint16 vport, const QHostAddr
         }
         ds->deleteLater(); // 一问一答即弃
     });
-    ds->writeDatagram(query, QHostAddress(QStringLiteral("127.0.0.1")), kDnsHijackPort);
+    ds->writeDatagram(query, upstream, upstreamPort);
     // 无应答兜底回收（mihomo 没起 / 解析失败）：5s 后无论如何删掉 socket，防泄漏。
     // dnsNoReply 涨 = 名字解析在核心那一侧就断了，这时再怎么查网关的数据面都是白费——
     // 有这一栏才分得清「解析不出来」和「解析出来了但连不上」。

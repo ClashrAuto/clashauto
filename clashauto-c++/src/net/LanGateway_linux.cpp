@@ -545,6 +545,11 @@ void GatewayWorker::applyCoastCoreLocal()
 {
     if (!m_net)
         return; // 协议栈还没建（首轮 configure 前）：意图已记在成员里，configureLocal 建栈后会再调一次
+    // ★ 进程内 DNS 与进程内出站**同一个开关**：开着时设备的 :53 由我们自己答（fake-ip 当场合成），
+    //   不再转投 mihomo 的 fake-ip DNS。这是「网关整条数据面不依赖核心」的最后一环 ——
+    //   在此之前即便出站走了进程内，DNS 仍然恒走 mihomo，开关**名不副实**。
+    //   关掉时立刻回到老行为（:53 → 127.0.0.1:1053），可热切换。
+    m_net->setLocalDnsEnabled(m_coastCore && m_dnsResolver != nullptr);
     if (m_coastCore && m_pcfgStore) {
         // 回退工厂 = 照旧拨每设备 SOCKS(7899) → mihomo 靠 IN-USER 分流。CoreDialerFactory 取得其所有权。
         auto *factory = new CoreDialerFactory(m_pcfgStore.get(), new Socks5OutboundFactory(m_socksPort));
@@ -614,7 +619,8 @@ void GatewayWorker::applyCoastCoreLocal()
         // 装 DNS 旁听器：让 accept 能把核心分配的 fake-ip 目的地改写成域名（否则域名类流量只能回退核心）。
         m_net->setDnsLearner(m_dnsResolver);
         qInfo() << "网关: CoastCore 进程内出站已启用（回退端口" << m_socksPort
-                << "，fake-ip 反查" << (m_dnsResolver ? "已接" : "未接") << "）";
+                << "，进程内 DNS" << (m_dnsResolver ? "已接（:53 不再转投核心）" : "未接（:53 仍转投核心）")
+                << "）";
     } else {
         // 撤回默认（全走 mihomo）——与「从未启用」完全一致：连 fake-ip 改写也一并撤掉。
         m_net->setOutboundFactory(new Socks5OutboundFactory(m_socksPort));
