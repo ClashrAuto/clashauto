@@ -64,6 +64,10 @@ struct TcpConn {
     bool socksClosed = false;  // socks 侧已关闭：等 toLwip 排空后再优雅关 lwIP 侧
     bool established = false;
     bool lwipClosed = false;
+    // —— 阶段0 量化埋点（纯观测，不参与转发决策）——
+    qint64 upBytes = 0;         // 设备→服务器 累计字节（喂给 socks 的量）
+    qint64 downBytes = 0;       // 服务器→设备 累计字节（从 socks 收到的量）
+    QElapsedTimer connectTimer; // connectTo→established 计时；established 回调里落 connectMsHist
 };
 
 } // namespace
@@ -666,6 +670,9 @@ void closeConn(TcpConn *c, bool abort)
     // 槽（socket 回调）进来，不在任何一个批量提交点上。晚 25 ms 关连接不致命，但设备侧会多挂
     // 一条半开连接，没必要。
     flushNicTx(c->impl);
+    // 阶段0 埋点：连接终局 → 按累计字节落桶 + 活跃 gauge 减一（两个 delete 点都要，见 lwipTcpErr）。
+    GatewayDiag::observeConnBytes(c->upBytes, c->downBytes);
+    GatewayDiag::tcpConnClosed();
     markConnDestroyed(c, aborted); // 必须在 delete 之前登记，外层 ConnWatch 靠它判存活
     delete c;
 }
@@ -692,6 +699,7 @@ err_t lwipTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
         return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK; // 之后不得再碰 c
     }
     const u16_t len = p->tot_len;
+    c->upBytes += len; // 阶段0 埋点：设备上行累计（关闭时落桶），纯整型自增
     // 窗口先记账、**不**立刻归还：归还与否交给 flushRecvWindow 按 SOCKS 侧排空进度判断。
     c->pendingRecved += len;
     if (c->socks) {
@@ -759,6 +767,9 @@ void lwipTcpErr(void *arg, err_t err)
         c->socks->deleteLater();
         c->socks = nullptr;
     }
+    // 阶段0 埋点：与 closeConn 同口径 —— 连接终局落桶 + 活跃 gauge 减一。
+    GatewayDiag::observeConnBytes(c->upBytes, c->downBytes);
+    GatewayDiag::tcpConnClosed();
     // byAbort=false：pcb 是 lwIP 自己释放的，不是我们 tcp_abort 的；tcp_err 也没有返回值可回。
     markConnDestroyed(c, false);
     delete c;
@@ -793,6 +804,7 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
                      victimIp.toLatin1().constData(), user.toLatin1().constData());
 
     ++GatewayDiag::c.tcpAccepted;
+    GatewayDiag::tcpConnOpened(); // 阶段0 埋点：活跃连接 gauge +1（+ 刷本窗口峰值）
     auto *c = new TcpConn;
     c->impl = g_impl;
     c->pcb = newpcb;
@@ -809,6 +821,9 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
     // 了——这样才不必在每个槽里再夹一层 ConnWatch。改这几个 lambda 时务必保持这个形状。
     QObject::connect(c->socks, &IOutboundTcp::established, g_impl->owner, [c]() {
         c->established = true;
+        // 阶段0 埋点：出站建连耗时落桶（connectTo→established；Socks5 即环回握手 RTT）。
+        // connectTimer 在下方 connectTo 之前 start()，established 只发一次，落桶一次。
+        GatewayDiag::observeConnectMs(c->connectTimer.elapsed());
         // 握手期扣下的窗口在这里重新评估一次：pending 刚被冲进 socket，水位变了。
         // flushRecvWindow 不会销毁 c（只有 getter + 纯 lwIP 调用），故无需保护。
         flushRecvWindow(c);
@@ -819,6 +834,7 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
         flushRecvWindow(c);
     });
     QObject::connect(c->socks, &IOutboundTcp::dataReceived, g_impl->owner, [c](const QByteArray &d) {
+        c->downBytes += d.size(); // 阶段0 埋点：下行累计（关闭时落桶），纯整型自增
         c->toLwip.append(d);
         pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
     });
@@ -833,6 +849,7 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
         pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
     });
 
+    c->connectTimer.start(); // 阶段0 埋点：建连计时起点（必须紧邻 connectTo 之前）
     c->socks->connectTo(serverIp, serverPort, user);
     return ERR_OK;
 }
@@ -1222,6 +1239,7 @@ bool NetStack::init(QString *err)
         const qint64 elapsed = d->pumpClock.restart();
         const qint64 lag = elapsed - kLwipPumpIntervalMs;
         ++GatewayDiag::c.pumpTicks;
+        GatewayDiag::observePumpLag(lag); // 阶段0 埋点：每拍迟到量分布（含早到，归 <=0 桶）
         if (elapsed > 2 * kLwipPumpIntervalMs) {
             ++GatewayDiag::c.pumpLateTicks;
             if (lag > GatewayDiag::c.pumpMaxLagMs)

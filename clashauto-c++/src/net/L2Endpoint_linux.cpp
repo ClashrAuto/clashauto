@@ -624,6 +624,10 @@ private:
             return;
         m_inDrain = true;
         ++GatewayDiag::c.rxWakes; // 与 rxFrames 之比 = 收环的批处理效率（掉到 1 = 退化成逐帧唤醒）
+        // 阶段0 埋点：本次唤醒取回多少帧 → 批处理分布。rxFrames 是全局单调计数，但收帧单线程、
+        // onReadable 有 m_inDrain 防重入，且 drainRing/drainSocket 下游（frameReceived→lwIP→发帧）
+        // 只可能增 txFrames、绝不增 rxFrames，故这段差值恰是本次唤醒本网卡吃进的帧数。
+        const qint64 rxBefore = GatewayDiag::c.rxFrames;
         pollRxDrops(QDateTime::currentMSecsSinceEpoch()); // 内部自带 5s 间隔，常态直接 return
 #ifdef COAST_HAVE_TPACKET_V3
         if (m_ring)
@@ -633,6 +637,7 @@ private:
 #else
         drainSocket();
 #endif
+        GatewayDiag::observeRxBatch(GatewayDiag::c.rxFrames - rxBefore);
         m_inDrain = false;
     }
 

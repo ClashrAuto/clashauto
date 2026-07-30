@@ -94,6 +94,7 @@ void GatewayDiag::sample(const QString &extra)
         // 峰值是瞬时量，即使不写也要清，否则会把上一个忙窗口的高水位一直带到下一个忙窗口。
         c.txBacklogPeak = 0;
         c.pumpMaxLagMs = 0;
+        c.tcpActivePeak = c.tcpActive; // 活跃连接峰值重置为当前值（连接长存，不能清 0）
         g_prev = c;
         g_lastSampleMs = now;
         return;
@@ -101,11 +102,22 @@ void GatewayDiag::sample(const QString &extra)
 
     const double secs = double(winMs) / 1000.0;
     const auto rate = [secs](qint64 n) { return qint64(double(n) / secs + 0.5); };
+    // 直方图按**窗口增量**渲染成 "a/b/c/..."（各桶本窗口的自增量）。桶边界见 GatewayDiag.h。
+    // 热路径上只做整型自增，格式化仅在这条 10s 一次的采样上发生。
+    const auto histDelta = [](const qint64 *now, const qint64 *prev, int n) {
+        QString s;
+        for (int i = 0; i < n; ++i) {
+            if (i)
+                s += QLatin1Char('/');
+            s += QString::number(now[i] - prev[i]);
+        }
+        return s;
+    };
 
     // 单行 key=value，方便 grep/awk，也方便以后直接喂给脚本画图。
     // 顺序按「链路从外到内」：收 → 分流 → 发 → TCP → 背压 → UDP → 泵 → lwIP(extra)。
     QString line;
-    line.reserve(512);
+    line.reserve(768); // 阶段0 埋点后单行更长（多了 gauge + 5 组直方图）
     line += QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
     line += QStringLiteral(" win=%1ms").arg(winMs);
     const qint64 wakes = d(c.rxWakes, g_prev.rxWakes);
@@ -162,6 +174,22 @@ void GatewayDiag::sample(const QString &extra)
                 .arg(d(c.pumpTicks, g_prev.pumpTicks))
                 .arg(d(c.pumpLateTicks, g_prev.pumpLateTicks))
                 .arg(c.pumpMaxLagMs);
+    // —— 阶段0 量化埋点：活跃连接 gauge/峰值 + 直方图（桶边界见 GatewayDiag.h 的 kXxxBuckets）——
+    // tcpActive/tcpActivePeak 是瞬时量（当前值/本窗口高水位），其余是本窗口各桶增量。
+    line += QStringLiteral(" tcpActive=%1 tcpActivePeak=%2")
+                .arg(c.tcpActive)
+                .arg(c.tcpActivePeak);
+    line += QStringLiteral(" rxBatch=%1")
+                .arg(histDelta(c.rxBatchHist, g_prev.rxBatchHist, GatewayDiag::kRxBatchBuckets));
+    line += QStringLiteral(" connMs=%1")
+                .arg(histDelta(c.connectMsHist, g_prev.connectMsHist, GatewayDiag::kConnectMsBuckets));
+    line += QStringLiteral(" connUpB=%1 connDnB=%2")
+                .arg(histDelta(c.connUpBytesHist, g_prev.connUpBytesHist,
+                               GatewayDiag::kConnBytesBuckets))
+                .arg(histDelta(c.connDownBytesHist, g_prev.connDownBytesHist,
+                               GatewayDiag::kConnBytesBuckets));
+    line += QStringLiteral(" pumpLag=%1")
+                .arg(histDelta(c.pumpLagHist, g_prev.pumpLagHist, GatewayDiag::kPumpLagBuckets));
     if (!extra.isEmpty())
         line += QLatin1Char(' ') + extra;
 
@@ -174,6 +202,7 @@ void GatewayDiag::sample(const QString &extra)
 
     c.txBacklogPeak = 0; // 瞬时量：下个窗口重新统计高水位
     c.pumpMaxLagMs = 0;
+    c.tcpActivePeak = c.tcpActive; // 活跃连接峰值重置为当前值（连接长存，不能清 0）
     g_prev = c;
     g_lastSampleMs = now;
 }

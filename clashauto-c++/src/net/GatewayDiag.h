@@ -30,6 +30,14 @@
 class GatewayDiag
 {
 public:
+    // ———————————— 阶段0 量化埋点：固定桶直方图的桶数与边界 ————————————
+    // 边界写死在下面 observe* 里（热路径零分配：一串整型比较定位桶号，直接 ++）。改桶数必须同步
+    // 改 observe* 的边界与 GatewayDiag.cpp sample() 的渲染，否则桶号与标注对不上。
+    static constexpr int kRxBatchBuckets = 6;   // 帧/唤醒：1 / 2-3 / 4-7 / 8-15 / 16-31 / 32+
+    static constexpr int kConnectMsBuckets = 5; // 建连 ms：<1 / 1-5 / 5-20 / 20-100 / 100+
+    static constexpr int kConnBytesBuckets = 8; // 连接字节：<1K/<4K/<16K/<64K/<256K/<1M/<4M/4M+
+    static constexpr int kPumpLagBuckets = 6;   // 泵迟到 ms：<=0 / <25 / <50 / <100 / <250 / 250+
+
     // ★ 全部是「窗口内增量」语义的累计量，除了名字里带 Peak 的那几个。
     //   加字段时记得同步 sample() 里的输出，否则加了等于没加。
     //
@@ -99,11 +107,84 @@ public:
         qint64 pumpTicks;
         qint64 pumpLateTicks; // 实际间隔 > 2 倍期望的拍数
         qint64 pumpMaxLagMs;  // 本窗口最大迟到量（瞬时量，每窗口清零）
+        // ———————————————— 阶段0 量化埋点（纯观测，不改转发行为）————————————————
+        // 活跃 TCP 连接：tcpActive 是**瞬时 gauge**（当前被 lwIP 终结、桥到出站的连接数），accept
+        // 时 +1、连接销毁时 -1，**不是**窗口增量。tcpActivePeak 是本窗口高水位（瞬时量，采样后
+        // 重置为 tcpActive 而**非 0**——连接是长存的，清零下一拍就被当前值顶回来，峰值失真）。
+        qint64 tcpActive;
+        qint64 tcpActivePeak;
+        // 以下都是固定桶直方图，**窗口增量**语义（sample() 里对 g_prev 做逐桶差值）。桶边界见上方
+        // kXxxBuckets 注释。它们回答的都是「后续 RX 批量/splice/lwIP 优化的收益面在哪」：
+        //  · rxBatchHist —— 每次**事件驱动收帧唤醒**取回多少帧的分布。全压在桶 0（=1 帧/唤醒）
+        //    就坐实了「逐帧唤醒/逐包」这个待优化的瓶颈；批量收生效后分布应右移。
+        qint64 rxBatchHist[kRxBatchBuckets];
+        //  · connectMsHist —— 出站建连耗时（connectTo→established 的墙钟 ms）。Socks5 出站即环回
+        //    握手 RTT；将来进程内出站同口径（都在 NetStack 的 established 回调计时）。
+        qint64 connectMsHist[kConnectMsBuckets];
+        //  · connUp/DownBytesHist —— 连接**关闭时**按其累计上/下行字节各落一桶（聚合，绝不每流
+        //    一条日志）。回答「是少数大流还是海量小连接」——直接决定 splice/批量的收益。
+        qint64 connUpBytesHist[kConnBytesBuckets];
+        qint64 connDownBytesHist[kConnBytesBuckets];
+        //  · pumpLagHist —— 每一拍 (实际间隔 − 目标 25ms) 的分布。pumpMaxLagMs 只给最坏一次，
+        //    这里给整个分布：偶发一次 250ms 尖峰 vs 持续 30~50ms 迟到是完全不同的饱和度诊断。
+        qint64 pumpLagHist[kPumpLagBuckets];
     };
 
     // 直接拿引用自增：`GatewayDiag::c.rxFrames++`。C++17 inline 静态成员 —— 有且仅有一个实例，
     // 且不像函数内 static 那样每次访问都要过一遍初始化 guard。
     static inline Counters c{};
+
+    // ———————————— 阶段0 量化埋点：直方图 / gauge 的采集入口 ————————————
+    // 全部 static inline：调用点在 NetStack / L2Endpoint（Linux-only 采集），定义放这里（跨平台
+    // TU，MinGW 也编）。桶定位 = 一串整型比较 + 一次数组自增，无分配、无字符串，满足头部「热路径
+    // 零开销」前提。且这几条都**远离逐帧热路径**：observeRxBatch 是每收帧唤醒一次（非每帧）、
+    // connect/connBytes 是每连接（冷）、observePumpLag 是每拍（40/s），函数调用开销可忽略。
+    static inline int bytesBucket(qint64 bytes)
+    {
+        return bytes < 1024 ? 0 : bytes < 4 * 1024 ? 1 : bytes < 16 * 1024 ? 2
+             : bytes < 64 * 1024 ? 3 : bytes < 256 * 1024 ? 4 : bytes < 1024 * 1024 ? 5
+             : bytes < 4 * 1024 * 1024 ? 6 : 7;
+    }
+    // 一次收帧唤醒取回的帧数 → 批处理效率分布（frames<=0 不记）。
+    static inline void observeRxBatch(qint64 frames)
+    {
+        if (frames <= 0)
+            return;
+        const int b = frames >= 32 ? 5 : frames >= 16 ? 4 : frames >= 8 ? 3
+                    : frames >= 4 ? 2 : frames >= 2 ? 1 : 0;
+        ++c.rxBatchHist[b];
+    }
+    // 出站建连耗时（毫秒）。
+    static inline void observeConnectMs(qint64 ms)
+    {
+        const int b = ms >= 100 ? 4 : ms >= 20 ? 3 : ms >= 5 ? 2 : ms >= 1 ? 1 : 0;
+        ++c.connectMsHist[b];
+    }
+    // 连接关闭时的累计上/下行字节（各自落桶）。
+    static inline void observeConnBytes(qint64 up, qint64 down)
+    {
+        ++c.connUpBytesHist[bytesBucket(up)];
+        ++c.connDownBytesHist[bytesBucket(down)];
+    }
+    // 泵每拍迟到量（毫秒；可为负=早到，归入 <=0 桶）。
+    static inline void observePumpLag(qint64 lagMs)
+    {
+        const int b = lagMs <= 0 ? 0 : lagMs < 25 ? 1 : lagMs < 50 ? 2
+                    : lagMs < 100 ? 3 : lagMs < 250 ? 4 : 5;
+        ++c.pumpLagHist[b];
+    }
+    // 活跃 TCP 连接 gauge：accept 时 +1 并刷峰值；连接销毁时 -1（钳在 >=0）。
+    static inline void tcpConnOpened()
+    {
+        ++c.tcpActive;
+        if (c.tcpActive > c.tcpActivePeak)
+            c.tcpActivePeak = c.tcpActive;
+    }
+    static inline void tcpConnClosed()
+    {
+        if (c.tcpActive > 0)
+            --c.tcpActive;
+    }
 
     // 由 main_qml.cpp 传 AppConfig::userDir（日志落在其 logs/ 子目录）。空 = 停用落盘。
     static void setLogDir(const QString &userDir);
