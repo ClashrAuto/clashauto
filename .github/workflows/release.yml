@@ -214,7 +214,20 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build $env:BUILD_DIR --config Release --parallel
+        # ★ 失败时把编译器的 error 行抬成 ::error:: 注解：本仓库**读不到 Actions 日志**
+        #   (download job logs 需要 admin，实测 403)，而注解是公开可读的。没有这一步，
+        #   一个 MSVC-only 的编译错误就只能靠反复推送去猜。
+        run: |
+          $log = "$env:RUNNER_TEMP\build.log"
+          cmake --build $env:BUILD_DIR --config Release --parallel 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Get-Content $log | Select-String -Pattern "error [A-Z]+[0-9]+|error:|fatal error" |
+              Select-Object -First 25 | ForEach-Object {
+                Write-Host ("::error::" + ($_.Line -replace "::", "："))
+              }
+            throw "build failed (exit $code)"
+          }
 
       - name: Stage portable app
         shell: pwsh
@@ -469,6 +482,38 @@ jobs:
           PY
           iconutil -c icns -o clashauto-c++/assets/icon.icns icon.iconset
 
+      - name: Cache msquic (macOS universal)
+        id: msquic-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/msquic-sdk
+          key: msquic-${{ env.MSQUIC_VERSION }}-macos-universal-v1
+
+      - name: Build msquic (universal, from source)
+        # ★ macOS 是三个平台里唯一必须**自己编** msquic 的：微软既没有预编译包，也没有包管理器
+        #   渠道（GitHub Release 零资产 / Homebrew 无 formula / NuGet 只有 Windows）。
+        #   而且 msquic 在 Darwin **不支持一次编出 universal**（它给 quictls 传的 Configure 目标按
+        #   CMAKE_OSX_ARCHITECTURES 精确匹配，多架构会走进 "WTF" 分支）→ 只能各编一次再 lipo。
+        #   具体逻辑放在仓库里的脚本，便于外部签名仓库(schat.build)复用同一份（那边才是发布 DMG 的构建者）。
+        if: steps.msquic-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: bash clashauto-c++/tools/build_msquic_macos.sh "$HOME/msquic-sdk" "$MSQUIC_VERSION"
+
+      - name: Verify msquic SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$HOME/msquic-sdk"
+          test -f "$sdk/lib/libmsquic.dylib" || { echo "::error::msquic SDK 缺 libmsquic.dylib"; exit 1; }
+          test -f "$sdk/include/msquic.h"    || { echo "::error::msquic SDK 缺头文件"; exit 1; }
+          archs="$(lipo -archs "$sdk/lib/libmsquic.dylib")"
+          case "$archs" in
+            *x86_64*arm64*|*arm64*x86_64*) ;;
+            *) echo "::error::libmsquic 不是 universal（$archs）——app 是通用包，缺一个架构就等于半个包起不来"; exit 1 ;;
+          esac
+          echo "COAST_MSQUIC_ROOT=$sdk" >> "$GITHUB_ENV"
+          echo "msquic SDK: $sdk（$archs）"
+
       - name: Configure
         shell: bash
         run: |
@@ -477,7 +522,9 @@ jobs:
             -DAPP_VERSION="$APP_VERSION" \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" \
             -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0 \
+            -DCOAST_MSQUIC_ROOT="$COAST_MSQUIC_ROOT" \
+            -DCOAST_REQUIRE_QUIC=ON
           # —— macOS 这边**不带 QUIC**（Windows/Linux 都带了，见各自的 Install msquic）——
           # 微软对 macOS 既没有预编译包也没有包管理器渠道（brew 无 formula），只能从源码构建 msquic；
           # 而本 job 产出的还是个 **universal(x86_64+arm64)** 包，等于要为两个架构各编一份再 lipo 合并，
@@ -488,7 +535,15 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cmake --build "$BUILD_DIR" --parallel
+        # ★ 失败时把编译器的 error 行抬成 ::error:: 注解，理由同 windows job：
+        #   本仓库读不到 Actions 日志（要 admin，实测 403），注解却是公开可读的。
+        run: |
+          set -o pipefail
+          if ! cmake --build "$BUILD_DIR" --parallel 2>&1 | tee "$RUNNER_TEMP/build.log"; then
+            grep -E "error:|fatal error" "$RUNNER_TEMP/build.log" | head -25 | \
+              while IFS= read -r line; do echo "::error::${line//::/：}"; done
+            exit 1
+          fi
 
       - name: Verify universal binary
         shell: bash
@@ -549,6 +604,23 @@ jobs:
           cp "clashauto-c++/helper/com.yuehongsun.coast.helper.plist" "$APP/Contents/Library/LaunchDaemons/"
           lipo -archs "$APP/Contents/MacOS/com.yuehongsun.coast.helper"
 
+          # —— msquic：QUIC(Hysteria2) 的运行时依赖，必须随 .app 走（不是系统库）——
+          # 放 Contents/Frameworks/；它的 install name 已是 @rpath/libmsquic.dylib，配合
+          # macdeployqt 给可执行文件写的 @executable_path/../Frameworks 即可被加载器找到。
+          # ★ 必须在 codesign **之前**做：签完再改文件会直接破坏签名。
+          EXE="$APP/Contents/MacOS/Coast"
+          mkdir -p "$APP/Contents/Frameworks"
+          cp -f "$COAST_MSQUIC_ROOT/lib/libmsquic.dylib" "$APP/Contents/Frameworks/"
+          if ! otool -l "$EXE" | grep -q "@executable_path/../Frameworks"; then
+            install_name_tool -add_rpath "@executable_path/../Frameworks" "$EXE"
+          fi
+          # 硬断言：宁可这里失败，也不发一个「装上去起不来」或「悄悄少了 QUIC」的包
+          otool -L "$EXE" | grep -q libmsquic \
+            || { echo "::error::Coast 未依赖 libmsquic —— QUIC 没编进来，拒绝出包"; exit 1; }
+          test -f "$APP/Contents/Frameworks/libmsquic.dylib" \
+            || { echo "::error::libmsquic.dylib 未进 bundle，拒绝出包"; exit 1; }
+          echo "msquic 已入 bundle: $(lipo -archs "$APP/Contents/Frameworks/libmsquic.dylib")"
+
           # 资源已内嵌 exe(qrc)，不再往 bundle 塞 Contents/Clashr-Auto —— app 自包含。
 
           # 签名（公证必需硬化运行时 + 安全时间戳）。macdeployqt 之后再签：install_name_tool 改写会破坏更早签名。
@@ -571,6 +643,17 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP" && echo "codesign verify OK"
           codesign --verify --strict --verbose=2 "$HELPER" && echo "helper codesign verify OK"
           echo "helper identity:"; codesign -dvv "$HELPER" 2>&1 | grep -Ei 'Identifier|TeamIdentifier'
+
+      - name: QUIC self-test (packaged app)
+        shell: bash
+        # ★ 与 Windows/Linux 同一道闸：跑**打包后的** .app 里的可执行，做 MsQuicOpen2 +
+        #   Hy2 的 QPACK KAT。runner 是 arm64，跑的是通用包里的 arm64 切片；x86_64 切片
+        #   由上面的 lipo -archs 断言保证存在。
+        run: |
+          set -euo pipefail
+          QT_QPA_PLATFORM=offscreen COAST_QUIC_SELFTEST=1 \
+            "$BUILD_DIR/Coast.app/Contents/MacOS/Coast"
+          echo "QUIC self-test passed: packaged Coast.app loads libmsquic and QPACK KAT is green"
 
       - name: Create DMG
         shell: bash
@@ -812,7 +895,15 @@ jobs:
 
       - name: Build
         shell: bash
-        run: cmake --build "$BUILD_DIR" --parallel
+        # ★ 失败时把编译器的 error 行抬成 ::error:: 注解，理由同 windows job：
+        #   本仓库读不到 Actions 日志（要 admin，实测 403），注解却是公开可读的。
+        run: |
+          set -o pipefail
+          if ! cmake --build "$BUILD_DIR" --parallel 2>&1 | tee "$RUNNER_TEMP/build.log"; then
+            grep -E "error:|fatal error" "$RUNNER_TEMP/build.log" | head -25 | \
+              while IFS= read -r line; do echo "::error::${line//::/：}"; done
+            exit 1
+          fi
 
       - name: Stage portable app
         shell: bash

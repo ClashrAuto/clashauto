@@ -76,6 +76,10 @@ if [ -n "$DMG" ]; then
     grep -aq "com.yuehongsun.coast" "$PL" && ok "Info.plist 含 com.yuehongsun.coast（bundle id 已改）" || bad "Info.plist 没有新 bundle id"
     grep -aq "com.yuehongsun.auto" "$PL" && bad "Info.plist 仍含旧 com.yuehongsun.auto" || ok "无旧 bundle id 残留"
     [ -e "$APP/Contents/MacOS/Coast" ] && ok "Contents/MacOS/Coast" || bad "缺 MacOS/Coast"
+    # QUIC(Hysteria2)：libmsquic 不是系统库，必须随 .app 走，否则 app 直接起不来。
+    [ -e "$APP/Contents/Frameworks/libmsquic.dylib" ] \
+      && ok "Frameworks/libmsquic.dylib 已随包（QUIC/Hysteria2 可用）" \
+      || bad "缺 Frameworks/libmsquic.dylib（QUIC 没进包，程序会起不来）"
     [ -e "$APP/Contents/MacOS/com.yuehongsun.coast.helper" ] && ok "helper = com.yuehongsun.coast.helper" || skip "没见到 helper 可执行（7z 可能没解全）"
     [ ! -e "$APP/Contents/Clashr-Auto" ] && ok "无 Contents/Clashr-Auto（自包含）" || bad "仍塞了 Contents/Clashr-Auto"
   fi

@@ -190,13 +190,15 @@ int main(int argc, char *argv[])
         const bool lib = coastcore::QuicTransport::libraryAvailable();
         QString why;
         const bool kat = hysteria2QpackSelfTest(&why);
-        fprintf(stderr, "msquic 运行时可加载      : %s\n", lib ? "PASS" : "FAIL");
+        // 纯 ASCII 输出：这几行会被 CI 重定向到文件再读回来，Windows 那侧是 GBK/ANSI，
+        // 中文必然变乱码（同 WM_ENDSESSION 那段的既有约定）。
+        fprintf(stderr, "msquic runtime loadable : %s\n", lib ? "PASS" : "FAIL");
         fprintf(stderr, "Hy2 QPACK/Huffman KAT   : %s%s\n", kat ? "PASS" : "FAIL",
                 kat ? "" : qUtf8Printable(QStringLiteral("  ") + why));
         fprintf(stderr, "TUIC keying exporter    : %s\n",
                 coastcore::QuicTransport::keyingMaterialSupported()
-                        ? "可用"
-                        : "不可用(需 msquic 2.6+；tuic 节点回退内核，属预期)");
+                        ? "available"
+                        : "unavailable (needs msquic 2.6+; tuic falls back to the core - expected)");
         return (lib && kat) ? 0 : 1;
     }
 #endif
