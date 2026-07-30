@@ -670,40 +670,21 @@ jobs:
           echo "QT_ROOT=$qt_root" >> "$GITHUB_ENV"
           echo "Qt root: $qt_root"
 
-      - name: Install msquic (QUIC 出站；缺了就降级，不阻断)
-        shell: bash
-        continue-on-error: true
-        run: |
-          # CoastCore 的 Hysteria2/TUIC 需要 msquic（见 CMakeLists 的 COAST_HAVE_QUIC）。
-          # ★ microsoft/msquic 的 GitHub Release **没有任何预编译资产**（实测 v2.5.9 assets=0），
-          #   Linux 侧唯一的正路是 packages.microsoft.com 的 libmsquic（jammy/amd64 与 noble/arm64
-          #   都有 2.5.9，正对上本 job 的 ubuntu-22.04 / ubuntu-24.04-arm 两个 runner）。
-          # ★★ 那个源**只有运行库 libmsquic、没有 -dev 包**，即 **不带 msquic.h** —— 上一版就是因此
-          #    find_path(msquic.h) 失败、静默降级：CI 全绿但产物里既无 libmsquic 也无 MsQuic 符号
-          #    （下载 release 产物核验才发现）。所以头文件要按**已装版本**从对应 tag 单独取。
-          # ★ continue-on-error + CMake 侧「找不到就降级」：装不上只是 hysteria2/tuic 不编入、回退核心，
-          #   绝不让流水线红（对齐 OpenSSL / QtDBus 的可选依赖策略）。
-          set -x
-          ver="$(lsb_release -rs)"   # 22.04 / 24.04
-          curl -fsSL -o /tmp/ms-prod.deb "https://packages.microsoft.com/config/ubuntu/${ver}/packages-microsoft-prod.deb"
-          sudo dpkg -i /tmp/ms-prod.deb
-          sudo apt-get update -qq
-          sudo apt-get install -y libmsquic
-          # 取与已装运行库**同版本**的公共头（msquic.h 会 include msquic_posix.h / quic_sal_stub.h）
-          mver="$(dpkg-query -W -f='${Version}' libmsquic | cut -d- -f1)"
-          echo "libmsquic 版本: $mver"
-          mkdir -p /tmp/msquic/include
-          for h in msquic.h msquic_posix.h quic_sal_stub.h; do
-            curl -fsSL -o "/tmp/msquic/include/${h}" "https://raw.githubusercontent.com/microsoft/msquic/v${mver}/src/inc/${h}"
-          done
-          # 运行库包常只装 libmsquic.so.N（无 .so 开发符号链接）→ find_library(NAMES msquic) 会找不到，
-          # 补一个符号链接。
-          for d in /usr/lib/*/ /usr/lib/; do
-            so="$(ls "$d"libmsquic.so.* 2>/dev/null | head -1)" || true
-            if [ -n "$so" ] && [ ! -e "${d}libmsquic.so" ]; then sudo ln -sf "$so" "${d}libmsquic.so"; fi
-          done
-          echo "COAST_MSQUIC_ROOT=/tmp/msquic" >> "$GITHUB_ENV"
-          ls -l /tmp/msquic/include/ /usr/lib/*/libmsquic.so* 2>/dev/null || true
+      # —— 为什么这里**没有**安装 msquic / 没开 QUIC ——
+      # 试过并撤回了（见 git log 的 9772929 / 3361d01 / c316c57 三次迭代）。结论按事实记录：
+      #  ✔ QUIC 代码本身**已验证可编可链**：给了真 msquic 头 + libmsquic 后，QuicTransport/
+      #    Hysteria2/Tuic 三个源编译通过，产物里能看到 libmsquic.so.2 依赖与 MsQuicOpenVersion 等真符号。
+      #  ✘ 但**打包这一步在 CI 上没能可靠完成**：apt 的 libmsquic 只给运行库（无 -dev、无 msquic.h、
+      #    常无 .so 符号链接），而把它随包带走的逻辑在 runner 上没生效，结果发出的包里二进制硬依赖
+      #    libmsquic.so.2 而库不在包内、也不在 Ubuntu 官方源 → **用户机上直接起不来**。
+      #    本仓库无 CI 日志读取权限，无法再靠猜迭代，故先撤回，保证发布包正确。
+      #  ✘ 且即便打包解决，**TUIC 目前也无法认证**：它的 token 要 msquic 的 keying-material exporter，
+      #    而最新发布版（v2.5.9）根本没有这套 API（见 QuicTransport 的 COAST_HAVE_QUIC_KEYING 说明）。
+      # 想开启时怎么做（本地/自建 CI 均可，CMake 侧已支持）：
+      #   1) 备好含 include/msquic.h 与 lib/libmsquic.so 的 SDK；
+      #   2) 配置时加 -DCOAST_MSQUIC_ROOT=<sdk>（CMakeLists 会手工定位，无需 CMake config 包）；
+      #   3) **务必**把 libmsquic 随包带走并核验：产物里要同时满足「包内有 lib/libmsquic.so*」与
+      #      「二进制里有 MsQuic 符号」——只看 CI 绿灯会被 continue-on-error + 自动降级骗过去（实测过）。
 
       - name: Configure
         shell: bash
