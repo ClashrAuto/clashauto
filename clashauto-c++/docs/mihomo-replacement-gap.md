@@ -22,8 +22,20 @@ grep -rn "CoreDialerFactory" src/ --include=*.cpp --include=*.h
 | 路径 | 现状 | 缺口 |
 |---|---|---|
 | 局域网被代理设备 | ✅ **进程内**（NetStack + CoreDialerFactory） | 有活锁待修，见 [gateway-load-test.md](gateway-load-test.md) |
-| **本机系统代理**（`:7890` 混合端口） | ❌ **mihomo** | 需要进程内 HTTP/SOCKS inbound 监听 |
+| **本机系统代理**（HTTP/SOCKS） | 🟡 **通路已验证，尚未接进 app** | 见下 |
 | **本机 TUN** | ❌ **mihomo** | 需要进程内 TUN 读写 + 三层栈（lwIP 已有，缺设备侧接入） |
+
+**本机入站的进展**（`src/net/inbound/MixedInbound`）：类已实现（SOCKS5 CONNECT / HTTP CONNECT /
+HTTP 绝对形式），并用 [`tools/inbound_e2e`](../tools/inbound_e2e) 跑通了**真正的生产路径**
+`MixedInbound → CoreDialerFactory → DirectOutbound`，且刻意设成 `fallback=nullptr` + `strict=on`
+—— 任何一次想回退 mihomo 的企图都会当场失败，所以 PASS 等于「这条路上没有 mihomo」。
+含 8 MiB 双向大流量 + 逐字节校验 + **背压确实被触发**的证伪检查。
+
+**还差接线**：没有 `CoreController`/`DevicesController` 的装配、没有端口配置项、没有 UI 开关。
+好消息是 `ProxyConfigStore` / `RuleEngine` / `DnsResolver` 已经在 **`DevicesController`**
+里（app 生命周期、跨平台），条件是齐的；卡点是**分流路由那段 lambda 目前长在
+`LanGateway_linux.cpp` 里**，本机入站要用同一套逻辑就得先把它提取成共享件
+（复制一份会立刻制造「两套逻辑要同步」，正是本文件反对的事）。
 
 进程内**出站**已经相当完整（核查过，`src/net/core/`）：
 
@@ -62,6 +74,12 @@ grep -rn "CoreDialerFactory" src/ --include=*.cpp --include=*.h
 
 **关于"多进程"**：真机数据已经否掉了它，见 [gateway-load-test.md](gateway-load-test.md)
 ——数据面 `late=0`、零丢弃、CPU 只占单核 15%，瓶颈不在并行度上。
+
+**关于延迟**（`tools/inbound_e2e` 顺带量的，300 次）：本机经进程内引擎每条连接
+p50 6.26 ms vs 直连 2.69 ms，净增 3.56 ms。**别把它当成"引擎开销"**：代理天然要多建一条
+到目标的 TCP 连接，直连一次就 2.69 ms，两次已接近这个净增值。要分离出引擎自身的开销，
+缺的对照是「同机 mihomo 走同一条路」，尚未做。
+这条路上**没有 lwIP**，所以它同时说明网关那 10~14 ms 的绝大部分**不来自出站侧**。
 
 ## 四、明确不打算做的
 
