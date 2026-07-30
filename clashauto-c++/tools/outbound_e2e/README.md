@@ -67,81 +67,73 @@ VLESS   PASS  est=1 bytes=1670  status='HTTP/1.1 200 OK'
 | VMess (VMessAEAD) | ✅ 已验 |
 | Trojan (over TLS) | ✅ 已验 |
 | VLESS (over TLS) | ✅ 已验 |
-| REALITY | ❌ 需真 xray 服务端（mihomo 的 reality inbound 与 xray 的 AuthKey 核验路径不等价） |
+| REALITY (自建 TLS1.3 + uTLS) | ✅ 已验（对真 xray 25.6.8；**dest 必须支持 TLS 1.3**，见下） |
 | Hysteria2 / TUIC | ❌ 需 msquic（`COAST_HAVE_QUIC`）；且 TUIC 的 token 还缺 msquic 的 keying-material exporter |
 | VLESS over ws/grpc | ❌ 未覆盖（ws 传输本身有独立实现，grpc 尚未实现） |
 
-## REALITY 现状：**对真 xray 复现失败（未解决）**
+## REALITY：**已验证通过** ✅（含根因复盘）
 
-本目录已含可复现的 REALITY 用例（`main.cpp` 的 `rl` 节点 + `xray-reality.json`）。跑法：
+最终结果（Pi5 + xray 25.6.8，五协议一次跑完）：
+
+```
+SS      PASS  HTTP/1.1 200 OK
+VMESS   PASS  HTTP/1.1 200 OK
+TROJAN  PASS  HTTP/1.1 200 OK
+VLESS   PASS  HTTP/1.1 200 OK
+REALITY PASS  HTTP/1.1 200 OK      ← 自建 TLS1.3 + uTLS 指纹 + REALITY 认证 + 证书 AuthKey 核验 全通
+== fails=0 ==
+```
+
+xray 服务端侧对我们这条连接的确认（配置里 `"show": true`）：
+
+```
+hs.c.ClientShortId: [104 108 14 240 0 0 0 0]   ← 我们注入的 session_id 被正确解出
+hs.c.conn == conn: true                         ← REALITY 认证通过（不是被丢去伪装站）
+hs.handshake() err: <nil>
+hs.readClientFinished() err: <nil>              ← 我们的 TLS1.3 密钥调度 / Finished 正确
+hs.c.handshakeStatus: true                      ← 握手完成
+```
+
+### ★★ 根因复盘：**dest 必须支持 TLS 1.3**（前几轮都栽在这里）
+
+之前反复失败、并且把我们自己的实现怀疑了两轮，真正原因是**测试台的 `dest` 配成了 `www.baidu.com`
+—— 它不支持 TLS 1.3**：
 
 ```bash
-# 1) 取 xray（该网络直连 GitHub 被墙，用 ghfast.top 镜像）
+openssl s_client -tls1_3 -servername www.baidu.com -connect www.baidu.com:443
+#  → tlsv1 alert protocol version (alert 70)          ← 与客户端收到的 alert 一模一样
+openssl s_client -tls1_3 -servername dl.google.com -connect dl.google.com:443
+#  → New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384   ✓
+```
+
+REALITY 的工作方式是把客户端握手**转发给 dest**；dest 不支持 TLS 1.3 时必然失败，客户端收到的
+`protocol_version` alert **是 dest 回的、经 REALITY 转发回来**，与客户端实现无关。
+**教训：排查 REALITY 之前，先用 `openssl s_client -tls1_3` 确认 dest 支持 1.3。**
+
+`www.microsoft.com` 虽支持 1.3 但**同样不可用**：服务端日志出现 `Server Hello: 127`
+（HelloRetryRequest）+ `Certificate: 8273`（证书链过大），最终 `handshakeStatus: false`。
+**实测可用：`dl.google.com`（最干净）、`www.apple.com`、`cloudflare.com`。**
+
+### 复现方法
+
+```bash
+# 1) 取 xray（GitHub 直连被墙时用 ghfast.top 镜像）
 curl -sfL -o x.zip "https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/v25.6.8/Xray-linux-arm64-v8a.zip"
 unzip -o x.zip && chmod +x xray
-# 2) 生成密钥，把 private 填进 xray-reality.json，public/shortId 填进 main.cpp 的 rl 节点
+# 2) 生成密钥：private 填进 xray-reality.json，public + shortId 填进 main.cpp 的 rl 节点
 ./xray x25519
-./xray run -c xray-reality.json        # 监听 127.0.0.1:18392，dest/serverNames = www.baidu.com
-# 3) 跑 harness
+# 3) 起服务端（本目录配置的 dest 已是 dl.google.com）
+./xray run -c xray-reality.json                  # 监听 127.0.0.1:18392
+#    可选先验参照：./xray run -c xray-reality-client.json   # socks 10808
+#    curl -x socks5h://127.0.0.1:10808 http://www.baidu.com/   → 期望 200
+# 4) 跑 harness（五协议）
 cmake -B build -G Ninja && cmake --build build && ./build/obh
 ```
 
-### 已查明的事实（2026-07-30，Pi5 + xray 25.6.8）
+### 排查 REALITY 的正确顺序（血泪总结）
 
-- 其余四协议同轮全部 PASS，**只有 REALITY 失败**，客户端报
-  `utls: 收到明文 alert（握手被拒？）`。
-- loopback 抓包（`tcpdump -i lo 'tcp port 18392'`）显示：客户端发出 **258 字节 ClientHello**，
-  xray 回 **7 字节**后立刻 FIN。该 7 字节解出来是
-  **`15 03 01 00 02 02 46` = fatal alert `protocol_version`(0x46)**。
-- **把线上真实 ClientHello 逐扩展解析过，结构完全合法**：
-  `session_id` 32B ✓、`cipher_suites` 4 项 ✓、`key_share` 含 x25519(0x001d) 32B ✓、
-  **`supported_versions` = `04 0a0a 0304`（长度 4，含 TLS 1.3 = 0x0304）✓**、
-  扩展总长与实际一致、无错位（parser 走到末尾对齐）。
-- xray 侧即便 `"show": true` + `loglevel: debug`，日志里**没有任何 REALITY 诊断行** →
-  拒绝发生在 **REALITY 逻辑之前的 TLS 层**（alert 记录版本 0x0301 也符合 Go 在版本协商前发 alert 的行为）。
-
-### ★ 两次对照实验（第二次推翻了第一次的结论——测试台本身不可信）
-
-**对照 1：openssl（不带 REALITY 认证的标准 TLS1.3 客户端）**
-
-```bash
-openssl s_client -tls1_3 -servername www.baidu.com -connect 127.0.0.1:18392
-```
-→ 收到**一模一样**的 `protocol version` alert（number 70 = 0x46），服务端同时打出：
-```
-REALITY remoteAddr: ...  hs.c.conn == conn: false / forwarded SNI: www.baidu.com
-REALITY remoteAddr: ...  hs.c.handshakeStatus: false
-[Info] transport/internet/tcp: REALITY: processed invalid connection
-```
-由此**先**得出结论：该 alert 不是「TLS 版本没协商上」，而是 REALITY 对「认证未通过」的正常处置。
-
-**对照 2（决定性）：xray 自己当 REALITY 客户端**（`client.json`：socks 10808 → vless+reality → 18392）
-
-```bash
-./xray run -c client.json &
-curl -x socks5h://127.0.0.1:10808 http://www.baidu.com/
-```
-→ **xray 自己的客户端也连不上**（`HTTP=000`）。它客户端侧的中间量全都正常（日志里
-`hello.SessionId[:16]: [25 6 8 0 …ts… 104 108 14 240 0 0 0 0]` = 版本 25.6.8 + 时间戳 + shortId `686c0ef0`、
-`uConn.AuthKey[:16]` 也打出来了），但**服务端对它一条 REALITY 日志都没有**，客户端反复重试到
-`context canceled`。此时服务端仍是健康的（同一时刻 openssl 再探，照样打出 invalid connection 日志），
-且 dest 可达（`https://www.baidu.com` = 200、TCP 443 通）。
-
-**⇒ 因此：这个测试台没有一个「已知可用」的 REALITY 参照连接。** 对照 1 的结论（「我们的认证没被接受」）
-**不成立**——它是拿一个**根本不带认证**的客户端做对照推出来的；既然连 xray 官方客户端在本台也连不上，
-就无法把失败归因到我们的实现。**在建立起可信参照之前，不要去改 UtlsClient 的认证代码**（那等于
-对着不可信的 oracle 瞎改，很可能把本来正确的实现改坏）。
-
-### 下一步（按优先级）
-
-1. **先把参照跑通**：目标是「xray 客户端 ↔ xray 服务端」在本机能取到网页。可试：
-   换 `dest`/`serverNames`（用支持 HTTP/2 且证书链干净的站点，如 `www.microsoft.com:443`）、
-   去掉/调整 `spiderX`、确认 `xver`、或把服务端换到非 loopback 地址（REALITY 对 dest 的
-   转发与 SNI 一致性较敏感）。**只有这一步绿了，才有资格判我们的实现对不对。**
-2. 参照跑通后，再用它做**逐字节对照**：xray 客户端日志会打出 `hello.SessionId[:16]` 与
-   `uConn.AuthKey[:16]`；给我们的 `applyRealityAuth` 加同样的临时输出，比对
-   ECDH 共享密钥 → `HKDF-SHA256(salt=CH.random[:20], info="REALITY")` → `AES-256-GCM(nonce=random[20:32],
-   aad=session_id 清零后的整条 CH 握手消息, pt=16B[版本3+保留1+时间戳4BE+shortId8])` → 32B session_id。
-   （已核对过 xray v25.6.8 的 `UClient` 源码，上述序列与我们的实现**在算法层面一致**，
-   所以真出问题多半在某个偏移/长度/字节序的细节，而不是整体思路。）
-3. 认证过了以后，才轮到验证证书 AuthKey 核验（`verifyRealityCertificate`）与 HRR/KeyUpdate 等。
+1. `openssl s_client -tls1_3 -servername <dest> -connect <dest>:443` —— **先确认 dest 支持 TLS 1.3**；
+2. 用 **xray 官方客户端**（`xray-reality-client.json`）打自己的服务端，确认**参照可用**（HTTP=200
+   且服务端日志 `handshakeStatus: true`）——**参照没绿之前，不要动我们的加密代码**；
+3. 才轮到跑我们的 harness；失败时看服务端 `show: true` 的 `hs.c.ClientShortId` / `hs.c.conn == conn`
+   判断是「认证没过」还是「认证过了但 TLS 后续有问题」。
