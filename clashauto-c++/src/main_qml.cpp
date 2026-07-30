@@ -28,6 +28,7 @@
 #include "net/GatewayPanic.h" // 崩溃兜底：进程被打死时裸发还原 ARP
 #include "net/core/crypto/CryptoSelfTest.h" // COAST_CRYPTO_SELFTEST：AEAD/KDF 已知答案测试
 #include "net/core/RuleEngine.h"             // COAST_RULE_SELFTEST：分流规则匹配自测
+#include "net/core/ProxyConfigBuilder.h"     // COAST_PROXYCFG_SELFTEST：proxies YAML → ProxyNode 解析自测
 #include "net/LanGateway.h"
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 #include "net/GatewaySelfTest.h"
@@ -161,6 +162,12 @@ int main(int argc, char *argv[])
     // MATCH 兜底 等同步断言,全过返回 0。同样不建 GUI、不碰网络。
     if (qEnvironmentVariableIsSet("COAST_RULE_SELFTEST"))
         return RuleEngine::selfTest() ? 0 : 1;
+
+    // proxies YAML → ProxyNode 解析自测（COAST_PROXYCFG_SELFTEST=1）：拿内置样例（ss/vmess/vless/
+    // vless+reality/trojan/hysteria2/tuic，含 ws-opts/sni/reality-opts/alpn，两种缩进形状）逐字段断言，
+    // 全过返回 0。纯解析、不建 GUI、不碰网络（见 net/core/ProxyConfigBuilder.cpp）。
+    if (qEnvironmentVariableIsSet("COAST_PROXYCFG_SELFTEST"))
+        return coastcore::proxyConfigSelfTest() ? 0 : 1;
 
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报
     // "current style does not support customization"），本 app 全是自绘控件，必须 Basic。

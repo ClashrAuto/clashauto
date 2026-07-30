@@ -103,6 +103,7 @@ set(BACKEND_SOURCES
     # CoastCore 进程内出站骨架（跨平台，只用 Qt Core/Network）：不可变配置快照 + 热重载、进程内直连
     # 出站、按(目的地/设备)选出站的拨号工厂（默认全部回退 Socks5，行为不变）。
     src/net/core/ProxyConfig.cpp       src/net/core/ProxyConfig.h
+    src/net/core/ProxyConfigBuilder.cpp src/net/core/ProxyConfigBuilder.h
     src/net/core/DirectOutbound.cpp    src/net/core/DirectOutbound.h
     src/net/core/CoreDialerFactory.cpp src/net/core/CoreDialerFactory.h
     # 协议出站的共享基建（跨平台）：AEAD/KDF 加密层(OpenSSL libcrypto)、TLS/WebSocket 传输原语、
