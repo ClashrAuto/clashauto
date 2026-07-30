@@ -196,15 +196,18 @@ public:
         sendNonce = QByteArray(coastcore::Aead::nonceSize(), '\0');
         sock->write(salt); // 明文 salt 置于加密流之首
 
-        established = true;
-        emit q->established();
-
-        // 首段上行明文 = 目标地址(SOCKS5 格式) || established 前缓冲的真实载荷，一起进加密流。
+        // ★ 必须先把「目标地址(SOCKS5 格式) || established 前缓冲的明文」写进加密流,**再** emit established：
+        //   established 的槽可能**同步**回写上行数据(write→encryptAndSend)。若先 emit，那份数据会抢在
+        //   目标地址 chunk 之前进流(nonce 0)，服务端把它当 SOCKS5 地址解析 → 整条流错乱。
+        //   真机实测(mihomo ss-in)正因此拨不通:GET 落 nonce0、目标地址落 nonce2、服务端只回 0 字节。
         QByteArray head = encodeSocksAddrHost(dstHost, dstPort);
         head += pending;
         pending.clear();
         targetSent = true;
-        encryptAndSend(head); // head 至少含目标地址，非空
+        encryptAndSend(head); // head 至少含目标地址，非空(此刻 established 仍 false，无人能抢先写)
+
+        established = true;
+        emit q->established();
     }
 
     // 把一段明文按 SIP004 chunk 加密后写进 socket：每 chunk = seal(2B 大端长度) || seal(payload)。
