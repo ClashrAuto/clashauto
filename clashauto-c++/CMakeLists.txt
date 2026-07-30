@@ -174,6 +174,9 @@ set(BACKEND_SOURCES
     # 出站抽象：把「连接接到哪个出站」与「出站是谁」解耦（Socks5=拨 mihomo，后续=进程内协议）
     src/net/IOutbound.h
     src/net/Socks5Client.cpp src/net/Socks5Client.h
+    # 本机混合入站（HTTP + SOCKS5）——CoastCore 的第二个入口，只依赖 Qt Network，四平台都编。
+    # 与 NetStack/lwIP 无关（那部分在下面 POSIX 段里），见 docs/mihomo-replacement-gap.md。
+    src/net/inbound/MixedInbound.cpp src/net/inbound/MixedInbound.h
     # CoastCore 进程内出站骨架（跨平台，只用 Qt Core/Network）：不可变配置快照 + 热重载、进程内直连
     # 出站、按(目的地/设备)选出站的拨号工厂（默认全部回退 Socks5，行为不变）。
     src/net/core/ProxyConfig.cpp       src/net/core/ProxyConfig.h
