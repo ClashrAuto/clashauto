@@ -68,8 +68,97 @@ VLESS   PASS  est=1 bytes=1670  status='HTTP/1.1 200 OK'
 | Trojan (over TLS) | ✅ 已验 |
 | VLESS (over TLS) | ✅ 已验 |
 | REALITY (自建 TLS1.3 + uTLS) | ✅ 已验（对真 xray 25.6.8；**dest 必须支持 TLS 1.3**，见下） |
-| Hysteria2 / TUIC | ❌ 需 msquic（`COAST_HAVE_QUIC`）；且 TUIC 的 token 还缺 msquic 的 keying-material exporter |
+| Hysteria2 (QUIC + HTTP/3 认证) | ✅ 已验（对**官方 hysteria 2.10.0 服务端**；不能拿 mihomo 当服务端，见下） |
+| TUIC | ⛔ 上游卡住：token 要 msquic 的 keying-material exporter，**msquic 最新发行版 v2.5.9 没有**（见下） |
 | VLESS over ws/grpc | ❌ 未覆盖（ws 传输本身有独立实现，grpc 尚未实现） |
+
+## QUIC 系（Hysteria2 / TUIC）
+
+### 怎么跑
+
+```bash
+# 0) msquic：官方 deb **只装 .so、不装头**，头要自己从对应 tag 取
+curl -O https://packages.microsoft.com/debian/12/prod/pool/main/libm/libmsquic/libmsquic_2.5.9_arm64.deb
+dpkg -i libmsquic_2.5.9_arm64.deb
+mkdir -p /opt/msquic/include /opt/msquic/lib
+for f in msquic.h msquic_posix.h quic_platform_posix.h quic_sal_stub.h; do
+  curl -sfLo /opt/msquic/include/$f     https://raw.githubusercontent.com/microsoft/msquic/v2.5.9/src/inc/$f
+done
+ln -sf /usr/lib/aarch64-linux-gnu/libmsquic.so.2 /opt/msquic/lib/libmsquic.so
+
+# 1) Hysteria2 参照服务端 = **官方 hysteria**（见 hy2srv.yaml；证书复用 /tmp/nodesrv3/）
+curl -Lo hysteria "https://github.com/apernet/hysteria/releases/download/app%2Fv2.10.0/hysteria-linux-arm64"
+chmod +x hysteria && systemd-run --unit=hy2srv ./hysteria server -c hy2srv.yaml   # :18395
+
+# 2) TUIC 参照服务端 = mihomo 的 tuic listener（nodesrv3.yaml，:18394）
+
+# 3) 编 + 跑
+cmake -B build -G Ninja -DCOAST_MSQUIC_ROOT=/opt/msquic && cmake --build build
+LD_LIBRARY_PATH=/opt/msquic/lib ./build/obh
+```
+
+期望：`QPACK PASS` + `HY2 PASS`（TUIC 见下，会 SKIP）。
+
+### ★★ 坑一：msquic 的 2^60 off-by-one —— **不能拿 mihomo/sing-box 当 hy2 服务端**
+
+一开始我用 mihomo 的 `hysteria2` listener 当参照，结果 **QUIC 握手就崩**，服务端**一行日志都没有**
+（因为它的 `Accept` 根本没返回）。查下来是 msquic 的 bug：
+
+- `msquic/src/core/quicdef.h`：`QUIC_TP_MAX_STREAMS_MAX = ((1ULL << 60) - 1)`，
+  `crypto_tls.c` 里 `if (InitialMaxBidiStreams > QUIC_TP_MAX_STREAMS_MAX) → 错误`；
+- `metacubex/sing-quic` 的 hy2 服务端：`quicConfig.MaxIncomingStreams = 1 << 60`（**正好 2^60**）；
+- RFC 9000 §4.6 说的是「**大于** 2^60」才非法 —— **2^60 本身合法**。msquic 把合法值判死了，
+  且 `main` 分支至今未修。
+
+影响范围（对用户）：**真实 hy2 节点不受影响** —— 官方 hysteria 服务端用的是
+`defaultMaxIncomingStreams = 1024`（`apernet/hysteria` 的 `core/server/config.go`）。
+只有当对端服务端是 **mihomo / sing-box** 时才会撞上，那种情况下 hy2 节点会**回退到 mihomo 内核**，
+功能不受损。所以参照服务端必须用官方 hysteria，测试台上这一条不是我们的 bug。
+
+排查顺序（血泪）：先拿**纯 msquic 探针**（几十行 C，见下）打一遍，把「msquic 能不能和 quic-go 握手」
+和「我们的封装对不对」切开。当时探针的结果是：TUIC listener ✅、公网 Cloudflare HTTP/3 ✅、
+故意写错 ALPN ✅ 报 `no_application_protocol`、**只有 hy2 listener ❌** —— 一眼定位到是服务端配置差异。
+
+### 真机上抓到的三个我们自己的 bug（都只在真服务端下暴露）
+
+1. **入向流额度通告成 0**（`QuicTransport::openConnection` 传了 `nullptr` 设置）。
+   `PeerUnidiStreamCount` 是「允许**对端**向我们开多少条流」，msquic 默认 **0**；而 HTTP/3 要求
+   服务器能开它自己的控制流。表现极具迷惑性：**QUIC 握手成功、认证请求也送达了**，服务端却
+   一声不响地关连接。quic-go 的帧日志（`QUIC_GO_LOG_LEVEL=debug`）一眼看穿：
+   ```
+   Processed Transport Parameters: ... MaxUniStreamNum: 0
+   server <- StreamFrame{StreamID: 2 ...}   ← 我们的控制流收到了
+   server <- StreamFrame{StreamID: 0 ...}   ← 认证请求也收到了
+   Closing connection with error: Application error 0x100 (local)
+   ```
+   修法：显式设 `PeerUnidiStreamCount=16`（双向仍保持 0），并**接住**对端开过来的流（`sDrainPeerStream`）。
+2. **QPACK 解码碰到解不开的 Huffman 就整块放弃**。hysteria 的认证响应里有 `Hysteria-UDP` 这类头，
+   排在 `:status` 前面 → 整个字段块解析失败。修法：内容解不开**不算结构错**，按长度跳过继续找。
+3. **Huffman 数字表写错**（最隐蔽的一个）。原实现假设 `'0'..'9'` 都是 5 位码、码值等于数字 ——
+   但 RFC 7541 附录 B 里 5 位码只有 `'0''1''2'`，接着是 `'a''c''e''i''o''s''t'`；`'3'..'9'` 是 **6 位**码。
+   于是 hy2 认证成功回的 `:status=233`（Huffman 编码 `13 2c ff`）被解成失败，
+   **服务端日志明明写着 `client connected`，客户端却报 `auth rejected (status=-1)`**。
+   现已按 RFC 抄正，并加了 KAT 自检 `hysteria2QpackSelfTest()`（harness 里作为 `QPACK` 一项先跑）。
+
+### TUIC：**上游卡住**，不是我们的问题
+
+TUIC v5 的 `Authenticate` token = 用 **TLS keying material exporter** 以 UUID 为 label、密码为 context 导出。
+msquic 的对应 API `ConnectionExportKeyingMaterial` 在头文件里明写着 `// Available from v2.6`，
+而 **msquic 最新 tag 是 v2.5.9**（`packages.microsoft.com` 上也只到 2.5.9）。所以：
+
+- CMake 的 `COAST_HAVE_QUIC_KEYING` 探测（真编一次）在现有 msquic 上必然失败 → **tuic 不注册 → 回退 mihomo**；
+- 退而求其次也不行：msquic 的 `QUIC_TLS_SECRETS` 只给 client random + 握手/应用流量密钥，
+  **没有 `exporter_master_secret`**，而后者无法从流量密钥反推 —— 导不出 token。
+
+结论：TUIC 的代码已就位并能编译，**等 msquic 2.6 发布即可开**；在此之前 harness 里显示 `SKIP`。
+
+### 纯 msquic 探针（切开「msquic 的问题」还是「我们的问题」）
+
+`qprobe.c`（不入库，几十行）：`MsQuicOpen2` → `ConfigurationOpen(alpn)` → `ConnectionStart`，
+只打印 `CONNECTED` 或 `SHUTDOWN_INITIATED_BY_TRANSPORT` 的 `Status/ErrorCode`。
+排 QUIC 问题时**先跑它**：能握手 = 问题在我们的协议层；握不上 = 问题在 msquic/服务端配置。
+现在 `QuicTransport` 自己也会把这两个数翻成人话了（`quic 握手失败: ALPN 协商失败 (status=0x..., err=...)`、
+`对端关闭: H3_NO_ERROR (app err=0x100)`），多数情况不必再动探针。
 
 ## REALITY：**已验证通过** ✅（含根因复盘）
 

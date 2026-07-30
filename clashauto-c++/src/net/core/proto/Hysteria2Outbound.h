@@ -73,3 +73,7 @@ private:
 
 // 注册入口(约定见 OutboundRegistry.h)：把 "hysteria2" 与别名 "hy2" 映射到上面两类。
 void registerHysteria2(OutboundRegistry &reg);
+
+// QPACK/Huffman 解码的 KAT 自检(纯函数, 不碰网络)。用来钉死「常量表写错」这类只在真机上
+// 才炸的 bug —— Hy2 的认证成败全靠从响应里解出 :status=233。返回 false 时 why 写明哪一条不符。
+bool hysteria2QpackSelfTest(QString *why = nullptr);

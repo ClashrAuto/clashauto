@@ -1,0 +1,30 @@
+## Hysteria2 参照服务端 —— **官方 hysteria**（apernet/hysteria），不是 mihomo。
+##
+## ★ 为什么不能用 mihomo 的 hysteria2 listener 当参照：
+##   sing-quic 的 hy2 服务端设 `MaxIncomingStreams = 1 << 60`（正好 2^60，RFC 9000 允许），
+##   而 msquic 的校验是 `> (1<<60)-1 即错`（off-by-one，main 分支至今未修）→ msquic 客户端
+##   直接拒收服务端的 transport parameters，QUIC 握手就崩，且服务端一行日志都没有。
+##   官方 hysteria 用的是 defaultMaxIncomingStreams = 1024，没这个问题。详见 README。
+##
+## 起：
+##   curl -Lo hysteria "https://github.com/apernet/hysteria/releases/download/app%2Fv2.10.0/hysteria-linux-arm64"
+##   chmod +x hysteria
+##   systemd-run --unit=hy2srv ./hysteria server -c hy2srv.yaml
+## 证书复用 /tmp/nodesrv3/（生成方法见 nodesrv3.yaml 顶部注释）。
+## 排查时可加 --setenv=HYSTERIA_LOG_LEVEL=debug --setenv=QUIC_GO_LOG_LEVEL=debug，
+## 后者会打出帧级日志（当初就是靠它看到我们通告了 MaxUniStreamNum: 0）。
+listen: 127.0.0.1:18395
+
+tls:
+  cert: /tmp/nodesrv3/cert.pem
+  key: /tmp/nodesrv3/key.pem
+
+## ★ 认证串就是**纯密码**（不是 "用户名:密码"）。写错时服务端返回的是伪装站的 404，不是 401。
+auth:
+  type: password
+  password: hy2pass123
+
+masquerade:
+  type: string
+  string:
+    content: coast-hy2-ref

@@ -268,7 +268,8 @@ void TuicOutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, const Q
         if (d->established)
             d->emitClosed();
         else
-            d->fail(QStringLiteral("tuic connection closed before established"));
+            d->fail(QStringLiteral("tuic 未建立即被关闭: %1")
+                        .arg(d->quic->lastCloseReason()));
     });
     d->quic->openConnection(d->server, d->serverPort, d->alpn, d->sni, d->skipVerify);
 }

@@ -1,0 +1,31 @@
+## QUIC 系参照服务端（mihomo 的 **tuic** listener）+ MATCH,DIRECT。
+##
+## ★ 这里的 hysteria2 listener **只作留档，harness 不用它**：msquic 客户端连不上 mihomo/sing-box 的
+##   hy2 服务端（sing-quic 设 MaxIncomingStreams=1<<60，撞 msquic 的 off-by-one，详见 README）。
+##   Hysteria2 的参照服务端请用官方 hysteria，见 hy2srv.yaml。
+## 证书须放在 -d 家目录内（mihomo SAFE_PATHS 限制）：这里用 /tmp/nodesrv3/。
+##   mkdir -p /tmp/nodesrv3 && openssl req -x509 -newkey rsa:2048 \
+##     -keyout /tmp/nodesrv3/key.pem -out /tmp/nodesrv3/cert.pem -days 365 -nodes \
+##     -subj "/CN=test.local" -addext "subjectAltName=DNS:test.local,IP:127.0.0.1"
+mode: rule
+log-level: info
+external-controller: 127.0.0.1:19194
+listeners:
+  - name: hy2-in
+    type: hysteria2
+    listen: 127.0.0.1
+    port: 18393
+    users:
+      test: hy2pass123
+    certificate: /tmp/nodesrv3/cert.pem
+    private-key: /tmp/nodesrv3/key.pem
+  - name: tuic-in
+    type: tuic
+    listen: 127.0.0.1
+    port: 18394
+    users:
+      b831381d-6324-4d53-ad4f-8cda48b30811: tuicpass123
+    certificate: /tmp/nodesrv3/cert.pem
+    private-key: /tmp/nodesrv3/key.pem
+rules:
+  - MATCH,DIRECT

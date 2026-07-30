@@ -1,4 +1,7 @@
 #include "proto/OutboundRegistry.h"
+#ifdef COAST_HAVE_QUIC
+#include "proto/Hysteria2Outbound.h"
+#endif
 #include "ProxyConfig.h"
 #include "../IOutbound.h"
 #include <QCoreApplication>
@@ -38,7 +41,32 @@ int main(int argc,char**argv){
   if(!testOne("VMESS",vm)) fails++;
   if(!testOne("TROJAN",tj)) fails++;
   if(!testOne("VLESS",vl)) fails++;
-  fprintf(stderr,"== fails=%d ==\n",fails);
   if(!testOne("REALITY",rl)) fails++;
+#ifdef COAST_HAVE_QUIC
+  // 先跑纯函数 KAT（不碰网络）：Hy2 认证成败全靠从响应里解出 :status，那段 QPACK/Huffman 解码
+  // 曾经因为常量表写错而在真机上炸过，所以每次跑 harness 都先钉一遍。
+  { QString why; const bool ok = hysteria2QpackSelfTest(&why);
+    fprintf(stderr,"%-7s %s%s\n","QPACK", ok?"PASS":"FAIL", ok?"":qUtf8Printable(QStringLiteral("  ")+why));
+    if(!ok) fails++; }
+  // QUIC 系参照服务端：
+  //   · Hysteria2 → **官方 hysteria 服务端**(hy2srv.yaml, :18395)。**不能用 mihomo 当 hy2 服务端**，
+  //     那条路被 msquic 的一个 off-by-one 判死（见 README「msquic 的 2^60 坑」）。
+  //   · TUIC     → mihomo 的 tuic listener(nodesrv3.yaml, :18394)。
+  // ★ Hysteria2 的认证串就是**纯密码**（不是 "用户名:密码"；写错时服务端返回伪装站的 404 而非 401）。
+  ProxyNode h2; h2.name="h2"; h2.type="hysteria2"; h2.server="127.0.0.1"; h2.port=18395;
+  h2.password="hy2pass123"; h2.sni="test.local"; h2.skipCertVerify=true;
+  if(!testOne("HY2",h2)) fails++;
+  ProxyNode tu; tu.name="tu"; tu.type="tuic"; tu.server="127.0.0.1"; tu.port=18394;
+  tu.uuid="b831381d-6324-4d53-ad4f-8cda48b30811"; tu.password="tuicpass123";
+  tu.sni="test.local"; tu.skipCertVerify=true;
+# ifdef COAST_HAVE_QUIC_KEYING
+  if(!testOne("TUIC",tu)) fails++;
+# else
+  fprintf(stderr,"%-7s SKIP  (msquic 无 keying exporter，需 v2.6+；token 无法导出)\n","TUIC");
+# endif
+#else
+  fprintf(stderr,"HY2/TUIC SKIP  (构建时未找到 msquic)\n");
+#endif
+  fprintf(stderr,"== fails=%d ==\n",fails);
   return fails;
 }

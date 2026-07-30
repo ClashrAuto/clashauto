@@ -6,6 +6,9 @@
 #include <QDateTime>
 #include <QHash>
 #include <QRandomGenerator>
+#include <QtGlobal>
+
+#include <cstdio>
 
 // 说明：本文件用 coastcore::QuicTransport 实现 Hysteria2。协议线格式见头文件与下方注释。
 // 与 Trojan/Direct 一样, 对 NetStack 侧无感:established 后就是背压化的双向字节管道。
@@ -158,13 +161,31 @@ bool readPrefixedInt(const QByteArray &buf, int &pos, int prefixBits, quint64 *o
     return true;
 }
 
-// HPACK Huffman 解码 —— 仅支持「全数字」内容(HPACK 中 '0'..'9' 均是 5 位码, 5 位值即数字)。
-// :status 恒为 3 位数字, 服务器常把它 Huffman 压成 2 字节, 故必须能解。非纯数字内容返回 false。
+// HPACK Huffman 解码 —— 仅支持「全数字」内容(够解 :status)。非纯数字内容返回 false。
+//
+// ★★ 这张表必须照 RFC 7541 附录 B 抄，**不能想当然**。数字**不是**清一色的 5 位码，码值也**不等于**
+//    数字本身 —— 5 位码只有 '0'=0b00000、'1'=0b00001、'2'=0b00010 三个，紧随其后的 5 位码是
+//    'a'(0b00011)、'c'、'e'、'i'、'o'、's'、't'；'3'..'9' 是 **6 位**码：
+//        '3'=0b011001  '4'=0b100010  '5'=0b100011  '6'=0b100100
+//        '7'=0b100101  '8'=0b100110  '9'=0b100111
+//    早前这里写成「取 5 位、值 >9 就失败、否则当数字」，于是只有 0/1/2 碰巧正确。
+//    真机后果：hysteria2 认证成功回的 :status=233 被编成 `13 2c ff`，解码在第二个码
+//    (0b011001=25>9) 上放弃 → 客户端报 auth rejected (status=-1)，而服务端日志明明写着
+//    client connected。KAT 见 hysteria2QpackSelfTest()。
+//
+// 因为 Huffman 码是前缀无关的，所以「先试 5 位、不中再试 6 位」是安全的：6 位数字码的前 5 位
+// (01100 / 10001) 都不在 {00000,00001,00010} 里，不会误判。
 bool huffmanDecodeDigits(const QByteArray &raw, QByteArray *out)
 {
     const int totalBits = raw.size() * 8;
     auto bitAt = [&](int i) -> int {
         return (quint8(raw.at(i >> 3)) >> (7 - (i & 7))) & 1;
+    };
+    auto peek = [&](int at, int n) -> int {
+        int v = 0;
+        for (int i = 0; i < n; ++i)
+            v = (v << 1) | bitAt(at + i);
+        return v;
     };
     QByteArray res;
     int bitPos = 0;
@@ -180,21 +201,41 @@ bool huffmanDecodeDigits(const QByteArray &raw, QByteArray *out)
             if (allOnes)
                 break;
         }
-        if (bitPos + 5 > totalBits)
-            return false; // 不足一个数字码又不是填充 → 非纯数字, 放弃
-        int v = 0;
-        for (int i = 0; i < 5; ++i)
-            v = (v << 1) | bitAt(bitPos + i);
-        if (v > 9)
-            return false; // 不是数字码
-        res.append(char('0' + v));
-        bitPos += 5;
+        if (bitPos + 5 <= totalBits) {
+            const int v5 = peek(bitPos, 5);
+            if (v5 <= 2) { // '0' '1' '2'
+                res.append(char('0' + v5));
+                bitPos += 5;
+                continue;
+            }
+        }
+        if (bitPos + 6 <= totalBits) {
+            const int v6 = peek(bitPos, 6);
+            int digit = -1;
+            if (v6 == 0x19)
+                digit = 3;                      // 011001
+            else if (v6 >= 0x22 && v6 <= 0x27)
+                digit = 4 + (v6 - 0x22);        // 100010..100111 → '4'..'9'
+            if (digit >= 0) {
+                res.append(char('0' + digit));
+                bitPos += 6;
+                continue;
+            }
+        }
+        return false; // 既不是数字码也不是填充 → 非纯数字内容，交回调用方跳过
     }
     *out = res;
     return true;
 }
 
-// 解一个 QPACK 字符串:首字节含 H 标志(位 hMask)+ 长度前缀整数(prefixBits)。H=1→Huffman(仅数字), H=0→原样。
+// 解一个 QPACK 字符串:首字节含 H 标志(位 hMask)+ 长度前缀整数(prefixBits)。H=1→Huffman, H=0→原样。
+//
+// ★ 返回值只表示**结构**是否完好(长度能不能读、有没有越界)——**内容解不开不算失败**：
+//   我们只有「纯数字」Huffman 解码能力(够解 :status)，碰上别的 Huffman 内容(hysteria 的响应里就有
+//   `Hysteria-UDP` 这类头)时，按长度**跳过**并把 out 置空即可，让调用方接着往后找 :status。
+//   早前这里直接 return false，调用方随即 return —— 于是只要 :status 前面出现一个 Huffman 编码的头，
+//   整个字段块就解析失败，表现为「认证其实成功了(服务端日志 client connected)，客户端却报
+//   auth rejected (status=-1)」。这是真机上抓到的最后一个 Hy2 拦路 bug。
 bool readQpackString(const QByteArray &buf, int &pos, int prefixBits, quint8 hMask, QByteArray *out)
 {
     if (pos >= buf.size())
@@ -211,7 +252,9 @@ bool readQpackString(const QByteArray &buf, int &pos, int prefixBits, quint8 hMa
         *out = rawv;
         return true;
     }
-    return huffmanDecodeDigits(rawv, out);
+    if (!huffmanDecodeDigits(rawv, out))
+        out->clear(); // 解不开:已按长度跳过，交回空值(不匹配任何我们关心的字段)
+    return true;
 }
 
 // QPACK 静态表里 :status 值确定的项 → 其状态码(RFC 9204 附录 A);其余返回 -1。
@@ -516,7 +559,15 @@ public:
             if (flen > quint64(authRx.size() - pos))
                 break; // 帧体未收全(且防越界)
             if (ftype == 0x01) { // HEADERS = 认证响应
-                const int status = decodeH3AuthStatus(authRx.mid(pos, int(flen)));
+                const QByteArray fields = authRx.mid(pos, int(flen));
+                const int status = decodeH3AuthStatus(fields);
+                // COAST_HY2_DEBUG=1 → 解不出 :status 时把 QPACK 字段块原样打出来。
+                // 认证响应是「服务端只发一次、内容由对端编码器决定」的东西，出问题时没有这段
+                // 十六进制基本无从下手（真机上就是靠它定位到 QPACK 解析的两处 bug）。
+                if (status != 233 && qEnvironmentVariableIsSet("COAST_HY2_DEBUG")) {
+                    fprintf(stderr, "[HY2] auth HEADERS status=%d block(%d)=%s\n", status,
+                            int(fields.size()), fields.toHex(' ').constData());
+                }
                 if (status == 233) {
                     authed = true;
                     startProxyStream();
@@ -565,7 +616,8 @@ void Hysteria2OutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, co
         if (d->established)
             d->emitClosed();
         else
-            d->fail(QStringLiteral("hysteria2 connection closed before established"));
+            d->fail(QStringLiteral("hysteria2 未建立即被关闭: %1")
+                        .arg(d->quic->lastCloseReason()));
     });
     d->quic->openConnection(d->server, d->serverPort, QByteArrayLiteral("h3"), d->sni, d->skipVerify);
 }
@@ -876,6 +928,62 @@ void Hysteria2OutboundUdp::closeSession()
 }
 
 bool Hysteria2OutboundUdp::isReady() const { return d->ready; }
+
+// ======================= QPACK 解码自检(KAT) =======================
+// 只测纯函数，不需要网络。守的是「常量表写错」这一类**编译期发现不了、只在真机上炸**的 bug ——
+// 本文件的 Huffman 数字表就曾经写错，把 hysteria2 认证成功的 :status=233 判成了失败。
+// 向量取自真机抓到的 quic-go/qpack 编码结果 + 按 RFC 7541 附录 B 手算：
+//   "233" → 13 2c ff   "200" → 10 01   "404" → 88 11 7f
+bool hysteria2QpackSelfTest(QString *why)
+{
+    struct Case { const char *hex; const char *want; };
+    // 1) Huffman 数字串
+    const Case huff[] = {
+        { "132cff", "233" }, // 真机向量：'2'(5位) + '3'(6位) + '3'(6位) + 填充
+        { "1001",   "200" },
+        { "88117f", "404" },
+        { "103f",   "20"  }, // '2'(00010) + '0'(00000) + 6 位全 1 填充
+    };
+    for (const Case &c : huff) {
+        QByteArray out;
+        const QByteArray raw = QByteArray::fromHex(c.hex);
+        if (!huffmanDecodeDigits(raw, &out) || out != QByteArray(c.want)) {
+            if (why)
+                *why = QStringLiteral("huffman %1 → '%2' (期望 '%3')")
+                           .arg(c.hex, QString::fromUtf8(out), QString::fromUtf8(c.want));
+            return false;
+        }
+    }
+    // 2) 非数字内容必须「失败而不是乱解」(调用方据此跳过该字段)
+    QByteArray dummy;
+    if (huffmanDecodeDigits(QByteArray::fromHex("aabbcc"), &dummy)) {
+        if (why)
+            *why = QStringLiteral("非数字 Huffman 竟然解成了 '%1'").arg(QString::fromUtf8(dummy));
+        return false;
+    }
+    // 3) 整段字段块 → :status。真机向量(hysteria2 认证成功的响应头部前缀):
+    //    00 00            字段段前缀(Required Insert Count=0, Delta Base=0)
+    //    5f 09            带静态名引用的字面量, nameIdx=15+9=24 → ":status"
+    //    83 13 2c ff      值: H=1 len=3, Huffman "233"
+    struct SCase { const char *hex; int want; };
+    const SCase blocks[] = {
+        { "00005f0983132cff", 233 },  // 真机向量：只有 :status
+        { "0000d9", 200 },            // 静态表索引：0xd9 = 11(索引位) + 011001(=25) → 200
+        // :status 前面先来一个**非数字 Huffman 值**的头：必须跳过它继续找到 233，而不是整块放弃
+        // (这正是真机上第二个 bug)。0x21=带字面名的字面量(N=0,H=0,名长1) + "x" +
+        // 0x83=值 H=1 长 3 + aabbcc(解不开的乱码)，随后才是真正的 :status。
+        { "0000217883aabbcc5f0983132cff", 233 },
+    };
+    for (const SCase &c : blocks) {
+        const int got = decodeH3AuthStatus(QByteArray::fromHex(c.hex));
+        if (got != c.want) {
+            if (why)
+                *why = QStringLiteral("block %1 → status=%2 (期望 %3)").arg(c.hex).arg(got).arg(c.want);
+            return false;
+        }
+    }
+    return true;
+}
 
 // ============================ 注册 ============================
 

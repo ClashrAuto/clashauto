@@ -71,7 +71,10 @@ endif()
 # **可选**:找到才编入 QUIC 协议并定义 COAST_HAVE_QUIC;找不到则 hysteria2/tuic 不注册、具名节点回退
 # mihomo,其余协议不受影响(与 QtDBus 一样的「缺了就降级、别让构建失败」策略)。
 # CI 需提供 msquic(预编译包,见 QuicTransport.cpp 的集成说明);本地 MinGW/QEMU 无 → 默认关。
-# 用 -Dmsquic_DIR=... 或 -DCOAST_MSQUIC_ROOT=... 指向 SDK。TUIC token 需 msquic>=2.6 的 preview 特性。
+# 用 -Dmsquic_DIR=... 或 -DCOAST_MSQUIC_ROOT=... 指向 SDK。
+# ★ Hysteria2 已真机拨通（对官方 hysteria 2.10 服务端，见 tools/outbound_e2e/README）。
+# ★ TUIC token 需 msquic 的 ConnectionExportKeyingMaterial —— 头文件里明写 "Available from v2.6"，
+#   而 msquic **最新发行版仍是 v2.5.9**（packages.microsoft.com 亦然），故 tuic 现阶段必然回退内核。
 set(COAST_HAVE_QUIC OFF)
 set(COAST_MSQUIC_LINK "")
 # 先试 CMake config 包（自己源码编的 msquic 会装 msquicConfig.cmake）。

@@ -259,6 +259,75 @@ bool QuicStream::isStarted() const { return d->started; }
 //                               QuicTransport
 // ============================================================================
 
+// msquic 的 QUIC_STATUS → 人能看懂的名字。只覆盖握手期真会碰到的那几个（其余打十六进制即可）。
+// ★ 别小看这张表：真机上「HY2 拨不通」的第一手线索就是这里的 ALPN/证书/超时之分。
+static QString quicStatusName(QUIC_STATUS st)
+{
+    if (st == QUIC_STATUS_CONNECTION_TIMEOUT) return QStringLiteral("连接超时(对端没响应)");
+    if (st == QUIC_STATUS_CONNECTION_IDLE)    return QStringLiteral("空闲超时");
+    if (st == QUIC_STATUS_UNREACHABLE)        return QStringLiteral("目标不可达");
+    if (st == QUIC_STATUS_ALPN_NEG_FAILURE)   return QStringLiteral("ALPN 协商失败");
+    if (st == QUIC_STATUS_VER_NEG_ERROR)      return QStringLiteral("QUIC 版本协商失败");
+    if (st == QUIC_STATUS_CONNECTION_REFUSED) return QStringLiteral("对端拒绝连接");
+    if (st == QUIC_STATUS_BAD_CERTIFICATE)    return QStringLiteral("证书无效");
+    if (st == QUIC_STATUS_UNKNOWN_CERTIFICATE) return QStringLiteral("证书未知(对端不认)");
+    if (st == QUIC_STATUS_CERT_UNTRUSTED_ROOT) return QStringLiteral("证书根不受信任");
+    if (st == QUIC_STATUS_CERT_EXPIRED)       return QStringLiteral("证书已过期");
+    if (st == QUIC_STATUS_TLS_ERROR)          return QStringLiteral("TLS 错误");
+    if (st == QUIC_STATUS_HANDSHAKE_FAILURE)  return QStringLiteral("握手失败");
+    if (st == QUIC_STATUS_ABORTED)            return QStringLiteral("被中止");
+    if (st == QUIC_STATUS_PROTOCOL_ERROR)     return QStringLiteral("协议错误");
+    // ★ QUIC_STATUS_TLS_ALERT / QUIC_STATUS_CERT_ERROR 在 msquic 里是**带参宏**(alert 号 / 证书错误号)，
+    //   不能当常量比。但可以用它算出「TLS alert 区间」，把对端发来的 alert 号直接解出来 ——
+    //   这比一句「传输错误」有用得多（例如 alert 40=handshake_failure、47=illegal_parameter）。
+    if (st >= QUIC_STATUS_TLS_ALERT(0) && st <= QUIC_STATUS_TLS_ALERT(255))
+        return QStringLiteral("对端 TLS alert %1").arg(quint32(st - QUIC_STATUS_TLS_ALERT(0)));
+    return QStringLiteral("传输错误");
+}
+
+// HTTP/3 应用层错误码 → 名字（RFC 9114 §8.1 / RFC 9204 §6）。Hy2 跑在 HTTP/3 上，对端关连接时
+// 带的就是这些码；把它翻出来，「握手过了但被关」这一类故障才有得查。
+static QString h3ErrorName(quint64 ec)
+{
+    switch (ec) {
+    case 0x100: return QStringLiteral("H3_NO_ERROR");
+    case 0x101: return QStringLiteral("H3_GENERAL_PROTOCOL_ERROR");
+    case 0x102: return QStringLiteral("H3_INTERNAL_ERROR");
+    case 0x103: return QStringLiteral("H3_STREAM_CREATION_ERROR");
+    case 0x104: return QStringLiteral("H3_CLOSED_CRITICAL_STREAM");
+    case 0x105: return QStringLiteral("H3_FRAME_UNEXPECTED");
+    case 0x106: return QStringLiteral("H3_FRAME_ERROR");
+    case 0x107: return QStringLiteral("H3_EXCESSIVE_LOAD");
+    case 0x108: return QStringLiteral("H3_ID_ERROR");
+    case 0x109: return QStringLiteral("H3_SETTINGS_ERROR");
+    case 0x10a: return QStringLiteral("H3_MISSING_SETTINGS");
+    case 0x10b: return QStringLiteral("H3_REQUEST_REJECTED");
+    case 0x10c: return QStringLiteral("H3_REQUEST_CANCELLED");
+    case 0x10d: return QStringLiteral("H3_REQUEST_INCOMPLETE");
+    case 0x10e: return QStringLiteral("H3_MESSAGE_ERROR");
+    case 0x10f: return QStringLiteral("H3_CONNECT_ERROR");
+    case 0x110: return QStringLiteral("H3_VERSION_FALLBACK");
+    case 0x200: return QStringLiteral("QPACK_DECOMPRESSION_FAILED");
+    case 0x201: return QStringLiteral("QPACK_ENCODER_STREAM_ERROR");
+    case 0x202: return QStringLiteral("QPACK_DECODER_STREAM_ERROR");
+    default:    return QStringLiteral("应用层错误");
+    }
+}
+
+// 对端(服务器)开过来的流的「接住并丢弃」回调。
+// ★ 为什么必须有：既然我们通告了 PeerUnidiStreamCount>0，服务器就真会开流过来 ——
+//   Hy2 场景下那是 HTTP/3 的控制流(SETTINGS/GOAWAY)与 QPACK 编解码流。我们不需要它们的内容
+//   (Hy2/TUIC 的数据面走我们自己开的流 + 数据报)，但**必须接住**：msquic 要求应用为对端流指定
+//   回调并最终 StreamClose，否则句柄泄漏 / 连接被拆。返回 SUCCESS 即视为数据已消费。
+static QUIC_STATUS QUIC_API sDrainPeerStream(HQUIC stream, void * /*ctx*/, QUIC_STREAM_EVENT *ev)
+{
+    if (ev->Type == QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE) {
+        if (const QUIC_API_TABLE *api = Api())
+            api->StreamClose(stream); // 句柄的关闭责任在我们这边
+    }
+    return QUIC_STATUS_SUCCESS;
+}
+
 class QuicTransport::Priv
 {
 public:
@@ -269,6 +338,7 @@ public:
     HQUIC config = nullptr;
     bool connected = false;
     bool closedEmitted = false;
+    QString closeInfo;  // 最近一次关闭/失败的可读原因(供上层拼进错误信息, 见 lastCloseReason())
     QByteArray alpn; // 保活:ConfigurationOpen 期间需有效(实际只用在 open 里, 留存无妨)
 
     QAtomicInt dgramSendEnabled{0};
@@ -308,19 +378,42 @@ public:
         case QUIC_CONNECTION_EVENT_CONNECTED:
             post([this] { emitConnected(); });
             break;
-        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
-            post([this] {
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT: {
+            // ★ 一定要把 msquic 的 Status/ErrorCode 带出去：握手失败的真因几乎全在这两个数里
+            //   （ALPN 谈崩 / 证书被拒 / 版本谈崩 / 干脆超时=对端没在听或包没到），
+            //   丢掉它们就只剩一句「握手失败」,真机排查时等于瞎子。
+            const QUIC_STATUS st = ev->SHUTDOWN_INITIATED_BY_TRANSPORT.Status;
+            const quint64 ec = quint64(ev->SHUTDOWN_INITIATED_BY_TRANSPORT.ErrorCode);
+            post([this, st, ec] {
+                const QString why = QStringLiteral("%1 (status=0x%2, err=%3)")
+                                        .arg(quicStatusName(st)).arg(quint32(st), 0, 16).arg(ec);
+                closeInfo = QStringLiteral("传输层关闭: ") + why;
                 if (connected)
                     emitClosed();
                 else
-                    emitFailed(QStringLiteral("quic transport shutdown (handshake/transport error)"));
+                    emitFailed(QStringLiteral("quic 握手失败: ") + why);
             });
             break;
-        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
-            post([this] { emitClosed(); });
+        }
+        case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
+            // ★ 对端主动关时带的是**应用层**错误码。跑 HTTP/3 的 Hy2 全靠它区分「密码错」「H3 帧不对」
+            //   「QPACK 解不开」—— 丢掉它就只剩「连接被关了」，等于没有线索。
+            const quint64 ec = quint64(ev->SHUTDOWN_INITIATED_BY_PEER.ErrorCode);
+            post([this, ec] {
+                closeInfo = QStringLiteral("对端关闭: %1 (app err=0x%2)").arg(h3ErrorName(ec)).arg(ec, 0, 16);
+                emitClosed();
+            });
             break;
+        }
         case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
             post([this] { emitClosed(); });
+            break;
+        case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED:
+            // 服务器开过来的流(HTTP/3 控制流 / QPACK 流 …)：接住并丢弃，见 sDrainPeerStream。
+            if (const QUIC_API_TABLE *api = Api()) {
+                api->SetCallbackHandler(ev->PEER_STREAM_STARTED.Stream,
+                                        reinterpret_cast<void *>(&sDrainPeerStream), nullptr);
+            }
             break;
         case QUIC_CONNECTION_EVENT_DATAGRAM_STATE_CHANGED: {
             const bool en = ev->DATAGRAM_STATE_CHANGED.SendEnabled != FALSE;
@@ -402,8 +495,28 @@ void QuicTransport::openConnection(const QString &host, quint16 port, const QByt
     alpnBuf.Buffer = reinterpret_cast<uint8_t *>(const_cast<char *>(d->alpn.constData()));
     alpnBuf.Length = uint32_t(d->alpn.size());
 
-    // 用默认设置(NULL) —— 客户端不需要设 stream 配额(由服务器授予)。数据报接收另行 SetParam。
-    if (QUIC_FAILED(api->ConfigurationOpen(reg, &alpnBuf, 1, nullptr, 0, nullptr, &d->config))) {
+    // ★★ 必须显式给**入向**流配额，不能用默认(NULL)。
+    //   PeerUnidiStreamCount/PeerBidiStreamCount 是「允许对端向我们开多少条流」，msquic 默认 **0**。
+    //   曾经这里传 NULL，注释还写着「客户端不需要设 stream 配额(由服务器授予)」—— 那是把方向弄反了：
+    //   服务器授予的是**我们能开多少条**，而 HTTP/3 要求服务器能开它自己的控制流(单向)。
+    //   真机后果(官方 hysteria2 服务端 + quic-go 帧日志)：
+    //     Processed Transport Parameters: ... MaxUniStreamNum: 0   ← 我们通告 0
+    //     server <- StreamFrame{StreamID: 2 / 0 ...}               ← 我们的控制流+认证请求都收到了
+    //     Closing connection with error: Application error 0x100 (local)  ← 服务器开不出控制流,直接收摊
+    //   表现为「QUIC 握手成功、认证请求已送达，但服务器一言不发地关连接、日志里连一行都没有」。
+    //   单向给足(HTTP/3 要控制流+QPACK 编/解码流=3 条；TUIC 的 quic 模式 UDP 也走服务端单向流)；
+    //   双向保持 0：Hy2/TUIC 的服务器不会向客户端开双向流，不开口就不必伺候。
+    QUIC_SETTINGS settings;
+    std::memset(&settings, 0, sizeof(settings));
+    settings.PeerUnidiStreamCount = 16;
+    settings.IsSet.PeerUnidiStreamCount = 1;
+    settings.PeerBidiStreamCount = 0;
+    settings.IsSet.PeerBidiStreamCount = 1;
+    // 数据报(Hy2/TUIC 的 UDP 回程)在此一并声明，比建连后再 SetParam 更早、更稳。
+    settings.DatagramReceiveEnabled = TRUE;
+    settings.IsSet.DatagramReceiveEnabled = 1;
+    if (QUIC_FAILED(api->ConfigurationOpen(reg, &alpnBuf, 1, &settings, sizeof(settings), nullptr,
+                                           &d->config))) {
         d->post([this] { d->emitFailed(QStringLiteral("quic ConfigurationOpen failed")); });
         return;
     }
@@ -428,10 +541,8 @@ void QuicTransport::openConnection(const QString &host, quint16 port, const QByt
         return;
     }
 
-    // 开启数据报接收(Hy2/TUIC 的 UDP 回程要用)。★需真机验证:个别 msquic 版本要求经 QUIC_SETTINGS
-    //   在 ConfigurationOpen 时设 DatagramReceiveEnabled;此处走连接级 SetParam, 需确认生效。
-    const uint8_t one = 1;
-    api->SetParam(d->conn, QUIC_PARAM_CONN_DATAGRAM_RECEIVE_ENABLED, sizeof(one), &one);
+    // 数据报接收已在上面的 QUIC_SETTINGS 里声明(真机 quic-go 日志确认对端收到
+    // MaxDatagramFrameSize: 65535)，这里不再重复 SetParam。
 
     // TLS ServerName(=SNI/证书校验名)：优先用 sni, 空才回落 host。
     const QByteArray sniName = (sni.isEmpty() ? host : sni).toUtf8();
@@ -574,5 +685,9 @@ void QuicTransport::close()
 }
 
 bool QuicTransport::isConnected() const { return d->connected; }
+
+// 最近一次关闭/失败的可读原因。上层(Hy2/TUIC)把它拼进自己的错误信息，避免只剩一句
+// 「连接被关了」——握手成功之后的故障(H3 帧错、QPACK 解不开、认证被拒)全靠这个码定位。
+QString QuicTransport::lastCloseReason() const { return d->closeInfo; }
 
 } // namespace coastcore

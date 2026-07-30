@@ -125,6 +125,8 @@ public:
 
     void close();            // 优雅关闭连接
     bool isConnected() const;
+    // 最近一次关闭/失败的可读原因(含 QUIC status / HTTP3 应用错误码)。空=还没关过。
+    QString lastCloseReason() const;
 
 signals:
     void connected();                          // QUIC+TLS 握手完成, 可开流/发数据报
