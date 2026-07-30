@@ -19,7 +19,9 @@
 #include <QHostAddress>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QElapsedTimer>
 #include <QTimer>
+#include <algorithm>
 
 #include <cstdio>
 #include <memory>
@@ -250,6 +252,60 @@ int main(int argc, char **argv)
                              kBigSize, checksum(body) == wantSum ? "对" : "不符");
             ok &= good;
         }
+    }
+
+    // ---- 延迟：进程内引擎给每条连接**加了多少**。直连靶机 vs 经入站，同一客户端同一靶机，
+    //      只差「中间有没有 CoastCore」这一个变量。回答的是「把延迟降到最低」到底该从哪下手。
+    {
+        auto measure = [&](bool viaInbound, int n) -> QVector<double> {
+            QVector<double> ms;
+            const quint16 port = viaInbound ? iport : tport;
+            for (int i = 0; i < n; ++i) {
+                QElapsedTimer t;
+                t.start();
+                QTcpSocket c;
+                QEventLoop loop;
+                QTimer to;
+                to.setSingleShot(true);
+                QObject::connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
+                QByteArray got;
+                QObject::connect(&c, &QTcpSocket::readyRead, &loop, [&] {
+                    got.append(c.readAll());
+                    if (got.contains("COASTOK:"))
+                        loop.quit();
+                });
+                QObject::connect(&c, &QTcpSocket::disconnected, &loop, &QEventLoop::quit);
+                c.connectToHost(QHostAddress::LocalHost, port);
+                if (!c.waitForConnected(2000))
+                    continue;
+                if (viaInbound)
+                    c.write("GET http://127.0.0.1:" + QByteArray::number(tport)
+                            + "/lat HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+                else
+                    c.write("GET /lat HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+                to.start(3000);
+                loop.exec();
+                if (got.contains("COASTOK:"))
+                    ms.push_back(t.nsecsElapsed() / 1e6);
+            }
+            std::sort(ms.begin(), ms.end());
+            return ms;
+        };
+        auto pct = [](const QVector<double> &v, double p) {
+            return v.isEmpty() ? 0.0 : v.at(qBound(0, int(v.size() * p), v.size() - 1));
+        };
+        const int N = 300;
+        const QVector<double> dir = measure(false, N);
+        const QVector<double> via = measure(true, N);
+        std::fprintf(stderr,
+                     "  [INFO] 每连接延迟（%d 次，connect→GET→拿到应答）\n"
+                     "         直连靶机   : p50 %.3f ms  p90 %.3f ms  (n=%d)\n"
+                     "         经进程内引擎: p50 %.3f ms  p90 %.3f ms  (n=%d)\n"
+                     "         ⇒ 净增 p50 %.3f ms —— ★别把它全算作「引擎开销」：代理天然要**多建一条**\n"
+                     "           到目标的 TCP 连接，本机直连一次就要 p50 %.3f ms，两次就接近这个净增值。\n"
+                     "           要分离出引擎自身的开销，缺的对照是「同机 mihomo 走同一条路」，尚未做。\n",
+                     N, pct(dir, 0.5), pct(dir, 0.9), dir.size(), pct(via, 0.5), pct(via, 0.9),
+                     via.size(), pct(via, 0.5) - pct(dir, 0.5), pct(dir, 0.5));
     }
 
     // ---- 证伪检查：上面两个大流量用例**必须真的把水位顶上去**，否则节流分支根本没跑，
