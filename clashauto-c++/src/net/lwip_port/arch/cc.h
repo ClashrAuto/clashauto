@@ -37,9 +37,19 @@
 #endif
 
 // —— 诊断 / 断言 ——
-#define LWIP_PLATFORM_DIAG(x)   do { printf x; } while (0)
-#define LWIP_PLATFORM_ASSERT(x) \
-    do { printf("lwip assert: %s @ %s:%d\n", (x), __FILE__, __LINE__); abort(); } while (0)
+// ★ 必须走 **stderr 且显式 fflush**，不能用 printf：stdout 在非 tty（systemd/重定向）下是**全缓冲**的，
+//   而断言紧接着 abort()，缓冲区根本来不及刷 —— 消息就此人间蒸发。真机压测时就吃过这个亏：
+//   进程 SIGABRT 挂掉，journal 里**一个字都没有**，只能靠 gdb 抓栈才知道是 lwIP 的 tcp_receive 断言。
+//   stderr 无缓冲，再补一次 fflush 保底，崩溃现场才留得下来。
+// 注意 DIAG 的参数 x 是**带括号的实参表**（`("fmt", a, b)`），只能原样跟在函数名后面 ——
+// 想换成 fprintf 就得塞进 stream 参数，宏做不到，所以保留 printf、补一次 fflush 即可。
+#define LWIP_PLATFORM_DIAG(x)   do { printf x; fflush(stdout); } while (0)
+#define LWIP_PLATFORM_ASSERT(x)                                                                    \
+    do {                                                                                           \
+        fprintf(stderr, "lwip assert: %s @ %s:%d\n", (x), __FILE__, __LINE__);                     \
+        fflush(stderr);                                                                            \
+        abort();                                                                                   \
+    } while (0)
 
 // 让 lwIP 使用标准 <string.h>（memcpy 等）与随机数：
 #define LWIP_RAND() ((u32_t)rand())

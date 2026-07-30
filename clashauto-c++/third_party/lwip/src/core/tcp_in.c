@@ -1170,6 +1170,14 @@ tcp_receive(struct tcp_pcb *pcb)
   u32_t right_wnd_edge;
 
   LWIP_ASSERT("tcp_receive: invalid pcb", pcb != NULL);
+  /* Coast 诊断补丁：这条断言在高连接速率下会真的触发（真机压测复现）。默认的消息只有一句
+     "wrong state"，不知道是哪个状态、也不知道当时收到的是什么标志位，根本无从下手。
+     把 state/flags/端口打出来再 abort —— 崩溃现场只有一次机会，别浪费它。 */
+  if (!(pcb->state >= ESTABLISHED)) {
+    fprintf(stderr, "lwip assert: tcp_receive wrong state=%d flags=0x%02x local=%d remote=%d\n",
+            (int)pcb->state, (unsigned)flags, (int)pcb->local_port, (int)pcb->remote_port);
+    fflush(stderr);
+  }
   LWIP_ASSERT("tcp_receive: wrong state", pcb->state >= ESTABLISHED);
 
   if (flags & TCP_ACK) {

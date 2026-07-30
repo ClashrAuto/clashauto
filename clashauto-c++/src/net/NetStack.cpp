@@ -880,7 +880,21 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
             }
         }
     }
-    c->socks->connectTo(dialHost, serverPort, user);
+    // ★★ **必须推迟一拍再拨号，不能在 accept 回调里同步调用。**
+    //   lwIP 的 tcp_process 在 SYN_RCVD 分支里是这么走的：
+    //       pcb->state = ESTABLISHED;  TCP_EVENT_ACCEPT(...);  tcp_receive(pcb);
+    //   accept 回调返回 ERR_OK 之后它**还要接着用这个 pcb**。而 connectTo() 完全可能**同步失败**
+    //   （高连接速率下 fd/端口耗尽、协议出站当场拒绝、严格模式拒绝回退…），失败处理会销毁本连接、
+    //   顺带关掉 lwIP 侧的 pcb —— 于是 lwIP 拿着一个已经死掉的 pcb 继续跑 tcp_receive：
+    //       lwip assert: tcp_receive: wrong state @ tcp_in.c:1173  → abort()，整个进程挂掉。
+    //   真机压测复现过（并发 6、~130 连接/秒，十几秒内必崩；崩溃前失败率还高达 60%）。
+    //   投到事件循环下一拍，accept 回调内就不可能有任何东西拆掉 pcb，lwIP 的状态机得以走完。
+    //   用 c->socks 作 context：连接若在此期间被销毁，Qt 会把这次排队调用直接丢弃（不会悬垂）。
+    QMetaObject::invokeMethod(
+        c->socks, [sock = c->socks, dialHost, serverPort, user] {
+            sock->connectTo(dialHost, serverPort, user);
+        },
+        Qt::QueuedConnection);
     return ERR_OK;
 }
 
