@@ -1,6 +1,7 @@
 #include "NetStack.h"
 #include "IL2Endpoint.h"
 #include "Socks5Client.h"
+#include "core/DnsResolver.h" // 旁听核心分配的 fake-ip，accept 时把假 IP 目的地改写成域名
 
 #include <QDebug>
 #include <QHash>
@@ -244,6 +245,8 @@ struct NetStack::Impl {
     // 出站工厂：每条被终结的连接向它要一个新出站对象（现状 = Socks5OutboundFactory 拨 mihomo）。
     // NetStack 拥有它，dtor 里 delete。
     OutboundFactory *factory = nullptr;
+    // DNS 旁听器（可空）：学核心分配的 fake-ip → 域名，供 accept 改写拨号目标（见 setDnsLearner）。
+    std::shared_ptr<DnsResolver> dnsLearner;
     NetStack *owner = nullptr;
     struct tcp_pcb *listener = nullptr;
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的 netif 上下文
@@ -850,7 +853,24 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
     });
 
     c->connectTimer.start(); // 阶段0 埋点：建连计时起点（必须紧邻 connectTo 之前）
-    c->socks->connectTo(serverIp, serverPort, user);
+    // ★ fake-ip → 域名改写：设备连的是核心分配的假 IP，出站若原样拨它必然路由不到（节点侧 i/o timeout）。
+    //   旁听 DNS 应答学到的映射能把它还原成域名：进程内出站按域名拨得通；回退核心时给域名也比给假 IP
+    //   更利于规则匹配。学不到（映射过期/被清/根本不是 fake-ip）就照原样用 IP —— 与从前完全一致。
+    QString dialHost = serverIp;
+    if (g_impl->dnsLearner) {
+        const QHostAddress dstAddr(serverIp);
+        if (!dstAddr.isNull() && DnsResolver::isFakeIp(dstAddr)) {
+            const QString learned = g_impl->dnsLearner->domainForLearnedIp(dstAddr);
+            if (!learned.isEmpty()) {
+                dialHost = learned;
+                ++GatewayDiag::c.dnsFakeIpResolved;
+                if (g_debug)
+                    std::fprintf(stderr, "NETSTACK fakeip %s -> %s\n", serverIp.toLatin1().constData(),
+                                 learned.toLatin1().constData());
+            }
+        }
+    }
+    c->socks->connectTo(dialHost, serverPort, user);
     return ERR_OK;
 }
 
@@ -1156,6 +1176,11 @@ NetStack::~NetStack()
         g_impl = nullptr;
     delete d->factory;
     delete d;
+}
+
+void NetStack::setDnsLearner(std::shared_ptr<DnsResolver> learner)
+{
+    d->dnsLearner = std::move(learner);
 }
 
 void NetStack::setOutboundFactory(OutboundFactory *f)
@@ -1768,6 +1793,10 @@ void NetStack::hijackDns(const QString &victimIp, quint16 vport, const QHostAddr
             if (n < 0)
                 break;
             resp.truncate(int(n));
+            // 旁听：把核心刚分配的 fake-ip → 域名记下来（见 DnsResolver::learnFromDnsResponse）。
+            // 放在回封给设备**之前**：设备拿到应答后可能立刻就发 SYN，映射必须先就位。
+            if (d->dnsLearner)
+                d->dnsLearner->learnFromDnsResponse(resp);
             UdpSess *s = d->udp.value(victimIp);
             if (s && s->nic) {
                 if (v6)

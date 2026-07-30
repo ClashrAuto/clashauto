@@ -165,11 +165,12 @@ void GatewayDiag::sample(const QString &extra)
     line += QStringLiteral(" upThrottle=%1 downPause=%2")
                 .arg(d(c.upThrottleHits, g_prev.upThrottleHits))
                 .arg(d(c.downPauseHits, g_prev.downPauseHits));
-    line += QStringLiteral(" udpNew=%1 udpEvict=%2 dns=%3 dnsNoReply=%4")
+    line += QStringLiteral(" udpNew=%1 udpEvict=%2 dns=%3 dnsNoReply=%4 fakeipResolved=%5")
                 .arg(d(c.udpFlowsCreated, g_prev.udpFlowsCreated))
                 .arg(d(c.udpFlowsEvicted, g_prev.udpFlowsEvicted))
                 .arg(d(c.dnsHijacked, g_prev.dnsHijacked))
-                .arg(d(c.dnsNoReply, g_prev.dnsNoReply));
+                .arg(d(c.dnsNoReply, g_prev.dnsNoReply))
+                .arg(d(c.dnsFakeIpResolved, g_prev.dnsFakeIpResolved));
     line += QStringLiteral(" pump=%1 late=%2 maxLagMs=%3")
                 .arg(d(c.pumpTicks, g_prev.pumpTicks))
                 .arg(d(c.pumpLateTicks, g_prev.pumpLateTicks))

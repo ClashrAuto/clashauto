@@ -272,6 +272,7 @@ public:
     void teardownLocal(); // 还原全部 ARP + 销毁 NetStack/端点/ArpSpoofer（幂等）。退出/析构走它。
     // 灰度：记下「是否把出站搬进程内」的意图 + 配置快照来源，并据此装/撤 CoreDialerFactory。
     void setCoastCoreLocal(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+                           std::shared_ptr<DnsResolver> dns,
                            std::shared_ptr<RuleEngine> rules);
 
 signals:
@@ -320,6 +321,7 @@ private:
     bool m_coastCore = false;
     std::shared_ptr<ProxyConfigStore> m_pcfgStore;
     std::shared_ptr<RuleEngine> m_ruleEngine;
+    std::shared_ptr<DnsResolver> m_dnsResolver; // DNS 旁听器：见 applyCoastCoreLocal 里 setDnsLearner
     bool m_torndown = false;
     // 诊断计数（COAST_GATEWAY_DEBUG）：设备帧在 frameReceived 里各分支的去向。
     long long m_dbgDropNonVictim = 0, m_dbgBypassLan = 0, m_dbgFedLwip = 0, m_dbgArpAnswered = 0,
@@ -550,13 +552,12 @@ void GatewayWorker::applyCoastCoreLocal()
         const std::shared_ptr<ProxyConfigStore> store = m_pcfgStore;
         factory->setRouter([store](const QString &dstHost, const QString &user) -> QString {
             Q_UNUSED(user);
-            // ★★ fake-ip 目的地必须回退 mihomo ★★（真机联调实测踩到，见下）
-            //   设备的 DNS 被劫持到**核心**的 dns.listen(1053)，于是「域名 ↔ 198.18.x.x」这张表在
-            //   **核心手里**，本进程无从反查。若把 fake-ip 当普通目的地交给进程内出站，出站会把
-            //   198.18.x.x **原样**当目标发给节点，节点当然路由不到 → 全部 i/o timeout
-            //   （树莓派实测：节点侧 55 次 dial 198.18.x.x 失败）。核心自己知道映射，交给它才对。
-            //   注：本进程的 DnsResolver 有自己的 fake-ip 池，但它还没接进 NetStack 的 DNS 劫持路径；
-            //   等接上（届时映射在本进程内）才能把这类目的地也收进进程内出站。
+            // ★★ 仍是 fake-ip 的目的地 = 「没反查到域名」，必须回退 mihomo ★★
+            //   正常路径上 NetStack 的 accept 已经用 DNS 旁听学到的映射把 fake-ip 改写成域名了
+            //   （见 NetStack 里的 fakeip 改写 + DnsResolver::learnFromDnsResponse），所以走到这里
+            //   还是个 198.18.x.x，说明**没学到**（映射被容量清空/进程刚起来设备用的是旧 DNS 缓存等）。
+            //   这时绝不能交给进程内出站——它会把假 IP 原样发给节点，节点路由不到、必然 i/o timeout
+            //   （真机实测过：节点侧 55 次 dial 198.18.x.x 失败）。核心自己知道映射，交给它才对。
             if (!dstHost.isEmpty()) {
                 const QHostAddress dst(dstHost);
                 if (!dst.isNull() && DnsResolver::isFakeIp(dst))
@@ -576,20 +577,26 @@ void GatewayWorker::applyCoastCoreLocal()
             return QString();
         });
         m_net->setOutboundFactory(factory); // 取得所有权：delete 掉旧工厂
-        qInfo() << "网关: CoastCore 进程内出站已启用（回退端口" << m_socksPort << "）";
+        // 装 DNS 旁听器：让 accept 能把核心分配的 fake-ip 目的地改写成域名（否则域名类流量只能回退核心）。
+        m_net->setDnsLearner(m_dnsResolver);
+        qInfo() << "网关: CoastCore 进程内出站已启用（回退端口" << m_socksPort
+                << "，fake-ip 反查" << (m_dnsResolver ? "已接" : "未接") << "）";
     } else {
-        // 撤回默认（全走 mihomo）——与「从未启用」完全一致。
+        // 撤回默认（全走 mihomo）——与「从未启用」完全一致：连 fake-ip 改写也一并撤掉。
         m_net->setOutboundFactory(new Socks5OutboundFactory(m_socksPort));
+        m_net->setDnsLearner(nullptr);
         qInfo() << "网关: CoastCore 进程内出站已停用（恢复默认 SOCKS 全走核心）";
     }
 }
 
 void GatewayWorker::setCoastCoreLocal(bool enabled, std::shared_ptr<ProxyConfigStore> store,
+                                      std::shared_ptr<DnsResolver> dns,
                                       std::shared_ptr<RuleEngine> rules)
 {
     m_coastCore = enabled;
     m_pcfgStore = std::move(store);
     m_ruleEngine = std::move(rules);
+    m_dnsResolver = std::move(dns);
     applyCoastCoreLocal();
 }
 
@@ -1344,7 +1351,7 @@ QStringList LanGateway::activeDevices() const
 }
 
 void LanGateway::setCoastCore(bool enabled, std::shared_ptr<ProxyConfigStore> store,
-                             std::shared_ptr<RuleEngine> rules)
+                             std::shared_ptr<RuleEngine> rules, std::shared_ptr<DnsResolver> dns)
 {
     if (!d->workerReady())
         return;
@@ -1353,7 +1360,7 @@ void LanGateway::setCoastCore(bool enabled, std::shared_ptr<ProxyConfigStore> st
     // NetStack、不反向阻塞等 GUI ⇒ 不可能死锁（论证同 configure）。
     QMetaObject::invokeMethod(
         d->worker,
-        [w = d->worker, enabled, store, rules] { w->setCoastCoreLocal(enabled, store, rules); },
+        [w = d->worker, enabled, store, rules, dns] { w->setCoastCoreLocal(enabled, store, dns, rules); },
         Qt::BlockingQueuedConnection);
 }
 

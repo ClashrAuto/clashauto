@@ -26,6 +26,9 @@
 #include <QObject>
 #include <QString>
 
+#include <memory>
+
+class DnsResolver;
 class IL2Endpoint;
 class OutboundFactory;
 class QHostAddress;
@@ -39,6 +42,13 @@ public:
 
     // 初始化 lwIP + catch-all TCP 监听 + 定时器泵。全进程只能有一个实例。失败置 *err。
     bool init(QString *err);
+
+    // 装一个「DNS 旁听器」：DNS 劫持的应答经我们手时交它学「核心分配的 fake-ip → 域名」，
+    // 于是 accept 时能把 fake-ip 目的地**改写成域名**再交给出站（进程内出站才拨得通；回退核心时
+    // 给域名也比给 IP 更利于规则匹配）。不设/设空 = 关掉该改写，行为与从前完全一致。
+    // 只用它的同步方法（learnFromDnsResponse/domainForLearnedIp，内部有锁、不碰事件循环），
+    // 故跨线程共享安全；本 NetStack 所属线程调用即可。
+    void setDnsLearner(std::shared_ptr<DnsResolver> learner);
 
     // 换出站工厂（取得所有权：delete 掉旧的，存下新的）。默认工厂 = 构造时按 socksPort 建的
     // Socks5OutboundFactory（全走 mihomo）。CoastCore 落地后由 CoreController 装一个 CoreDialerFactory

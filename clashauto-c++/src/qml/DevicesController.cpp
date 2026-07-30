@@ -9,7 +9,8 @@
 #include "../net/LanGateway.h"
 #include "../net/core/ProxyConfig.h"        // ProxyConfigStore/ProxyConfig（灰度：进程内出站快照）
 #include "../net/core/ProxyConfigBuilder.h" // coastcore::buildProxyConfig
-#include "../net/core/RuleEngine.h"         // RuleEngine（灰度：分流规则，本单元备用）
+#include "../net/core/RuleEngine.h"
+#include "../net/core/DnsResolver.h"         // DNS 旁听器（灰度：学核心 fake-ip → 域名）
 
 #include <QDateTime>
 #include <QDir>
@@ -38,6 +39,9 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
     // 灰度：进程内出站快照持有者 + 规则引擎（app 生命周期常驻；与网关工作线程共享同一实例）。
     m_pcfgStore = std::make_shared<ProxyConfigStore>();
     m_ruleEngine = std::make_shared<RuleEngine>();
+    // DNS 旁听器：本对象持有、与网关 worker 共享。只被数据面调它的同步方法（内部有锁），
+    // 异步解析(resolveReal)本单元不用，故不涉及跨线程 QDnsLookup 的问题。
+    m_dnsResolver = std::make_shared<DnsResolver>();
 
     connect(m_scanner, &LanScanner::discovered, this, &DevicesController::onDiscovered);
     connect(m_scanner, &LanScanner::scanningChanged, this, [this](bool s) {
@@ -138,7 +142,7 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
     if (m_coastCore) {
         rebuildCoastCoreConfig();
         if (m_gateway)
-            m_gateway->setCoastCore(true, m_pcfgStore, m_ruleEngine);
+            m_gateway->setCoastCore(true, m_pcfgStore, m_ruleEngine, m_dnsResolver);
     }
 }
 
@@ -1048,6 +1052,6 @@ void DevicesController::setCoastCoreEnabled(bool on)
     persistCoastCore(on);
     rebuildCoastCoreConfig(); // 先把快照建好，再切开关，避免开的那一刻拿到空快照
     if (m_gateway)
-        m_gateway->setCoastCore(on, m_pcfgStore, m_ruleEngine);
+        m_gateway->setCoastCore(on, m_pcfgStore, m_ruleEngine, m_dnsResolver);
     emit coastCoreEnabledChanged();
 }

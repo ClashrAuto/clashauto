@@ -57,9 +57,27 @@ public:
     QHostAddress fakeFor(const QString &domain);  // 取/分配该域名的假 IP（v4）
     QString domainForFake(const QHostAddress &ip) const; // 假 IP 反查域名；非本池/未分配返回空
 
+    // —— 「旁听」核心分配的 fake-ip（同步、线程安全，不碰 QObject/事件循环，可从数据面线程调）——
+    //
+    // ★ 为什么需要它：被劫持设备的 DNS 被转投**核心**的 dns.listen，于是「域名 ↔ 198.18.x.x」这张表
+    //   在核心手里。进程内出站拿到的目的地只是一个 fake-ip，反查不到域名就只能把它原样发给节点 ——
+    //   节点当然路由不到（真机实测：节点侧 55 次 dial 198.18.x.x i/o timeout）。
+    //   解法不是自己另建一套 fake-ip（那会让回退路径的核心认不出自己没分配过的 IP），而是**旁听**：
+    //   DNS 应答回程经我们手时顺手解析一遍，把核心分配的 fake-ip→域名记下来。于是两条路都成立：
+    //   进程内出站按域名拨；回退核心时也能给域名（规则匹配比给 IP 更准）。
+    //
+    // learnFromDnsResponse：解析一份 DNS 应答报文（wire 格式），把其中 **A 记录且落在 fake-ip 段** 的
+    //   地址映射到问题名。只认应答(QR=1)、RCODE=0；解析不了/无 fake-ip 记录就静默忽略。
+    //   只记 fake-ip（不记真实 IP）：表小、语义紧——真实 IP 的连接本就该照原样直连，不需要改写。
+    //   注：核心的 fake-ip 池是 v4 的，故这里只看 A 记录；AAAA 返回的是真地址，不属本机制。
+    void learnFromDnsResponse(const QByteArray &wire);
+    // 旁听学到的 fake-ip → 域名；未学到/非 v4 返回空。
+    QString domainForLearnedIp(const QHostAddress &ip) const;
+
     // —— 真实解析（异步）——
     // 触发对 domain 的 A+AAAA 解析。命中新鲜缓存则下一拍 emit resolved；否则发起查询，完成后 emit
     // resolved（有记录）或 failed（都无记录/都出错）。同一域名在途重复调用会被合并（只发一次查询）。
+    // ★ 只能在**拥有本对象的线程**上调用（内部建 QDnsLookup，需要事件循环）；上面那两个同步方法不受此限。
     void resolveReal(const QString &domain);
 
     // 清空解析缓存（fake 映射不动）。热重载/切换上游 DNS 后可调。
@@ -87,6 +105,9 @@ private:
 
     QHash<QString, CacheEntry> m_cache;
     QHash<QString, Pending *> m_pending;
+    // 旁听学到的「核心分配的 fake-ip(v4 整数) → 域名」。与上面自建池的两张表**互不相干**：
+    // 那两张是本进程自己分配用的，这张是记核心分配的（当前生效的就是这张，见 learnFromDnsResponse）。
+    QHash<quint32, QString> m_learnedFake;
 
     UseFakeIpPredicate m_useFakeIp;
     QHostAddress m_nameserver; // 可空

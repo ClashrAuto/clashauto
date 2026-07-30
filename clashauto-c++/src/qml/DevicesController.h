@@ -29,7 +29,8 @@ class CoreController;
 class LanGateway;
 class HistoryStore;
 class ProxyConfigStore; // CoastCore 出站配置快照持有者（灰度）
-class RuleEngine;       // CoastCore 分流规则引擎（灰度）
+class RuleEngine;        // CoastCore 分流规则引擎（灰度）
+class DnsResolver;       // DNS 旁听器：学核心分配的 fake-ip → 域名（灰度）
 class QTimer;
 
 class DevicesController final : public QObject
@@ -228,7 +229,9 @@ private:
     QString m_configDir;                          // config.yaml / full.yaml 所在（构造时从 AppConfig 取）
     bool m_coastCore = false;                     // 灰度开关（默认关 = 零行为变化）
     std::shared_ptr<ProxyConfigStore> m_pcfgStore; // 出站配置快照持有者（app 生命周期常驻，与网关 worker 共享）
-    std::shared_ptr<RuleEngine> m_ruleEngine;      // 分流规则引擎（本单元备用；Rule 模式回退核心）
+    std::shared_ptr<RuleEngine> m_ruleEngine;   // 分流规则引擎（本单元备用；Rule 模式回退核心）
+    // DNS 旁听器：交给网关装到 NetStack 上，学核心分配的 fake-ip → 域名（见 LanGateway::setCoastCore）。
+    std::shared_ptr<DnsResolver> m_dnsResolver;
     QString m_ccMode;      // 上次构建时的模式（Rule/Global/Direct）——变了才热更新，避免每次轮询白重建
     QString m_ccSelected;  // 上次构建时的全局选中节点名
 };

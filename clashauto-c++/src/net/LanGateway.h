@@ -25,7 +25,8 @@
 #include <memory>
 
 class ProxyConfigStore; // CoastCore 出站配置快照的持有者（不完整类型，只经 shared_ptr 透传给工作线程）
-class RuleEngine;       // CoastCore 分流规则引擎（同上）
+class RuleEngine;        // CoastCore 分流规则引擎（同上）
+class DnsResolver;       // DNS 旁听器：学核心分配的 fake-ip → 域名（同上）
 
 class LanGateway : public QObject
 {
@@ -80,8 +81,10 @@ public:
     //   enabled=false → 撤回默认 Socks5OutboundFactory（全走 mihomo）。
     // store/rules 用 shared_ptr 跨线程安全传递（数据面在专用工作线程；本调用投递到该线程执行）。
     // 可重入：切节点/改模式/换订阅后重复调即热更新（配合 ProxyConfigStore::reload 的原子换手）。
+    // dns：DNS 旁听器（可空）。装上后 NetStack 会把 DNS 劫持应答里学到的「核心分配的 fake-ip → 域名」
+    //   用于 accept 时改写拨号目标——否则进程内出站拿到假 IP 原样拨、节点必然 i/o timeout（真机实测）。
     void setCoastCore(bool enabled, std::shared_ptr<ProxyConfigStore> store,
-                      std::shared_ptr<RuleEngine> rules);
+                      std::shared_ptr<RuleEngine> rules, std::shared_ptr<DnsResolver> dns);
 
     QStringList activeDevices() const; // 当前被劫持的 mac 列表
 
