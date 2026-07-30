@@ -61,6 +61,7 @@
 #include <QSocketNotifier>
 #include <csignal>
 #include <cstring>
+#include <sys/resource.h> // setrlimit：抬高 fd 上限（网关每条连接一个 fd）
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -133,8 +134,42 @@ private:
 } // namespace
 #endif
 
+#if defined(Q_OS_UNIX)
+namespace {
+// 把每进程可打开文件数的**软限制**抬到硬限制。
+//
+// ★ 为什么必须做：透明网关是**每条被代理连接占一个 fd**（出站 socket）。发行版默认软限制普遍是
+//   1024，而真机压测里 tcpActive 轻松到 965 —— 于是 fd 顶死在 1024，新连接**打不开 socket**。
+//   现象极具迷惑性：不是报"too many open files"，而是表现为**建连变慢+大面积失败**
+//   （connMs 直方图整个塌到 ≥100ms 那一桶、74% 连接失败），很容易被误判成"网络慢"或"要上多进程"。
+//   真机数据：fd 占用 763 → 977 → 1024 → 顶死不动。硬限制是 524288，抬上去即可，无需 root。
+//   放在 main 最前面：任何监听/拨号之前生效。失败只警告不致命（受 cgroup/容器约束时抬不动）。
+void raiseFdLimit()
+{
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0)
+        return;
+    if (rl.rlim_cur >= rl.rlim_max)
+        return; // 已经顶格
+    const rlim_t before = rl.rlim_cur;
+    rl.rlim_cur = rl.rlim_max;
+    if (setrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        std::fprintf(stderr, "[LIMIT] fd soft limit %llu -> %llu\n",
+                     (unsigned long long)before, (unsigned long long)rl.rlim_cur);
+    } else {
+        std::fprintf(stderr, "[LIMIT] raise fd limit failed (soft=%llu hard=%llu)\n",
+                     (unsigned long long)before, (unsigned long long)rl.rlim_max);
+    }
+    std::fflush(stderr);
+}
+} // namespace
+#endif
+
 int main(int argc, char *argv[])
 {
+#if defined(Q_OS_UNIX)
+    raiseFdLimit(); // 必须在建任何 socket 之前
+#endif
     QApplication app(argc, argv);
     // 渲染后端：走 Qt 默认的 RHI（Windows=D3D11 / macOS=Metal / Linux=OpenGL），**不再强制软件后端**。
     //
