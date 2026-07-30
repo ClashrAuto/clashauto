@@ -17,6 +17,10 @@
 #
 # 幂等：<sdk>/lib/libmsquic.dylib 已存在且是 universal 就直接返回（配合 CI 缓存）。
 # 依赖：git、cmake、ninja（brew install cmake ninja）、Xcode Command Line Tools。
+#
+# ★ 写法坑：双引号串里 `$var` 后面若紧跟中文/全角标点（如 `）` `，`），必须写 `${var}`。
+#   某些 libc（macOS 正是）把 ≥0x80 的字节判成字母，bash 就把全角字符吃进变量名——
+#   `"$arch）"` 被解析成变量 `arch）`，配上下面的 set -u 当场 unbound variable 退出。
 set -euo pipefail
 
 SDK="${1:?用法: build_msquic_macos.sh <sdk-dir> [version]}"
@@ -27,9 +31,9 @@ if [ -f "$SDK/lib/libmsquic.dylib" ] && [ -f "$SDK/include/msquic.h" ]; then
   archs="$(lipo -archs "$SDK/lib/libmsquic.dylib" 2>/dev/null || echo '')"
   case "$archs" in
     *x86_64*arm64*|*arm64*x86_64*)
-      echo "msquic SDK 已就绪（$archs）：$SDK"; exit 0 ;;
+      echo "msquic SDK 已就绪（${archs}）：$SDK"; exit 0 ;;
   esac
-  echo "已有 SDK 但不是 universal（$archs），重建"
+  echo "已有 SDK 但不是 universal（${archs}），重建"
 fi
 
 SRC="${MSQUIC_SRC_DIR:-${RUNNER_TEMP:-/tmp}/msquic-src}"
@@ -41,7 +45,7 @@ cd "$SRC"
 git submodule update --init --depth 1 submodules/quictls submodules/clog
 
 for arch in x86_64 arm64; do
-  echo "== 编 msquic（$arch）=="
+  echo "== 编 msquic（${arch}）=="
   cmake -B "build-$arch" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DQUIC_TLS_LIB=quictls \

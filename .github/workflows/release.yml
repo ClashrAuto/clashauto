@@ -523,10 +523,11 @@ jobs:
           archs="$(lipo -archs "$sdk/lib/libmsquic.dylib")"
           case "$archs" in
             *x86_64*arm64*|*arm64*x86_64*) ;;
-            *) echo "::error::libmsquic 不是 universal（$archs）——app 是通用包，缺一个架构就等于半个包起不来"; exit 1 ;;
+            # `$var` 后紧跟全角标点必须写 `${var}`——macOS libc 会把高位字节吃进变量名（详见 tools/build_msquic_macos.sh 顶部）
+            *) echo "::error::libmsquic 不是 universal（${archs}）——app 是通用包，缺一个架构就等于半个包起不来"; exit 1 ;;
           esac
           echo "COAST_MSQUIC_ROOT=$sdk" >> "$GITHUB_ENV"
-          echo "msquic SDK: $sdk（$archs）"
+          echo "msquic SDK: ${sdk}（${archs}）"
 
       - name: Configure
         shell: bash
