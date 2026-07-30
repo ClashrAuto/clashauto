@@ -670,6 +670,8 @@ void QuicTransport::sendDatagram(const QByteArray &payload)
 bool QuicTransport::datagramSendEnabled() const { return d->dgramSendEnabled.loadAcquire() != 0; }
 int QuicTransport::datagramMaxSendLength() const { return d->dgramMaxLen.loadAcquire(); }
 
+bool QuicTransport::libraryAvailable() { return MsQuicLib::instance().ok(); }
+
 bool QuicTransport::keyingMaterialSupported()
 {
     // ★ 判据是 **COAST_HAVE_QUIC_KEYING**（由 CMake 真编译探测决定），不是 QUIC_API_ENABLE_PREVIEW_FEATURES。

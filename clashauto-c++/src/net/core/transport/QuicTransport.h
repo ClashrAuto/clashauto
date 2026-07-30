@@ -123,6 +123,12 @@ public:
     QByteArray exportKeyingMaterial(const QByteArray &label, const QByteArray &context, int outLen);
     static bool keyingMaterialSupported();
 
+    // msquic 运行时是否真的可用(MsQuicOpen2 + RegistrationOpen 成功)。
+    // ★ 存在的理由:发布包里 msquic 是**动态库**，编译期链上了不等于运行期找得到 ——
+    //   曾经就发生过「产物 NEEDED libmsquic.so.2 但没打进包」，用户拿到的是个起不来的包。
+    //   CI 用 COAST_QUIC_SELFTEST 跑一次，把这种事挡在发布前(见 main_qml.cpp)。
+    static bool libraryAvailable();
+
     void close();            // 优雅关闭连接
     bool isConnected() const;
     // 最近一次关闭/失败的可读原因(含 QUIC status / HTTP3 应用错误码)。空=还没关过。

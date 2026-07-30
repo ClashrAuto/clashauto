@@ -55,6 +55,8 @@ if [ -n "$WZ" ]; then
   [ ! -e win/opengl32sw.dll ]      && ok "无 opengl32sw.dll（瘦身 ~20MB 生效）" || bad "opengl32sw.dll 还在（瘦身没生效）"
   [ ! -e win/d3dcompiler_47.dll ]  && ok "无 d3dcompiler_47.dll（~4MB）"        || bad "d3dcompiler_47.dll 还在"
   [ -f win/Qt6Quick.dll ]          && ok "Qt6Quick.dll 已部署"                  || bad "缺 Qt6Quick.dll（QML 运行时没打进去）"
+  # QUIC(Hysteria2)：msquic.dll 不是系统组件，必须随包带走，否则 Coast.exe 直接起不来。
+  [ -f win/msquic.dll ]            && ok "msquic.dll 已随包（QUIC/Hysteria2 可用）" || bad "缺 msquic.dll（QUIC 没进包，程序会起不来）"
 else bad "没找到 windows x64 便携 zip"; fi
 
 sec "macOS DMG — Coast.app + com.yuehongsun.coast（best-effort，7z 解 DMG）"
@@ -98,6 +100,14 @@ if [ -n "$DEB" ]; then
     bad "deb 安装失败（依赖问题？）"
   fi
   if [ -x /opt/coast/coast ]; then
+    # —— QUIC 自检：用**装好的**二进制跑一次 MsQuicOpen2 + Hy2 的 QPACK KAT ——
+    # 这是唯一能证明「发出去的包真带着能用的 QUIC」的检查：编译期链上 ≠ 运行期加载得到，
+    # 而 libmsquic 来自 packages.microsoft.com、不在官方源，漏打包就是个装上去起不来的包。
+    if HOME=/root QT_QPA_PLATFORM=offscreen COAST_QUIC_SELFTEST=1 /opt/coast/coast; then
+      ok "QUIC 自检通过（msquic 加载得到 + Hy2 QPACK KAT 全过）"
+    else
+      bad "QUIC 自检失败（msquic 没打包/加载不了，或 QPACK KAT 挂了）"
+    fi
     export COAST_NO_AUTOSTART=1   # 跳过「自动下载并启动内核」，只验 UI 起 + 配置种子落地
     export HOME=/root
     rm -rf /root/.local/share/Coast

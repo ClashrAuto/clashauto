@@ -107,6 +107,19 @@ else()
     message(STATUS "msquic NOT found → CoastCore QUIC disabled (hysteria2/tuic fall back to mihomo)")
 endif()
 
+# ★ -DCOAST_REQUIRE_QUIC=ON → 找不到 msquic 就**直接失败**，而不是静默降级。
+#   存在的理由是一次真实的翻车：CI 全绿、发布也成功，但下载产物一看根本没有 QUIC ——
+#   因为 msquic 的安装步骤悄悄失败了，而 CMake 这边「找不到就关掉」，构建照样绿。
+#   发布流水线必须传这个开关：**要么带着 QUIC 发，要么别发**，不许发一个悄悄少了功能的包。
+option(COAST_REQUIRE_QUIC "构建必须带上 msquic（QUIC/Hysteria2）；找不到即失败" OFF)
+if(COAST_REQUIRE_QUIC AND NOT COAST_HAVE_QUIC)
+    message(FATAL_ERROR
+        "要求带 QUIC(COAST_REQUIRE_QUIC=ON) 但没找到 msquic。\n"
+        "  用 -DCOAST_MSQUIC_ROOT=<sdk> 指一份含 include/(msquic.h) 与 lib/(libmsquic.so|msquic.lib) 的目录。\n"
+        "  Linux: packages.microsoft.com 的 libmsquic 只装 .so，头要另取（见 tools/outbound_e2e/README）。\n"
+        "  Windows: NuGet 包 Microsoft.Native.Quic.MsQuic.Schannel 里 include/ 与 lib/<arch>/ 都有。")
+endif()
+
 # Linux 的睡眠/唤醒事件走 systemd-logind 的 D-Bus 信号 PrepareForSleep（外加一把 delay 抑制锁，
 # 保证我们能在挂起前把被代理设备的 ARP 还回去）。QtDBus 属 qtbase，装了 Qt 基本就有；**故意做成
 # 可选**——万一某个构建环境缺它，只是这条链路降级为不可用，不该让整个构建失败。

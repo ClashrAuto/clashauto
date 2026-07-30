@@ -31,6 +31,10 @@
 #endif
 #include "net/core/RuleEngine.h"             // COAST_RULE_SELFTEST：分流规则匹配自测
 #include "net/core/ProxyConfigBuilder.h"     // COAST_PROXYCFG_SELFTEST：proxies YAML → ProxyNode 解析自测
+#ifdef COAST_HAVE_QUIC
+#include "net/core/proto/Hysteria2Outbound.h"   // COAST_QUIC_SELFTEST：Hy2 的 QPACK/Huffman KAT
+#include "net/core/transport/QuicTransport.h"   // COAST_QUIC_SELFTEST：msquic 运行时可加载性
+#endif
 #include "net/LanGateway.h"
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 #include "net/GatewaySelfTest.h"
@@ -172,6 +176,30 @@ int main(int argc, char *argv[])
     // 全过返回 0。纯解析、不建 GUI、不碰网络（见 net/core/ProxyConfigBuilder.cpp）。
     if (qEnvironmentVariableIsSet("COAST_PROXYCFG_SELFTEST"))
         return coastcore::proxyConfigSelfTest() ? 0 : 1;
+
+#ifdef COAST_HAVE_QUIC
+    // QUIC 自检（COAST_QUIC_SELFTEST=1）：**发布前的守门人**，回答两个只有跑起来才知道的问题：
+    //   ① msquic 动态库在**这个包里**真的加载得到吗（MsQuicOpen2 + RegistrationOpen）——
+    //      编译期链上 ≠ 运行期找得到。曾经就发生过「产物 NEEDED libmsquic.so.2 却没打进包」，
+    //      那是个装上去起不来的包；CI 现在跑这一项，把它挡在发布之前。
+    //   ② Hysteria2 认证要用的 QPACK/Huffman 解码是否仍然正确（KAT，见 Hysteria2Outbound.cpp）——
+    //      那张常量表写错过一次，且错得很隐蔽（服务端说认证成功、客户端说被拒）。
+    // 顺带报告 TUIC 的 keying exporter 有没有（没有属预期：需 msquic 2.6+，届时 tuic 回退内核）。
+    // 不建 GUI、不碰网络；有任一失败返回非零。
+    if (qEnvironmentVariableIsSet("COAST_QUIC_SELFTEST")) {
+        const bool lib = coastcore::QuicTransport::libraryAvailable();
+        QString why;
+        const bool kat = hysteria2QpackSelfTest(&why);
+        fprintf(stderr, "msquic 运行时可加载      : %s\n", lib ? "PASS" : "FAIL");
+        fprintf(stderr, "Hy2 QPACK/Huffman KAT   : %s%s\n", kat ? "PASS" : "FAIL",
+                kat ? "" : qUtf8Printable(QStringLiteral("  ") + why));
+        fprintf(stderr, "TUIC keying exporter    : %s\n",
+                coastcore::QuicTransport::keyingMaterialSupported()
+                        ? "可用"
+                        : "不可用(需 msquic 2.6+；tuic 节点回退内核，属预期)");
+        return (lib && kat) ? 0 : 1;
+    }
+#endif
 
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报
     // "current style does not support customization"），本 app 全是自绘控件，必须 Basic。

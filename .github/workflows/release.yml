@@ -20,6 +20,11 @@ env:
   QT_VERSION: 6.8.3
   QT_ARCH: win64_msvc2022_64
   BUILD_DIR: build-release
+  # CoastCore 的 QUIC(Hysteria2) 所用 msquic 版本。Windows 取 NuGet 的
+  # Microsoft.Native.Quic.MsQuic.Schannel；Linux 取 packages.microsoft.com 的 libmsquic，头文件
+  # 按同一个 tag 从 GitHub 取 —— 两边同号，避免「头与库版本不一致」这种最难查的问题。
+  # 注：TUIC 要的 keying-material exporter 得等 msquic 2.6（尚未发布），届时升这里即可。
+  MSQUIC_VERSION: 2.5.9
   STAGE_DIR: dist/package/ClashAuto
 
 jobs:
@@ -151,6 +156,42 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $dst -Force
           "NPCAP_SDK=$dst" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Install msquic (NuGet)
+        shell: pwsh
+        # QUIC 系出站（Hysteria2）要 msquic。Windows 侧的正路是 NuGet 包
+        # Microsoft.Native.Quic.MsQuic.Schannel —— 它同时带 include/、lib/{x64,arm64}/msquic.lib 与
+        # bin/{x64,arm64}/msquic.dll，两个架构都覆盖（msquic 的 GitHub Release 一个预编译资产都没有）。
+        # 归一化成 CMake 认得的 SDK 布局：<sdk>/include + <sdk>/lib/msquic.lib（+ bin/msquic.dll 供打包）。
+        # 下载沿用 Npcap SDK 那套「多次重试」写法，别让网络抖动挡住整个构建。
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ver = "$env:MSQUIC_VERSION"
+          $nupkg = "$env:RUNNER_TEMP\msquic.nupkg"
+          $url = "https://api.nuget.org/v3-flatcontainer/microsoft.native.quic.msquic.schannel/$ver/microsoft.native.quic.msquic.schannel.$ver.nupkg"
+          $ok = $false
+          for ($i = 1; $i -le 4; $i++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $nupkg -TimeoutSec 120
+              if ((Get-Item $nupkg).Length -gt 500000) { $ok = $true; break }
+            } catch { Write-Host "downloading msquic attempt $i failed: $_"; Start-Sleep -Seconds 6 }
+          }
+          if (-not $ok) { throw "msquic NuGet package download failed: $url" }
+          $ext = "$env:RUNNER_TEMP\msquic-nupkg"
+          Remove-Item -Recurse -Force $ext -ErrorAction SilentlyContinue
+          Expand-Archive -Path $nupkg -DestinationPath $ext -Force   # .nupkg 就是个 zip
+          $arch = "${{ matrix.arch }}"    # NuGet 里的目录名与 matrix.arch 一致（x64 / arm64）
+          $sdk = "$env:RUNNER_TEMP\msquic-sdk"
+          $nat = Join-Path $ext "build\native"
+          New-Item -ItemType Directory -Force "$sdk\include","$sdk\lib","$sdk\bin" | Out-Null
+          Copy-Item (Join-Path $nat "include\*.h") "$sdk\include" -Force
+          Copy-Item (Join-Path $nat "lib\$arch\msquic.lib") "$sdk\lib" -Force
+          Copy-Item (Join-Path $nat "bin\$arch\msquic.dll") "$sdk\bin" -Force
+          foreach ($f in @("$sdk\include\msquic.h", "$sdk\lib\msquic.lib", "$sdk\bin\msquic.dll")) {
+            if (-not (Test-Path $f)) { throw "msquic SDK incomplete, missing $f" }
+          }
+          "COAST_MSQUIC_ROOT=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "msquic $ver ($arch) SDK: $sdk"
+
       - name: Configure
         shell: pwsh
         run: |
@@ -160,7 +201,11 @@ jobs:
             "-G", "Visual Studio 17 2022",
             "-A", "${{ matrix.cmake_arch }}",
             "-DCMAKE_PREFIX_PATH=$env:QT_ROOT",
-            "-DAPP_VERSION=$env:APP_VERSION"
+            "-DAPP_VERSION=$env:APP_VERSION",
+            # ★ 要么带着 QUIC 发，要么别发：msquic 找不到就让配置阶段**直接失败**，而不是
+            #   CMake 静默降级、构建照样绿、产物里悄悄少了 Hysteria2（上一次就是这么发出去的）。
+            "-DCOAST_MSQUIC_ROOT=$env:COAST_MSQUIC_ROOT",
+            "-DCOAST_REQUIRE_QUIC=ON"
           )
           if ("${{ matrix.arch }}" -eq "arm64") {
             $args += "-DQT_HOST_PATH=$env:QT_HOST_ROOT"
@@ -215,14 +260,41 @@ jobs:
             Write-Host "WARNING: MSVC runtime CRT dir not found; package may need VC++ redist"
           }
 
+          # msquic.dll：QUIC(Hysteria2) 的运行时依赖，**必须随包带走** —— 它不是系统组件，
+          # 用户机上没有；缺了 Coast.exe 连启动都启动不了（加载器找不到 msquic.dll）。
+          Copy-Item (Join-Path $env:COAST_MSQUIC_ROOT "bin\msquic.dll") $stage -Force
+
           if (-not (Test-Path "$stage\Coast.exe")) {
             throw "Missing staged executable"
+          }
+          # 硬断言：宁可这里失败，也不发一个「装上去起不来」的包（正是上次撤回 QUIC 的原因）。
+          if (-not (Test-Path "$stage\msquic.dll")) {
+            throw "msquic.dll was not staged; refusing to publish"
           }
           # 上网历史库（src/HistoryStore）用 QSQLITE 驱动插件；windeployqt 跟着 Qt6Sql.dll 一起带上。
           # 缺了程序照常跑，只是历史静默不记录 —— 所以只警告不失败，但要在日志里看得见。
           if (-not (Test-Path "$stage\sqldrivers\qsqlite.dll")) {
             Write-Host "::warning::未见 sqldrivers\qsqlite.dll（上网历史/常用域名将不可用）"
           }
+
+      - name: QUIC self-test (packaged binary)
+        # ★ 唯一能证明「发出去的包真带着能用的 QUIC」的一步：直接跑**打包后的** exe，让它
+        #   MsQuicOpen2 一次 + 跑 Hy2 的 QPACK KAT（见 main_qml.cpp 的 COAST_QUIC_SELFTEST）。
+        #   编译期链上 ≠ 运行期加载得到 —— 上次翻车正是产物依赖 msquic 而库没进包。
+        #   arm64 是在 x64 机器上交叉编译的，跑不了，只能靠上面的存在性断言兜底。
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = Join-Path $pwd "$env:STAGE_DIR\Coast.exe"
+          $err = "$env:RUNNER_TEMP\quic-selftest.log"
+          $env:COAST_QUIC_SELFTEST = "1"
+          # WIN32_EXECUTABLE 的程序没有控制台，stderr 得重定向到文件才看得见
+          $p = Start-Process -FilePath $exe -Wait -PassThru -NoNewWindow -RedirectStandardError $err
+          $env:COAST_QUIC_SELFTEST = $null
+          if (Test-Path $err) { Get-Content $err | ForEach-Object { Write-Host $_ } }
+          if ($p.ExitCode -ne 0) { throw "QUIC self-test failed (exit $($p.ExitCode))" }
+          Write-Host "QUIC self-test passed: packaged Coast.exe loads msquic and QPACK KAT is green"
 
       - name: Create portable zip
         shell: pwsh
@@ -406,6 +478,13 @@ jobs:
             -DCMAKE_PREFIX_PATH="$QT_ROOT" \
             -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0
+          # —— macOS 这边**不带 QUIC**（Windows/Linux 都带了，见各自的 Install msquic）——
+          # 微软对 macOS 既没有预编译包也没有包管理器渠道（brew 无 formula），只能从源码构建 msquic；
+          # 而本 job 产出的还是个 **universal(x86_64+arm64)** 包，等于要为两个架构各编一份再 lipo 合并，
+          # 之后还得进外部签名/公证仓库（integemjack/schat.build）那条链路。投入产出比不合适，暂不做。
+          # 后果是明确且良性的：macOS 上 hysteria2/tuic 节点走**回退内核**（mihomo），功能不缺，
+          # 只是不经进程内出站。真要开的话，路径是「源码编 msquic → 打进 .app 的 Frameworks/ →
+          # install_name_tool 改 @rpath」，届时同样要加 COAST_REQUIRE_QUIC + 运行期自检。
 
       - name: Build
         shell: bash
@@ -670,29 +749,66 @@ jobs:
           echo "QT_ROOT=$qt_root" >> "$GITHUB_ENV"
           echo "Qt root: $qt_root"
 
-      # —— 为什么这里**没有**安装 msquic / 没开 QUIC ——
-      # 试过并撤回了（见 git log 的 9772929 / 3361d01 / c316c57 三次迭代）。结论按事实记录：
-      #  ✔ QUIC 代码本身**已验证可编可链**：给了真 msquic 头 + libmsquic 后，QuicTransport/
-      #    Hysteria2/Tuic 三个源编译通过，产物里能看到 libmsquic.so.2 依赖与 MsQuicOpenVersion 等真符号。
-      #  ✘ 但**打包这一步在 CI 上没能可靠完成**：apt 的 libmsquic 只给运行库（无 -dev、无 msquic.h、
-      #    常无 .so 符号链接），而把它随包带走的逻辑在 runner 上没生效，结果发出的包里二进制硬依赖
-      #    libmsquic.so.2 而库不在包内、也不在 Ubuntu 官方源 → **用户机上直接起不来**。
-      #    本仓库无 CI 日志读取权限，无法再靠猜迭代，故先撤回，保证发布包正确。
-      #  ✘ 且即便打包解决，**TUIC 目前也无法认证**：它的 token 要 msquic 的 keying-material exporter，
-      #    而最新发布版（v2.5.9）根本没有这套 API（见 QuicTransport 的 COAST_HAVE_QUIC_KEYING 说明）。
-      # 想开启时怎么做（本地/自建 CI 均可，CMake 侧已支持）：
-      #   1) 备好含 include/msquic.h 与 lib/libmsquic.so 的 SDK；
-      #   2) 配置时加 -DCOAST_MSQUIC_ROOT=<sdk>（CMakeLists 会手工定位，无需 CMake config 包）；
-      #   3) **务必**把 libmsquic 随包带走并核验：产物里要同时满足「包内有 lib/libmsquic.so*」与
-      #      「二进制里有 MsQuic 符号」——只看 CI 绿灯会被 continue-on-error + 自动降级骗过去（实测过）。
+      - name: Install msquic
+        shell: bash
+        # QUIC 系出站（Hysteria2）要 msquic。Linux 侧唯一的官方渠道是 packages.microsoft.com 的
+        # libmsquic（msquic 的 GitHub Release 一个预编译资产都没有；Debian/Ubuntu 官方源也没这个包）。
+        # 两个坑一次处理掉：
+        #   · 那个 deb **只装 .so，不带头文件、也没有 libmsquic.so 符号链接** —— 头按**同一个 tag**
+        #     从 GitHub 取，链接器要的 .so 自己做软链；同号可避免「头与库不一致」这种最难查的问题。
+        #   · libmsquic 自己还依赖 libcrypto/libnuma/libz/libzstd —— 本机要跑打包后自检，先装上；
+        #     终端用户侧写进 .deb 的 Depends（见 Create deb package）。
+        run: |
+          set -euo pipefail
+          ver="$MSQUIC_VERSION"
+          rel="$(. /etc/os-release && echo "$VERSION_ID")"
+          deb="$RUNNER_TEMP/libmsquic.deb"
+          url="https://packages.microsoft.com/ubuntu/$rel/prod/pool/main/libm/libmsquic/libmsquic_${ver}_${{ matrix.deb_arch }}.deb"
+          ok=false
+          for i in 1 2 3 4; do
+            if curl -fsSL --max-time 120 -o "$deb" "$url"; then ok=true; break; fi
+            echo "downloading libmsquic attempt $i failed: $url"; sleep 6
+          done
+          [ "$ok" = true ] || { echo "::error::libmsquic download failed ($url)"; exit 1; }
+
+          rm -rf "$RUNNER_TEMP/msquic-deb"
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/msquic-deb"
+          so="$(find "$RUNNER_TEMP/msquic-deb" -type f -name 'libmsquic.so.*' | head -1)"
+          [ -n "$so" ] || { echo "::error::no libmsquic.so.* inside the deb"; exit 1; }
+          # 按库自己写的 SONAME 落地：加载器要找的就是这个名字（通常是 libmsquic.so.2）
+          soname="$(readelf -d "$so" | sed -n 's/.*SONAME.*\[\(.*\)\].*/\1/p' | head -1)"
+          [ -n "$soname" ] || soname="$(basename "$so")"
+          sdk="$RUNNER_TEMP/msquic-sdk"
+          rm -rf "$sdk"; mkdir -p "$sdk/include" "$sdk/lib"
+          cp "$so" "$sdk/lib/$soname"
+          ln -sf "$soname" "$sdk/lib/libmsquic.so"    # 链接期用；运行期用上面的 SONAME
+
+          for f in msquic.h msquic_posix.h quic_platform_posix.h quic_sal_stub.h; do
+            for i in 1 2 3; do
+              curl -fsSL --max-time 60 -o "$sdk/include/$f" \
+                "https://raw.githubusercontent.com/microsoft/msquic/v$ver/src/inc/$f" && break
+              sleep 5
+            done
+            [ -s "$sdk/include/$f" ] || { echo "::error::msquic header $f download failed"; exit 1; }
+          done
+
+          sudo apt-get install -y --no-install-recommends libnuma1 libzstd1 zlib1g \
+            || echo "::warning::libmsquic runtime deps incomplete; the QUIC self-test may fail"
+
+          echo "COAST_MSQUIC_ROOT=$sdk" >> "$GITHUB_ENV"
+          echo "msquic $ver: $sdk/lib/$soname"
 
       - name: Configure
         shell: bash
         run: |
+          # ★ 要么带着 QUIC 发，要么别发：msquic 找不到就让配置阶段**直接失败**，而不是 CMake
+          #   静默降级、构建照样绿、产物里悄悄少了 Hysteria2（上一次就是这么发出去的）。
           cmake -S clashauto-c++ -B "$BUILD_DIR" -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_PREFIX_PATH="$QT_ROOT" \
-            -DAPP_VERSION="$APP_VERSION"
+            -DAPP_VERSION="$APP_VERSION" \
+            -DCOAST_MSQUIC_ROOT="$COAST_MSQUIC_ROOT" \
+            -DCOAST_REQUIRE_QUIC=ON
 
       - name: Build
         shell: bash
@@ -718,23 +834,19 @@ jobs:
           # 全部 Qt6 共享库 + ICU（-a 保留符号链接与 so 版本号链）
           cp -a "$QT_ROOT"/lib/libQt6*.so* "$app_dir/lib/"
           cp -a "$QT_ROOT"/lib/libicu*.so* "$app_dir/lib/" 2>/dev/null || true
-          # libmsquic：QUIC 编进来了才有（见上面的 Install msquic）。**必须随包带走**——它来自
-          #   packages.microsoft.com，不在 Debian/Ubuntu 官方源，靠 .deb Depends 用户根本装不上；
-          #   主程序 RPATH 已是 $ORIGIN/lib，放进来就能被加载器找到。
-          # ★ 用 ldd 问二进制**实际依赖的是哪个文件**，而不是拿 /usr/lib/*/ 去猜路径：上一版就是靠通配
-          #   猜路径，结果库没拷进去、而二进制已经硬依赖 libmsquic.so.2 → 发出去的包在用户机上直接起不来
-          #   （下载 release 产物核验才发现）。ldd 给的就是加载器会用的那条路径，拿它 cp -L 最准。
-          msq_path="$(ldd "$app_dir/coast" 2>/dev/null | awk '/libmsquic/ {print $3}' | head -1)"
-          if [ -n "${msq_path:-}" ] && [ -e "$msq_path" ]; then
-            cp -L "$msq_path" "$app_dir/lib/"
-            echo "bundled msquic: $msq_path -> $app_dir/lib/$(basename "$msq_path")"
+          # libmsquic：**必须随包带走** —— 它来自 packages.microsoft.com，不在 Debian/Ubuntu 官方源，
+          # 靠 .deb Depends 用户根本装不上；主程序 RPATH 已是 $ORIGIN/lib，放进来就能被加载器找到。
+          # ★ 用 readelf 读**二进制自己写着的 NEEDED 名字**，别用 ldd：此刻 RPATH 还没 patch、SDK 也不在
+          #   默认搜索路径，ldd 只会报 "not found"。上一版正是靠 ldd/通配猜路径，结果库没拷进去，而二进制
+          #   已硬依赖 libmsquic.so.2 → 发出去的包在用户机上直接起不来（下载 release 产物核验才发现）。
+          #   NEEDED 名就是加载器要找的文件名，照它拷最准。
+          need="$(readelf -d "$app_dir/coast" 2>/dev/null | sed -n 's/.*NEEDED.*\[\(libmsquic[^]]*\)\].*/\1/p' | head -1)"
+          if [ -z "${need:-}" ]; then
+            echo "::error::coast 未依赖 libmsquic —— QUIC 没编进来，拒绝出包"; exit 1
           fi
-          # ★ 硬断言：二进制若 NEEDED libmsquic 而包里没有，**当场失败**，绝不发一个起不来的包。
-          if ldd "$app_dir/coast" 2>/dev/null | grep -q libmsquic; then
-            need="$(ldd "$app_dir/coast" | awk '/libmsquic/ {print $1}' | head -1)"
-            test -e "$app_dir/lib/$need" || { echo "::error::coast 依赖 $need 但未打包，拒绝出包"; exit 1; }
-            echo "msquic 依赖校验通过: lib/$need"
-          fi
+          cp -L "$COAST_MSQUIC_ROOT/lib/$need" "$app_dir/lib/$need"
+          test -e "$app_dir/lib/$need" || { echo "::error::$need 未打包，拒绝出包"; exit 1; }
+          echo "msquic 已入包并校验: lib/$need"
           # 插件整目录拷更稳：platforms/libqxcb、tls(openssl 后端，HTTPS 订阅/更新必需)、
           # imageformats、iconengines、xcbglintegrations、platforminputcontexts 等
           cp -a "$QT_ROOT"/plugins/. "$app_dir/plugins/"
@@ -764,6 +876,17 @@ jobs:
           test -e "$app_dir/plugins/sqldrivers/libqsqlite.so" \
             || echo "::warning::未见 plugins/sqldrivers/libqsqlite.so（上网历史/常用域名将不可用）"
           # 内核不再随包分发：不校验 command/clash 下的核心是否存在
+
+      - name: QUIC self-test (packaged binary)
+        shell: bash
+        # ★ 唯一能证明「发出去的包真带着能用的 QUIC」的一步：直接跑**打包后的**二进制，让它
+        #   MsQuicOpen2 一次（验证 $ORIGIN/lib 里的 libmsquic 真加载得到）+ 跑 Hy2 的 QPACK KAT
+        #   （见 main_qml.cpp 的 COAST_QUIC_SELFTEST）。编译期链上 ≠ 运行期加载得到。
+        run: |
+          set -euo pipefail
+          cd "$STAGE_DIR"
+          QT_QPA_PLATFORM=offscreen COAST_QUIC_SELFTEST=1 ./coast
+          echo "QUIC self-test passed: packaged coast loads lib/libmsquic and QPACK KAT is green"
 
       - name: Create portable tar.gz
         shell: bash
@@ -802,7 +925,7 @@ jobs:
           Architecture: ${{ matrix.deb_arch }}
           Installed-Size: ${installed_size}
           Maintainer: Coast <auto@clash.com>
-          Depends: libc6, libstdc++6, libgl1, libopengl0, libegl1, libglib2.0-0 | libglib2.0-0t64, libdbus-1-3, libfontconfig1, libfreetype6, libssl3 | libssl3t64, libx11-6, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcb-glx0, libxcb-util1, libxkbcommon0, libxkbcommon-x11-0
+          Depends: libc6, libstdc++6, libgl1, libopengl0, libegl1, libglib2.0-0 | libglib2.0-0t64, libdbus-1-3, libfontconfig1, libfreetype6, libssl3 | libssl3t64, libnuma1, libzstd1, zlib1g, libx11-6, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcb-glx0, libxcb-util1, libxkbcommon0, libxkbcommon-x11-0
           Description: Coast Qt desktop client
            Coast desktop client built with Qt Quick (QML).
           EOF
