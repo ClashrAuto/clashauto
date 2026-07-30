@@ -11,6 +11,7 @@
 //
 // 用法: ./ibh            （自带靶服务器，不需要任何节点/订阅/外网）
 #include "core/CoreDialerFactory.h"
+#include "core/CoreRouter.h"
 #include "core/ProxyConfig.h"
 #include "inbound/MixedInbound.h"
 
@@ -175,7 +176,9 @@ int main(int argc, char **argv)
     std::fprintf(stderr, "  入站=127.0.0.1:%u  靶机=127.0.0.1:%u  (strict=on, fallback=none)\n",
                  unsigned(iport), unsigned(tport));
 
-    bool ok = true;
+    // 先跑分流路由的判定自测（纯逻辑，不碰网络）。它钉住的是「什么时候必须回退核心」——
+    // 这套判定松掉的后果是**误路由**（本该走节点的走了直连，或反过来），比崩溃难发现得多。
+    bool ok = coastcore::routerSelfTest();
 
     {   // SOCKS5 CONNECT（域名形式）+ 紧随其后的早到数据
         const QByteArray host("127.0.0.1");
