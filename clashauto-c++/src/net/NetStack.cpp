@@ -890,6 +890,12 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
     //   真机压测复现过（并发 6、~130 连接/秒，十几秒内必崩；崩溃前失败率还高达 60%）。
     //   投到事件循环下一拍，accept 回调内就不可能有任何东西拆掉 pcb，lwIP 的状态机得以走完。
     //   用 c->socks 作 context：连接若在此期间被销毁，Qt 会把这次排队调用直接丢弃（不会悬垂）。
+    //
+    //   ★ 推迟的代价，出站实现必须扛住：这一拍之内 lwipTcpRecv 完全可能已经跑过了（一次 AF_PACKET
+    //     批量收包里，握手 ACK 和设备紧随其后的首个数据段常常在同一批），于是 write() 会先于
+    //     connectTo() 到达出站对象。**出站的 connectTo() 因此绝不能清空上行缓冲**，否则 HTTP 请求 /
+    //     TLS ClientHello 被静默吞掉，隧道建起来却一个字节不发（真机现象：设备 curl 报 Connected
+    //     后挂住，mihomo /connections 里该连接 upload=0）。契约写在 IOutbound.h 的 connectTo 上。
     QMetaObject::invokeMethod(
         c->socks, [sock = c->socks, dialHost, serverPort, user] {
             sock->connectTo(dialHost, serverPort, user);

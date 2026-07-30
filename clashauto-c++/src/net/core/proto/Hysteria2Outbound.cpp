@@ -604,7 +604,8 @@ void Hysteria2OutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, co
     d->authed = false;
     d->closedEmitted = false;
     d->readPaused = false;
-    d->pending.clear();
+    // ★ 不清 pending —— 拨号被 NetStack 推迟一拍，首个数据段可能已经 write() 进来了。
+    //   契约见 IOutbound.h 的 connectTo 注释。（authRx/respRx 是下行握手缓冲，照清。）
     d->authRx.clear();
     d->respRx.clear();
 

@@ -76,7 +76,8 @@ void DirectOutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, const
     d->established = false;
     d->closedEmitted = false;
     d->readPaused = false;
-    d->pending.clear();
+    // ★ 不清 pending —— 拨号被 NetStack 推迟一拍，首个数据段可能已经 write() 进来了。
+    //   契约见 IOutbound.h 的 connectTo 注释。
 
     d->sock = new QTcpSocket(this);
     // ★ 必须显式 NoProxy：否则本机开着系统代理时，Qt 默认 socket 会去读全局 ApplicationProxy，

@@ -346,6 +346,13 @@ void RealityOutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, cons
     });
     connect(m_stream, &RealityStream::closed, this, [this] { emitClosed(); });
 
+    // 拨号前就 write() 进来的字节（NetStack 推迟一拍拨号导致，契约见 IOutbound.h）：承载流
+    // 未就绪时它自己会再缓冲一层，这里只负责把顺序原样交接过去，不能丢。
+    if (!m_preDial.isEmpty()) {
+        m_stream->write(m_preDial);
+        m_preDial.clear();
+    }
+
     m_stream->start(0x01, dstHost, dstPort);
 }
 
@@ -353,12 +360,18 @@ void RealityOutboundTcp::write(const QByteArray &data)
 {
     if (m_stream)
         m_stream->write(data);
+    else
+        m_preDial += data; // 还没 connectTo：先存着，connectTo 里交接（早先是直接丢弃）
 }
 
 void RealityOutboundTcp::write(const char *data, qsizetype size)
 {
+    if (!data || size <= 0)
+        return;
     if (m_stream)
         m_stream->write(data, size);
+    else
+        m_preDial.append(data, size); // 深拷贝：字节要留到 connectTo 之后（生命周期契约见 IOutbound.h）
 }
 
 void RealityOutboundTcp::closeTunnel()
@@ -375,7 +388,8 @@ bool RealityOutboundTcp::isEstablished() const
 
 qint64 RealityOutboundTcp::bytesToWrite() const
 {
-    return m_stream ? m_stream->bytesToWrite() : 0;
+    // 拨号前缓冲的字节也要算进水位，否则上层会误以为上行已排空而把 lwIP 接收窗口开满。
+    return qint64(m_preDial.size()) + (m_stream ? m_stream->bytesToWrite() : 0);
 }
 
 void RealityOutboundTcp::setReadPaused(bool paused)

@@ -26,6 +26,16 @@ public:
     // 发起到 dstHost:dstPort 的连接。dstHost 可为 IPv4/IPv6 字面量或域名。
     // user = 该设备的 mihomo 身份（dev-<mac 短哈希>）；进程内实现可据此做每设备策略/归属。
     virtual void connectTo(const QString &dstHost, quint16 dstPort, const QString &user) = 0;
+    // ★★ 契约：write() 允许在 connectTo() **之前**被调用，实现必须把这些字节缓冲下来，
+    //    并在 connectTo() 之后、隧道就绪时原样补发。**connectTo() 里绝不能清空缓冲区。**
+    //
+    //    为什么会有「先 write 后 connectTo」这种顺序：NetStack 的 lwipTcpAccept 必须把拨号
+    //    推迟一拍（Qt::QueuedConnection）才能让 lwIP 的 tcp_process 安全走完（见那边的长注释）。
+    //    而一次 AF_PACKET 批量收包里，设备的三次握手 ACK 和它紧随其后的首个数据段（HTTP 请求 /
+    //    TLS ClientHello）常常在**同一批**被处理完 —— 于是 accept→recv 都跑完了，排队的
+    //    connectTo 才轮到。此时若 connectTo 清空 pending，设备的首个数据段就被静默吞掉：
+    //    隧道建起来了却一个字节都不发，服务器等请求、客户端等响应，直到超时（真机 100% 复现，
+    //    表现为「设备 curl 报 Connected 后挂住」、mihomo /connections 里该连接 upload=0）。
     virtual void write(const QByteArray &data) = 0;
     // 裸缓冲零拷贝上行：data 只需在**本次调用期间**有效，实现必须返回前把字节完整复制走
     //（生命周期契约见 Socks5Client.h，NetStack 的零拷贝路径依赖它）。

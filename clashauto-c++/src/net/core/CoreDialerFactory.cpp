@@ -6,6 +6,8 @@
 #include "ProxyConfig.h"
 #include "proto/OutboundRegistry.h"
 
+#include <QByteArray>
+
 // ———————————————————————————————————————————————————————————————————————————
 // 为什么需要「路由包装器」而不能在 createTcp/createUdp 里直接选实现：
 //   OutboundFactory 的 create* 只拿得到 parent —— 目的地(dstHost/dstPort)与设备身份(user) 要等
@@ -131,6 +133,13 @@ public:
         if (m_readPausedPending) {
             m_inner->setReadPaused(true);
         }
+        // 拨号前就 write() 进来的上行字节，先原样交给内层再拨（内层的契约保证 connectTo 之前
+        // 收到的字节会被缓冲、就绪后补发，见 IOutbound.h）。**必须在 connectTo 之前交接**：
+        // connectTo 可能同步失败并让上层收掉这条连接，之后再碰本对象就没意义了。
+        if (!m_preDial.isEmpty()) {
+            m_inner->write(m_preDial);
+            m_preDial.clear();
+        }
         m_inner->connectTo(dstHost, dstPort, user);
     }
 
@@ -138,12 +147,22 @@ public:
     {
         if (m_inner) {
             m_inner->write(data);
+        } else {
+            // 还没选内层（NetStack 把拨号推迟了一拍，而设备的首个数据段先到了）：先存着。
+            // 早先这里是**静默丢弃** —— HTTP 请求/TLS ClientHello 被吞掉，隧道建起来却不发
+            // 一个字节，设备侧表现为 connect 成功后挂死。契约见 IOutbound.h。
+            m_preDial += data;
         }
     }
     void write(const char *data, qsizetype size) override
     {
+        if (!data || size <= 0) {
+            return;
+        }
         if (m_inner) {
             m_inner->write(data, size);
+        } else {
+            m_preDial.append(data, size); // 深拷贝：字节要留到 connectTo 之后（同上）
         }
     }
     void closeTunnel() override
@@ -155,7 +174,11 @@ public:
         }
     }
     bool isEstablished() const override { return m_inner && m_inner->isEstablished(); }
-    qint64 bytesToWrite() const override { return m_inner ? m_inner->bytesToWrite() : 0; }
+    qint64 bytesToWrite() const override
+    {
+        // 拨号前缓冲的字节也要算进水位，否则上层会误判「上行已排空」而把 lwIP 接收窗口开满。
+        return qint64(m_preDial.size()) + (m_inner ? m_inner->bytesToWrite() : 0);
+    }
     void setReadPaused(bool paused) override
     {
         if (m_inner) {
@@ -175,6 +198,7 @@ private:
     ProxyConfigStore *m_store = nullptr;
     OutboundFactory *m_fallback = nullptr;
     IOutboundTcp *m_inner = nullptr;   // parent=this，随本对象析构；connectTo 前为空
+    QByteArray m_preDial;              // connectTo 前 write() 进来的上行字节（内层还没造出来）
     bool m_readPausedPending = false;  // connectTo 前暂存的暂停请求
 };
 

@@ -365,7 +365,8 @@ void ShadowsocksOutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, 
     d->targetSent = false;
     d->haveSalt = false;
     d->wantLen = -1;
-    d->pending.clear();
+    // ★ 不清 pending —— 拨号被 NetStack 推迟一拍，首个数据段可能已经 write() 进来了。
+    //   契约见 IOutbound.h 的 connectTo 注释。（recvBuf 是下行解密缓冲，与此无关，照清。）
     d->recvBuf.clear();
 
     d->sock = new QTcpSocket(this);

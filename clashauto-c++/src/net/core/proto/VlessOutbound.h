@@ -125,6 +125,9 @@ private:
 
     ProxyNode m_node;
     VlessStream *m_stream = nullptr;
+    // connectTo() 之前 write() 进来的上行字节（承载流还没建）。契约见 IOutbound.h：
+    // NetStack 把拨号推迟一拍，设备的首个数据段常常先到 —— 早先这里 m_stream 为空直接丢弃。
+    QByteArray m_preDial;
     bool m_established = false;
     bool m_closedEmitted = false;
 };
