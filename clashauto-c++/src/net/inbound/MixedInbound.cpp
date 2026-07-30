@@ -292,7 +292,11 @@ void MixedInbound::handleHandshake(Session *s)
     rewritten += "Connection: close\r\n\r\n";
     rewritten += body;
 
-    startDial(s, url.host(), static_cast<quint16>(url.port(80)), rewritten);
+    // 端口缺省要跟着 scheme 走：绝对形式虽然绝大多数是 http://，但写死 80 会让 https:// 的
+    // 绝对形式（少见但合法）被送到 80 端口，表现为「莫名其妙连不上」。
+    const quint16 defPort =
+        url.scheme().compare(QLatin1String("https"), Qt::CaseInsensitive) == 0 ? 443 : 80;
+    startDial(s, url.host(), static_cast<quint16>(url.port(defPort)), rewritten);
 }
 
 void MixedInbound::startDial(Session *s, const QString &host, quint16 port,
@@ -346,6 +350,18 @@ void MixedInbound::startDial(Session *s, const QString &host, quint16 port,
         closeSession(s, qPrintable(why));
     });
     connect(out, &IOutboundTcp::closed, this, [this, s] { closeSession(s, "upstream closed"); });
+    // 上行排空 → 立刻重新评估「要不要解除对客户端的节流」。
+    // ★ 不接这个信号的话，解除节流的唯一触发点是客户端的下一次 readyRead —— 而我们正把它的读缓冲
+    //   卡在 1 字节，于是只能一字节一字节地爬回来（能恢复，但慢得莫名其妙）。这是典型的
+    //   「节流容易、恢复难」的坑：不看信号就以为它自愈了。
+    connect(out, &IOutboundTcp::upstreamBytesWritten, this, [this, s](qint64) {
+        if (s->gone || !s->out || !s->client || !s->upThrottled)
+            return;
+        if (s->out->bytesToWrite() <= kLowWater) {
+            s->upThrottled = false;
+            s->client->setReadBufferSize(0);
+        }
+    });
 
     out->connectTo(host, port, m_user);
     // 契约允许（也要求）write() 早于/紧随 connectTo：早到的上行字节必须原样补发，
