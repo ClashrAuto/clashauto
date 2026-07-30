@@ -40,6 +40,8 @@ struct MixedInbound::Session {
     bool established = false;
     bool gone = false;   // 已进入销毁流程，防重入
     int socksPhase = 0;  // 0=等 greeting，1=等 request
+    bool upThrottled = false; // 已卡住客户端读（等出站排空）
+    bool downPaused = false;  // 已暂停从出站读（等客户端排空）
 };
 
 MixedInbound::MixedInbound(OutboundFactory *factory, QObject *parent)
@@ -96,9 +98,11 @@ void MixedInbound::onNewConnection()
         connect(c, &QTcpSocket::disconnected, this, [this, s] { closeSession(s, "client closed"); });
         connect(c, &QTcpSocket::bytesWritten, this, [this, s] {
             // 下行排空 → 恢复从出站读（背压回落）
-            if (s->out && s->client && s->client->bytesToWrite() <= kLowWater
-                && s->out->isReadPaused())
+            if (s->out && s->client && s->downPaused
+                && s->client->bytesToWrite() <= kLowWater) {
+                s->downPaused = false;
                 s->out->setReadPaused(false);
+            }
         });
         if (c->bytesAvailable() > 0)
             onClientReadable(s);
@@ -130,10 +134,16 @@ void MixedInbound::pumpClientToOut(Session *s)
     if (!data.isEmpty())
         s->out->write(data);
     // 出站积压过高 → 暂停从客户端读（QTcpSocket 没有 setReadPaused，用 readBufferSize 卡住）
-    if (s->out->bytesToWrite() > kHighWater)
+    if (s->out->bytesToWrite() > kHighWater) {
+        if (!s->upThrottled) {
+            s->upThrottled = true;
+            ++m_upThrottleHits; // 只数进入节流态的沿
+        }
         s->client->setReadBufferSize(1);
-    else
+    } else if (s->upThrottled) {
+        s->upThrottled = false;
         s->client->setReadBufferSize(0); // 0 = 不限
+    }
 }
 
 void MixedInbound::handleHandshake(Session *s)
@@ -318,8 +328,11 @@ void MixedInbound::startDial(Session *s, const QString &host, quint16 port,
         if (s->gone || !s->client)
             return;
         s->client->write(d);
-        if (s->client->bytesToWrite() > kHighWater && s->out)
+        if (s->client->bytesToWrite() > kHighWater && s->out && !s->downPaused) {
+            s->downPaused = true;
+            ++m_downPauseHits;
             s->out->setReadPaused(true); // 客户端吃不下 → 停止从上游读
+        }
     });
     connect(out, &IOutboundTcp::failed, this, [this, s](const QString &why) {
         // 握手还没回应答就失败 → 给客户端一个像样的拒绝，而不是静默断开

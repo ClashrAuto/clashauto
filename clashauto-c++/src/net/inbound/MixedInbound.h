@@ -47,6 +47,11 @@ public:
     // 出站的「设备身份」。本机流量统一用一个固定 user，便于在分流/记账里与被代理设备区分开。
     void setUser(const QString &user) { m_user = user; }
 
+    // 背压触发次数（只数「进入节流态」的沿，不数每次评估）。存在的理由是**让测试能证伪**：
+    // 大流量用例若没把水位顶上去，节流分支根本没跑，用例 PASS 也是空的。测试里断言它 > 0。
+    quint64 upThrottleHits() const { return m_upThrottleHits; }   // 客户端→出站：卡住客户端读
+    quint64 downPauseHits() const { return m_downPauseHits; }     // 出站→客户端：暂停从上游读
+
     // 自检：起一个本地靶服务器 + 一个直连出站桩，用真实的 SOCKS5 / HTTP CONNECT / HTTP 绝对形式
     // 三种客户端各打一遍，校验协议解析与双向转发。返回 true = 全通过（结果打到 stderr）。
     // 由 COAST_INBOUND_SELFTEST=1 触发（见 main_qml.cpp），无需任何节点或网络。
@@ -68,4 +73,6 @@ private:
     OutboundFactory *m_factory = nullptr; // 不持有
     QString m_user = QStringLiteral("local");
     QSet<Session *> m_sessions;
+    quint64 m_upThrottleHits = 0;
+    quint64 m_downPauseHits = 0;
 };
