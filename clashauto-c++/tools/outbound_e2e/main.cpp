@@ -30,11 +30,15 @@ int main(int argc,char**argv){
   tj.sni="test.local"; tj.skipCertVerify=true; tj.tls=true;
   ProxyNode vl; vl.name="vl"; vl.type="vless"; vl.server="127.0.0.1"; vl.port=18391;
   vl.uuid="b831381d-6324-4d53-ad4f-8cda48b30811"; vl.sni="test.local"; vl.skipCertVerify=true; vl.tls=true;
+  ProxyNode rl; rl.name="rl"; rl.type="reality"; rl.server="127.0.0.1"; rl.port=18392;
+  rl.uuid="b831381d-6324-4d53-ad4f-8cda48b30811"; rl.sni="www.baidu.com";
+  rl.realityPublicKey="1l2LpjEwsgCjefaPQTMtpr9ni1g9oHkumdi1HdMoJWM"; rl.realityShortId="686c0ef0"; rl.fingerprint="chrome"; rl.tls=true;
   int fails=0;
   if(!testOne("SS",ss)) fails++;
   if(!testOne("VMESS",vm)) fails++;
   if(!testOne("TROJAN",tj)) fails++;
   if(!testOne("VLESS",vl)) fails++;
   fprintf(stderr,"== fails=%d ==\n",fails);
+  if(!testOne("REALITY",rl)) fails++;
   return fails;
 }

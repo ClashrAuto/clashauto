@@ -70,3 +70,69 @@ VLESS   PASS  est=1 bytes=1670  status='HTTP/1.1 200 OK'
 | REALITY | ❌ 需真 xray 服务端（mihomo 的 reality inbound 与 xray 的 AuthKey 核验路径不等价） |
 | Hysteria2 / TUIC | ❌ 需 msquic（`COAST_HAVE_QUIC`）；且 TUIC 的 token 还缺 msquic 的 keying-material exporter |
 | VLESS over ws/grpc | ❌ 未覆盖（ws 传输本身有独立实现，grpc 尚未实现） |
+
+## REALITY 现状：**对真 xray 复现失败（未解决）**
+
+本目录已含可复现的 REALITY 用例（`main.cpp` 的 `rl` 节点 + `xray-reality.json`）。跑法：
+
+```bash
+# 1) 取 xray（该网络直连 GitHub 被墙，用 ghfast.top 镜像）
+curl -sfL -o x.zip "https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/v25.6.8/Xray-linux-arm64-v8a.zip"
+unzip -o x.zip && chmod +x xray
+# 2) 生成密钥，把 private 填进 xray-reality.json，public/shortId 填进 main.cpp 的 rl 节点
+./xray x25519
+./xray run -c xray-reality.json        # 监听 127.0.0.1:18392，dest/serverNames = www.baidu.com
+# 3) 跑 harness
+cmake -B build -G Ninja && cmake --build build && ./build/obh
+```
+
+### 已查明的事实（2026-07-30，Pi5 + xray 25.6.8）
+
+- 其余四协议同轮全部 PASS，**只有 REALITY 失败**，客户端报
+  `utls: 收到明文 alert（握手被拒？）`。
+- loopback 抓包（`tcpdump -i lo 'tcp port 18392'`）显示：客户端发出 **258 字节 ClientHello**，
+  xray 回 **7 字节**后立刻 FIN。该 7 字节解出来是
+  **`15 03 01 00 02 02 46` = fatal alert `protocol_version`(0x46)**。
+- **把线上真实 ClientHello 逐扩展解析过，结构完全合法**：
+  `session_id` 32B ✓、`cipher_suites` 4 项 ✓、`key_share` 含 x25519(0x001d) 32B ✓、
+  **`supported_versions` = `04 0a0a 0304`（长度 4，含 TLS 1.3 = 0x0304）✓**、
+  扩展总长与实际一致、无错位（parser 走到末尾对齐）。
+- xray 侧即便 `"show": true` + `loglevel: debug`，日志里**没有任何 REALITY 诊断行** →
+  拒绝发生在 **REALITY 逻辑之前的 TLS 层**（alert 记录版本 0x0301 也符合 Go 在版本协商前发 alert 的行为）。
+
+### ★ 对照实验（决定性，推翻了「TLS 版本没协商上」的第一直觉）
+
+用一个**标准正确**的 TLS 1.3 客户端做对照：
+
+```bash
+openssl s_client -tls1_3 -servername www.baidu.com -connect 127.0.0.1:18392
+```
+
+结果：**openssl（1482 字节的标准 ClientHello）收到一模一样的 `protocol version` alert（number 70 = 0x46）**。
+同时 xray 日志这次打出了 REALITY 诊断：
+
+```
+REALITY remoteAddr: ...  hs.c.conn == conn: false
+REALITY remoteAddr: ...  forwarded SNI: www.baidu.com
+REALITY remoteAddr: ...  hs.c.handshakeStatus: false
+[Info] transport/internet/tcp: REALITY: processed invalid connection
+```
+
+**结论：这个 alert 不是「TLS 版本没协商上」，而是 REALITY 对「认证未通过」连接的正常处置** ——
+它把握手转发给伪装站（dest）、判定 `invalid connection`，客户端于是拿到 alert。
+换言之 **我们的 ClientHello 结构没问题**（上面已逐字节验过），真正没通过的是
+**session_id 里注入的 REALITY 认证数据**。
+
+### 下一步该查什么（按优先级，已按对照实验修正）
+
+1. **REALITY 认证数据本身**（`UtlsClient::applyRealityAuth`）。要点逐条对齐 xray 的 `UClient`：
+   ECDH（客户端临时私钥 × 服务端 publicKey）→ `HKDF-SHA256(salt=ClientHello.random[:20], info="REALITY")`
+   → `AES-256-GCM(nonce=random[20:32], aad=把 session_id 清零后的整条 ClientHello 握手消息, pt=16B 结构化数据)`
+   → 覆盖回 32 字节 session_id。**任一环的取值范围/偏移/顺序错了，xray 都只会静默按 invalid 处理**（不会告诉你哪错）。
+   建议做法：给 `applyRealityAuth` 加临时调试输出（ECDH 共享密钥、authKey、被清零后的 CH 摘要、最终 session_id），
+   与 xray 侧同一连接的中间量对照 —— xray 可加 `"show": true` 并配合源码 `reality.go` 的日志点。
+2. 一个可疑的差异点：**我们的连接在 xray 日志里没有留下任何 REALITY 行，而 openssl 的留下了**。
+   说明我们可能在更早的地方就被丢掉（比 openssl 更早），值得先查清「xray 从哪一行开始记 REALITY」，
+   再判断我们是否根本没进到那段逻辑。
+3. `shortId`（本台用 `686c0ef0`）必须同时出现在 xray 的 `shortIds` 与客户端参数里，长度/hex 解码要一致。
+4. TLS 层其余能力（HelloRetryRequest、KeyUpdate、证书 AuthKey 核验）在认证通过之后才有机会被测到。

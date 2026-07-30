@@ -1,0 +1,25 @@
+{
+  "log": {"loglevel": "debug"},
+  "inbounds": [{
+    "listen": "127.0.0.1",
+    "port": 18392,
+    "protocol": "vless",
+    "settings": {
+      "clients": [{"id": "b831381d-6324-4d53-ad4f-8cda48b30811", "flow": ""}],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "show": true,
+        "dest": "www.baidu.com:443",
+        "xver": 0,
+        "serverNames": ["www.baidu.com"],
+        "privateKey": "<用 ./xray x25519 生成的 private key>",
+        "shortIds": ["686c0ef0"]
+      }
+    }
+  }],
+  "outbounds": [{"protocol": "freedom"}]
+}
