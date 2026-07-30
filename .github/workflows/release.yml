@@ -678,17 +678,32 @@ jobs:
           # ★ microsoft/msquic 的 GitHub Release **没有任何预编译资产**（实测 v2.5.9 assets=0），
           #   Linux 侧唯一的正路是 packages.microsoft.com 的 libmsquic（jammy/amd64 与 noble/arm64
           #   都有 2.5.9，正对上本 job 的 ubuntu-22.04 / ubuntu-24.04-arm 两个 runner）。
+          # ★★ 那个源**只有运行库 libmsquic、没有 -dev 包**，即 **不带 msquic.h** —— 上一版就是因此
+          #    find_path(msquic.h) 失败、静默降级：CI 全绿但产物里既无 libmsquic 也无 MsQuic 符号
+          #    （下载 release 产物核验才发现）。所以头文件要按**已装版本**从对应 tag 单独取。
           # ★ continue-on-error + CMake 侧「找不到就降级」：装不上只是 hysteria2/tuic 不编入、回退核心，
-          #   **绝不让整条流水线红**（对齐 OpenSSL / QtDBus 的可选依赖策略）。
+          #   绝不让流水线红（对齐 OpenSSL / QtDBus 的可选依赖策略）。
           set -x
           ver="$(lsb_release -rs)"   # 22.04 / 24.04
           curl -fsSL -o /tmp/ms-prod.deb "https://packages.microsoft.com/config/ubuntu/${ver}/packages-microsoft-prod.deb"
           sudo dpkg -i /tmp/ms-prod.deb
           sudo apt-get update -qq
           sudo apt-get install -y libmsquic
-          # apt 装的 libmsquic 不带 CMake config → 由 CMakeLists 的手工 find_path/find_library 定位
-          ls -l /usr/include/msquic.h || true
-          ls -l /usr/lib/*/libmsquic.so* /usr/lib/libmsquic.so* 2>/dev/null || true
+          # 取与已装运行库**同版本**的公共头（msquic.h 会 include msquic_posix.h / quic_sal_stub.h）
+          mver="$(dpkg-query -W -f='${Version}' libmsquic | cut -d- -f1)"
+          echo "libmsquic 版本: $mver"
+          mkdir -p /tmp/msquic/include
+          for h in msquic.h msquic_posix.h quic_sal_stub.h; do
+            curl -fsSL -o "/tmp/msquic/include/${h}" "https://raw.githubusercontent.com/microsoft/msquic/v${mver}/src/inc/${h}"
+          done
+          # 运行库包常只装 libmsquic.so.N（无 .so 开发符号链接）→ find_library(NAMES msquic) 会找不到，
+          # 补一个符号链接。
+          for d in /usr/lib/*/ /usr/lib/; do
+            so="$(ls "$d"libmsquic.so.* 2>/dev/null | head -1)" || true
+            if [ -n "$so" ] && [ ! -e "${d}libmsquic.so" ]; then sudo ln -sf "$so" "${d}libmsquic.so"; fi
+          done
+          echo "COAST_MSQUIC_ROOT=/tmp/msquic" >> "$GITHUB_ENV"
+          ls -l /tmp/msquic/include/ /usr/lib/*/libmsquic.so* 2>/dev/null || true
 
       - name: Configure
         shell: bash
