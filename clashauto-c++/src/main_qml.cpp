@@ -26,7 +26,9 @@
 #include "PowerWatcher.h" // 睡眠/唤醒：挂起前撤劫持还原 ARP，醒来补回
 #include "net/GatewayDiag.h"
 #include "net/GatewayPanic.h" // 崩溃兜底：进程被打死时裸发还原 ARP
-#include "net/core/crypto/CryptoSelfTest.h" // COAST_CRYPTO_SELFTEST：AEAD/KDF 已知答案测试
+#ifdef COAST_HAVE_OPENSSL
+#include "net/core/crypto/CryptoSelfTest.h" // COAST_CRYPTO_SELFTEST：AEAD/KDF 已知答案测试（需 OpenSSL）
+#endif
 #include "net/core/RuleEngine.h"             // COAST_RULE_SELFTEST：分流规则匹配自测
 #include "net/core/ProxyConfigBuilder.h"     // COAST_PROXYCFG_SELFTEST：proxies YAML → ProxyNode 解析自测
 #include "net/LanGateway.h"
@@ -155,8 +157,10 @@ int main(int argc, char *argv[])
     // 加密层已知答案测试（COAST_CRYPTO_SELFTEST=1）：跑 AEAD(AES-GCM/ChaCha20-Poly1305)、HKDF-SHA1、
     // EVP_BytesToKey 的公开测试向量，逐项 PASS/FAIL 打到 stderr，返回非零退出码表示有失败。跨平台、
     // 不建 GUI、不碰网络 —— 加密写错是静默的，唯一防线就是拿 RFC/NIST 向量逐字节比对（见 CryptoSelfTest.cpp）。
+#ifdef COAST_HAVE_OPENSSL
     if (qEnvironmentVariableIsSet("COAST_CRYPTO_SELFTEST"))
         return coastcore::runCryptoSelfTest();
+#endif
 
     // 规则引擎自测（COAST_RULE_SELFTEST=1）：DOMAIN-SUFFIX 边界 / 精确 vs 子域 / 关键字 / v4·v6 CIDR /
     // MATCH 兜底 等同步断言,全过返回 0。同样不建 GUI、不碰网络。

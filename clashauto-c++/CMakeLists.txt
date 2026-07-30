@@ -28,9 +28,51 @@ find_package(QT NAMES Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickCon
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 
 # OpenSSL libcrypto —— CoastCore 协议出站的裸 AEAD（AES-GCM / ChaCha20-Poly1305，见
-# src/net/core/crypto/Aead.cpp）。只用 libcrypto 的 EVP（不用它做哈希——哈希/HMAC 走 Qt）。
-# 本地 MinGW 自带（头 opt/include、库 opt/lib）；CI 里由工具链/aqt 提供。用 -DOPENSSL_ROOT_DIR 提示。
-find_package(OpenSSL REQUIRED)
+# src/net/core/crypto/Aead.cpp）+ REALITY 的 X25519。只用 libcrypto 的 EVP（哈希/HMAC 走 Qt）。
+#
+# ★ **可选**（与 msquic / QtDBus 同策略：缺了就降级，绝不让构建失败）。曾经写成 REQUIRED，
+#   结果 **macOS universal 与 Windows arm64 两个 job 直接构建失败**：
+#     · macOS 要 `-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64` 出通用二进制，而 brew 的 libcrypto 是
+#       **单架构**的 → 即便 find 得到也链不进通用二进制；
+#     · Windows arm64 是交叉编译，环境里没有 arm64 的 OpenSSL（找到的是 x64 → 架构不匹配）。
+#   降级后果**很轻**：只有「需要裸 AEAD/X25519 的三个协议」(ss / vmess / reality) 不编入、不注册，
+#   拨号侧照旧回退 mihomo（功能不缺，只是不走进程内）；direct / trojan / vless 仍是进程内（它们只用
+#   QSslSocket + Qt 哈希）。本地 MinGW 自带（opt/include、opt/lib），可用 -DOPENSSL_ROOT_DIR 提示。
+set(COAST_HAVE_OPENSSL OFF)
+find_package(OpenSSL QUIET)
+if(OPENSSL_FOUND)
+    set(COAST_HAVE_OPENSSL ON)
+    # Apple 通用构建（多架构）下还要确认 libcrypto 本身是通用的，否则链接必炸——单架构就当没有。
+    if(APPLE)
+        list(LENGTH CMAKE_OSX_ARCHITECTURES _coast_osx_archs)
+        if(_coast_osx_archs GREATER 1)
+            set(COAST_HAVE_OPENSSL OFF)
+            foreach(_lib IN LISTS OPENSSL_CRYPTO_LIBRARY)
+                if(EXISTS "${_lib}")
+                    execute_process(COMMAND lipo -archs "${_lib}"
+                                    OUTPUT_VARIABLE _coast_lipo OUTPUT_STRIP_TRAILING_WHITESPACE
+                                    ERROR_QUIET RESULT_VARIABLE _coast_lipo_rc)
+                    if(_coast_lipo_rc EQUAL 0)
+                        set(COAST_HAVE_OPENSSL ON)
+                        foreach(_a IN LISTS CMAKE_OSX_ARCHITECTURES)
+                            if(NOT _coast_lipo MATCHES "${_a}")
+                                set(COAST_HAVE_OPENSSL OFF)
+                            endif()
+                        endforeach()
+                    endif()
+                endif()
+            endforeach()
+            if(NOT COAST_HAVE_OPENSSL)
+                message(STATUS "OpenSSL 非通用二进制（需 ${CMAKE_OSX_ARCHITECTURES}）→ 按缺失处理")
+            endif()
+        endif()
+    endif()
+endif()
+if(COAST_HAVE_OPENSSL)
+    message(STATUS "OpenSSL found → CoastCore ss/vmess/reality (in-process) enabled")
+else()
+    message(STATUS "OpenSSL NOT usable → ss/vmess/reality fall back to mihomo (direct/trojan/vless unaffected)")
+endif()
 
 # msquic —— CoastCore 的 QUIC 系出站(Hysteria2 / TUIC,见 src/net/core/transport/QuicTransport.cpp)。
 # **可选**:找到才编入 QUIC 协议并定义 COAST_HAVE_QUIC;找不到则 hysteria2/tuic 不注册、具名节点回退
@@ -108,20 +150,15 @@ set(BACKEND_SOURCES
     src/net/core/CoreDialerFactory.cpp src/net/core/CoreDialerFactory.h
     # 协议出站的共享基建（跨平台）：AEAD/KDF 加密层(OpenSSL libcrypto)、TLS/WebSocket 传输原语、
     # 协议注册表（加协议=加文件+注册一行）。各协议出站单元并行建立在这之上。
-    src/net/core/crypto/Aead.cpp          src/net/core/crypto/Aead.h
+    # Kdf 是纯 Qt（QCryptographicHash/QMessageAuthenticationCode），不依赖 OpenSSL，恒编入。
     src/net/core/crypto/Kdf.cpp           src/net/core/crypto/Kdf.h
-    src/net/core/crypto/CryptoSelfTest.cpp src/net/core/crypto/CryptoSelfTest.h
     src/net/core/transport/TlsClient.cpp  src/net/core/transport/TlsClient.h
     src/net/core/transport/WsClient.cpp   src/net/core/transport/WsClient.h
-    # uTLS 指纹 + 自建最小 TLS1.3 客户端（REALITY 用；QSslSocket 无法控制 ClientHello 指纹）——用 OpenSSL EVP 做原语
-    src/net/core/transport/UtlsClient.cpp src/net/core/transport/UtlsClient.h
     src/net/core/proto/OutboundRegistry.cpp src/net/core/proto/OutboundRegistry.h
     # 进程内出站协议实现（各自实现 IOutbound*，经 OutboundRegistry 注册 type→构造器）。
-    src/net/core/proto/ShadowsocksOutbound.cpp src/net/core/proto/ShadowsocksOutbound.h
+    # 只用 QSslSocket + Qt 哈希的两个恒编入；需要裸 AEAD/X25519 的 ss/vmess/reality 见下方 OpenSSL 条件块。
     src/net/core/proto/TrojanOutbound.cpp      src/net/core/proto/TrojanOutbound.h
     src/net/core/proto/VlessOutbound.cpp       src/net/core/proto/VlessOutbound.h
-    src/net/core/proto/VmessOutbound.cpp       src/net/core/proto/VmessOutbound.h
-    src/net/core/proto/RealityOutbound.cpp     src/net/core/proto/RealityOutbound.h
     # 分流规则引擎（mihomo 风格首命中 + 自带只读 mmdb GEOIP 查询）+ DNS 解析器（A/AAAA 缓存 + fake-ip 池）。
     src/net/core/RuleEngine.cpp  src/net/core/RuleEngine.h
     src/net/core/DnsResolver.cpp src/net/core/DnsResolver.h
@@ -267,8 +304,7 @@ target_link_libraries(clashauto-qml PRIVATE
     Qt6::Quick
     Qt6::QuickControls2
     Qt6::Sql
-    # 协议出站 AEAD 的裸加密（EVP）。只链 libcrypto，不链 libssl（TLS 由 Qt 的 QSslSocket 负责）。
-    OpenSSL::Crypto
+    # OpenSSL 是**可选**依赖，见上方 COAST_HAVE_OPENSSL 条件块（不在这里无条件链接）。
     $<$<PLATFORM_ID:Windows>:dwmapi>
     $<$<PLATFORM_ID:Windows>:shell32>
     $<$<PLATFORM_ID:Windows>:advapi32>
@@ -282,6 +318,23 @@ target_link_libraries(clashauto-qml PRIVATE
 if(Qt6DBus_FOUND)
     target_link_libraries(clashauto-qml PRIVATE Qt6::DBus)
     target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_DBUS)
+endif()
+
+# CoastCore 需要裸 AEAD / X25519 的部分（ss / vmess / reality + 加密 KAT 自测）：仅在 OpenSSL 可用时
+# 编入 + 定义 COAST_HAVE_OPENSSL（见 OutboundRegistry.cpp / main_qml.cpp 的 #ifdef）。
+# 不可用时这三个协议不注册 → 拨号侧回退 mihomo；direct/trojan/vless 不受影响（只用 QSslSocket + Qt 哈希）。
+if(COAST_HAVE_OPENSSL)
+    target_sources(clashauto-qml PRIVATE
+        src/net/core/crypto/Aead.cpp               src/net/core/crypto/Aead.h
+        src/net/core/crypto/CryptoSelfTest.cpp     src/net/core/crypto/CryptoSelfTest.h
+        # uTLS 指纹 + 自建最小 TLS1.3 客户端（REALITY 用；QSslSocket 无法控制 ClientHello 指纹）
+        src/net/core/transport/UtlsClient.cpp      src/net/core/transport/UtlsClient.h
+        src/net/core/proto/ShadowsocksOutbound.cpp src/net/core/proto/ShadowsocksOutbound.h
+        src/net/core/proto/VmessOutbound.cpp       src/net/core/proto/VmessOutbound.h
+        src/net/core/proto/RealityOutbound.cpp     src/net/core/proto/RealityOutbound.h)
+    # 只链 libcrypto，不链 libssl（TLS 由 Qt 的 QSslSocket 负责）。
+    target_link_libraries(clashauto-qml PRIVATE OpenSSL::Crypto)
+    target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_OPENSSL)
 endif()
 
 # CoastCore QUIC 系（Hysteria2 / TUIC）：仅在找到 msquic 时编入 + 定义 COAST_HAVE_QUIC（见
