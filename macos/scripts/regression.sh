@@ -20,6 +20,16 @@ BUILD=1
 pass=0; fail=0; skip=0
 line() { printf '  %-22s %s\n' "$1" "$2"; }
 
+# —— 0. 真核心校验(可选) ——
+# COAST_TEST_MIHOMO 指向 mihomo 二进制时,单测里那两条 RealCoreValidation 会真的跑
+# `mihomo -t` 校验生成的 full.yaml —— **真正的消费者**才是权威判据,PyYAML 只能证明
+# 「是合法 YAML」,核心还有自己的 schema。没设就自动跳过,不做硬依赖。
+if [[ -n "${COAST_TEST_MIHOMO:-}" && -x "${COAST_TEST_MIHOMO}" ]]; then
+    echo "== 真核心校验:已启用($(basename "$COAST_TEST_MIHOMO")) =="
+else
+    echo "== 真核心校验:跳过(设 COAST_TEST_MIHOMO=/path/to/mihomo 可启用) =="
+fi
+
 # —— 1. 单元测试 ——
 echo "== 单元测试 =="
 if swift test 2>&1 | grep -q "Test run with .* passed"; then

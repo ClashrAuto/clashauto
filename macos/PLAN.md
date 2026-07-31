@@ -698,3 +698,18 @@
 
   **至此 `QmlBridge` 的数据面全部对等** —— 连续三轮行为/数据审计把页面、config 开关、
   会话统计三块补齐,期间抓到 4 个死开关 + 2 个真 bug(NSApp 早启动崩、连接查看器缺失)。
+- 2026-07-31：**★ 第一次用真正的 mihomo 核心校验生成的 full.yaml —— 通过**(199 用例)。
+
+  此前 `full.yaml` 的正确性只靠 PyYAML(仅证明「是合法 YAML」)和我自己的正则反解。
+  但**核心有自己的 schema**(规则类型、代理字段、组结构),一份合法 YAML 完全可能被它拒绝 ——
+  真正的消费者才是权威判据。
+
+  弄来 `Mihomo Meta v1.19.29`(经 ghfast 镜像;GitHub API 直连仍 403),用 `mihomo -t` 校验一份
+  **完整场景**的配置:4 种协议的订阅节点(trojan/vless/ss/hysteria2)、自定义规则
+  (DOMAIN-SUFFIX/IP-CIDR/PROCESS-NAME)、区域组、设备策略(SRC-IP-CIDR)、redir-port、
+  DNS、sniffer、profile —— **TUN 开与关两种都通过**。
+
+  这是对 `ConfigBuilder` 这条链路最有分量的一次验证:它证明的不只是「语法对」,而是
+  「真核心愿意加载」。测试在 `COAST_TEST_MIHOMO` 未设时**自动跳过**(不做硬依赖,别人机器
+  和 CI 上未必有核心),`scripts/regression.sh` 会明确报告启用与否。
+  核心存到 `~/.local/share/coast-devtools/mihomo` 供以后回归复用。
