@@ -8,6 +8,7 @@ import SwiftUI
 struct StatusPage: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
+    @State private var showingConnections = false
 
     var body: some View {
         ScrollView {
@@ -15,7 +16,12 @@ struct StatusPage: View {
                 HStack(spacing: 10) {
                     MetricCard(symbol: "arrow.up", title: "上传".t, value: state.upText)
                     MetricCard(symbol: "arrow.down", title: "下载".t, value: state.downText)
-                    MetricCard(symbol: "link", title: "连接".t, value: String(state.connectionsCount))
+                    // 连接卡可点 —— 打开实时连接查看器(对齐 Qt 的 ConnectionsWindow)
+                    Button { showingConnections = true } label: {
+                        MetricCard(symbol: "link", title: "连接".t, value: String(state.connectionsCount))
+                    }
+                    .buttonStyle(.plain)
+                    .help("查看全部连接".t)
                     MetricCard(symbol: "tray.and.arrow.down", title: "累计下载".t, value: state.totalDownText)
                 }
 
@@ -41,6 +47,9 @@ struct StatusPage: View {
                 }
             }
             .padding(14)
+        }
+        .sheet(isPresented: $showingConnections) {
+            ConnectionsView().environment(state).environment(theme)
         }
     }
 }

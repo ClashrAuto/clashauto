@@ -67,6 +67,9 @@ public final class AppState {
     public private(set) var todayHourly: [Int64] = []
     public private(set) var todayTop: [HistoryStore.GroupTotal] = []
     public private(set) var todayTotal: Int64 = 0
+
+    /// 实时连接列表(连接查看器用)。每拍 /connections 快照解析而来,不额外发请求。
+    public private(set) var connections: [ConnectionRow] = []
     /// 口径：只算走代理的流量。与 Qt 版的默认一致。
     public var trafficProxyOnly = true { didSet { refreshTodayTraffic() } }
     /// 维度：进程 / 域名。（Qt 版还有「设备」，那一维依赖设备台账，见 PLAN 阶段 6/9。）
@@ -113,6 +116,7 @@ public final class AppState {
         // 历史库消费**同一份** /connections 快照，不为此多发一次请求。
         clash.onConnectionsSnapshot = { [weak self] connections in
             self?.history.observe(connections)
+            self?.connections = ConnectionRow.parse(connections)
         }
     }
 
@@ -187,6 +191,8 @@ public final class AppState {
     public func toggleTun() { Task { await controller.toggleTun() } }
 
     public func setMode(_ mode: String) { clash.setMode(mode) }
+    public func closeConnection(id: String) { clash.closeConnection(id: id) }
+    public func closeAllConnections() { clash.clearConnections() }
     public func selectNode(_ name: String) { clash.selectNode(name) }
 
     /// 页脚模式下拉的档位。

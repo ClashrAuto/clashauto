@@ -87,7 +87,7 @@
 - [x] LogsPage
 - [x] AboutPage + 更新检查（只打开发布页，**不做自动替换 .app**，理由见变更日志）
 - [x] DevicesPage — **只读的局域网设备浏览**（不含代理开关，理由见下）。带台账/策略的完整版仍阻塞于网关决策
-- [x] RuleEditorWindow（规则/分组编辑器）；ConnectionsWindow/UpdateWindow 的功能已并入页面内，不另开窗
+- [x] RuleEditorWindow（规则/分组编辑器）；ConnectionsView（连接查看器,状态页连接卡点开）；UpdateWindow 并入关于页
 
 ### 阶段 6 — 数据库与设备
 - [x] `SQLite` 轻封装（原生 sqlite3）
@@ -633,3 +633,21 @@
   决定**维持 v5**:彻底迁 v6(把 ClashAPI 返回类型结构体化)是中等 refactor,为「今天已安全」
   的东西冒引入 bug 的风险不划算。文档把「v6 会标记什么、正解是什么」记清,将来照此迁。
   11 个 `@unchecked Sendable` 类型的安全依据逐个核对入表。**承诺逐个兑现,无活竞争。**
+- 2026-07-31：**功能对等审计:补上唯一漏掉的页面——实时连接查看器**(191 用例全绿)。
+
+  逐一核对 Qt 的每个 QML 页面/窗口在 Swift 侧是否都有对应,发现一个**真缺口**:
+  Qt 有 `ConnectionsWindow`(每条活动连接的 host/进程/出口链/上下行,可逐条关闭、可清空),
+  而我的 Swift 侧后端钩子齐全(`ClashService.closeConnection`/`clearConnections`/
+  `onConnectionsSnapshot`)、状态页也显示连接数,**却没有查看/管理连接的 UI**。
+
+  补法:
+  - `ConnectionRow`(CoastKit):把 `/connections` 的裸 `[[String: Any]]` 在进 UI 前解析成
+    类型化结构,UI 不碰裸字典。配 4 条单测(字段解析、host 回退 IP、按流量降序、跳过缺 id)。
+  - `AppState.connections`:复用每拍的 /connections 快照解析,不额外发请求。
+  - `ConnectionsView`:sheet,状态页「连接」卡可点打开。**真机截图验过渲染**——
+    三条假连接的 host/进程/出口链徽标(代理品牌色、DIRECT 灰)/上下行/关闭按钮都在位。
+
+  其它 QML 逐一核对结果:`NpcapWindow`=Windows 专属(macOS 正确不做);`DeviceDetailWindow`
+  =依赖网关流量聚合(随网关);其余页面全部已有对应。**至此页面级功能对等达成。**
+
+  截图用的两个临时钩子(COAST_FAKE_CONNS/OPEN_CONNS)已移除,不留调试代码。
