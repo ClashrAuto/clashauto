@@ -40,7 +40,7 @@ struct LatencyCard: View {
                             .foregroundStyle(theme.textMuted)
                     }
                     Text(text(reading.directMs))
-                        .font(.system(size: 24, weight: .medium))
+                        .font(.system(size: 24))
                         .foregroundStyle(theme.latencyColor(reading.directMs))
                 }
                 Spacer()

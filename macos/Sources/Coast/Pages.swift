@@ -483,7 +483,7 @@ struct TodayTrafficCard: View {
                     Text("今日流量".t).font(.system(size: 13)).foregroundStyle(theme.accent)
                         .lineLimit(1)
                     Text(Formatting.bytes(state.todayTotal))
-                        .font(.system(size: 22, weight: .medium)).foregroundStyle(theme.accent)
+                        .font(.system(size: 24)).foregroundStyle(theme.accent)
                 }
                 Spacer()
                 GlassSegmented(items: [(false, "全部".t), (true, "仅代理".t)],
@@ -565,7 +565,7 @@ struct CompositionCard: View {
                     Text("总流量".t).font(.system(size: 13)).foregroundStyle(theme.accent)
                         .lineLimit(1)
                     Text(Formatting.bytes(comp.totalBytes))
-                        .font(.system(size: 22, weight: .medium)).foregroundStyle(theme.accent)
+                        .font(.system(size: 24)).foregroundStyle(theme.accent)
                 }
                 Spacer()
                 Spacer()

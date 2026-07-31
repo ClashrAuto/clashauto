@@ -430,5 +430,6 @@
   "接口": "Interfaccia",
   "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。": "Il traffico di questo dispositivo è inoltrato da questo Mac. Uscire, spegnere o mettere in stop lo restituisce automaticamente al router (ripristino in circa un secondo); in caso di mancanza di corrente o chiusura forzata può restare senza rete per circa 30 secondi.",
   "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Attiva «Avvia al login» nelle impostazioni perché il proxy riprenda automaticamente dopo un riavvio.",
-  "正在应用…": "Applicazione…"
+  "正在应用…": "Applicazione…",
+  "检测到局域网内有异常代理行为": "Rilevata attività proxy sospetta nella rete locale"
 }

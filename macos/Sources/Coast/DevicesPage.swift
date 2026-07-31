@@ -121,6 +121,9 @@ struct DevicesPage: View {
     var body: some View {
         // Qt 的设备页没有任何分隔线：概览条 / 搜索行 / 列表靠 10 的行距分开。
         VStack(spacing: 10) {
+            // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 搜索行 → 列表）——
+            // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。
+            securityBanner
             header
             if rows.isEmpty { emptyState } else { list }
             proxyBanner
@@ -328,26 +331,58 @@ struct DevicesPage: View {
         .scrollContentBackground(.hidden)
     }
 
+    /// 安全告警横幅。**逐元素对齐** `qml/DevicesPage.qml` 顶部那一块：
+    /// 半径 6、红色淡底（12%）+ 1px 红边（50%）、内距 10、20px 警告图标顶对齐、
+    /// **加粗 13px 的标题**「检测到局域网内有异常代理行为」+ 每条威胁一行 11px 说明、
+    /// 右上角一颗「知道了」小胶囊（半径 4、同色淡底、悬停加深）。
+    ///
+    /// 加粗是有理由的：全 UI 只有**两处**加粗（另一处是 logo 上那个 26px 角标里的字母），
+    /// 这两处的共同点是「不加粗就看不清 / 压不住」。别顺手给别处也加。
+    @ViewBuilder
+    private var securityBanner: some View {
+        let alerts = state.securityAlerts.filter { !dismissedAlerts.contains($0.id) }
+        if !alerts.isEmpty {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(Color(hex: 0xE0_53_3D))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("检测到局域网内有异常代理行为".t)
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1)
+                    ForEach(alerts) { alert in
+                        Text(alert.kind == .gatewaySpoofed
+                             ? String(format: "%@ 正在冒充网关，可能在监听或代理你的流量".t, alert.offenderMAC)
+                             : String(format: "%@ 也在劫持你代理的设备 %@".t, alert.offenderMAC, alert.subjectIP))
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                DismissChip { alerts.forEach { dismissedAlerts.insert($0.id) } }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color(red: 224 / 255, green: 83 / 255, blue: 61 / 255, opacity: 0.12))
+            }
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(Color(red: 224 / 255, green: 83 / 255, blue: 61 / 255, opacity: 0.5),
+                            lineWidth: 1)
+            }
+            .padding(.trailing, 10)
+        }
+    }
+
     /// 底部横幅：说明当前状态。设备端零配置，所以这里没有任何要用户抄的东西。
     @ViewBuilder
     private var proxyBanner: some View {
-        // 安全告警排在提示条之前 —— 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。
-        ForEach(state.securityAlerts.filter { !dismissedAlerts.contains($0.id) }) { alert in
-            HStack(spacing: 6) {
-                Image(systemName: "exclamationmark.shield.fill")
-                    .font(.system(size: 11)).foregroundStyle(theme.danger)
-                Text(alert.kind == .gatewaySpoofed
-                     ? String(format: "%@ 正在冒充网关，可能在监听或代理你的流量".t, alert.offenderMAC)
-                     : String(format: "%@ 也在劫持你代理的设备 %@".t, alert.offenderMAC, alert.subjectIP))
-                    .font(.system(size: 11)).foregroundStyle(theme.danger)
-                Spacer()
-                Button("知道了".t) { dismissedAlerts.insert(alert.id) }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textMuted)
-            }
-        }
-
         HStack(spacing: 6) {
             Image(systemName: enabledCount > 0 ? "network" : "info.circle")
                 .font(.system(size: 10)).foregroundStyle(theme.textMuted)
@@ -728,6 +763,31 @@ struct SquareToggle: View {
                 .overlay {
                     RoundedRectangle(cornerRadius: 3, style: .continuous)
                         .stroke(on ? theme.accent : theme.inputBorder, lineWidth: 1)
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// 告警横幅右上角那颗「知道了」。半径 4、同色淡底，悬停加深 —— 对齐 QML 的 `dismissHover`。
+private struct DismissChip: View {
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text("知道了".t)
+                .font(.system(size: 11))
+                .foregroundStyle(Color(hex: 0xE0_53_3D))
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background {
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(Color(red: 224 / 255, green: 83 / 255, blue: 61 / 255,
+                                    opacity: hovering ? 0.22 : 0.12))
                 }
                 .contentShape(Rectangle())
         }
