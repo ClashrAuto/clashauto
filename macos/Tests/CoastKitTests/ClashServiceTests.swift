@@ -109,3 +109,51 @@ struct ProxyTreeTests {
         #expect(["A", "B"].contains(cyclic.finalName(from: "A")))
     }
 }
+
+@Suite("ProxyTree:畸形代理图健壮性")
+struct ProxyTreeRobustnessTests {
+
+    @Test("now 指向自己(自环) —— 不死循环")
+    func selfLoop() {
+        let tree = ProxyTree(proxies: ["A": ["now": "A", "history": [] as [[String: Any]]]])
+        #expect(tree.finalName(from: "A") == "A")      // 走到访问过的就停
+        #expect(tree.history(from: "A").isEmpty)
+    }
+
+    @Test("超长链(>16 步)—— 被步数上限截断,不无限递归")
+    func veryLongChain() {
+        var proxies: [String: [String: Any]] = [:]
+        for i in 0..<100 { proxies["n\(i)"] = ["now": "n\(i+1)"] }  // n0→n1→…→n99→n100(不存在)
+        let tree = ProxyTree(proxies: proxies)
+        // 不崩、有返回(16 步上限内的某个节点)
+        _ = tree.finalName(from: "n0")
+        #expect(tree.history(from: "n0").isEmpty)
+    }
+
+    @Test("now 是数字/history 是字符串等错类型 —— 当作缺失,不崩")
+    func wrongTypes() {
+        let tree = ProxyTree(proxies: [
+            "A": ["now": 42, "history": "not-an-array"],
+            "B": ["now": ["nested": "array"], "history": ["也不是对象数组"]],
+        ])
+        #expect(tree.finalName(from: "A") == "A")   // now 非字符串 → 视为叶子
+        #expect(tree.history(from: "A").isEmpty)
+        #expect(tree.history(from: "B").isEmpty)
+    }
+
+    @Test("互指成环 A→B→A —— 不死循环")
+    func mutualCycle() {
+        let tree = ProxyTree(proxies: ["A": ["now": "B"], "B": ["now": "A"]])
+        #expect(["A", "B"].contains(tree.finalName(from: "A")))
+        #expect(tree.history(from: "A").isEmpty)
+    }
+
+    @Test("排序对含 NaN/极值 delay 不崩")
+    func sortExtremes() {
+        var a = NodeInfo(name: "a"); a.delay = Int.max
+        var b = NodeInfo(name: "b"); b.delay = -999
+        var c = NodeInfo(name: "c"); c.speed = Int64.max
+        let sorted = ClashService.sorted([a, b, c], selected: "")
+        #expect(sorted.count == 3)   // 不崩、不丢
+    }
+}
