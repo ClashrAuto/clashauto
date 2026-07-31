@@ -23,15 +23,16 @@ struct LatencyCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 Image(systemName: "timer")
-                    .font(.system(size: 16))
-                    .foregroundStyle(theme.accent)
+                    .font(.system(size: 26))
+                    .foregroundStyle(theme.textMuted)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
+                        // 标题是白色、不是主题色 —— 主题色留给数值旁边那些「可点」的东西。
                         Text("延迟".t)
                             .font(.system(size: 13))
-                            .foregroundStyle(theme.accent)
+                            .foregroundStyle(theme.textPrimary)
                         Text("直连".t)
                             .font(.system(size: 10))
                             .foregroundStyle(theme.textMuted)
@@ -47,6 +48,7 @@ struct LatencyCard: View {
                 } label: {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 12))
+                        .foregroundStyle(theme.accent)
                         .rotationEffect(.degrees(monitor.probing ? 360 : 0))
                         .animation(monitor.probing
                                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
@@ -54,7 +56,6 @@ struct LatencyCard: View {
                                    value: monitor.probing)
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(theme.textMuted)
                 .disabled(monitor.probing)
                 .help("重新测一轮".t)
             }
@@ -72,22 +73,22 @@ struct LatencyCard: View {
     }
 
     private func row(_ label: String, _ ms: Int, sub: String) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(label)
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textSecondary)
-                if !sub.isEmpty {
-                    Text(sub)
-                        .font(.system(size: 9))
-                        .foregroundStyle(theme.textMuted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
+        HStack(spacing: 6) {
+            // 副标题跟在标题**右侧同一行**（Qt：「代理  Auto - US」），不是第二行 ——
+            // 放第二行会让三行的高度参差，右侧数值也跟着错位。
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(theme.textSecondary)
+            if !sub.isEmpty {
+                Text(sub)
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.textMuted)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
             Spacer()
             Text(text(ms))
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 12))
                 .foregroundStyle(theme.latencyColor(ms))
         }
     }

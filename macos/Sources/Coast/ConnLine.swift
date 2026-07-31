@@ -82,39 +82,46 @@ struct ConnectionsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
                 Image(systemName: "link")
-                    .font(.system(size: 16))
-                    .foregroundStyle(theme.accent)
+                    .font(.system(size: 26))
+                    .foregroundStyle(theme.textMuted)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("连接".t)
-                        .font(.system(size: 13))
-                        .foregroundStyle(theme.accent)
+                    // 按钮组**紧贴标题右侧**，不是甩到卡片最右 —— 对齐 Qt。
+                    // 甩到最右的话，标题和它之间隔着一整片空白，读起来像两件不相干的东西。
+                    HStack(spacing: 6) {
+                        Text("连接".t)
+                            .font(.system(size: 13))
+                            .foregroundStyle(theme.accent)
+                        HStack(spacing: 0) {
+                            Button(action: onOpenAll) {
+                                Image(systemName: "eye").font(.system(size: 12))
+                                    .foregroundStyle(theme.textPrimary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("查看全部连接".t)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            Rectangle().fill(theme.divider).frame(width: 1, height: 14)
+                            Button(action: onClearAll) {
+                                // 垃圾桶用危险色 —— 这是不可撤销的批量断开，
+                                // 和旁边的「查看」不该长得一样。
+                                Image(systemName: "trash").font(.system(size: 12))
+                                    .foregroundStyle(theme.danger)
+                            }
+                            .buttonStyle(.plain)
+                            .help("全部断开".t)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                        }
+                        .background(theme.navSelected)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    }
                     Text(String(state.connectionsCount))
-                        .font(.system(size: 24, weight: .medium))
+                        .font(.system(size: 24, weight: .regular))
                         .foregroundStyle(theme.accent)
                 }
                 Spacer()
-                // 右上角动作组：查看全部（开窗）| 清空全部
-                HStack(spacing: 0) {
-                    Button(action: onOpenAll) {
-                        Image(systemName: "eye").font(.system(size: 12))
-                    }
-                    .buttonStyle(.plain)
-                    .help("查看全部连接".t)
-                    .padding(.horizontal, 8)
-                    Divider().frame(height: 14)
-                    Button(action: onClearAll) {
-                        Image(systemName: "trash").font(.system(size: 12))
-                    }
-                    .buttonStyle(.plain)
-                    .help("全部断开".t)
-                    .padding(.horizontal, 8)
-                }
-                .foregroundStyle(theme.textMuted)
-                .padding(.vertical, 4)
-                .background(theme.metricBg)
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
 
             Divider().overlay(theme.divider)
