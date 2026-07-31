@@ -61,6 +61,8 @@ public final class AppState {
     public let history: HistoryStore
     public let devices: DeviceStore
     public let theme: Theme
+    /// 「延迟」卡的四个数。
+    public let latency = LatencyMonitor()
 
     // MARK: 今日流量（数据来自历史库，跨重启保留）
 
@@ -158,6 +160,7 @@ public final class AppState {
         startSystemAppearanceObserver()   // 之后系统外观变了也跟上
         startSubscriptionAutoUpdate()     // 定时自动更新订阅
         startArpWatch()                   // 盯着有没有别人在做 ARP 欺骗
+        startLatencyMonitor()             // 直连 / 到路由 / DNS / 代理 四个延迟
         // .app 被替换过(应用内更新/从 DMG 拖覆盖)就重注册 helper —— 否则 status() 照报
         // enabled，XPC 却永远无人应答。详见 MacHelperClient.ensureRegisteredForCurrentBuild。
         // 放进 Task：自愈可能要注销 + 退避重试，最坏几秒钟，不能卡在启动路径上。
@@ -177,6 +180,7 @@ public final class AppState {
 
     public func shutdown() async {
         clash.stop()
+        latency.stop()
         // 在途的长连接也各落一条 —— 否则一条挂了几小时的连接永远进不了库。
         history.flush(includingLive: true)
         await controller.stopCore()
@@ -229,6 +233,29 @@ public final class AppState {
                     self.append(log: "订阅自动更新:有变化,已重建配置".t)
                     await self.controller.rebuildConfig()
                 }
+            }
+        }
+    }
+
+    /// 「延迟」卡：喂给它网关与当前节点，然后让它自己按 10 秒一轮跑。
+    ///
+    /// 网关与当前节点都会变（换网络、切节点），所以要持续同步 —— 只在启动时喂一次的话，
+    /// 换了 Wi-Fi 之后「到路由」还在测老网关，显示的是一个早就不相干的数。
+    private func startLatencyMonitor() {
+        latency.start()
+        Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.latency.gatewayIP = LanTopology.defaultGateway()?.ip ?? ""
+                // 当前选中节点的延迟直接取核心的测速结果，不自己再连一遍。
+                if let current = self.clash.nodes.first(where: { $0.active }) {
+                    self.latency.proxyName = current.now.isEmpty ? current.name : current.now
+                    self.latency.proxyDelay = current.delay > 0 ? current.delay : LatencyProbe.unknown
+                } else {
+                    self.latency.proxyName = ""
+                    self.latency.proxyDelay = LatencyProbe.untested
+                }
+                try? await Task.sleep(for: .seconds(5))
             }
         }
     }

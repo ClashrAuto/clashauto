@@ -398,6 +398,7 @@
   "配置校验未通过，已跳过热重载（保留当前运行配置）": "Konfigurationsprüfung fehlgeschlagen — Hot-Reload übersprungen (aktuelle laufende Konfiguration beibehalten)",
   "配置目录": "Konfigurationsordner",
   "重新扫描": "Erneut suchen",
+  "重新测一轮": "Erneut messen",
   "重载 Clash 配置失败: %1 %2": "Clash-Konfiguration konnte nicht neu geladen werden: %1 %2",
   "间隔秒": "Intervall (s)",
   "音箱": "Lautsprecher",

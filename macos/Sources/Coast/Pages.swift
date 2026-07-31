@@ -43,6 +43,7 @@ struct StatusPage: View {
                     .background(theme.metricBg)
                     .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
 
+                LatencyCard(monitor: state.latency)
                 CompositionCard()
                 TodayTrafficCard()
 

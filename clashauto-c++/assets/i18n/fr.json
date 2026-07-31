@@ -398,6 +398,7 @@
   "配置校验未通过，已跳过热重载（保留当前运行配置）": "Échec de la validation de la configuration — rechargement à chaud ignoré (conservation de la configuration en cours d'exécution)",
   "配置目录": "Dossier de configuration",
   "重新扫描": "Rescanner",
+  "重新测一轮": "Remesurer",
   "重载 Clash 配置失败: %1 %2": "Échec du rechargement de la configuration Clash : %1 %2",
   "间隔秒": "Intervalle (s)",
   "音箱": "Enceinte",

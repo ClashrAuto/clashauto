@@ -398,6 +398,7 @@
   "配置校验未通过，已跳过热重载（保留当前运行配置）": "Config validation failed — skipped hot reload (keeping current running config)",
   "配置目录": "Config directory",
   "重新扫描": "Rescan",
+  "重新测一轮": "Probe again",
   "重载 Clash 配置失败: %1 %2": "Failed to reload Clash config: %1 %2",
   "间隔秒": "Interval (s)",
   "阶段 6：依赖设备台账（coast.db）": "Phase 6: depends on the device ledger (coast.db)",

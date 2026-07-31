@@ -398,6 +398,7 @@
   "配置校验未通过，已跳过热重载（保留当前运行配置）": "Validazione della configurazione non superata — ricaricamento a caldo saltato (mantenuta la configurazione in esecuzione)",
   "配置目录": "Cartella di configurazione",
   "重新扫描": "Riscansiona",
+  "重新测一轮": "Misura di nuovo",
   "重载 Clash 配置失败: %1 %2": "Ricaricamento della configurazione Clash non riuscito: %1 %2",
   "间隔秒": "Intervallo (s)",
   "音箱": "Altoparlante",

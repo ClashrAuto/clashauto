@@ -24,6 +24,16 @@ public final class Theme {
     /// 「直连」的色点。取值与 Qt 的 `StatusPage.qml` 一致（`#48a5a7`）——
     /// 状态页两张连接列表靠它和 `accent` 区分这条走没走代理。
     /// 不跟随明暗切换：它要和 `accent` 形成固定对比，换一套值就失去了「一眼分辨」的作用。
+    /// 延迟 → 颜色：绿(快) / 黄(一般) / 红(慢)。取值与阈值都照搬 Qt 的 `StatusPage.qml`。
+    ///
+    /// 阈值按「体感」定，不是什么标准：100ms 以内基本无感，300ms 以上开网页就明显在等了。
+    public func latencyColor(_ ms: Int) -> Color {
+        if ms < 0 { return textMuted }
+        if ms < 100 { return Color(hex: 0x4DA13E) }
+        if ms < 300 { return Color(hex: 0xC69A54) }
+        return Color(hex: 0xA84343)
+    }
+
     public var directDot: Color { Color(hex: 0x48A5A7) }
 
     public var accentStrong: Color { dark ? Color(hex: 0x83BDFF) : Color(hex: 0x1F6FD2) }

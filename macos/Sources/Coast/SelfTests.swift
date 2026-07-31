@@ -19,6 +19,7 @@ enum SelfTests {
         if environment["COAST_SYSPROXY_SELFTEST"] == "1" { systemProxySelfTest() }
         if environment["COAST_PATHS_SELFTEST"] == "1" { pathsSelfTest() }
         if environment["COAST_TOPO_SELFTEST"] == "1" { topoSelfTest() }
+        if environment["COAST_LATENCY_SELFTEST"] == "1" { latencySelfTest() }
     }
 
     /// helper 自检：报告 bundle 布局与 SMAppService 状态。
@@ -140,6 +141,34 @@ enum SelfTests {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
         }
         exit(0)
+    }
+
+    /// 「延迟」卡的四个数。界面上的数字没法在无头环境里读，而「画对了」与「真的测出数」
+    /// 是两回事 —— 探测全返回 `—` 的话卡片照样渲染得很好看。
+    private static func latencySelfTest() {
+        print("=== 延迟探测自检 ===")
+        let gateway = LanTopology.defaultGateway()
+        print("网关: \(gateway?.ip ?? "<取不到>")  接口: \(gateway?.interface ?? "-")")
+        nonisolated(unsafe) var finished = false
+        Task.detached {
+            func show(_ label: String, _ ms: Int) {
+                let text = ms < 0 ? "— (测不到)" : (ms == 0 ? "… (未测)" : "\(ms) ms")
+                print(String(format: "  %-10@ %@", label as NSString, text as NSString))
+            }
+            show("直连", await LatencyProbe.directRTT())
+            if let ip = gateway?.ip, !ip.isEmpty {
+                show("到路由", await LatencyProbe.tcpRTT(host: ip, port: 443))
+            } else {
+                show("到路由", LatencyProbe.unknown)
+            }
+            show("DNS", await LatencyProbe.dnsRTT())
+            finished = true
+        }
+        let deadline = Date().addingTimeInterval(20)
+        while !finished, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
+        exit(finished ? 0 : 1)
     }
 
     private static func topoSelfTest() {

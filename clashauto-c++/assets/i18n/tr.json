@@ -398,6 +398,7 @@
   "配置校验未通过，已跳过热重载（保留当前运行配置）": "Yapılandırma doğrulaması başarısız — sıcak yeniden yükleme atlandı (çalışan mevcut yapılandırma korunuyor)",
   "配置目录": "Yapılandırma klasörü",
   "重新扫描": "Yeniden tara",
+  "重新测一轮": "Yeniden ölç",
   "重载 Clash 配置失败: %1 %2": "Clash yapılandırması yeniden yüklenemedi: %1 %2",
   "间隔秒": "Aralık (sn)",
   "音箱": "Hoparlör",
