@@ -1,6 +1,5 @@
-import CoastKit
+import Foundation
 import Observation
-import SwiftUI
 
 /// 界面语言。
 ///
@@ -10,6 +9,10 @@ import SwiftUI
 /// 简体中文是源语言，不加载任何表。
 ///
 /// 12 种语言的表与 Qt 版**共用同一批文件**，不复制一份到 macos/。
+///
+/// 放在 **CoastKit** 而不是 app 层：托盘（`TrayController`）也在 CoastKit 里，
+/// 它那一整份菜单此前是**裸中文字面量**，对 11 种非中文语言直接漏中文，
+/// 而 `i18n_check.py` 只扫 `Sources/Coast`，连报都报不出来。
 @MainActor
 @Observable
 public final class I18n {
@@ -128,9 +131,9 @@ extension I18n {
     /// 放在本文件里是有原因的：这些名字**故意不翻译**（用当前界面语言去翻译语言名的话，
     /// 用户切到看不懂的语言后就再也找不回来了），而 `i18n_check.py` 正是靠
     /// 「`I18n.swift` 免检」这条豁免放行它们。放在设置页里会被判成「漏标 .t」。
-    static let languageCodes = ["zh-CN", "en-US", "zh-TW", "ja", "ko", "ru",
+    public static let languageCodes = ["zh-CN", "en-US", "zh-TW", "ja", "ko", "ru",
                                 "es", "fr", "de", "pt-BR", "it", "tr", "vi"]
-    static let languageNames = ["简体中文", "English", "繁體中文", "日本語", "한국어", "Русский",
+    public static let languageNames = ["简体中文", "English", "繁體中文", "日本語", "한국어", "Русский",
                                 "Español", "Français", "Deutsch", "Português", "Italiano",
                                 "Türkçe", "Tiếng Việt"]
 }

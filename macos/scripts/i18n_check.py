@@ -42,9 +42,39 @@ def unescape(raw):
             i += 1
     return ''.join(out)
 
+# 扫描范围。
+#
+# ★ 原来只扫 `Sources/Coast`，于是 **CoastKit 里的托盘菜单整份是裸中文**
+# （控制面板 / 启动核心 / 打开网页代理 / 打开增强模式 / 退出程序 / 运行中 / 已停止），
+# 对 11 种非中文语言直接漏中文，而这个脚本连报都报不出来 —— 又一次「看起来在把关」。
+# 现在两个目录一起扫。
+SOURCE_DIRS = [ROOT / 'Sources' / 'Coast', ROOT / 'Sources' / 'CoastKit']
+
+def swift_files():
+    for directory in SOURCE_DIRS:
+        yield from sorted(directory.glob('*.swift'))
+
+# 「有中文却没标 .t」这一检查的扫描范围。
+#
+# 覆盖率那一项两个目录一起扫（上面 `swift_files`），但这一项**不能**照搬 ——
+# CoastKit 里大量中文是**匹配用的字面量**，翻了反而坏事：`ClashService` 拿
+# 「节点 / 选择 / 代理」认策略组名、拿「规则 / 全局 / 直连」归一化模式，
+# 那些串要和**核心返回的数据**对得上，不是给人看的。一股脑扫会报出 130 多条假阳性，
+# 检查也就没人看了。
+#
+# 所以 app 层整层扫，CoastKit 只点名扫真正有界面文案的那几个文件。
+UNMARKED_EXTRA = ['TrayController.swift', 'Notifier.swift']
+
+def unmarked_scan_files():
+    yield from sorted((ROOT / 'Sources' / 'Coast').glob('*.swift'))
+    for name in UNMARKED_EXTRA:
+        path = ROOT / 'Sources' / 'CoastKit' / name
+        if path.exists():
+            yield path
+
 def used_keys():
     keys = set()
-    for path in (ROOT / 'Sources' / 'Coast').glob('*.swift'):
+    for path in swift_files():
         for m in re.finditer(r'"((?:[^"\\]|\\.)*)"\.t', path.read_text(encoding='utf-8')):
             if CJK.search(m.group(1)):
                 keys.add(unescape(m.group(1)))
@@ -59,7 +89,7 @@ UNTRANSLATED_OK = {'SelfTests.swift', 'I18n.swift'}
 def unmarked_chinese():
     """界面代码里含中文、却没标 `.t` 的字符串字面量。"""
     found = []
-    for path in (ROOT / 'Sources' / 'Coast').glob('*.swift'):
+    for path in unmarked_scan_files():
         if path.name in UNTRANSLATED_OK:
             continue
         for number, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):

@@ -19,9 +19,9 @@ public final class TrayController {
 
     private let upItem = NSMenuItem(title: "UP: 0 B/s", action: nil, keyEquivalent: "")
     private let downItem = NSMenuItem(title: "DOWN: 0 B/s", action: nil, keyEquivalent: "")
-    private let coreItem = NSMenuItem(title: "启动核心", action: nil, keyEquivalent: "")
-    private let proxyItem = NSMenuItem(title: "打开网页代理", action: nil, keyEquivalent: "")
-    private let tunItem = NSMenuItem(title: "打开增强模式", action: nil, keyEquivalent: "")
+    private let coreItem = NSMenuItem(title: "启动核心".t, action: nil, keyEquivalent: "")
+    private let proxyItem = NSMenuItem(title: "打开网页代理".t, action: nil, keyEquivalent: "")
+    private let tunItem = NSMenuItem(title: "打开增强模式".t, action: nil, keyEquivalent: "")
 
     /// 上一次已渲染的状态。`NSStatusItem` 的图标/标题赋值是到 window server 的往返，
     /// 每秒无脑重设会让图标肉眼可见地闪 —— 只在真的变了时才写。
@@ -41,7 +41,7 @@ public final class TrayController {
     }
 
     private func buildMenu() {
-        let panel = NSMenuItem(title: "控制面板", action: #selector(showPanel), keyEquivalent: "")
+        let panel = NSMenuItem(title: "控制面板".t, action: #selector(showPanel), keyEquivalent: "")
         panel.target = self
         menu.addItem(panel)
         menu.addItem(.separator())
@@ -61,7 +61,7 @@ public final class TrayController {
         menu.addItem(tunItem)
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: "退出程序", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "退出程序".t, action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
     }
@@ -76,17 +76,17 @@ public final class TrayController {
     public func updateStatus(coreRunning: Bool, proxyEnabled: Bool, tunEnabled: Bool) {
         if renderedCoreRunning != coreRunning {
             renderedCoreRunning = coreRunning
-            coreItem.title = coreRunning ? "停止核心" : "启动核心"
-            statusItem.button?.toolTip = "Coast - \(coreRunning ? "运行中" : "已停止")"
+            coreItem.title = coreRunning ? "停止核心".t : "启动核心".t
+            statusItem.button?.toolTip = "Coast - \(coreRunning ? "运行中".t : "已停止".t)"
         }
         if renderedProxyEnabled != proxyEnabled {
             renderedProxyEnabled = proxyEnabled
-            proxyItem.title = proxyEnabled ? "关闭网页代理" : "打开网页代理"
+            proxyItem.title = proxyEnabled ? "关闭网页代理".t : "打开网页代理".t
             proxyItem.state = proxyEnabled ? .on : .off
         }
         if renderedTunEnabled != tunEnabled {
             renderedTunEnabled = tunEnabled
-            tunItem.title = tunEnabled ? "关闭增强模式" : "打开增强模式"
+            tunItem.title = tunEnabled ? "关闭增强模式".t : "打开增强模式".t
             tunItem.state = tunEnabled ? .on : .off
         }
     }
