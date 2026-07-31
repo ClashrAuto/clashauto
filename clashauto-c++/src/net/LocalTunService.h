@@ -16,10 +16,11 @@
 //
 // ★★ QUIC 系节点（hysteria2 / tuic）曾经被**直接拒绝**：它们的 socket 由 msquic 内部创建，
 //   SelfRouteGuard 那条 fd 路径够不着 → 开 TUN 必然环路 → 整机断网。
-//   现已改为经 msquic 的 QUIC_PARAM_CONN_LOCAL_ADDRESS 把本地地址钉在物理出口 IP 上
-//   （QuicTransport.cpp，须在 ConnectionStart 之前设），闸门已撤，改为 start() 时打一条告警。
-//   证据边界要记清楚：目前只有「编译 + 打包后 msquic 可加载」（CI 三平台 QUIC self-test），
-//   **没有「TUN 开着时 Hy2 真的不环路」的真机证据**。blockedByQuicNode() 保留未删 ——
+//   现在的主层是 **/32 主机路由**（start() ①.5 收集代理服务器 + 系统 DNS 地址、TunSession 安装
+//   经物理网关的主机路由）——协议无关，msquic 自持 socket 也覆盖；socket 选项/钉源那些是保险层。
+//   证据（2026-07-31，详见 docs/mihomo-replacement-gap.md 环路一节）：Linux 真机 tcpdump A/B
+//   对照证过（无 /32 时 QUIC 包 coast0:3/eth0:0，有 /32 时 0/5）；macOS route -n get A/B 证过
+//   查表级；**Windows 只编过，macOS 的真 QUIC 流量也还没验**。blockedByQuicNode() 保留未删 ——
 //   真出问题时把 start() 里那处 emit 改回 return false 即可立刻恢复闸门。
 #include <QObject>
 #include <QString>

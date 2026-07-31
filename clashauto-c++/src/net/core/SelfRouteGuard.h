@@ -6,7 +6,13 @@
 //   于是包又回到我们的 lwIP、又被拨一次出站……死循环。表现不是"某个网站打不开"，
 //   而是整机断网 —— 比不开 TUN 更糟。所以这不是可选优化，是接线的前置条件。
 //
-// ★ 办法：把本进程的出站 socket 钉死在**物理默认路由网卡**上，让它的路由查表根本命中不到 TUN。
+// ★★ 分层（2026-07-31 起）：本文件的 socket 选项已降级为**保险层**。环路排除的**主层**是
+//   /32(/128) 主机路由 —— TUN 起来时给每个代理服务器地址 + 系统 DNS 加一条经物理网关的主机
+//   路由（TunSession 安装、LocalTunService ①.5 收集材料），协议无关、三平台同形，msquic 自持
+//   socket 也照样覆盖。socket 选项保留的理由：它们已被真机验证有效（见下），在 /32 集合过期
+//   （订阅变了没重开 TUN）或某条路由装失败时仍是第二道防线，删掉是净损失。
+//
+// ★ 保险层的办法：把本进程的出站 socket 钉死在**物理默认路由网卡**上，让它的路由查表根本命中不到 TUN。
 //   三个平台的机制不同，但形状一样，都必须在 **connect() 之前**作用在 fd 上：
 //     · Linux  —— SO_MARK 打标 + 策略路由。**两条 rule 缺一不可**（见 TunSession.cpp）：
 //                   ip rule add fwmark <mark> lookup main    pref 100   ← 我们的包，查 main
@@ -72,6 +78,24 @@ public:
     //   QUIC_PARAM_CONN_LOCAL_ADDRESS —— 它要的是一个**地址**，不是 ifIndex。
     //   把本地地址钉在物理网卡的 IP 上，路由查表就不会命中我们自己的 TUN。
     static QString physicalAddress(bool v6 = false);
+
+    // 物理默认路由的**网关**地址（v6=false 取 IPv4 网关，true 取 IPv6，可能带 %zone）。
+    // 取不到（没有默认路由 / 默认路由是 on-link 没有网关）返回空串。
+    //
+    // ★ 用途：/32 主机路由方案（TunSession::Config::hostRoutes4/6）—— 给每个代理服务器地址
+    //   加一条「经物理网关」的主机路由，让它在查表时永远胜过 TUN 的 /1。这是**协议无关**的
+    //   环路排除主层（socket 选项那些是第二道保险，见 docs/mihomo-replacement-gap.md 环路一节）。
+    // ★ 拿不到网关时调用方**必须拒绝接管默认路由**：没有网关的 /32 路由装不出来，
+    //   宁可 TUN 不开也不能开出一个「自己出站全环路」的断网状态。
+    static QString physicalGateway(bool v6 = false);
+
+    // 当前系统的 DNS 服务器地址（v4+v6 混合，已去重、滤掉回环/链路本地）。
+    //
+    // ★ 为什么归到这里：这些地址同样要被 /32 排除在 TUN 之外 —— 我们自己解析代理服务器域名、
+    //   以及之后任何 QHostInfo 调用都要打向它们，而那条路在 TUN 接管之后同样在 /1 的覆盖范围内。
+    //   （Linux 上 127.0.0.53 这类 systemd-resolved stub 是回环、不会进 TUN，故被滤掉；
+    //   它背后的真实上游经 resolvectl 补上。）
+    static QStringList systemDnsServers();
 
     // 在 **connect() 之前**作用于 fd。family 取 AF_INET / AF_INET6。
     // 返回 false = 没能应用（*err 说明原因）。调用方**照常拨号**：没有环路保护总好过连不上，

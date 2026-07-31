@@ -206,6 +206,231 @@ QString SelfRouteGuard::physicalAddress(bool v6)
     return {};
 }
 
+QString SelfRouteGuard::physicalGateway(bool v6)
+{
+#if defined(Q_OS_LINUX)
+    if (!v6) {
+        // /proc/net/route：Destination 全 0 的行；Gateway 是**小端 hex** 的 in_addr。
+        // 只认当前物理出口那张网卡（g_iface 有效时），并要求 RTF_GATEWAY(0x2) —— on-link
+        // 默认路由（Gateway=0）没有网关，返回空串让调用方拒绝接管。
+        QFile f(QStringLiteral("/proc/net/route"));
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
+            return {};
+        QTextStream ts(&f);
+        ts.readLine(); // 表头
+        int bestMetric = -1;
+        quint32 bestGw = 0;
+        while (!ts.atEnd()) {
+            const QStringList c = ts.readLine().split(QLatin1Char('\t'), Qt::SkipEmptyParts);
+            if (c.size() < 7)
+                continue;
+            const QString name = c[0].trimmed();
+            if (c[1].trimmed() != QLatin1String("00000000"))
+                continue;
+            if (name.startsWith(QLatin1String("coast")))
+                continue; // 自己的 TUN 不算
+            if (g_iface.valid() && name != g_iface.name)
+                continue; // 网关必须和已选定的物理出口是同一张网卡
+            bool ok = false;
+            const quint32 gw = c[2].trimmed().toUInt(&ok, 16); // 小端
+            if (!ok || gw == 0)
+                continue;
+            const int metric = c[6].trimmed().toInt();
+            if (bestMetric < 0 || metric < bestMetric) {
+                bestMetric = metric;
+                bestGw = gw;
+            }
+        }
+        if (bestGw == 0)
+            return {};
+        return QStringLiteral("%1.%2.%3.%4")
+                .arg(bestGw & 0xff)
+                .arg((bestGw >> 8) & 0xff)
+                .arg((bestGw >> 16) & 0xff)
+                .arg((bestGw >> 24) & 0xff);
+    }
+    // v6：/proc/net/ipv6_route 的格式解析不值当，走 `ip -6 route show default`。
+    QProcess p;
+    p.start(QStringLiteral("ip"), {QStringLiteral("-6"), QStringLiteral("route"),
+                                   QStringLiteral("show"), QStringLiteral("default")});
+    if (!p.waitForFinished(4000))
+        return {};
+    const QStringList lines = QString::fromLocal8Bit(p.readAllStandardOutput())
+                                      .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString &l : lines) {
+        const QStringList tok = l.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        const int via = tok.indexOf(QStringLiteral("via"));
+        const int dev = tok.indexOf(QStringLiteral("dev"));
+        if (via < 0 || via + 1 >= tok.size() || dev < 0 || dev + 1 >= tok.size())
+            continue;
+        if (tok[dev + 1].startsWith(QLatin1String("coast")))
+            continue;
+        if (g_iface.valid() && tok[dev + 1] != g_iface.name)
+            continue;
+        return tok[via + 1];
+    }
+    return {};
+
+#elif defined(Q_OS_MACOS)
+    QProcess p;
+    QStringList args{QStringLiteral("-n"), QStringLiteral("get")};
+    if (v6)
+        args << QStringLiteral("-inet6");
+    args << QStringLiteral("default");
+    p.start(QStringLiteral("/sbin/route"), args);
+    if (!p.waitForFinished(4000))
+        return {};
+    const QStringList lines = QString::fromLocal8Bit(p.readAllStandardOutput())
+                                      .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    QString gw, ifname;
+    for (const QString &l : lines) {
+        const QString t = l.trimmed();
+        if (t.startsWith(QLatin1String("gateway:")))
+            gw = t.mid(8).trimmed();
+        else if (t.startsWith(QLatin1String("interface:")))
+            ifname = t.mid(10).trimmed();
+    }
+    // 默认路由已经在 utun 上 = 探不出物理网关；返回空串让调用方拒绝，别把 TUN 自己当网关。
+    if (ifname.startsWith(QLatin1String("utun")))
+        return {};
+    if (g_iface.valid() && !ifname.isEmpty() && ifname != g_iface.name)
+        return {};
+    // v6 网关常是 fe80::x%en0（带 zone）——原样返回，route add -inet6 认这个格式。
+    // 「gateway: link#4」这类 on-link 形态不是地址，不能用。
+    if (gw.contains(QLatin1Char('#')) || (!v6 && QHostAddress(gw).isNull()))
+        return {};
+    return gw;
+
+#elif defined(Q_OS_WIN)
+    MIB_IPFORWARD_TABLE2 *table = nullptr;
+    if (GetIpForwardTable2(v6 ? AF_INET6 : AF_INET, &table) != NO_ERROR || !table)
+        return {};
+    ULONG bestMetric = ULONG_MAX;
+    QString gw;
+    for (ULONG i = 0; i < table->NumEntries; ++i) {
+        const MIB_IPFORWARD_ROW2 &r = table->Table[i];
+        if (r.DestinationPrefix.PrefixLength != 0)
+            continue;
+        if (g_iface.valid()) {
+            if (int(r.InterfaceIndex) != g_iface.ifIndex)
+                continue; // 只认已选定的物理出口
+        } else {
+            // 没有已选定的出口：按 probeWin 同款过滤，只认物理网卡。
+            MIB_IF_ROW2 ifr;
+            ZeroMemory(&ifr, sizeof(ifr));
+            ifr.InterfaceLuid = r.InterfaceLuid;
+            if (GetIfEntry2(&ifr) != NO_ERROR)
+                continue;
+            if (ifr.Type != IF_TYPE_ETHERNET_CSMACD && ifr.Type != IF_TYPE_IEEE80211)
+                continue;
+            if (ifr.OperStatus != IfOperStatusUp)
+                continue;
+        }
+        const QHostAddress a(reinterpret_cast<const sockaddr *>(&r.NextHop));
+        if (a.isNull() || a == QHostAddress(QHostAddress::AnyIPv4)
+            || a == QHostAddress(QHostAddress::AnyIPv6))
+            continue; // on-link（NextHop 全 0）没有网关
+        if (r.Metric < bestMetric) {
+            bestMetric = r.Metric;
+            gw = a.toString();
+        }
+    }
+    FreeMibTable(table);
+    return gw;
+
+#else
+    Q_UNUSED(v6);
+    return {};
+#endif
+}
+
+QStringList SelfRouteGuard::systemDnsServers()
+{
+    QStringList out;
+    auto addAddr = [&out](const QHostAddress &a) {
+        if (a.isNull() || a.isLoopback() || a.isLinkLocal())
+            return; // 回环（如 systemd-resolved 的 127.0.0.53）不会进 TUN；链路本地不经网关
+        const QString s = a.toString();
+        if (!out.contains(s))
+            out << s;
+    };
+
+#if defined(Q_OS_LINUX)
+    // /etc/resolv.conf 的 nameserver 行。systemd-resolved 环境下这里往往只有 127.0.0.53
+    //（被上面滤掉）——那就再问 resolvectl 拿真实上游。
+    {
+        QFile f(QStringLiteral("/etc/resolv.conf"));
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream ts(&f);
+            while (!ts.atEnd()) {
+                const QString l = ts.readLine().trimmed();
+                if (!l.startsWith(QLatin1String("nameserver")))
+                    continue;
+                const QStringList tok = l.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+                if (tok.size() >= 2)
+                    addAddr(QHostAddress(tok[1]));
+            }
+        }
+    }
+    if (out.isEmpty()) {
+        QProcess p;
+        p.start(QStringLiteral("resolvectl"), {QStringLiteral("dns")});
+        if (p.waitForFinished(4000)) {
+            const QStringList lines = QString::fromLocal8Bit(p.readAllStandardOutput())
+                                              .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+            for (const QString &l : lines) {
+                const QStringList tok = l.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+                for (const QString &t : tok)
+                    addAddr(QHostAddress(t)); // 非地址的 token（"Global:" 等）解析为 null，自动跳过
+            }
+        }
+    }
+
+#elif defined(Q_OS_MACOS)
+    QProcess p;
+    p.start(QStringLiteral("/usr/sbin/scutil"), {QStringLiteral("--dns")});
+    if (p.waitForFinished(4000)) {
+        const QStringList lines = QString::fromLocal8Bit(p.readAllStandardOutput())
+                                          .split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        for (const QString &l : lines) {
+            const QString t = l.trimmed();
+            // 形如 "nameserver[0] : 192.168.20.1"
+            if (!t.startsWith(QLatin1String("nameserver[")))
+                continue;
+            const int colon = t.indexOf(QLatin1Char(':'));
+            if (colon > 0)
+                addAddr(QHostAddress(t.mid(colon + 1).trimmed()));
+        }
+    }
+
+#elif defined(Q_OS_WIN)
+    // GetAdaptersAddresses 的 DnsServerList。只收**物理网卡**（以太网/WiFi 且 Up）的——
+    // mihomo 之类的 TUN 适配器常把 DNS 指到自己的假地址（198.18.x），给那种地址加 /32
+    // 经物理网关的路由反而会把它的解析弄断。
+    ULONG len = 0;
+    const ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_UNICAST
+            | GAA_FLAG_SKIP_FRIENDLY_NAME;
+    GetAdaptersAddresses(AF_UNSPEC, flags, nullptr, nullptr, &len);
+    if (len > 0) {
+        QByteArray buf(int(len), 0);
+        auto *aa = reinterpret_cast<IP_ADAPTER_ADDRESSES *>(buf.data());
+        if (GetAdaptersAddresses(AF_UNSPEC, flags, nullptr, aa, &len) == NO_ERROR) {
+            for (auto *ad = aa; ad; ad = ad->Next) {
+                if (ad->OperStatus != IfOperStatusUp)
+                    continue;
+                if (ad->IfType != IF_TYPE_ETHERNET_CSMACD && ad->IfType != IF_TYPE_IEEE80211)
+                    continue;
+                for (auto *d = ad->FirstDnsServerAddress; d; d = d->Next) {
+                    if (d->Address.lpSockaddr)
+                        addAddr(QHostAddress(d->Address.lpSockaddr));
+                }
+            }
+        }
+    }
+#endif
+    return out;
+}
+
 bool SelfRouteGuard::applyToFd(qintptr fd, int family, QString *err)
 {
     if (!g_enabled)

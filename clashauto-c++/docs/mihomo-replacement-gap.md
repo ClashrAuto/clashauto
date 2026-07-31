@@ -102,7 +102,60 @@ cc=10/5/0/0/0/0   socksFail=0                   ← 10 条全走进程内
 curl 的整整 8 秒里一帧都没被读走（对照实测：阻塞版 `ep.rx=1 ep.tx=0 tcpAcc=0`）。该分支作为反面
 教材留在驱动里（`COAST_TUNTEST_BLOCK=1`）。**生产代码未作任何改动。**
 
-### 环路问题：TCP 侧三平台验过；**QUIC 侧此前是个未真验的洞，现已补上（Linux 真机证）**
+### 环路问题：已换主方案 —— /32 主机路由（协议无关，Linux/macOS 真机对照证；Windows 只编过）
+
+> **2026-07-31 深夜重构**：环路排除从「三平台三套 socket 机制」换成「**/32 主机路由为主层 +
+> 原 socket 机制为保险层**」。动机见 [upstream-comparison.md](upstream-comparison.md)：msquic
+> 自持 UDP socket、拿不到 fd，Windows/macOS 又没有 Linux 那种按源地址的策略路由，所以那两个
+> 平台的 QUIC 环路一直无解也无证据。/32 方案与 socket 归属无关：**TUN 起来时给每个代理服务器
+> 地址 + 系统 DNS 加一条经物理网关的 /32(v6 /128) 主机路由**，查表时 /32 永远比 TUN 的 /1 更具体。
+>
+> **落地形状**（`TunSession.cpp` 安装、`LocalTunService::start()` ①.5 收集材料）：
+> - 域名在**接管路由之前**阻塞解析（接管后解析请求自己会被 TUN 抓走）；解析失败的节点跳过并
+>   记日志，不挡 TUN 启动。系统 DNS 地址（`SelfRouteGuard::systemDnsServers()`）一并排除 ——
+>   运行中的 QHostInfo 都靠它。真机（Pi，真实订阅）：**56 个域名全解析成功、失败 0，排除集合
+>   v4 ×65**。
+> - 物理网关来自 `SelfRouteGuard::physicalGateway()`（Linux /proc/net/route；macOS `route -n get
+>   default`；Windows `GetIpForwardTable2` 的 NextHop）。**探不到网关就拒绝接管**（没有网关装不出
+>   /32，宁可不开也不开出断网）。地址=网关本身（网关兼任 DNS）时用接口路由，不写「经它自己」
+>  （macOS 上那样写会 Can't assign requested address）。
+> - **Linux 的 /32 必须进 TUN 专用表 989，不能进 main**：未打标的包在 pref 200 就被引去查 989，
+>   main 里的 /32 永远轮不到。macOS/Windows 单表，直接更具体即胜出。
+> - undo 沿用 TunSession 的「先入栈再执行、stop() 逆序全试」约定；看门狗保留。
+>
+> **真机证据（2026-07-31，全部带反向对照）**：
+> - **Linux（Pi .91，真实 Hy2 节点 hk2.dexlos.com:20302，tcpdump 记 QUIC 握手包）**：
+>   - A 组（`COAST_TUN_NO_HOSTROUTES=1` + `COAST_TUN_NO_QUICRULE=1`，无任何 QUIC 防护）：
+>     **coast0=3 / eth0=0**，`ip route get` → `dev coast0` —— 反向对照成立（确实环路）。
+>   - B 组（只 `COAST_TUN_NO_QUICRULE=1`，即 **/32 单独作用**）：**coast0=0 / eth0=5**，
+>     `ip route get` → `via 192.168.20.1 dev eth0 table 989` —— /32 自己就够。
+>   - C 组（生产默认，/32 + pref90 并存）：**coast0=0 / eth0=3~4**，规则表 90/100/200 共存无冲突。
+>   - D 组（TUN + 65 条 /32 全装 + DIRECT 出站）：**接管中 curl=404，端到端 PASS**，停止后
+>     规则/表/网卡零残留、网络恢复。
+> - **macOS（.34，13.7.8，`/private/tmp/tunmac` 台子真接管默认路由）**：A 组无 /32 → 探针地址
+>   `route -n get` 落 utun7（反向对照成立）；B 组 /32 生效 → `en0 via 192.168.20.1`，普通目标
+>   9.9.9.9 仍进 TUN，还原后 curl=404。⚠ 这是**路由查表级**证据；macOS 上**真 QUIC 流量的
+>   环路验证仍未做**（本机没有 msquic 构建）。
+> - **Windows：只编过（MinGW 全量）**，netsh 路径没真跑（建 wintun + 改路由要管理员）。
+>   **Windows 的 QUIC 环路仍无真机证据。**
+>
+> **端到端「TUN + 真实 Hy2」那一格仍是空的**：机场服务端对本客户端的握手整段静默（同机 mihomo
+> 对照 curl=404 正常，我们的 Initial 重传 6 次无一回包 —— 是针对客户端指纹/行为的反刷，不是 IP 封锁，
+> 也不是路由问题：B/C 组已证包都从物理口出去了）。订阅里其余节点全是 reality+grpc / salamander /
+> tuic，进程内暂不支持，换不了别的真节点。
+>
+> **已知局限（有意为之）**：排除集合是 TUN 启动那一刻的快照，**运行中订阅/节点变化不热更新**，
+> TUN 重启时按新配置重建；v6 主机路由只在探到 v6 网关时装（当前 TUN 本就只接管 v4 默认路由，
+> v6 流量不进 TUN）。
+>
+> **保险层的去留**：socket 选项（SO_MARK / IP_UNICAST_IF / IP_BOUND_IF）与 msquic 的
+> LOCAL_ADDRESS 钉源**保留**——已被验证有效，且在「/32 集合过期」时仍兜底。Linux 那条**专为
+> QUIC 的 pref 90 源地址规则**已标注「/32 拿到真机证据后可撤」（B/C 组就是证据），下一轮可删。
+> 对照开关 `COAST_TUN_NO_HOSTROUTES` / `COAST_TUN_NO_QUICRULE` 只供测试。
+
+#### （下为旧记录：socket 机制时代的证据，保险层仍在用）
+
+TCP 侧三平台验过；**QUIC 侧此前是个未真验的洞，后补上（Linux 真机证）**
 
 TUN 一旦接管默认路由，coast 自己的出站也会被路由进 TUN → 死循环（表现是整机断网，比不开 TUN 更糟）。
 现已落地 `SelfRouteGuard`（`src/net/core/SelfRouteGuard.h`）：探物理出口 → 把出站 socket 钉在它上面。

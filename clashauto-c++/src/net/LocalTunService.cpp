@@ -13,7 +13,10 @@
 
 #include <QEventLoop>
 #include <QFile>
+#include <QHostAddress>
+#include <QHostInfo>
 #include <QProcess>
+#include <QSet>
 #include <QTimer>
 
 #include <cstdio>
@@ -88,29 +91,31 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
     }
     // QUIC 系节点（hysteria2 / tuic）：**曾经在这里直接拒绝启动**，因为它们的 socket 由 msquic
     // 内部创建、SelfRouteGuard 那条 fd 路径够不着 → 开 TUN 必然环路 → 整机断网。
-    // 现已改为经 msquic 自己的 QUIC_PARAM_CONN_LOCAL_ADDRESS 把本地地址钉在物理出口 IP 上
-    //（见 QuicTransport.cpp，必须在 ConnectionStart 之前设），所以闸门撤掉。
     //
-    // ★ 但**留一条明确告警**，别让它变成静默的坑：这条路目前只有「编译 + 打包后 msquic 可加载」
-    //   的证据（CI 三平台的 QUIC self-test），**没有「TUN 开着时 Hy2 真的不环路」的真机证据**
-    //   —— 验它需要真 Hy2 服务端 + TUN + 管理员同时到位。
+    // 现在的环路排除是**主层 + 保险层**两级（详见 docs/mihomo-replacement-gap.md 环路一节）：
+    //   · 主层（协议无关、三平台同形）：给每个代理服务器地址 + 系统 DNS 加一条经物理网关的
+    //     /32(/128) 主机路由（①.5 收集材料，TunSession 安装）。查表时 /32 永远比 TUN 的 /1
+    //     更具体 —— 不管 socket 是谁建的、能不能打标，都出物理口。msquic 自持 socket 的问题
+    //     就此绕开。
+    //   · 保险层（各平台原有机制，保留不删）：socket 选项（SO_MARK / IP_UNICAST_IF /
+    //     IP_BOUND_IF）+ msquic 的 QUIC_PARAM_CONN_LOCAL_ADDRESS + Linux 的 pref 90 源地址
+    //     规则（那条在 /32 拿到真机证据后可撤，见 TunSession.cpp）。
+    //
+    // ★ 告警照留，且按**证据强度**分平台说 —— 含糊的告警等于没有告警：
+    //   · Linux：真机 tcpdump 证过保险层（修前 QUIC 握手包 coast0:5/eth0:0 → 修后 0/6）；
+    //     /32 主层的验证见 docs（同样是 tcpdump 记数）。
+    //   · Windows / macOS：/32 主层机制相同，但**尚无本平台的真机 QUIC 验证**。
     //   真出问题的表现是整机断网，自救办法：关掉「增强」，或 config.yaml 写 coastcore: false。
-    // ★ 三个平台的**证据强度不同**，所以别用同一句话糊过去 —— 含糊的告警等于没有告警。
-    //   · Linux：真机 tcpdump 证过（修前 QUIC 握手包 coast0:5/eth0:0 → 修后 coast0:0/eth0:6）。
-    //     靠的是 `ip rule from <物理IP> lookup main`，即**按源地址做策略路由**。
-    //   · Windows / macOS：**没有那个等价能力，也从未验证**。那边只设了
-    //     QUIC_PARAM_CONN_LOCAL_ADDRESS（钉源地址），而「绑了源地址」是否足以让路由避开 TUN
-    //     是未知的。详见 docs/upstream-comparison.md 第三节。
     QString why;
     if (blockedByQuicNode(store, &why)) {
 #if defined(Q_OS_LINUX)
-        emit logged(tr("提示：配置里有 QUIC 类节点。本平台已通过策略路由把它们排除在 TUN 之外"
-                       "（真机抓包验证过）。"));
+        emit logged(tr("提示：配置里有 QUIC 类节点。本平台已通过 /32 主机路由 + 策略路由"
+                       "把它们排除在 TUN 之外（真机抓包验证过）。"));
 #else
-        emit logged(tr("⚠ 配置里有 QUIC 类节点（Hysteria2/TUIC）。它们的连接由 msquic 内部建立，"
-                       "本平台**尚无**「TUN 开启时不会环路」的验证 —— Linux 上靠按源地址做策略路由"
-                       "解决，而本平台没有等价能力。若开启后整机断网，请关掉「增强」，"
-                       "或在 config.yaml 写 coastcore: false。"));
+        emit logged(tr("⚠ 配置里有 QUIC 类节点（Hysteria2/TUIC）。已按 /32 主机路由方案把代理"
+                       "服务器排除在 TUN 之外（与 Linux 同一机制），但本平台**尚无**真机 QUIC "
+                       "验证。若开启后整机断网，请关掉「增强」，或在 config.yaml 写 "
+                       "coastcore: false。"));
 #endif
     }
 
@@ -122,9 +127,91 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
             *err = tr("探不到物理出口网卡，开启进程内 TUN 会导致断网，已中止");
         return false;
     }
+    emit logged(tr("物理出口：%1 (ifIndex=%2)").arg(ifc.name).arg(ifc.ifIndex));
+
+    // ①.5 /32 主机路由的材料：物理网关 + 要排除的地址集合（代理服务器 + 系统 DNS）。
+    //    ★ 域名解析**必须发生在接管路由之前** —— 接管之后再解析，DNS 查询自己就会被 TUN
+    //      抓走（/1 覆盖一切），解析永远回不来。所以这一整段都在任何路由改动之前完成，
+    //      结果作为快照传给 TunSession（生命周期同一次 TUN 会话；运行中订阅变化不热更新，
+    //      TUN 重启时按新配置重建 —— 这是已知局限，见 docs/mihomo-replacement-gap.md）。
+    const QString gw4 = SelfRouteGuard::physicalGateway(false);
+    const QString gw6 = SelfRouteGuard::physicalGateway(true);
+    QStringList excl4, excl6;
+    auto addExcl = [&excl4, &excl6](const QHostAddress &a) {
+        if (a.isNull() || a.isLoopback() || a.isLinkLocal())
+            return;
+        // v4-mapped v6（::ffff:1.2.3.4）按 v4 记，路由命令认的是纯 v4 形态
+        bool isV4 = false;
+        const quint32 v4 = a.toIPv4Address(&isV4);
+        if (isV4 || a.protocol() == QAbstractSocket::IPv4Protocol) {
+            const QString s = QHostAddress(v4).toString();
+            if (!excl4.contains(s))
+                excl4 << s;
+        } else {
+            const QString s = a.toString();
+            if (!excl6.contains(s))
+                excl6 << s;
+        }
+    };
+    int nDomains = 0, nSkipped = 0;
+    {
+        QSet<QString> seen;
+        const auto snap = store->current();
+        const QVector<ProxyNode> nodes = snap ? snap->nodes() : QVector<ProxyNode>();
+        for (const ProxyNode &n : nodes) {
+            if (n.isDirect() || n.server.isEmpty() || seen.contains(n.server))
+                continue;
+            seen.insert(n.server);
+            const QHostAddress lit(n.server);
+            if (!lit.isNull()) {
+                addExcl(lit);
+                continue;
+            }
+            ++nDomains;
+            const QHostInfo hi = QHostInfo::fromName(n.server); // 阻塞解析——此刻路由还没动，安全
+            if (hi.error() != QHostInfo::NoError || hi.addresses().isEmpty()) {
+                // 解析不出：跳过并记日志，不让整个 TUN 启动失败 —— 这个节点开 TUN 后会环路，
+                // 但用户多半也选不中它（连不上），比「因为一个死节点整个开关打不开」强。
+                ++nSkipped;
+                emit logged(tr("⚠ 代理服务器域名解析失败，无法为它加排除路由：%1（%2）")
+                                    .arg(n.server, hi.errorString()));
+                continue;
+            }
+            for (const QHostAddress &a : hi.addresses())
+                addExcl(a);
+        }
+    }
+    const int nProxy4 = excl4.size(), nProxy6 = excl6.size();
+    const QStringList dns = SelfRouteGuard::systemDnsServers();
+    for (const QString &d : dns)
+        addExcl(QHostAddress(d));
+    emit logged(tr("排除集合：v4 ×%1 + v6 ×%2（代理 %3/%4，域名 %5 个、失败 %6 个；DNS %7 个）"
+                   "，物理网关 %8%9")
+                        .arg(excl4.size())
+                        .arg(excl6.size())
+                        .arg(nProxy4)
+                        .arg(nProxy6)
+                        .arg(nDomains)
+                        .arg(nSkipped)
+                        .arg(dns.size())
+                        .arg(gw4.isEmpty() ? tr("<v4 未探到>") : gw4,
+                             gw6.isEmpty() ? QString() : QStringLiteral(" / ") + gw6));
+    if (!excl4.isEmpty() && gw4.isEmpty()) {
+        // ★ 没有网关，/32 装不出来 → 主层缺位 → QUIC 等打不了标的出站必然环路。
+        //   宁可拒绝开启，也不开出一个「看着开了、实则整机断网」的状态。
+        if (err)
+            *err = tr("探不到物理默认网关（默认路由可能是 on-link），无法给 %1 个代理/DNS "
+                      "地址加排除路由，开启进程内 TUN 会导致断网，已中止")
+                           .arg(excl4.size());
+        return false;
+    }
+    if (!excl6.isEmpty() && gw6.isEmpty())
+        emit logged(tr("提示：有 %1 个 v6 地址但没探到 v6 网关，跳过 v6 排除路由"
+                       "（当前 TUN 只接管 v4 默认路由，v6 流量本就不进 TUN）")
+                            .arg(excl6.size()));
+
     m_guardWasEnabled = SelfRouteGuard::enabled();
     SelfRouteGuard::setEnabled(true);
-    emit logged(tr("物理出口：%1 (ifIndex=%2)").arg(ifc.name).arg(ifc.ifIndex));
 
     // ② 设备层
     m_ep = createTunEndpoint(this);
@@ -181,6 +268,13 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
     c.peer4 = QString::fromLatin1(kTunIp); // macOS 点对点的对端 = 我们（网关侧）
     c.mask4 = QString::fromLatin1(kMask);
     c.takeDefault = true;
+    // /32 主机路由材料（①.5 备好的快照）。运行中订阅/节点变化不会热更新这组路由 ——
+    // 重开 TUN 才重建（已知局限，文档有记）。
+    c.physIfname = ifc.name;
+    c.gateway4 = gw4;
+    c.gateway6 = gw6;
+    c.hostRoutes4 = excl4;
+    c.hostRoutes6 = excl6;
     if (!m_sess->start(c, err)) {
         emit logged(tr("路由接管失败，已回滚：%1").arg(*err));
         teardown();

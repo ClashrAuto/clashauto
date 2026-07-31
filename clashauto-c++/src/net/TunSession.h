@@ -40,6 +40,20 @@ public:
         int prefix4 = 24;
         int mtu = 1500;
         bool takeDefault = true; // false = 只配地址不接管路由（真机验证命令通路时用，安全）
+
+        // —— /32(/128) 主机路由：环路排除的**主层**（协议无关）——
+        // 每个地址加一条「经物理网关」的主机路由；查表时 /32 永远比 TUN 的 /1 更具体，
+        // 于是不管 socket 是谁建的（Qt 的还是 msquic 自持的）、能不能打标，都出物理口。
+        // 地址集合 = 代理服务器（域名已在**接管之前**解析好）+ 当前系统 DNS。
+        // ★ takeDefault 且 hostRoutes4 非空时 physIfname/gateway4 必填 —— 没有网关装不出
+        //   有效的 /32，start() 会直接失败（宁可不开也不开出一个自己出站全环路的断网状态）。
+        // ★ 局限（有意为之，见 docs/mihomo-replacement-gap.md 环路一节）：集合是启动那一刻的
+        //   快照，运行中订阅/节点变化**不会**热更新这组路由 —— TUN 重启时按新配置重建。
+        QString physIfname;      // 物理出口网卡名（Linux 的 dev / Windows 的接口别名）
+        QString gateway4;        // 物理默认网关 v4
+        QString gateway6;        // 物理默认网关 v6（可空 = 跳过全部 v6 主机路由）
+        QStringList hostRoutes4; // 要排除的 v4 地址（不带前缀，逐条加 /32）
+        QStringList hostRoutes6; // 要排除的 v6 地址（逐条加 /128）
     };
 
     ~TunSession();

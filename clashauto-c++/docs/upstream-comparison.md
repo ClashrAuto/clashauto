@@ -57,6 +57,12 @@ Linux 上那条补丁 `ip rule from <物理IP> lookup main pref 90` 之所以成
 
 ## 四、建议的方向：换一条与 socket 归属无关的路
 
+> **✅ 2026-07-31 已落地**：/32 主机路由方案已实现（`TunSession.cpp` + `LocalTunService` ①.5 +
+> `SelfRouteGuard::physicalGateway()/systemDnsServers()`），Linux（Pi，tcpdump A/B 对照）与
+> macOS（route -n get A/B 对照）真机验证通过，原 socket 机制降级为保险层。
+> 证据与局限的完整记录在 [mihomo-replacement-gap.md](mihomo-replacement-gap.md) 环路一节。
+> Windows 仍只编过；macOS 的真 QUIC 流量验证也还欠着（无 msquic 本地构建）。
+
 与其继续追「怎么摸到 msquic 的 fd」，不如学 WireGuard 客户端：
 **TUN 起来时，给每个代理服务器 IP 加一条经物理网关的 /32（v6 /128）主机路由。**
 
