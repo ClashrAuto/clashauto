@@ -153,7 +153,7 @@ public:
     }
     int ifIndex() const override { return m_ifIndex; }
     int mtu() const override { return 1500; }
-    QString ifname() const { return m_ifname; }
+    QString ifname() const override { return m_ifname; }
 
 private:
     // errno 必须由调用方**在出错的那一行之后立刻**取好传进来：从系统调用返回到这里，中间隔着

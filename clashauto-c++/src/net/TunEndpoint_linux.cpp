@@ -95,7 +95,7 @@ public:
     }
     int ifIndex() const override { return 0; } // TUN 上层用不到
     int mtu() const override { return 1500; }
-    QString ifname() const { return m_ifname; }
+    QString ifname() const override { return m_ifname; }
 
 private:
     // 读一批 IP 包，各自套上以太头后交给上层。

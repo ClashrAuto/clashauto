@@ -284,6 +284,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         target_sources(clashauto-qml PRIVATE
             src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
     endif()
+    # 「进程内增强」会话：把设备层+激活层+NetStack+出站串成一个可开关的整体，供「增强」按钮用。
+    target_sources(clashauto-qml PRIVATE src/net/LocalTunService.cpp src/net/LocalTunService.h)
     # TUN 激活层（跨平台）：配地址/接管默认路由/Linux 策略路由，以及**原样还原**。
     # 与设备层分开：设备层失败只是 TUN 起不来，这一层失败会改变整机路由。
     target_sources(clashauto-qml PRIVATE src/net/TunSession.cpp src/net/TunSession.h)

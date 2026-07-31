@@ -36,6 +36,11 @@ public:
     virtual int ifIndex() const = 0;
     virtual int mtu() const = 0;                      // 接口 MTU（不含以太头），失败回 1500
 
+    // 实际的网卡名。抓包端点直接回传进来的那个；**TUN 端点必须重写**——它的名字可能不是
+    // 调用方要的那个（macOS 的 utun 单元由内核分配，传空名时真名只有 UTUN_OPT_IFNAME 问得到）。
+    // TunSession 要靠它去配地址/加路由，拿错名字就会去配一张别人的网卡。
+    virtual QString ifname() const { return {}; }
+
     // 设置「感兴趣的源 MAC 集合」——内核态源 MAC 过滤，纯属**收方**优化，不影响 send()。
     //
     // 为什么需要：抓包是混杂模式，默认整个网段的每一帧都被复制进用户态、分配 QByteArray、发一次

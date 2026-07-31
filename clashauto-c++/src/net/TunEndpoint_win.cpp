@@ -281,7 +281,7 @@ public:
     int ifIndex() const override { return m_ifIndex; }
     int mtu() const override { return 1500; }
     void drainNow() override { drain(); }
-    QString ifname() const { return m_ifname; }
+    QString ifname() const override { return m_ifname; }
 
 private:
     // 排空接收环：每个裸 IP 包套上以太头交给上层。
