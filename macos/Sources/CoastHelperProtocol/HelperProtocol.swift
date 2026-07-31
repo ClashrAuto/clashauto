@@ -31,6 +31,16 @@ public enum HelperConstants {
     /// helper 自身版本，用来判断「装着的 helper 是否过期需重装」。
     func getVersion(withReply reply: @escaping (String) -> Void)
 
+    /// 收拾干净并退出本进程，让 launchd 下次按需拉起**新版**。
+    ///
+    /// 为什么需要它：daemon 一旦被拉起就 `RunLoop.main.run()` 常驻，重新注册**不会**把它换掉
+    /// （实测：.app 换成新版、重注册成功、`getVersion` 仍返回旧版本，PID 也没变）。
+    /// 结果是程序更新之后，以 root 运行的仍旧是旧代码，且可能长期如此。
+    ///
+    /// 退出前必须先还原接管、再停核心 —— 直接 exit 会把局域网留在被 ARP 接管的状态，
+    /// 并留下一个以 root 运行的孤儿核心进程。那比「跑着旧版 helper」糟得多。
+    func terminate(withReply reply: @escaping () -> Void)
+
     /// 以 root 设置/清除系统代理（HTTP/HTTPS/SOCKS 都指向 host:port）。
     /// root 提交网络配置无需 Authorization，这正是 helper 能做到全程免密的原因。
     ///

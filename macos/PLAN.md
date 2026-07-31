@@ -746,3 +746,61 @@
   这个设计此前**从没在真并发下验过**,现在有实证了(洪水期间 /configs 耗时 <3s 且拿得到数据)。
 
   207 用例:不带真核心 0.13 秒,带真核心 47 秒。
+
+
+## 2026-07-31 · 用真开发者证书跑通 helper —— 卡了十几轮的阻塞解开
+
+用户把证书放到了下载目录。实际上钥匙串里**早已**有可用身份
+`Developer ID Application: yuehong sun (6AXTRT5TV4)`，Team ID 正是
+`HelperConstants.clientCodeRequirement` 里硬编码要求的那个 —— 不必导入 p12 就能真签。
+于是第一次真正装上并连通了 helper：
+
+```
+SMAppService 状态: enabled → helper 版本: 0.8.0 → ✅ XPC 通道可用
+```
+
+双向代码签名鉴权用 `codesign -v -R=<requirement>` 分别验过两端，都满足。
+
+### 由此暴露并修掉的四个真问题
+
+1. **`.app` 被原地替换后，以 root 运行的仍是旧 helper —— 且可能长期如此。**
+   daemon 被拉起后 `RunLoop.main.run()` 常驻，重新注册**不会**换掉它。
+   实测：替换成新版、重注册成功，`getVersion` 仍返回旧版本，PID 也没变。
+   影响面是每一次程序更新。修法：协议加 `terminate`，helper 先还原 ARP 接管、
+   再停核心、才退出，launchd 下次按需拉起新版。
+   验证：`0.7.0 / PID 22210` → 自愈后 `0.8.0 / PID 22302`。
+
+2. **第一版自愈把事情弄得更糟。** 写成「先 unregister 再 register」，实测注销成功、
+   紧接着的注册报 `Operation not permitted`（launchd 的注销是异步的），用户从
+   「有一个陈旧但能用的 helper」变成「完全没有 helper」。
+   改成：先只 `register()`（对已 enabled 的服务重复注册是安全的），
+   用**行为**（XPC ping）而非 `status()` 判定成败，不行才注销 + 退避重试。
+   —— `status()` 会说谎：报 `.enabled` 而 XPC 无人应答的情况实测存在。
+
+3. **helper 版本号恒为 1.0，探针失灵。** 它嵌在 `__TEXT,__info_plist`，是链接期产物，
+   而那个 plist 只作为一条 `-Xlinker` 参数存在，**不在 swift build 的依赖图里** ——
+   改了构建系统照样判定无需重建（连 touch 源码强制重编都不保证重链）。
+   改成运行时读所在 `.app` 的 `Info.plist`。`getVersion` 是唯一能问出
+   「现在跑的到底是哪一份 helper」的探针，恒定值等于没有。
+
+4. **特权操作零日志。** 一个以 root 改系统代理、起进程、往局域网发 ARP 接管别人流量的
+   daemon，没终端没界面，出问题时除系统日志无处可查。五个操作全部加 os_log 审计，
+   带调用方 PID（`NSXPCConnection.current()`）。只记 IP/MAC/端口/路径，不记凭据 ——
+   系统日志是全机可读的。
+   注意 `os_log` 的 `CVarArg...` 无法转发数组，那样编译过但输出全错。
+
+### 顺带记下的坑
+
+- zsh 里 `log` 被同名函数截掉，`log show ...` 报 “too many arguments” 或静默返回空。
+  查系统日志必须用 `/usr/bin/log`。这让我先前几次查询假阴性。
+- 自检探针的超时必须**长于**被测组件自身的超时，否则屏蔽掉真实错误。
+- `SelfTests` 是 `@MainActor` 隔离的，里面写 `Task { } + 信号量阻塞主线程` 会死锁
+  （任务体继承主 actor，排在被阻塞的主线程上，永不开始）。要用 `Task.detached` + 跑 runloop。
+
+### 仍未验证
+
+- **真机接管（ARP 欺骗 + PF rdr）本身**没有实跑。跑它会改动局域网状态与
+  `net.inet.ip.forwarding`，需要用户明确同意后再做。
+  （附带确认：本机 `ip.forwarding` 现为 1，但不是我们设的 —— `Redirector.stop()` 在
+  `!active` 时提前返回，根本不碰它。）
+- 11 种机翻语言仍待母语者校对。

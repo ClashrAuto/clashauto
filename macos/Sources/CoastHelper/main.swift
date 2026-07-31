@@ -44,7 +44,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
     func setSystemProxy(enabled: Bool, host: String, port: Int,
                         bypassCommaSeparated: String,
                         withReply reply: @escaping (Bool, String) -> Void) {
-        Audit.log("setSystemProxy enabled=\(enabled) \(host):\(port)")
+        Audit.log("setSystemProxy enabled=\(enabled) \(host):\(port)", caller: NSXPCConnection.current())
         // root 身份下 SCPreferencesCreate 直接可写，不需要 AuthorizationRef —— 全程免密。
         guard let prefs = SCPreferencesCreate(nil, "CoastHelper" as CFString, nil) else {
             reply(false, "SCPreferencesCreate 返回空")
@@ -100,7 +100,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
 
     func startCore(executable: String, config: String, userDir: String,
                    withReply reply: @escaping (Bool, String) -> Void) {
-        Audit.log("startCore exe=\(executable) config=\(config)")
+        Audit.log("startCore exe=\(executable) config=\(config)", caller: NSXPCConnection.current())
         queue.sync {
             stopCoreLocked()
 
@@ -153,7 +153,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
     }
 
     func stopCore(withReply reply: @escaping (Bool, String) -> Void) {
-        Audit.log("stopCore")
+        Audit.log("stopCore", caller: NSXPCConnection.current())
         queue.sync {
             stopCoreLocked()
             reply(true, "")
@@ -167,7 +167,8 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
         // 接管别人的流量是本程序做过的最重的一件事，日志必须记全:接管了谁、冒充哪个网关、
         // 走哪块网卡。出问题时(局域网异常、某台设备断网)这是唯一能自证「我做了什么」的记录。
         Audit.log("startRedirect 设备=[\(deviceIPsCommaSep)] 网卡=\(interface) "
-                  + "网关=\(gatewayIP)/\(gatewayMAC) redir=\(redirPort) dns=\(dnsPort)")
+                  + "网关=\(gatewayIP)/\(gatewayMAC) redir=\(redirPort) dns=\(dnsPort)",
+                  caller: NSXPCConnection.current())
         let ips = deviceIPsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         let macs = deviceMACsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         if let error = redirector.start(deviceIPs: ips, deviceMACs: macs, interface: interface,
@@ -179,8 +180,20 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
         }
     }
 
+    func terminate(withReply reply: @escaping () -> Void) {
+        Audit.log("terminate:收到退出请求,先还原接管与核心")
+        // 顺序要紧:先还原 ARP 接管(否则局域网里那些设备会继续把流量发给一个不存在的网关),
+        // 再停核心。反过来的话,接管还在、转发目标已经没了 —— 被接管的设备直接断网。
+        redirector.stop()
+        queue.sync { stopCoreLocked() }
+        Audit.log("terminate:已收拾干净,退出")
+        reply()
+        // 让 reply 有机会送达对端再退。launchd 会在下次连接时按需拉起新版。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
+    }
+
     func stopRedirect(withReply reply: @escaping (Bool, String) -> Void) {
-        Audit.log("stopRedirect")
+        Audit.log("stopRedirect", caller: NSXPCConnection.current())
         redirector.stop()
         reply(true, "")
     }
@@ -249,6 +262,15 @@ enum Audit {
     /// 无法这样展开，数组会被当成**一个**参数，编译通过但输出全错。审计日志错了比没有更糟。
     static func log(_ message: String) {
         os_log("%{public}@", log: channel, type: .default, message)
+    }
+
+    /// 带调用方 PID 的审计行。光记「做了什么」不够 —— 出事时还要能回答「谁让它做的」。
+    /// codesign 门保证了调用方是 Coast 本体，但同一台机器上可能有多个实例/多次启动。
+    /// PID 由 `NSXPCConnection.current()` 提供（官方指定的「本次调用来自哪条连接」入口），
+    /// 不需要自己按连接铺一套 exported object。
+    static func log(_ message: String, caller: NSXPCConnection?) {
+        let pid = caller?.processIdentifier ?? -1
+        os_log("%{public}@ [caller pid=%d]", log: channel, type: .default, message, pid)
     }
 }
 

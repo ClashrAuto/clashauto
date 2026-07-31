@@ -141,8 +141,11 @@ public final class AppState {
         startSubscriptionAutoUpdate()     // 定时自动更新订阅
         // .app 被替换过(应用内更新/从 DMG 拖覆盖)就重注册 helper —— 否则 status() 照报
         // enabled，XPC 却永远无人应答。详见 MacHelperClient.ensureRegisteredForCurrentBuild。
-        let heal = MacHelperClient.ensureRegisteredForCurrentBuild()
-        if heal.isNoteworthy { append(log: "检测到程序已更新：\(heal)") }
+        // 放进 Task：自愈可能要注销 + 退避重试，最坏几秒钟，不能卡在启动路径上。
+        Task { [weak self] in
+            let heal = await MacHelperClient.ensureRegisteredForCurrentBuild()
+            if heal.isNoteworthy { self?.append(log: "免密助手：\(heal)") }
+        }
 
         guard ProcessInfo.processInfo.environment["COAST_NO_AUTOSTART"] != "1" else {
             append(log: "COAST_NO_AUTOSTART=1，跳过自动启动核心".t)

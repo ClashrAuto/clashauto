@@ -122,9 +122,17 @@ enum SelfTests {
         print("处理前状态: \(MacHelperClient.status())")
         print("当前 cdhash: \(MacHelperClient.debugCurrentCDHash() ?? "<取不到>")")
         print("已记录 cdhash: \(MacHelperClient.debugRecordedCDHash() ?? "<无记录>")")
-        let outcome = MacHelperClient.ensureRegisteredForCurrentBuild()
-        print("结果: \(outcome)")
-        print("处理后状态: \(MacHelperClient.status())")
+        nonisolated(unsafe) var finished = false
+        Task.detached {
+            let outcome = await MacHelperClient.ensureRegisteredForCurrentBuild()
+            print("结果: \(outcome)")
+            print("处理后状态: \(MacHelperClient.status())")
+            finished = true
+        }
+        let deadline = Date().addingTimeInterval(40)
+        while !finished, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        }
         exit(0)
     }
 

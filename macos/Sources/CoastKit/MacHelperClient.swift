@@ -132,24 +132,48 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
         UserDefaults.standard.string(forKey: registeredIdentityKey)
     }
 
+    /// 轻量连通性探测：真发一次只读请求。
+    ///
+    /// **判据只能是行为，不能是 `status()`** —— 实测中 `status()` 报 `.enabled`
+    /// 而 XPC 无人应答的情况真实存在（.app 被替换后 launchd 还拽着旧注册）。
+    /// 超时取 3s：这只是判活，不值得让启动流程等满默认的 15s。
+    nonisolated private static func pingSucceeds() async -> Bool {
+        (try? await MacHelperClient().version(timeout: .seconds(3))) != nil
+    }
+
     @discardableResult
-    nonisolated public static func ensureRegisteredForCurrentBuild() -> HealOutcome {
-        // `.notRegistered` 也要放过去：替换 .app 之后系统有时会**自己**把注册作废，
-        // 而此时旧 daemon 往往还活着继续服务 —— 只看 `.enabled` 会漏掉这一支。
-        // 判据改成「以前装过」（有记录的 cdhash），而不是「现在还 enabled」。
+    nonisolated public static func ensureRegisteredForCurrentBuild() async -> HealOutcome {
         let recorded = UserDefaults.standard.string(forKey: registeredIdentityKey)
+        // 判据是「以前装过」，不是「现在还 enabled」：替换 .app 后系统有时会自己把注册作废。
         guard recorded != nil || status() == .enabled else { return .notInstalled }
         guard let current = helperCDHash() else { return .identityUnavailable }
-        guard recorded != current || status() != .enabled else { return .unchanged }
-        // 先注销再注册：直接 register() 不会覆盖已有的陈旧注册。
-        try? unregister()
-        do {
-            let status = try register()
+        if recorded == current, status() == .enabled, await pingSucceeds() { return .unchanged }
+
+        // 第一步：**只** register()，绝不先注销。
+        //
+        // 第一版是「先 unregister 再 register」，实测的结果是：注销成功、紧接着的注册报
+        // “Operation not permitted”（launchd 的注销是异步的），于是用户从「有一个陈旧但
+        // 还能用的 helper」变成「完全没有 helper」—— 自愈把事情弄得更糟。
+        // 而对已 enabled 的服务重复 register() 是安全的（实测返回 enabled，XPC 照常）。
+        if let status = try? register(), status == .enabled, await pingSucceeds() {
             UserDefaults.standard.set(current, forKey: registeredIdentityKey)
-            return status == .enabled ? .reregistered : .needsApproval
-        } catch {
-            return .failed(error.localizedDescription)
+            // 重注册**不会**替换已在运行的 daemon（实测：版本与 PID 都不变）。
+            // 请它自行收拾干净并退出，launchd 下次按需拉起的就是新版。
+            // 旧版 helper 没有 terminate 方法，失败是预期的 —— 忽略即可。
+            try? await MacHelperClient().terminate()
+            return .reregistered
         }
+
+        // 第二步：确实需要重来一遍时才注销，并带退避重试 —— 注销后立刻注册必然失败。
+        try? unregister()
+        for delay in [Duration.milliseconds(500), .seconds(2), .seconds(4)] {
+            try? await Task.sleep(for: delay)
+            guard let status = try? register() else { continue }
+            UserDefaults.standard.set(current, forKey: registeredIdentityKey)
+            guard status == .enabled else { return .needsApproval }
+            return await pingSucceeds() ? .reregistered : .failed("已注册但 XPC 仍不通")
+        }
+        return .failed("重注册失败，请在设置页重新安装免密助手")
     }
 
     /// 打开「系统设置 → 登录项」，引导用户批准。注册后停在 `requiresApproval` 时必须给这条出路。
@@ -211,8 +235,16 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
         }
     }
 
-    public func version() async throws -> String {
-        try await withProxy { helper, done in
+    /// 请求 helper 收拾干净并退出。旧版 helper 没有这个方法，调用会失败 —— 那是预期的，
+    /// 调用方当作「换不掉」处理即可，不应视为错误。
+    public func terminate(timeout: Duration = .seconds(8)) async throws {
+        let _: Bool = try await withProxy(timeout: timeout) { helper, done in
+            helper.terminate { done(.success(true)) }
+        }
+    }
+
+    public func version(timeout: Duration = .seconds(15)) async throws -> String {
+        try await withProxy(timeout: timeout) { helper, done in
             helper.getVersion { version in done(.success(version)) }
         }
     }
