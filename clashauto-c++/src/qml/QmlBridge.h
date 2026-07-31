@@ -143,6 +143,9 @@ public:
     // ★ 出站配置与分流实现取自 DevicesController 的**同一份** store/rules —— 复制一份就会
     //   开始漂移（网关和 TUN 用两套规则，用户改了设置只有一边生效）。
     void setInProcessTunSources(DevicesController *devices);
+
+    // 核心缺席时用进程内配置填节点列表（详见 .cpp）。核心在时不调用。
+    void syncNodesFromInProcess();
     Q_INVOKABLE void setMode(const QString &display); // 传中文「规则/全局/直连」即可
     Q_INVOKABLE void selectNode(const QString &rawName);
     // 禁用当前正在使用的节点：把它从订阅池摘除并重建配置（对齐旧项目 disableNodeByName）。

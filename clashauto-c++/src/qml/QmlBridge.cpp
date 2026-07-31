@@ -2,6 +2,7 @@
 
 #include "DevicesController.h"      // coastCoreEnabled / 共享的 store+rules
 #include "../net/LocalTunService.h" // 进程内 TUN（coastcore 打开时由它建 TUN）
+#include "../net/core/ProxyConfig.h" // 核心缺席时从进程内配置喂节点列表
 
 #include "../AppConfig.h"
 #include "../ClashService.h"
@@ -190,6 +191,50 @@ void QmlBridge::refreshStatusFromCore()
     m_tunEnabled = tun;
     m_proxyEnabled = proxy;
     emit statusChanged();
+    // 核心停了但进程内引擎还在干活时，节点列表改由进程内配置提供（否则节点页会空着，
+    // 而用户明明还能上网 —— 自相矛盾的界面比缺功能更让人不信任）。
+    if (!running)
+        syncNodesFromInProcess();
+}
+
+
+// 核心缺席时，从**进程内配置**喂节点列表。
+//
+// 平时节点列表来自 mihomo 的 /proxies；核心一停，列表就空了 —— 而此时进程内引擎其实
+// 完全知道有哪些节点（ProxyConfig 是从我们自己生成的 full.yaml 解析来的）。不喂的话，
+// 用户看到的是一个空节点页，却又能正常上网，自相矛盾。
+//
+// ★ 只在**核心没跑**且 coastcore 开着时才做，核心在时一行行为不变（REST 永远优先）。
+// ★ 延迟/速度留空：那两个数现在确实拿不到（LatencyProbe 是另一条路），宁可显示空白
+//   也不编一个假的填上去。
+// ★ 已知局限（有意不补，免得加一堆验不了的管道）：调用点挂在 refreshStatusFromCore 的
+//   **状态变化**分支上，所以核心不在期间若订阅更新导致配置重建，这个列表不会跟着刷新，
+//   要等下一次状态变化。补它需要从 DevicesController 引一条重建信号过来 —— 等能真机验
+//   这条路时再一起做，现在加了也验不了。
+void QmlBridge::syncNodesFromInProcess()
+{
+    if (!m_devices || !m_devices->coastCoreEnabled())
+        return;
+    const auto store = m_devices->proxyConfigStore();
+    if (!store)
+        return;
+    const auto cfg = store->current();
+    if (!cfg || cfg->nodes().isEmpty())
+        return;
+
+    QVector<NodeInfo> list;
+    list.reserve(cfg->nodes().size());
+    for (const ProxyNode &n : cfg->nodes()) {
+        NodeInfo i;
+        i.name = n.name;
+        i.active = (!cfg->selected().isEmpty() && n.name == cfg->selected());
+        list.push_back(i);
+    }
+    m_nodeModel.setNodes(list);
+    if (m_selectedNode != cfg->selected()) {
+        m_selectedNode = cfg->selected();
+        emit nodesChanged();
+    }
 }
 
 void QmlBridge::toggleCore()
