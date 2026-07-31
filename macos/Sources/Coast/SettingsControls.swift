@@ -134,8 +134,18 @@ struct ThemedField: View {
 }
 
 /// 手画下拉（不可编辑）。对齐公共组件 `qml/ThemedCombo.qml`：
-/// 30 高、半径 3、右侧一个 ▾。用 `Menu` 而不是 `Picker` —— `Picker` 在 macOS 上
-/// 会渲染成系统 pop-up button，高度和描边都不受控。
+/// 30 高、半径 3、**文字左对齐、右侧一个 ▾**。
+///
+/// ★ **视觉自己画，`Menu` 只当一层透明的点击层盖在上面。**
+///   `.menuStyle(.borderlessButton)` 对 `label:` 的处理很霸道，两次都栽在这上面：
+///   ① 装饰画在 label 里 → 被整个吃掉，控件变成一段裸文字（设备详情窗「策略」那行的截图）；
+///   ② 把底色描边挪到 `Menu` 外面之后底是有了，但 label 里的 `HStack` 仍被**居中**、
+///      右侧那个 ▾ 直接不见（第二张截图）。
+///   所以别再试图让它按我们的排版渲染 —— 自己画一份完整的样子，
+///   再叠一个几乎全透明的 `Menu` 接管点击。
+///
+/// 用 `Menu` 而不是 `Picker`：`Picker` 在 macOS 上会渲染成系统 pop-up button，
+/// 高度和描边都不受控。
 struct ThemedCombo: View {
     @Environment(Theme.self) private var theme
     let options: [String]
@@ -144,14 +154,15 @@ struct ThemedCombo: View {
     var width: CGFloat?
     var enabled = true
 
+    private var title: String {
+        options.indices.contains(selection) ? options[selection] : ""
+    }
+
     var body: some View {
-        Menu {
-            ForEach(Array(options.enumerated()), id: \.offset) { index, title in
-                Button(title) { selection = index }
-            }
-        } label: {
+        ZStack {
+            // —— 自己画的样子 ——
             HStack(spacing: 0) {
-                Text(options.indices.contains(selection) ? options[selection] : "")
+                Text(title)
                     .font(.system(size: 13))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
@@ -162,8 +173,7 @@ struct ThemedCombo: View {
                     .foregroundStyle(theme.textMuted)
             }
             .padding(.horizontal, 8)
-            .frame(width: width, height: 30)
-            .frame(maxWidth: width == nil ? .infinity : nil)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background {
                 RoundedRectangle(cornerRadius: 3, style: .continuous).fill(theme.inputBg)
             }
@@ -171,11 +181,21 @@ struct ThemedCombo: View {
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .stroke(theme.inputBorder, lineWidth: 1)
             }
-            .contentShape(Rectangle())
+
+            // —— 只负责弹菜单的那一层 ——
+            // 不能用 `.opacity(0)`：完全透明的视图不参与命中测试，点下去没反应。
+            Menu {
+                ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+                    Button(option) { selection = index }
+                }
+            } label: {
+                Rectangle().fill(Color.white.opacity(0.001))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
+        .frame(width: width, height: 30)
+        .frame(maxWidth: width == nil ? .infinity : nil)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
     }
