@@ -2053,3 +2053,53 @@ Qt 的 `restoreWindowPos`：有历史且仍可见就恢复，否则**贴着当�
 六张卡、延迟色阶、页脚玻璃按钮都正常 —— 这是之前一直没验过的一面。
 
 `swift test` 308 全绿；`i18n_check.py` 248/248。
+
+
+## 2026-08-01(续二十二) · 背景拖动真拖了一次，以及全量对照表
+
+### 拖动验证（上一条欠的）
+
+上一条只说「开关打开了」，这次用 `cliclick` 真发了两组鼠标事件：
+
+| 起点 | 结果 |
+|---|---|
+| 状态页卡片的**空白处** | 窗口从 (1340, 693) 移到 (1060, 513) ✅ |
+| 侧栏「节点」**按钮上** | 窗口**没动**，还在 (1060, 513) ✅ |
+
+正是 Qt 要的那两条：空白处能拖整窗，控件上按住拖不会拖走窗口。
+
+### 全量对照：`qml/` 24 个文件都有归宿
+
+| QML | Swift |
+|---|---|
+| Main | `MainView` / `CoastApp` / `WindowRestore` |
+| StatusPage | `Pages.StatusPage` + `TrafficCard` / `ConnLine` / `LatencyCard` |
+| NodesPage / NodeRow | `Pages.NodesPage` / `Pages.NodeRow` |
+| DevicesPage / DeviceRow / DeviceTrafficBg | `DevicesPage` 内三者 |
+| DeviceDetailWindow | `DeviceDetailView`（独立窗） |
+| SubscriptionsPage | `SubscriptionsPage`（含三个弹窗） |
+| SettingsPage | `SettingsPage` + `SettingsControls` |
+| RuleEditorWindow | `RulesEditor.RuleEditorSheet` / `AreaEditorSheet` |
+| ConnectionsWindow | `ConnectionsView` + `ConnectionLedger` |
+| UpdateWindow | `UpdateView`（独立窗） |
+| AboutPage | `AboutPage` |
+| LogsPage / LogTimeline | `Pages.LogsPage` / `LogTimeline` + `LogSeverity` |
+| MetricCard | `TrafficCard` |
+| BandwidthChart | `BandwidthChart` |
+| Card / NavButton / FooterSwitch / ThemedCombo | `Components` / `SettingsControls` |
+| Theme | `Theme` |
+| **NpcapWindow** | **无 —— Windows 专属，macOS 正确不做** |
+
+### 这一轮（22 条）总账
+
+改动集中在三类，**后两类只有把 app 跑起来才发现得了**：
+
+1. **元素与尺寸对不上** —— 每一页、每一个窗、每一个共用组件都逐项对过；
+2. **编译过、检查全绿，但功能不可达** —— ✕ 之后界面再也回不来、更新窗底部整行按钮被裁掉、
+   设备行整行点击在 `List` 里不触发、`Window` scene 用 `@State` 接共享状态开出全空窗、
+   `ThemedCombo` 四处都只是裸文字；
+3. **检查本身够不着要查的东西** —— `settings_persist_check` 变成永远绿、
+   `i18n_check` 扫不到 CoastKit 里整份托盘菜单、也认不出带转义的文案。
+
+第 3 类最值得记一笔：三次都是「看起来在把关」。修的时候一并让它们**在失效时主动失败**
+（persist 检查匹配到 0 个块即报错），而不是安静地通过。
