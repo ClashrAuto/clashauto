@@ -34,6 +34,14 @@ public:
     //   **用户本机直接断网**。以「确实 listen 成功」为唯一依据，这个脚枪就不存在。
     //   系统代理正开着时调用会**就地重设**到新端口（切换无需重启）。
     void setLocalInboundPort(int port);
+
+    // 系统代理机制自检（COAST_SYSPROXY_SELFTEST=1，见 main_qml.cpp）。**不建 GUI、不起核心。**
+    //
+    // ★ 为什么单独做一个：把系统代理改指进程内入站这条路，只有在**真实桌面会话**里才验得了
+    //   （Windows 走 WinINET、Linux 走 gsettings），CI 和无头机都跑不了。而它一旦出错的后果是
+    //   「本机上不了网」，让用户拿 GUI 去试代价太大。这个钩子读当前值 → 设成测试值 → 读回核对
+    //   → **还原原值**，几秒钟就能知道机制在这台机器上到底通不通。
+    static bool systemProxySelfTest();
     // 立即硬杀核心并还原系统代理（提权重启时用，避免旧核心占用 9090 与新实例冲突）
     void killCoreNow();
     // 修改 REST API 端口（设置页「应用」时）：更新配置并让下次 full.yaml 用新端口写 external-controller。

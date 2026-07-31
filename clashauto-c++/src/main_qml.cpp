@@ -214,6 +214,12 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsSet("COAST_PROXYCFG_SELFTEST"))
         return coastcore::proxyConfigSelfTest() ? 0 : 1;
 
+    // 系统代理机制自检（COAST_SYSPROXY_SELFTEST=1）：读 → 设 → 读回核对 → **还原**。
+    // 「把系统代理改指进程内入站」只有在真实桌面会话里才验得了（CI / 无头机都不行），而它出错
+    // 的后果是本机上不了网 —— 让用户拿 GUI 去试代价太大，所以给一条几秒钟就有答案的命令。
+    if (qEnvironmentVariableIsSet("COAST_SYSPROXY_SELFTEST"))
+        return CoreController::systemProxySelfTest() ? 0 : 1;
+
     // 本机混合入站自检（COAST_INBOUND_SELFTEST=1）：SOCKS5 CONNECT / HTTP CONNECT / HTTP 绝对形式
     // 三种客户端各打一遍，验协议解析 + 双向转发 + 绝对形式被正确改写成源形式。
     // 全在进程内（自带靶服务器和直连出站桩），不需要任何节点/订阅/网络。

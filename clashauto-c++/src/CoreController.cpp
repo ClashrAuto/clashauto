@@ -58,6 +58,34 @@ int runHidden(const QString &program, const QStringList &args, int timeoutMs = 3
 #if defined(Q_OS_WIN)
 // Windows 原生系统代理：WinINET 每连接选项（即 IE/系统代理），与此前捆绑的 sysproxy.exe
 // 所做的完全等价，但免掉外部二进制与子进程。设置后广播 SETTINGS_CHANGED/REFRESH 即时生效。
+// 读回当前的系统代理设置（给 COAST_SYSPROXY_SELFTEST 用；平时不需要读）。
+// 返回 "DIRECT" 或 "server=<host:port>"；读不到返回空串。
+QString readWinSystemProxy()
+{
+    wchar_t buf[1024]{};
+    INTERNET_PER_CONN_OPTIONW options[2]{};
+    options[0].dwOption = INTERNET_PER_CONN_FLAGS;
+    options[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER;
+    options[1].Value.pszValue = buf;
+    INTERNET_PER_CONN_OPTION_LISTW list{};
+    list.dwSize = sizeof(list);
+    list.pszConnection = nullptr;
+    list.dwOptionCount = 2;
+    list.pOptions = options;
+    DWORD sz = sizeof(list);
+    if (!InternetQueryOptionW(nullptr, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, &sz))
+        return QString();
+    QString out;
+    if (options[0].Value.dwValue & PROXY_TYPE_PROXY)
+        out = QStringLiteral("server=")
+            + QString::fromWCharArray(options[1].Value.pszValue ? options[1].Value.pszValue : L"");
+    else
+        out = QStringLiteral("DIRECT");
+    if (options[1].Value.pszValue && options[1].Value.pszValue != buf)
+        GlobalFree(options[1].Value.pszValue);
+    return out;
+}
+
 bool setWinSystemProxy(bool enable, const QString &server, const QString &bypass)
 {
     std::wstring serverW = server.toStdWString();
@@ -541,6 +569,60 @@ void CoreController::rebuildConfig()
     m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
     emit logUpdated(QString("Config generated: %1").arg(m_fullConfigPath));
     reloadConfig();
+}
+
+// 系统代理机制自检：读 → 设 → 读回核对 → **还原**。理由见头文件。
+// 退出码 0 = 机制可用；非 0 = 这台机器上设不了（那么「本机代理入口」也就指望不上）。
+bool CoreController::systemProxySelfTest()
+{
+    const QString kTest = QStringLiteral("127.0.0.1:65123"); // 一个不会有人监听的端口，纯当标记
+#if defined(Q_OS_WIN)
+    const QString before = readWinSystemProxy();
+    std::fprintf(stderr, "[SYSPROXY] 当前: %s\n", qUtf8Printable(before));
+    if (!setWinSystemProxy(true, kTest, QStringLiteral("<local>"))) {
+        std::fprintf(stderr, "[SYSPROXY] FAIL: InternetSetOption 设置失败\n");
+        return false;
+    }
+    const QString mid = readWinSystemProxy();
+    const bool ok = mid.contains(kTest);
+    std::fprintf(stderr, "[SYSPROXY] 设为 %s → 读回: %s  %s\n", qUtf8Printable(kTest),
+                 qUtf8Printable(mid), ok ? "一致 ✓" : "不一致 ✗");
+    // 还原：原本就是 DIRECT 就关掉，否则设回原来的 server。
+    if (before.startsWith(QStringLiteral("server=")))
+        setWinSystemProxy(true, before.mid(7), QStringLiteral("<local>"));
+    else
+        setWinSystemProxy(false, QString(), QString());
+    std::fprintf(stderr, "[SYSPROXY] 已还原: %s\n", qUtf8Printable(readWinSystemProxy()));
+    return ok;
+#elif defined(Q_OS_LINUX)
+    const auto get = [](const char *schema, const char *key) {
+        QProcess p;
+        p.start(QStringLiteral("gsettings"),
+                {QStringLiteral("get"), QString::fromLatin1(schema), QString::fromLatin1(key)});
+        p.waitForFinished(5000);
+        return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+    };
+    const QString beforeMode = get("org.gnome.system.proxy", "mode");
+    const QString beforePort = get("org.gnome.system.proxy.http", "port");
+    if (beforeMode.isEmpty()) {
+        std::fprintf(stderr, "[SYSPROXY] FAIL: gsettings 不可用（非 GNOME 系桌面 / 无会话总线）\n");
+        return false;
+    }
+    std::fprintf(stderr, "[SYSPROXY] 当前: mode=%s http.port=%s\n", qUtf8Printable(beforeMode),
+                 qUtf8Printable(beforePort));
+    runHidden("gsettings", {"set", "org.gnome.system.proxy.http", "port", "65123"}, 5000);
+    const bool ok = get("org.gnome.system.proxy.http", "port") == QStringLiteral("65123");
+    std::fprintf(stderr, "[SYSPROXY] 设为 65123 → 读回: %s  %s\n",
+                 qUtf8Printable(get("org.gnome.system.proxy.http", "port")), ok ? "一致 ✓" : "不一致 ✗");
+    runHidden("gsettings", {"set", "org.gnome.system.proxy.http", "port", beforePort}, 5000);
+    std::fprintf(stderr, "[SYSPROXY] 已还原: http.port=%s\n",
+                 qUtf8Printable(get("org.gnome.system.proxy.http", "port")));
+    return ok;
+#else
+    std::fprintf(stderr, "[SYSPROXY] macOS 这条走 helper/SCPreferences，会弹授权，"
+                         "不适合做无人值守自检；请直接在设置页开关里验。\n");
+    return true;
+#endif
 }
 
 // 进程内入站起/停时由 DevicesController 调用（listen 成功之后才传端口，停时传 0）。
