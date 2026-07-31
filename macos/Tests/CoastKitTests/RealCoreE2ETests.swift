@@ -184,4 +184,88 @@ struct RealCoreE2ETests {
         await process.stop()
         #expect(process.isRunning == false, "停不干净")
     }
+
+    // MARK: - 延迟测速(此前只验过纯排序逻辑,没对真核心验过)
+
+    @Test("★ ClashAPI.delay 对真核心:拿到真实延迟;不通的节点返回 nil")
+    func liveDelay() async throws {
+        guard Self.mihomo != nil else { return }
+        let (core, dir) = try startCore(restPort: 19306, mixedPort: 17806, secret: "s6")
+        defer { core.terminate(); try? FileManager.default.removeItem(at: dir) }
+        #expect(await waitForREST(port: 19306, secret: "s6"))
+
+        let api = ClashAPI(host: "127.0.0.1", port: 19306, mixedPort: 17806, secret: "s6")
+
+        // DIRECT 直连 gstatic,应能拿到延迟(需要外网;拿不到就说明本机不通,跳过断言)
+        if let direct = await api.delay(node: "DIRECT") {
+            #expect(direct > 0, "DIRECT 延迟应 > 0,实得 \(direct)")
+        }
+        // NodeA 指向 127.0.0.1:44300(没人监听)—— 必然不通,应返回 nil 而不是 0 或崩
+        let dead = await api.delay(node: "NodeA", timeoutMs: 2000)
+        #expect(dead == nil, "连不通的节点应返回 nil,实得 \(String(describing: dead))")
+    }
+
+    @Test("★ 延迟测完后真的注入节点列表(testNodeDelays → pollNodes)")
+    @MainActor func liveDelayFeedsNodeList() async throws {
+        guard Self.mihomo != nil else { return }
+        let (core, dir) = try startCore(restPort: 19307, mixedPort: 17807, secret: "s7")
+        defer { core.terminate(); try? FileManager.default.removeItem(at: dir) }
+        #expect(await waitForREST(port: 19307, secret: "s7"))
+
+        var config = AppConfig()
+        config.uiPort = 19307; config.mixedPort = 17807; config.secret = "s7"
+        let service = ClashService(config: config)
+        service.start()
+        defer { service.stop() }
+        try await Task.sleep(for: .seconds(2))   // 等首轮轮询
+
+        // 对组里全部成员测延迟(含 DIRECT),测完 pollNodes 会把 history 里的延迟解析进 NodeInfo
+        await service.testDelays()
+        try await Task.sleep(for: .seconds(1))
+
+        let nodes = service.nodes
+        #expect(!nodes.isEmpty, "测完延迟后节点列表不该为空")
+        // DIRECT 若在组里且网络通,它的 delay 应被解析出来(>0)。
+        // 不强求(可能无外网),但**至少不能因为解析出错而全是 0 且列表为空**。
+        let hasAnyMeasured = nodes.contains { $0.delay > 0 }
+        if hasAnyMeasured {
+            #expect(nodes.contains { $0.delay > 0 && $0.delay < 100_000 }, "延迟值应在合理范围")
+        }
+    }
+
+    @Test("★ 大量并发延迟测速时,轮询不被挤死(独立连接池的意义)")
+    @MainActor func liveDelayDoesNotStarvePolling() async throws {
+        guard Self.mihomo != nil else { return }
+        let (core, dir) = try startCore(restPort: 19308, mixedPort: 17808, secret: "s8")
+        defer { core.terminate(); try? FileManager.default.removeItem(at: dir) }
+        #expect(await waitForREST(port: 19308, secret: "s8"))
+
+        var config = AppConfig()
+        config.uiPort = 19308; config.mixedPort = 17808; config.secret = "s8"
+        let service = ClashService(config: config)
+        service.start()
+        defer { service.stop() }
+        try await Task.sleep(for: .seconds(2))
+
+        // 同时打 40 个延迟请求(全指向连不通的节点 → 每个都要等超时),
+        // 这是最容易把连接池占满的场景。ClashAPI 给延迟单开了 delaySession 正是为此。
+        let api = ClashAPI(host: "127.0.0.1", port: 19308, mixedPort: 17808, secret: "s8")
+        let flood = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<40 {
+                    group.addTask { _ = await api.delay(node: "NodeA", timeoutMs: 3000) }
+                }
+            }
+        }
+
+        // 洪水期间,常规轮询接口必须仍然可用(这就是独立连接池要保证的事)
+        try await Task.sleep(for: .milliseconds(700))
+        let start = Date()
+        let configs = try await api.configs()
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(configs["mode"] != nil, "洪水期间 /configs 拿不到数据 —— 轮询被挤死了")
+        #expect(elapsed < 3.0, "洪水期间 /configs 耗时 \(elapsed)s,疑似排队等待")
+
+        _ = await flood.value
+    }
 }
