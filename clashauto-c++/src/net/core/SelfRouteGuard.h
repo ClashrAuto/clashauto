@@ -23,6 +23,8 @@
 //   applyToFd()。未启用（TUN 没开）时 applyToFd() 直接返回 true 且什么都不做。
 #include <QString>
 
+class QAbstractSocket;
+
 class SelfRouteGuard
 {
 public:
@@ -51,6 +53,17 @@ public:
     // 返回 false = 没能应用（*err 说明原因）。调用方**照常拨号**：没有环路保护总好过连不上，
     // 但必须把 err 记进日志——静默失效正是这类 bug 最难查的地方。
     static bool applyToFd(qintptr fd, int family, QString *err);
+
+    // 出站拨号的**统一入口**：在 connectToHost() 之前调用它，之后照常 connectToHost。
+    //
+    // 解决的是一个 Qt 上的死结：选项必须在 connect() 之前作用于 fd，而 Qt 在 connectToHost()
+    // 之前根本没建 socket、拿不到 fd。出路是**先 bind**（Qt 的 bind 会把 fd 建出来），
+    // 拿到 fd 打完选项再 connect。这样就不必为了确定 AF_INET/AF_INET6 而先解析域名 ——
+    // 绑成双栈，然后把 v4/v6 两个选项**都**打上：双栈 socket 上的 v4-mapped 流量吃 v4 那个。
+    //
+    // 返回 false = 没能保护（*err 说明）。调用方**照常拨号**——没有环路保护也好过连不上，
+    // 但必须记日志：静默失效正是这类 bug 最难查的地方。
+    static bool prepareSocket(QAbstractSocket *sock, QString *err);
 
     // 自检：探网卡 → 建 socket → 应用 → **读回来核对** → 再**真连一次**确认没把连通性弄坏。
     // 读回核对是关键：这些 setsockopt 写错参数时多半**不报错也不生效**，只验 rc==0 等于没验。

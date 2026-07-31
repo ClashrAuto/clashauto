@@ -257,6 +257,47 @@ bool SelfRouteGuard::applyToFd(qintptr fd, int family, QString *err)
 #endif
 }
 
+bool SelfRouteGuard::prepareSocket(QAbstractSocket *sock, QString *err)
+{
+    if (!g_enabled)
+        return true;
+    if (!sock) {
+        if (err)
+            *err = QStringLiteral("空 socket");
+        return false;
+    }
+
+    // Qt 在 connectToHost 之前不建 socket —— 先 bind 把 fd 逼出来。
+    // 绑 QHostAddress::Any = 双栈（Qt 会关掉 IPV6_V6ONLY），这样后面连 v4 还是 v6 都行，
+    // 不必先解析域名。个别环境下双栈绑不上（禁了 IPv6），退回纯 v4。
+    if (sock->socketDescriptor() == -1) {
+        if (!sock->bind(QHostAddress(QHostAddress::Any), 0)
+            && !sock->bind(QHostAddress(QHostAddress::AnyIPv4), 0)) {
+            if (err)
+                *err = QStringLiteral("bind 失败：%1").arg(sock->errorString());
+            return false;
+        }
+    }
+    const qintptr fd = sock->socketDescriptor();
+    if (fd == -1) {
+        if (err)
+            *err = QStringLiteral("bind 后仍拿不到 fd");
+        return false;
+    }
+
+    // v4/v6 两个都打。双栈 socket 上 v4-mapped 的流量吃 v4 那个选项，纯 v6 的吃 v6 那个；
+    // 只打一个会在另一族上静默失去保护。有一个成功就算保护住了（纯 v4 环境下 v6 那次必然失败）。
+    QString e4, e6;
+    const bool ok4 = applyToFd(fd, AF_INET, &e4);
+    const bool ok6 = applyToFd(fd, AF_INET6, &e6);
+    if (!ok4 && !ok6) {
+        if (err)
+            *err = QStringLiteral("v4/v6 均失败：%1 / %2").arg(e4, e6);
+        return false;
+    }
+    return true;
+}
+
 bool SelfRouteGuard::selfTest(QString *report)
 {
     QStringList log;
@@ -463,6 +504,62 @@ bool SelfRouteGuard::selfTest(QString *report)
             if (!ok)
                 ::closesocket(s);
         }
+    }
+#endif
+
+    // ———— prepareSocket()：真正会被出站用到的那条路 ————
+    // 上面验的是「裸 fd + setsockopt」，而生产代码走的是 Qt 的 QTcpSocket。这两者之间夹着
+    // 一个假设：**Qt 的 bind() 会把 fd 建出来，且之后 connectToHost 会沿用同一个 fd**。
+    // 假设不成立的话，选项打在一个随后被丢弃的 fd 上 —— 照样一切正常、照样毫无保护。
+    // 所以这里单独验它，并且同样配反向对照。
+    if (ok) {
+        QTcpSocket a;
+        QString e;
+        if (!prepareSocket(&a, &e)) {
+            log << QStringLiteral("✗ prepareSocket 失败：%1").arg(e);
+            ok = false;
+        } else {
+            a.connectToHost(QStringLiteral("223.5.5.5"), 80);
+            if (a.waitForConnected(5000)) {
+                log << QStringLiteral("✓ prepareSocket 后连得通（本地 %1）")
+                               .arg(a.localAddress().toString());
+            } else {
+                log << QStringLiteral("✗ prepareSocket 后连不通：%1").arg(a.errorString());
+                ok = false;
+            }
+            a.abort();
+        }
+    }
+#if !defined(Q_OS_LINUX)
+    // 反向对照：把"物理出口"临时改成回环口，prepareSocket 之后必须连不通。
+    // 连通了 = bind→打选项→connect 这条链上有一环没生效（多半是 connectToHost 换了 fd）。
+    // Linux 除外：SO_MARK 不导流，换成回环 ifindex 也不会有任何变化，这条对照在那边是空的。
+    if (ok) {
+        const Iface saved = g_iface;
+#  if defined(Q_OS_WIN)
+        g_iface.ifIndex = 1; // Loopback Pseudo-Interface
+#  else
+        g_iface.ifIndex = int(::if_nametoindex("lo0"));
+#  endif
+        g_iface.name = QStringLiteral("<loopback>");
+        if (g_iface.ifIndex != 0) {
+            QTcpSocket b;
+            QString e;
+            prepareSocket(&b, &e);
+            b.connectToHost(QStringLiteral("223.5.5.5"), 80);
+            if (b.waitForConnected(3000)) {
+                log << QStringLiteral("✗ prepareSocket 反向对照失败：钉到回环口竟然也连得通 —— "
+                                      "bind→setsockopt→connect 这条链上有一环没生效");
+                ok = false;
+            } else {
+                log << QStringLiteral("✓ prepareSocket 反向对照：钉到回环口如期连不通（%1）")
+                               .arg(b.errorString());
+            }
+            b.abort();
+        } else {
+            log << QStringLiteral("· prepareSocket 反向对照跳过（拿不到回环 ifIndex）");
+        }
+        g_iface = saved;
     }
 #endif
 
