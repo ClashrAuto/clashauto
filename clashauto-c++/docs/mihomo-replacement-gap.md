@@ -231,7 +231,18 @@ Pi 上还多验到一点容器测不出的：它有**两条默认路由**（eth0
 
 ---
 
-## 四、明确不打算做的
+## 四、上游怎么做的（mihomo / sing-box）
+
+读过两边源码后的对比见 **[upstream-comparison.md](upstream-comparison.md)**。一句话：
+它们靠 Go 的 `net.Dialer.Control` / `ListenConfig.Control` 在 connect 前拿到裸 fd，
+**而且 quic-go 接受外部 `net.PacketConn`，所以 QUIC 的 UDP socket 也走同一条钩子** ——
+一套机制覆盖全部协议，obfs/grpc 也因此只是包装层。
+
+我们用 msquic 拿不到这个前提（它自持 socket、只给 `QUIC_PARAM_CONN_LOCAL_ADDRESS`），
+于是被迫两套机制。⚠️ 其中 Linux 那条靠「按源地址做策略路由」，**Windows/macOS 无等价能力且未验证**
+—— 那两个平台的 Hy2+TUN 很可能仍然环路。建议方向（协议无关、三平台同形）见该文档第四节。
+
+## 五、明确不打算做的
 
 - **不追求 mihomo 的全部配置兼容面**。目标是「Coast 自己生成的 full.yaml 里用到的那些」，
   不是做一个 mihomo 的完整替代实现。范围失控的风险比缺功能的风险大。
