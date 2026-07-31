@@ -119,6 +119,8 @@ struct DevicesPage: View {
     }
 
     var body: some View {
+        // 右下角浮动提示压在整页之上（Qt 的 `noticeBar`）。
+        ZStack(alignment: .bottomTrailing) {
         // Qt 的设备页没有任何分隔线：概览条 / 搜索行 / 列表靠 10 的行距分开。
         VStack(spacing: 10) {
             // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 搜索行 → 列表）——
@@ -129,6 +131,39 @@ struct DevicesPage: View {
             proxyBanner
         }
         .task { await scan() }
+
+            noticeBar
+        }
+    }
+
+    /// 右下角浮动提示（导出成功 / 出错），自动消失。对齐 `qml/DevicesPage.qml` 的 `noticeBar`：
+    /// 距右下各 12、半径 5、黑底 78%、白色 12px 正文。
+    ///
+    /// **必须限宽 + 换行**：网关那类报错可以很长（Qt 注释举的例子是 Npcap 权限那条），
+    /// 单行的话会一路撑到窗口左边界外，长文案直接看不全。
+    ///
+    /// 停留 **6 秒**而不是三秒半 —— 两三行的报错三秒半读不完（Qt 的注释原话）。
+    @ViewBuilder
+    private var noticeBar: some View {
+        if !exportMessage.isEmpty {
+            Text(exportMessage)
+                .font(.system(size: 12))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 320, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.black.opacity(0.78))
+                }
+                .padding(12)
+                .transition(.opacity)
+                .task(id: exportMessage) {
+                    try? await Task.sleep(for: .seconds(6))
+                    exportMessage = ""
+                }
+        }
     }
 
     /// 概览条。**逐元素对齐** `qml/DevicesPage.qml` 顶部那一行：
@@ -179,12 +214,6 @@ struct DevicesPage: View {
             }
             .padding(.trailing, 10)
 
-            if !exportMessage.isEmpty {
-                Text(exportMessage)
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1).truncationMode(.middle)
-            }
         }
         // 右内距**不写在这里**：设备列表要一直铺到页面最右缘，它的滚动条才是贴着窗口右侧的。
         // 上面几行各自补 10 回来（与 Qt 的做法完全一致）。
