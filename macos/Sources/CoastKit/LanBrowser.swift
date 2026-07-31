@@ -89,6 +89,15 @@ public struct LanBrowser: Sendable {
 
     // MARK: - ARP 表
 
+    /// ARP 表的 IP → MAC 映射（已补零规范化、小写）。给 `ArpWatch` 用。
+    public static func arpMap() -> [String: String] {
+        var map: [String: String] = [:]
+        for device in arpTable() where !device.ip.isEmpty && !device.mac.isEmpty {
+            map[device.ip] = device.mac.lowercased()
+        }
+        return map
+    }
+
     /// 解析 `arp -an`。
     ///
     /// 用子进程而不是自己 `sysctl(NET_RT_FLAGS)`：后者要手工走 `rt_msghdr` + `sockaddr_dl`

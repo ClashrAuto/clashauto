@@ -103,6 +103,19 @@ struct DevicesPage: View {
     @ViewBuilder
     private var proxyBanner: some View {
         let enabledCount = rows.filter(\.proxyEnabled).count
+        // 安全告警排在提示条之前 —— 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。
+        ForEach(state.securityAlerts) { alert in
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.shield.fill")
+                    .font(.system(size: 11)).foregroundStyle(theme.danger)
+                Text(alert.kind == .gatewaySpoofed
+                     ? String(format: "%@ 正在冒充网关，可能在监听或代理你的流量".t, alert.offenderMAC)
+                     : String(format: "%@ 也在劫持你代理的设备 %@".t, alert.offenderMAC, alert.subjectIP))
+                    .font(.system(size: 11)).foregroundStyle(theme.danger)
+                Spacer()
+            }
+        }
+
         HStack(spacing: 6) {
             Image(systemName: enabledCount > 0 ? "network" : "info.circle")
                 .font(.system(size: 10)).foregroundStyle(theme.textMuted)

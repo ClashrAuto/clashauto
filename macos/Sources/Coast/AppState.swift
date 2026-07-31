@@ -77,6 +77,13 @@ public final class AppState {
     /// 维度：进程 / 域名。（Qt 版还有「设备」，那一维依赖设备台账，见 PLAN 阶段 6/9。）
     public var trafficDimension: HistoryStore.Dimension = .process { didSet { refreshTodayTraffic() } }
 
+    // MARK: 局域网安全告警
+
+    /// 当前成立的 ARP 欺骗告警。设备页据此显示警示条。
+    public private(set) var securityAlerts: [ArpWatch.Alert] = []
+    private let arpWatch = ArpWatch()
+    private let arpThrottle = ArpAlertThrottle()
+
     // MARK: 日志
 
     /// 环形日志。**必须有上限** —— 核心在 debug 级别下每秒能刷几十条，无界数组跑一晚上
@@ -144,6 +151,7 @@ public final class AppState {
         applySystemAppearanceIfNeeded()   // 启动时若跟随系统,先对齐一次
         startSystemAppearanceObserver()   // 之后系统外观变了也跟上
         startSubscriptionAutoUpdate()     // 定时自动更新订阅
+        startArpWatch()                   // 盯着有没有别人在做 ARP 欺骗
         // .app 被替换过(应用内更新/从 DMG 拖覆盖)就重注册 helper —— 否则 status() 照报
         // enabled，XPC 却永远无人应答。详见 MacHelperClient.ensureRegisteredForCurrentBuild。
         // 放进 Task：自愈可能要注销 + 退避重试，最坏几秒钟，不能卡在启动路径上。
@@ -215,6 +223,50 @@ public final class AppState {
                     self.append(log: "订阅自动更新:有变化,已重建配置".t)
                     await self.controller.rebuildConfig()
                 }
+            }
+        }
+    }
+
+    /// ARP 欺骗巡检。
+    ///
+    /// 30 秒一轮：ARP 表本身就是缓存，变化不会比这更快被本机学到；而且这条路径要跑
+    /// `arp -an` 子进程，更密没有意义。**接管没开时也要跑** —— 「有人在冒充网关」
+    /// 与我们开没开代理无关，恰恰是这种时候用户更需要知道。
+    private func startArpWatch() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                self.runArpWatchOnce()
+                try? await Task.sleep(for: .seconds(30))
+            }
+        }
+    }
+
+    private func runArpWatchOnce() {
+        guard let gateway = LanTopology.defaultGateway() else { return }
+        // 只盯**正在代理**的设备：没接管的设备其 ARP 变化与我们无关，报了只是噪音。
+        var proxied: [String: String] = [:]
+        for device in devices.proxiedDevices() where !device.lastIP.isEmpty {
+            proxied[device.lastIP] = device.mac
+        }
+        let snapshot = ArpWatch.Snapshot(arp: LanBrowser.arpMap(),
+                                         gatewayIP: gateway.ip, gatewayMAC: gateway.mac,
+                                         localMACs: LanTopology.localMACs(),
+                                         proxiedDevices: proxied)
+        let alerts = arpWatch.evaluate(snapshot)
+        securityAlerts = alerts
+        for alert in arpThrottle.filter(alerts) {
+            switch alert.kind {
+            case .gatewaySpoofed:
+                let body = String(format: "%@ 正在冒充网关，可能在监听或代理你的流量".t,
+                                  alert.offenderMAC)
+                append(log: body)
+                Notifier.post(title: "检测到 ARP 欺骗".t, body: body)
+            case .deviceContended:
+                let body = String(format: "%@ 也在劫持你代理的设备 %@".t,
+                                  alert.offenderMAC, alert.subjectIP)
+                append(log: body)
+                Notifier.post(title: "设备被争抢".t, body: body)
             }
         }
     }

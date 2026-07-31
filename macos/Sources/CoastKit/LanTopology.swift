@@ -14,6 +14,31 @@ public enum LanTopology {
     ///
     /// 三样缺一不可：没有网关 MAC 就没法发复原包 —— 而复原包发不出去，被接管的设备会断网
     /// 十几分钟。所以任何一样取不到都返回 nil，让调用方**根本不开始接管**，而不是带着残缺信息硬上。
+    /// 本机所有网卡的 MAC（含虚拟网卡）。
+    ///
+    /// 用途是「这个 IP 现在归本机占着，不是别人在冒充」。必须**含虚拟网卡** ——
+    /// 判据是「是不是我们自己」，而不是「是不是主网卡」，漏掉一张就会把自己报成攻击者。
+    /// `getifaddrs` 不需要 root。
+    public static func localMACs() -> Set<String> {
+        var result: Set<String> = []
+        var head: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&head) == 0, let first = head else { return result }
+        defer { freeifaddrs(head) }
+        for pointer in sequence(first: first, next: { $0.pointee.ifa_next }) {
+            guard let address = pointer.pointee.ifa_addr,
+                  address.pointee.sa_family == UInt8(AF_LINK) else { continue }
+            let link = UnsafeRawPointer(address).assumingMemoryBound(to: sockaddr_dl.self)
+            let length = Int(link.pointee.sdl_alen)
+            guard length == 6 else { continue }
+            let base = UnsafeRawPointer(link) + MemoryLayout<sockaddr_dl>.offset(of: \.sdl_data)!
+                + Int(link.pointee.sdl_nlen)
+            let bytes = base.assumingMemoryBound(to: UInt8.self)
+            let mac = (0..<6).map { String(format: "%02x", bytes[$0]) }.joined(separator: ":")
+            if mac != "00:00:00:00:00:00" { result.insert(mac) }
+        }
+        return result
+    }
+
     public static func defaultGateway() -> Gateway? {
         guard let (ip, interface) = defaultRoute(), let mac = arpLookup(ip: ip) else { return nil }
         return Gateway(ip: ip, mac: mac, interface: interface)
