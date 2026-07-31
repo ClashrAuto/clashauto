@@ -78,6 +78,10 @@ bool gwDbgOn()
 // （或即将解析），触发 ArpSpoofer 的高频重投窗口抢在真网关前钉回投毒。取 8s：短于常见的邻居缓存
 // 老化（Linux base_reachable_time≈30s、Win/mac NUD 类似量级），足以覆盖「表项刚老化就来流量」。
 constexpr qint64 kWakeIdleMs = 8000;
+// —— 遗留还原的「确认」参数（见 healPending 里为什么不能一发了之）——
+// 设备可能真的永久离开了（换网/报废）：次数和时效都封顶，别让状态文件无限增长。
+constexpr int kHealMaxTries = 64;
+constexpr qint64 kHealMaxAgeMs = 7LL * 24 * 3600 * 1000;
 } // namespace
 
 namespace {
@@ -326,6 +330,13 @@ private:
     // routerLL6/routerMac6，与状态文件里的对象同形）。开机那一刻网卡常常还没就绪，一次还原打空是
     // 常态；留在这里 + 写回状态文件，等 configureLocal 拿到就绪网卡后重试，直到真的还原掉。
     QVector<QJsonObject> m_pendingHeal;
+    // m_pendingHeal 里 MAC 的打包键索引：收帧路径上要按帧做 O(1) 判断「这台是不是待还原设备」，
+    // 不能每帧去遍历 QVector<QJsonObject>。随 m_pendingHeal 一起维护（refreshPendingHealIndex）。
+    QSet<quint64> m_pendingHealMacs;
+    qint64 m_lastPendingHealMs = 0; // 收帧触发的补还原限频（别每帧都跑一遍 healPending）
+    void refreshPendingHealIndex();
+    // 停用一台设备时留一条「待还原」记录，由「设备下次现身」来确认清除（见函数体上方）。
+    void keepPendingForHeal(const QString &ip, const QString &mac);
     void learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame); // 从设备 v6 帧学它的地址
     // 从线上观察到的 RA 学 v6 路由器（不依赖本机 accept_ra / 路由表）。详见实现处的说明。
     void learnRouterFromRa(GwNic *n, const QByteArray &frame);
@@ -355,6 +366,17 @@ void GatewayWorker::pushMacFilter(GwNic *n) const
             continue;
         const QByteArray mb = macBytes(it.value());
         if (mb.size() == 6)
+            macs.append(mb);
+    }
+    // ★ 待还原（pendingHeal）的设备也必须放行，否则「设备重新上线 → 补发 heal」那条路走不通：
+    //   victim 集合为空时这个过滤器会装成「全丢」，收方彻底静默，我们就永远等不到它的帧。
+    //   真机上就是这么卡住的：记录留下了、设备也醒着，但一条帧都收不到，记录清不掉。
+    //   放行的只是**已经被我们投过毒**的那几台，不扩大收包面。
+    for (const QJsonObject &o : m_pendingHeal) {
+        if (o["ifname"].toString() != n->spec.ifname)
+            continue;
+        const QByteArray mb = macBytes(o["mac"].toString());
+        if (mb.size() == 6 && !macs.contains(mb))
             macs.append(mb);
     }
     n->ep->setSourceMacFilter(macs);
@@ -822,6 +844,19 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             // 源 MAC 原地打包成 quint64 查表：不做 frame.mid(6, 6)，省掉每帧一次堆分配。
             const quint64 vkey = macKey(f + 6);
             if (!m_victimByMac.contains(vkey)) {
+                // ★ 待还原设备**重新上线**了 —— 这是补发 heal 的最佳时机：它此刻醒着，一定处理得到。
+                //   （老代码只在启动/网卡就绪时还原一次，正好错过"设备休眠时退出、之后才醒来"这条。）
+                //   记下 lastSeen 供 healPending 判定"在线"，并**排队**执行——不在收帧回调里直接跑，
+                //   避免 healPending 里开/关临时端点与当前回调重入。限频 1s，别每帧都排。
+                if (!m_pendingHealMacs.isEmpty() && m_pendingHealMacs.contains(vkey)) {
+                    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+                    m_lastSeenMs[vkey] = nowMs;
+                    if (nowMs - m_lastPendingHealMs > 1000) {
+                        m_lastPendingHealMs = nowMs;
+                        QMetaObject::invokeMethod(this, [this] { healPending(); },
+                                                  Qt::QueuedConnection);
+                    }
+                }
                 // 帧到了这一层但源 MAC 不在被劫持名单里 → 这里丢弃。若「设备流量为 0」且这个
                 // 计数在涨，说明设备的帧收到了、但它的源 MAC 和台账里的 MAC 对不上（随机 MAC /
                 // 台账 MAC 有误），是 victim 匹配的问题，不是抓包的问题。
@@ -1092,6 +1127,10 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
         for (const QString &ip6 : v6s)
             m_net->removeDeviceV6(ip6);
     }
+    // stopSpoof 的 heal 帧是无回执的，设备若已休眠就收不到 → 先留一条待还原记录（必须在清表之前，
+    // 它要读 m_victimNic）。设备若醒着，下一帧到来时就会被确认并清掉。
+    keepPendingForHeal(ip, mac);
+    refreshPendingHealIndex();
     m_victimByMac.remove(key);
     m_victimMacStr.remove(ip);
     m_victimNic.remove(ip);
@@ -1127,6 +1166,11 @@ void GatewayWorker::disableAllLocal()
             for (const QString &ip6 : it.value())
                 m_net->removeDeviceV6(ip6);
     }
+    // 同上：healAll() 只是把帧发出去了，睡着的设备收不到，而进程马上就要退出、没有第二次机会。
+    // **退出流程走的就是这条**，也正是真机上那个「Mac 醒来断网」的现场：一律留记录，下次启动补。
+    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it)
+        keepPendingForHeal(it.key(), it.value());
+    refreshPendingHealIndex();
     m_victimByMac.clear();
     m_victimMacStr.clear();
     m_victimNic.clear();
@@ -1167,7 +1211,64 @@ void GatewayWorker::recoverLocal()
             continue; // 没有 MAC/网卡名 = 永远还原不了，别留着无限重试
         m_pendingHeal.append(o);
     }
+    refreshPendingHealIndex();
     healPending();
+}
+
+// 维护 m_pendingHealMacs（收帧路径的 O(1) 判据）。凡是改动 m_pendingHeal 的地方都要调。
+void GatewayWorker::refreshPendingHealIndex()
+{
+    m_pendingHealMacs.clear();
+    for (const QJsonObject &o : std::as_const(m_pendingHeal)) {
+        const quint64 k = macKey(macBytes(o["mac"].toString()));
+        if (k)
+            m_pendingHealMacs.insert(k);
+    }
+}
+
+// 停用一台设备时，留一条「待还原」记录。
+//
+// ★ 为什么需要：heal 是**无回执**的 ARP/NDP。设备睡着时网卡根本不处理这些帧，而
+//   disableDevice/disableAll 之后我们就把它从所有表里清掉了 —— 于是设备醒来时仍指着本机、
+//   断网直到缓存自然老化，而且**再没有任何人会重试**。真机复现过：Mac 休眠期间停 coast，
+//   醒来后 `arp -n <网关>` 仍是本机 MAC、外网全 000，手动 `arp -d` 才恢复。
+//   这是「合上笔记本 → 退出 Coast → 打开笔记本 → 没网」这条很常见的用户路径。
+// ★ 判据必须是「heal **之后**又见到它」，不能是「heal 之前刚见过」。
+//   真机实测推翻了后者：设备睡着后 coast 很快就发现它离线并撤劫持，而此刻 m_lastSeenMs 才过几秒、
+//   仍是"新鲜"的 —— 按"最近见过=在线"判就会把记录清掉，正好漏掉要救的那台。
+//   所以这里**一律先留下记录**，再由「设备下次发帧」这个正向证据去清（见 frameReceived 的
+//   pendingHeal 分支：它会补发一次 heal 并刷新 lastSeen，随后 healPending 确认清除）。
+//   代价：醒着的设备也会短暂留一条记录，约 1 秒内被清掉；退出时留下的那批会在下次启动被重发一遍
+//   heal（heal 是幂等的——只是告诉设备真网关的 MAC），随后见到设备即清。宁可多发，不可漏发。
+void GatewayWorker::keepPendingForHeal(const QString &ip, const QString &mac)
+{
+    const quint64 key = macKey(macBytes(mac));
+    if (!key)
+        return;
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    QJsonObject o;
+    o["ip"] = ip;
+    o["mac"] = mac;
+    o["since"] = double(nowMs);
+    const QString ifn = m_victimNic.value(ip);
+    if (GwNic *n = m_nics.value(ifn)) {
+        o["ifname"] = n->spec.ifname;
+        o["localMac"] = n->spec.localMac;
+        o["gatewayIp"] = n->spec.gatewayIp;
+        o["gatewayMac"] = n->spec.gatewayMac;
+        o["routerLL6"] = n->effectiveRouterLL6();
+        o["routerMac6"] = n->effectiveRouterMac6();
+        if (!n->learnedRdnss6.isEmpty()) {
+            QJsonArray ex;
+            for (const QByteArray &a : n->learnedRdnss6)
+                if (a.size() == 16)
+                    ex.append(QString::fromLatin1(a.toHex()));
+            o["routerExtra6"] = ex;
+        }
+    }
+    if (o["ifname"].toString().isEmpty())
+        return; // 没网卡名 = 永远还原不了，别留着无限重试（判据与 loadState 一致）
+    m_pendingHeal.append(o);
 }
 
 // 尝试还原上次遗留的投毒记录。**还原不掉的绝不丢弃**——开机那一刻 WiFi 常常还没关联、网卡/Npcap
@@ -1260,11 +1361,31 @@ void GatewayWorker::healPending()
         // 静默 no-op，等于**没还原**。这种也要留着重试：下一轮扫描后拓扑就有了。
         const bool healable = healer.configured();
         if (healable) {
+            const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
             for (const QJsonObject &o : group) {
                 healer.startSpoof(o["mac"].toString(), o["ip"].toString());
                 healer.stopSpoof(o["mac"].toString()); // startSpoof 建档、stopSpoof 立刻 heal
                 ndpHealer.startSpoof(o["mac"].toString());
                 ndpHealer.stopSpoof(o["mac"].toString());
+                // ★★ 「发出去」≠「生效」：ARP/NDP 都没有回执。设备若正在**休眠**，网卡根本不处理
+                //   这些帧，而老代码在这里就把记录清了 —— 于是再也不会重试，设备醒来时带着被投毒的
+                //   表项、断网直到缓存自然老化。真机遇到过：Mac 休眠中停 coast，醒来后
+                //   `arp -n <网关>` 仍是本机 MAC、外网全 000，手动 `arp -d` 才好。
+                //   清记录的**唯一正向证据**：记录建立之后又见到过这台设备的帧 —— 说明它醒着，
+                //   而我们就在上面几行刚给它补发了一遍 heal，必然收得到。
+                //   ★ 别用"最近见过"当判据（我第一版就是，真机打脸）：设备睡下后 coast 几秒内就会
+                //     发现它离线并撤劫持，那一刻 lastSeen 还很"新鲜"，按那个判就正好把要救的清掉了。
+                const quint64 k = macKey(macBytes(o["mac"].toString()));
+                const qint64 seen = k ? m_lastSeenMs.value(k, 0) : 0;
+                const qint64 since = o.contains("since") ? qint64(o["since"].toDouble()) : nowMs;
+                if (seen > since)
+                    continue; // 建档后又现身过 → 还原确认，清记录
+                QJsonObject keep = o;
+                const int tries = keep["tries"].toInt() + 1;
+                keep["tries"] = tries;
+                keep["since"] = double(since);
+                if (tries < kHealMaxTries && nowMs - since < kHealMaxAgeMs)
+                    left.append(keep); // 还没确认到，留着重试
             }
         } else {
             left += group;
@@ -1278,6 +1399,10 @@ void GatewayWorker::healPending()
     }
 
     m_pendingHeal = left;
+    refreshPendingHealIndex();
+    // 待还原集合变了 → 重推收包过滤器（它把 pendingHeal 的 MAC 也放行，见 pushMacFilter）。
+    for (GwNic *n : m_nics)
+        pushMacFilter(n);
     saveState();
 }
 
