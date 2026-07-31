@@ -13,6 +13,8 @@ struct SettingsPage: View {
     @State private var draft = AppConfig()
     @State private var message = ""
     @State private var coreStatus = "更新内核".t
+    @State private var geoipStatus = "更新 GeoIP".t
+    @State private var geoipBusy = false
     @State private var coreBusy = false
     @State private var helperStatus = ""
     /// `COAST_OPEN_RULES=1` 时直接弹出规则编辑器 —— 同 COAST_INITIAL_PAGE，
@@ -112,6 +114,12 @@ struct SettingsPage: View {
                             Text("内核尚未安装，需先下载".t)
                                 .font(.system(size: 10)).foregroundStyle(theme.danger)
                         }
+                    }
+                    HStack(spacing: 8) {
+                        Button(geoipStatus) { Task { await updateGeoIP() } }
+                            .disabled(geoipBusy)
+                        Text("按 IP 归属地分流所用的地理数据库；下次启动核心时生效".t)
+                            .font(.system(size: 10)).foregroundStyle(theme.textMuted)
                     }
                 }
 
@@ -237,6 +245,35 @@ struct SettingsPage: View {
         } else {
             await state.controller.rebuildConfig()
             message = "已应用".t
+        }
+    }
+
+    /// 更新 GeoIP 数据库。
+    ///
+    /// 下载来的字节先过结构校验、只写暂存，**绝不原地覆盖线上库** —— 核心把它 mmap 着且
+    /// 只加载一次，原地换根本不会生效，唯一效果是有概率毁掉好文件（Qt 版真机上为此坏过一次）。
+    private func updateGeoIP() async {
+        geoipBusy = true
+        defer { geoipBusy = false }
+        // 核心在跑就走本机代理下载 —— GitHub 直连不通时这是唯一能成的路径。
+        let updater = GeoIPUpdater(useMirror: draft.mirror,
+                                   proxyPort: state.controller.isCoreRunning ? draft.mixedPort : nil)
+        do {
+            let summary = try await updater.update { progress in
+                Task { @MainActor in
+                    switch progress {
+                    case .downloading(let percent):
+                        geoipStatus = String(format: "下载中 %d%%".t, percent)
+                    case .validating:
+                        geoipStatus = "校验中…".t
+                    }
+                }
+            }
+            geoipStatus = "更新 GeoIP".t
+            message = summary
+        } catch {
+            geoipStatus = "更新 GeoIP".t
+            message = error.localizedDescription
         }
     }
 

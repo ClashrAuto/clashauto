@@ -77,6 +77,7 @@ public final class CoreProcess {
         }
 
         seedGeoIP()
+        refreshGeoIP()
 
         // 有 helper 就以 root 起（TUN/增强才能建 utun、改路由）。失败**不静默回退** ——
         // 把原因讲清楚再降级，否则「装了 helper、开了增强、核心却不是 root」无从排查。
@@ -205,6 +206,27 @@ public final class CoreProcess {
                 }
                 try? await Task.sleep(for: .milliseconds(500))
             }
+        }
+    }
+
+    /// 起核心前的 GeoIP 收尾：换上暂存的新库 + 给线上那份体检。
+    ///
+    /// 体检不是多余的：坏掉的 mmdb **核心不报错** —— 打得开、不 fatal，只是每次查询返回空，
+    /// 于是 `GEOIP,CN` 静默失效、国内流量全部出海，日志里一个字都没有。
+    /// 一旦发现坏了就退回内置种子：宁可用一份旧的、对的，也不能用一份新的、坏的。
+    private func refreshGeoIP() {
+        let target = AppPaths.userDir.appendingPathComponent("Country.mmdb")
+        if MmdbFile.applyStaged(target: target) {
+            log("GeoIP 数据库已更新")
+        }
+        guard FileManager.default.fileExists(atPath: target.path) else { return }
+        let health = MmdbFile.validateFile(target)
+        guard !health.ok else { return }
+        log("GeoIP 数据库损坏（\(health.why)），已退回内置版本")
+        if let seed = Resources.seed("Country.mmdb") {
+            try? FileManager.default.removeItem(at: target)
+            try? FileManager.default.copyItem(at: seed, to: target)
+            AppPaths.makeWritable(target)
         }
     }
 
