@@ -1091,3 +1091,44 @@ ConfigBuilder 里那一份，无人看守。改坏它，测试照样全绿。甚
 
 `regression.sh`：7 PASS · 0 FAIL · 1 SKIP；220 用例全绿；
 并确认格式串真的进了 app bundle 且占位符完好（ja/ru/fr 抽查）。
+
+
+## 2026-07-31(续八) · 与 Qt 版的对等性：逐项核对而不是「看起来差不多」
+
+重构的本职是「完全替代 Qt 版」，那就得逐项对。三个维度都过了一遍：
+
+### 1. 配置项 —— 完全对等
+
+Qt `AppConfig` 27 个字段 vs Swift 23 个：**0 缺失、0 多余**
+（差的 4 个是 `clashConfig`/`clashExecutable`/`configDir`/`userDir`，路径类，已迁到 `AppPaths`）。
+24 个 YAML 键名映射也**逐个对上**，老用户的 `config.yaml` 不会被误读。
+
+### 2. 生成的 full.yaml —— 三处差异，都清楚
+
+| 键 | 情况 |
+|---|---|
+| `redir-port` | 只有 Swift 写 —— 透明代理（macOS 特有）|
+| `listeners` | 只有 Qt 写 —— **有意不做**，见下 |
+| `speedtest` / `list` | 订阅文件字段，不是配置键（正则误报）|
+
+`listeners:` 是 Qt 版的 LAN 代理做法：给每台设备发一组用户名密码，配 `IN-USER` 规则。
+你明确否掉了（「不要用户配置任何信息，只要在软件上点开关就行」），Swift 改成
+ARP + PF 透明重定向。这条分歧是设计决定，不是遗漏。
+
+`speedtest` 在 Qt 里也是只写不改的遗留字段（永远写 `false`，没有界面能改），
+只影响节点显示名的 `[speedtest]` 后缀。不实现。
+
+### 3. 数据文件迁移 —— 新增测试锁住
+
+这次是**替换**掉 Qt 版，用户的数据目录里就是 Qt 写出来的文件。解析器在某个不认识的字段上
+翻车，用户升级后订阅全丢，而且丢得毫无征兆 —— 界面只会显示「没有订阅」。
+
+新增 `QtMigrationTests`，直接拿 Qt 源码里**逐字段抄下来**的格式喂给 Swift：
+
+- `subscribe.yaml`（含 Swift 未声明的 `speedtest` / `proxy` / `updateTime`）：
+  两条订阅、节点、订阅级与节点级的 `use:` 都读得出来；
+- **回写时不丢未知字段** —— 用户若装回 Qt 版，这些信息还在。文本手术的意义正在于此；
+- `rules.json`（Qt schema `{area:[{name,type,rule}], rule:[{type,node,value}]}`）：
+  区域组与自定义规则都读得出来，`MATCH` 的两段拼法也对。
+
+224 用例全绿。
