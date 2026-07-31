@@ -5,7 +5,9 @@
 #include <QtGlobal>
 
 #include <climits>
+#include <cstdio>
 #include <cstring>
+#include <iterator> // std::size（自检里数用例条数）
 
 // 本文件三块：
 //   1) RuleGeoDb —— 一个**最小只读 MaxMind DB 阅读器**。MmdbFile 只做校验/落盘、没有查询 API
@@ -950,5 +952,11 @@ bool RuleEngine::selfTest()
             qWarning("selfTest FAIL: 有 ip 时不应报 needsResolve");
         }
     }
+
+    // 成功也要出一行。原先只在失败时 qWarning、成功一声不吭，于是从外面看
+    // 「rc=0 且零输出」和「钩子压根没触发 / 二进制因别的原因提前退出」是分不开的 ——
+    // 一个分不清"通过"与"没跑"的自检，等于没有自检。其余几个钩子都打 PASS 行，这里对齐。
+    std::fprintf(stderr, "RuleEngine selfTest: %s（匹配用例 %d 条 + 转义/引号/matchEx 断言）\n",
+                 ok ? "PASS" : "FAIL", int(std::size(cases)));
     return ok;
 }
