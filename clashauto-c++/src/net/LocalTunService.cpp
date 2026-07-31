@@ -134,7 +134,9 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
                      QStringLiteral("local"));
 
     m_store = std::move(store);
-    m_factory = new CoreDialerFactory(m_store.get(), nullptr); // 无 parent，由 teardown 手动释放
+    // 无 parent：**所有权交给 NetStack**（setOutboundFactory 取得所有权，~NetStack 会删它）。
+    // 我们只留一个裸指针用于 setStrict/setRouter，teardown 里置空即可，千万别自己再删一遍。
+    m_factory = new CoreDialerFactory(m_store.get(), nullptr);
     m_factory->setStrict(socksFallbackPort <= 0); // 无回退口 = 严格：判不了就失败，不静默改道
     m_factory->setRouter(coastcore::makeRouter(m_store, std::move(rules), false));
     m_net->setOutboundFactory(m_factory);
@@ -146,8 +148,14 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
     m_sess = new TunSession();
     TunSession::Config c;
     c.ifname = dev;
-    c.addr4 = QString::fromLatin1(kTunIp);
-    c.peer4 = QString::fromLatin1(kPeerIp);
+    // ★★ 两端地址**不能同号**，而且方向容易搞反（第一版就反了，表现是路由全配对但 curl 恒 000）：
+    //   · 内核那侧的 TUN 网卡 = lwIP 眼里的「那台设备」 → 拿 **kPeerIp**；
+    //     内核按 0.0.0.0/1 把包投进 coast0 时，源地址就选它，正对上 addDevice(kPeerIp)。
+    //   · lwIP 的 netif = 「网关」 → 拿 **kTunIp**（上面 addNic 用的就是它）。
+    //   写成两边都用 kTunIp 的话，addDevice 登记的那台设备根本不存在，进来的帧一律不认。
+    //   已验通的 tools/gwbench/tunstack.cpp 就是这个分工（内核 kAppIp / lwIP kTunIp）。
+    c.addr4 = QString::fromLatin1(kPeerIp);
+    c.peer4 = QString::fromLatin1(kTunIp); // macOS 点对点的对端 = 我们（网关侧）
     c.mask4 = QString::fromLatin1(kMask);
     c.takeDefault = true;
     if (!m_sess->start(c, err)) {
@@ -248,14 +256,13 @@ void LocalTunService::teardown()
         m_sess = nullptr;
     }
     if (m_net) {
-        delete m_net;
+        delete m_net; // ★ 它会**连带删掉出站工厂**（见下）
         m_net = nullptr;
     }
-    // ★ 必须**在 NetStack 之后**删：栈里存着这个工厂的裸指针，反过来就是悬垂访问。
-    if (m_factory) {
-        delete m_factory;
-        m_factory = nullptr;
-    }
+    // ★★ 这里**绝不能**再 delete m_factory —— NetStack::setOutboundFactory 的契约是
+    //   「取得所有权」，~NetStack 里就有一句 delete d->factory。第一版在这里又删了一遍，
+    //   结果是停服务时 SIGSEGV（真机自检当场崩在这）。只置空，不释放。
+    m_factory = nullptr;
     if (m_ep) {
         m_ep->close();
         m_ep->deleteLater();
