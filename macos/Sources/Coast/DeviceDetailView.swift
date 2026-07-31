@@ -5,35 +5,55 @@ import SwiftUI
 /// 自上而下 —— 头部（头像 / 名字 / 代理开关）→ 依赖说明 / 不可代理的原因 → 信息网格 →
 /// 备注名 / 类型 → 实时流量卡 → 近 7 天 → 策略 → 常用域名 → 该设备的实时连接列表。
 ///
-/// Qt 那边是独立顶层窗；这里沿用本项目既有做法以 sheet 呈现（设备行点开）。
-/// 页面那边因此只留列表 —— 与 Qt 一样，备注名/策略都搬进了这里。
+/// **独立顶层窗**，与 Qt 一致（做成 sheet 会被 510 高的主窗裁掉一大截）。
+/// 显示的永远是 `AppState.selectedDevice` —— 窗口开着时点列表里另一台，内容跟着换，
+/// 不用来回开关窗口。页面那边因此只留列表：备注名/策略都搬进了这里。
 struct DeviceDetailView: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
-    @Environment(\.dismiss) private var dismiss
 
-    let row: DevicesPage.Row
-    var rejection: RedirectTargets.Rejection?
+    /// 当前选中的设备。没有选中时给一句空态，而不是整窗空白。
+    private var selected: AppState.SelectedDevice? { state.selectedDevice }
+    private var discovered: LanBrowser.Device { selected?.discovered ?? LanBrowser.Device(mac: "", ip: "", interface: "") }
+    private var online: Bool { selected?.online ?? false }
+    private var rejection: RedirectTargets.Rejection? { selected?.rejection }
+    private var mac: String { discovered.mac }
 
     @State private var alias = ""
     @State private var recentDays: [HistoryStore.DayTotal] = []
     @State private var topDomains: [HistoryStore.GroupTotal] = []
     @State private var totals: (up: Int64, down: Int64) = (0, 0)
 
-    private var record: DeviceStore.Device? { state.devices.device(mac: row.id) }
+    private var record: DeviceStore.Device? { state.devices.device(mac: mac) }
     private var proxyEnabled: Bool { record?.proxyEnabled ?? false }
     /// 已经开着的一律可关（离线 / 跨网段也得能撤销）；关着的只有「可代理且在线」才点得动
     /// —— 离线设备拿不到 IP/ARP，劫持无从下手。
-    private var canToggle: Bool { proxyEnabled || (rejection == nil && row.online) }
+    private var canToggle: Bool { proxyEnabled || (rejection == nil && online) }
 
-    private var sample: DeviceTraffic.Sample { state.deviceTraffic.sample(ip: row.discovered.ip) }
+    private var sample: DeviceTraffic.Sample { state.deviceTraffic.sample(ip: discovered.ip) }
 
     /// 这台设备当前的连接。按发起方 IP 认 —— 透明重定向看不到任何凭据，只有源 IP。
     private var connections: [ConnectionRow] {
-        state.connections.filter { $0.sourceIP == row.discovered.ip }
+        state.connections.filter { $0.sourceIP == discovered.ip }
     }
 
     var body: some View {
+        Group {
+            if selected == nil {
+                Text("未选择设备".t)
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textMuted)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                content
+            }
+        }
+        .frame(minWidth: 420, minHeight: 420)
+        .background(theme.card)
+        .task(id: mac) { await load() }
+    }
+
+    private var content: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 header
@@ -49,14 +69,6 @@ struct DeviceDetailView: View {
             }
             .padding(12)
         }
-        // Qt 那边是 600×720 的**独立窗**（最小 420×420）。这里仍是 sheet，所以高度写成
-        // 「理想 720、但不超过可用高度」——写死 720 的话，主窗默认才 510 高，
-        // sheet 会被裁掉一大截（更新窗就是这么发现的：底部整条动作行消失、按钮点不到）。
-        // 内容本来就在 ScrollView 里，压矮只是要多滚两下，不会丢东西。
-        .frame(width: 600)
-        .frame(minHeight: 420, idealHeight: 720, maxHeight: 720)
-        .background(theme.card)
-        .task { await load() }
     }
 
     // MARK: 头部
@@ -64,10 +76,10 @@ struct DeviceDetailView: View {
     private var header: some View {
         HStack(spacing: 10) {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.deviceColor(row.discovered.typeKey))
+                .fill(theme.deviceColor(discovered.typeKey))
                 .frame(width: 48, height: 48)
                 .overlay {
-                    Image(systemName: theme.deviceSymbol(row.discovered.typeKey))
+                    Image(systemName: theme.deviceSymbol(discovered.typeKey))
                         .font(.system(size: 26))
                         .foregroundStyle(.white)
                 }
@@ -77,8 +89,8 @@ struct DeviceDetailView: View {
                     .font(.system(size: 18))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1).truncationMode(.tail)
-                Text(Self.typeName(row.discovered.typeKey) + "  ·  "
-                     + (row.online ? "在线".t : "离线".t))
+                Text(Self.typeName(discovered.typeKey) + "  ·  "
+                     + (online ? "在线".t : "离线".t))
                     .font(.system(size: 12))
                     .foregroundStyle(theme.textMuted)
                 Spacer(minLength: 0)
@@ -99,7 +111,7 @@ struct DeviceDetailView: View {
 
     private var displayName: String {
         let alias = record?.alias ?? ""
-        return alias.isEmpty ? row.discovered.displayName : alias
+        return alias.isEmpty ? discovered.displayName : alias
     }
 
     // MARK: 提示区
@@ -144,12 +156,12 @@ struct DeviceDetailView: View {
 
     private var infoGrid: some View {
         let items: [(String, String)] = [
-            ("IP", row.discovered.ip),
-            ("MAC", row.discovered.mac),
-            ("厂商".t, row.discovered.vendor),
-            ("接口".t, row.discovered.interface),
+            ("IP", discovered.ip),
+            ("MAC", discovered.mac),
+            ("厂商".t, discovered.vendor),
+            ("接口".t, discovered.interface),
             ("首次发现".t, record.map { Self.dateText($0.firstSeen) } ?? ""),
-            ("主机名".t, row.discovered.hostname),
+            ("主机名".t, discovered.hostname),
         ]
         return LazyVGrid(columns: [GridItem(.flexible(), spacing: 24),
                                    GridItem(.flexible(), spacing: 24)],
@@ -177,7 +189,7 @@ struct DeviceDetailView: View {
             ThemedField(text: $alias, placeholder: "为该设备起个名字".t, width: nil)
                 .frame(height: 28)
                 // 每敲一个字都写库太浪费；与 Qt 的 `onEditingFinished` 一样，离焦才落。
-                .onSubmit { state.devices.setAlias(mac: row.id, alias) }
+                .onSubmit { state.devices.setAlias(mac: mac, alias) }
         }
     }
 
@@ -261,9 +273,20 @@ struct DeviceDetailView: View {
 
     // MARK: 策略
 
+    /// 台账里还没有这台设备时用的默认记录。
+    ///
+    /// ★ Qt 显示策略行的条件只有 `proxyable === true` —— 与「台账里有没有这条记录」无关。
+    /// 而这里原来写的是 `let record`，于是**从没被开过代理的设备根本看不到策略选择**
+    /// （截图里就是这样：一台可代理的在线设备，策略那一行整个不见了）。
+    /// 台账记录是「用户动过它」才产生的，不该反过来决定用户能不能动它。
+    private var recordOrDefault: DeviceStore.Device {
+        record ?? DeviceStore.Device(mac: mac)
+    }
+
     @ViewBuilder
     private var policyRow: some View {
-        if rejection == nil, let record {
+        if rejection == nil {
+            let record = recordOrDefault
             HStack(spacing: 8) {
                 Text("策略".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
                     .frame(width: 64, alignment: .leading)
@@ -373,22 +396,23 @@ struct DeviceDetailView: View {
 
     private func load() async {
         alias = record?.alias ?? ""
-        recentDays = state.history.recentDays(mac: row.id)
-        topDomains = state.history.topDomains(mac: row.id)
-        totals = state.history.total(mac: row.id)
+        recentDays = state.history.recentDays(mac: mac)
+        topDomains = state.history.topDomains(mac: mac)
+        totals = state.history.total(mac: mac)
     }
 
     private func toggleProxy() {
         guard canToggle else { return }
-        _ = state.devices.setProxyEnabled(mac: row.id, !proxyEnabled, ip: row.discovered.ip)
+        _ = state.devices.setProxyEnabled(mac: mac, !proxyEnabled, ip: discovered.ip)
         state.refreshHistoryDeviceMap()
         Task { await state.controller.rebuildConfig() }
     }
 
     private func setPolicy(_ mode: DeviceStore.PolicyMode, _ target: String) {
-        guard var record else { return }
+        var record = recordOrDefault
         record.policyMode = mode
         record.policyTarget = target
+        // 台账里还没有就顺手建一条 —— 用户选了策略，那条记录本来就该存在了。
         _ = state.devices.save(record)
         Task { await state.controller.rebuildConfig() }
     }

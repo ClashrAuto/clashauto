@@ -54,6 +54,26 @@ public final class AppState {
         return page
     }()
 
+    /// 设备详情窗当前显示的那台设备。
+    ///
+    /// 与 Qt 的 `devices.selectedDevice` 同一个意思：详情窗显示的**永远是当前选中的那台**，
+    /// 窗口开着时点列表里另一台，窗口内容跟着换，不用来回开关窗口。
+    /// 详情窗是独立顶层窗（不在主窗的 environment 链里），所以这份「选中」必须放在共享状态上。
+    public struct SelectedDevice: Sendable, Equatable {
+        public var discovered: LanBrowser.Device
+        public var online: Bool
+        public var rejection: RedirectTargets.Rejection?
+
+        public init(discovered: LanBrowser.Device, online: Bool,
+                    rejection: RedirectTargets.Rejection?) {
+            self.discovered = discovered
+            self.online = online
+            self.rejection = rejection
+        }
+    }
+
+    public var selectedDevice: SelectedDevice?
+
     /// 供**独立窗口** scene 取用的那一份 `AppState`。
     ///
     /// SwiftUI 的 `Window` scene 不在主窗的 environment 链里，拿不到 `RootView` 注入的

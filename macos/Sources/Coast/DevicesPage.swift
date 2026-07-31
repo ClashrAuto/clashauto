@@ -21,9 +21,10 @@ struct DevicesPage: View {
     @State private var discovered: [LanBrowser.Device] = []
     @State private var ledger: [String: DeviceStore.Device] = [:]
     @State private var scanning = false
-    /// 点开的设备详情（Qt 那边是独立窗口，这里是 sheet）。页面本身只留列表 ——
-    /// 备注名 / 策略 / 流量都搬进详情里了，与 Qt 一致。
-    @State private var detail: Row?
+    /// 打开设备详情窗用。窗口显示的是 `AppState.selectedDevice`，
+    /// 所以「点开某一行」= 先写选中、再开窗（与 Qt 的 `openFor(mac)` 完全一致：
+    /// `devices.select(mac)` 然后 show + raise）。
+    @Environment(\.openWindow) private var openWindow
     @State private var search = ""
     /// 已被「知道了」消掉的告警 id。
     ///
@@ -211,6 +212,14 @@ struct DevicesPage: View {
         .padding(.top, 10)
     }
 
+    /// 选中并打开详情窗。窗口已经开着时只是换内容（`selectedDevice` 一变它就跟着重画）。
+    private func openDetail(_ row: Row) {
+        state.selectedDevice = AppState.SelectedDevice(discovered: row.discovered,
+                                                       online: row.online,
+                                                       rejection: rejection(for: row))
+        openWindow(id: DeviceDetailWindowID.value)
+    }
+
     /// 这台设备最近新建的那条连接的目标。没开代理的设备流量不经核心，这里永远是空 ——
     /// 行里那一行也就整条收起来，不占位。
     private func lastHost(for row: Row) -> String {
@@ -267,7 +276,7 @@ struct DevicesPage: View {
                           sample: state.deviceTraffic.sample(ip: row.discovered.ip),
                           lastHost: lastHost(for: row),
                           onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
-                          onOpenDetail: { detail = row })
+                          onOpenDetail: { openDetail(row) })
             }
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
@@ -277,10 +286,6 @@ struct DevicesPage: View {
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
-        .sheet(item: $detail) { row in
-            DeviceDetailView(row: row, rejection: rejection(for: row))
-                .environment(state).environment(theme)
-        }
     }
 
     /// 底部横幅：说明当前状态。设备端零配置，所以这里没有任何要用户抄的东西。
@@ -341,7 +346,7 @@ struct DevicesPage: View {
     private func setProxy(row: Row, enabled: Bool) {
         _ = state.devices.setProxyEnabled(mac: row.discovered.mac, enabled, ip: row.discovered.ip)
         reloadLedger()
-        if enabled { detail = row }   // 刚开启就把详情打开（策略在里面选）
+        if enabled { openDetail(row) }   // 刚开启就把详情打开（策略在里面选）
         Task { await state.controller.rebuildConfig() }
     }
 
@@ -365,7 +370,7 @@ private struct DeviceRow: View {
     /// 已经开着的一律可关（离线/跨网段也得能撤销）；关着的只有「可代理且在线」才点得动。
     private var canToggle: Bool { row.proxyEnabled || (rejection == nil && row.online) }
 
-    var body: some View {
+    private var rowContent: some View {
         HStack(spacing: 8) {
             avatar
 
@@ -428,9 +433,21 @@ private struct DeviceRow: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .opacity(row.online ? 1 : 0.5)         // 离线行整体淡化
-        .contentShape(Rectangle())
         .onHover { hovering = $0 }
-        .onTapGesture(perform: onOpenDetail)
+    }
+
+    /// 整行可点（打开详情窗）。
+    ///
+    /// ★ 必须是**真的 Button**，不能只挂 `.onTapGesture` —— 行在 `List` 里，
+    /// 光挂手势点下去没有任何反应（实测点了好几次，详情窗一个都没开出来，
+    /// 而且没有任何报错）。Qt 那边同样是给整行单独铺了一个 `MouseArea`，
+    /// 它的注释写的理由也是「TapHandler 抢不到」。
+    ///
+    /// 行里那颗代理开关自己带手势，嵌在里面**优先吃掉**落在它上面的点击 ——
+    /// 与 Qt「开关的 MouseArea 压在整行的 MouseArea 之上」是同一个效果。
+    var body: some View {
+        Button(action: onOpenDetail) { rowContent }
+            .buttonStyle(.plain)
     }
 
     /// 类型头像 34×34 圆角 8 + 图标 18 + 右下角 11 的在线小圆点（带 2px 描边）。
@@ -487,6 +504,7 @@ private struct DeviceRow: View {
         .animation(.easeInOut(duration: 0.12), value: row.proxyEnabled)
         .contentShape(Rectangle())
         .onTapGesture { if canToggle { onToggleProxy(!row.proxyEnabled) } }
+        .allowsHitTesting(canToggle)
         .help(rejection?.reason.t ?? "代理网络".t)
     }
 

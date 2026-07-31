@@ -34,6 +34,14 @@ struct CoastApp: App {
         }
         .defaultSize(width: 600, height: 560)
         .keyboardShortcut(nil)
+
+        // 设备详情同理：Qt 是 600×720 的独立窗（最小 420×420），比主窗默认的 510 高得多，
+        // 做成 sheet 一样会被裁。显示的永远是 `AppState.selectedDevice`（与 Qt 的
+        // `devices.selectedDevice` 同义）：窗口开着时点列表里另一台，内容跟着换。
+        Window("设备详情".t, id: DeviceDetailWindowID.value) {
+            DeviceDetailWindowRoot()
+        }
+        .defaultSize(width: 600, height: 720)
     }
 }
 
@@ -146,6 +154,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
         NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+    }
+}
+
+/// 设备详情窗的 scene id。
+enum DeviceDetailWindowID { static let value = "coast.device-detail" }
+
+/// 设备详情窗的根视图。**不能用 `@State` 接** `sharedForWindows`，理由见 `UpdateWindowRoot`。
+private struct DeviceDetailWindowRoot: View {
+    var body: some View {
+        if let state = AppState.sharedForWindows {
+            DeviceDetailView()
+                .environment(state)
+                .environment(state.theme)
+        } else {
+            Color.clear
+        }
     }
 }
 
