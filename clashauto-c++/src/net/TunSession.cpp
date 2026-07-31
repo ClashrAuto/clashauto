@@ -93,6 +93,8 @@ bool TunSession::start(const Config &cfg, QString *err)
         //     · pref 100 的 "fwmark X lookup main" 排在它**前面** —— 打了标的包先查 main，
         //       main 里只有物理默认路由，于是走物理口出去。
         //   两条 rule 的**先后（pref 数值小者先）就是全部的机制**，写反了同样是环路。
+        //   已用 `ip route get <ip> [mark …]` 在容器里验过两组配置（tools/tunroute/rulecheck.sh）：
+        //   错误配置下带 mark 仍解析到 coast0（SO_MARK 形同虚设），本配置下带 mark 解析到物理口。
         const QString mark = QStringLiteral("0x%1").arg(SelfRouteGuard::fwmark(), 0, 16);
         const QString table = QString::number(kTunTable);
 
