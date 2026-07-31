@@ -1966,3 +1966,38 @@ Swift 侧此前是每拍整条重画，所以是跳的。现在两处都接上�
 SwiftUI 一般会自行停掉 timeline，但没有实测，记在这里。
 
 `swift test` 308 全绿；`i18n_check.py` 238/238；persist check 7/7。
+
+
+## 2026-08-01(续十九) · ★ 点一下 ✕，界面再也回不来
+
+核对主窗 shell 的行为时试了一下红点，结果是个**死局**：
+
+- SwiftUI 的 `WindowGroup` 窗口一关就**销毁**了；
+- 而 `applicationShouldTerminateAfterLastWindowClosed` 是 false（进程照样活着，这是对的：
+  ✕ 直接退会连带停掉核心与系统代理）；
+- 于是点一下 ✕ 之后**窗口数恒为 0，怎么都开不回来** —— 只剩一个够不着的托盘进程。
+
+Qt 那边专门拦了这件事：`onClosing: close.accepted = false; window.hide()`
+（注释原话：「不销毁窗口，仅隐藏，供后续重开」）。Swift 侧一直没有对应物。
+
+修复四处，缺一不可 —— 少任何一处都还是坏的：
+
+1. **`CloseGuard`**（`NSWindowDelegate.windowShouldClose` 返回 false + `orderOut`）：
+   ✕ 只隐藏、不销毁。**delegate 必须强引用**：`NSWindow.delegate` 是 weak 的，
+   挂完就被释放等于没装。
+2. 隐藏时**同时收掉 Dock 图标**（切 `.accessory`）—— 照 Qt 的
+   `bridge.setMacDockVisible(visible)` 来：窗口一藏，回来的路只剩托盘。
+3. **`showMainWindow` 要认得哪个才是主窗**。原来写的是 `NSApplication.shared.windows.first`
+   —— 那可能是状态栏窗口或更新窗，order front 等于什么都没做。
+4. **`applicationShouldHandleReopen` 返回 `false`**。这一位的语义是「要不要让 AppKit 再
+   执行默认行为」；返回 true 时 SwiftUI 会**再建一个**主窗 —— 实测重开之后屏幕上是
+   **两个** Coast 窗，一个在原位、一个在左上角。改成 false 之后就只剩一个、且在原位。
+
+### 顺带补上「没有历史位置时落在右下角」
+
+Qt 的 `restoreWindowPos`：有历史且仍可见就恢复，否则**贴着当前屏可用区的右下角**摆放
+（可用区已扣掉菜单栏与程序坞）。Swift 侧此前是 SwiftUI 的默认落点。
+现在首次启动会落到右下角，之后按上一条做的固定 autosave 名恢复。
+实测：首启 (1340, 693)（屏 2240×1260，2240−900=1340 ✓），✕ 再回来仍是 (1340, 693)。
+
+`swift test` 308 全绿；`i18n_check.py` 238/238；persist check 7/7。

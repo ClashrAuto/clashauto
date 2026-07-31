@@ -20,10 +20,19 @@ import AppKit
 /// 2. **偏好文件无限膨胀** —— 每启动一次多一个永远不会被读的键。
 ///
 /// 所以这里给窗口挂一个**固定**的 autosave 名，并把历史垃圾键清掉。
+@MainActor
 enum WindowRestore {
 
     /// 固定的存储键。改它等于让所有老用户的窗口位置回到默认，别改。
     private static let autosaveName = "CoastMainWindow"
+
+    /// 主窗口。`showMainWindow()` 也用它 —— **不能用 `windows.first`**：
+    /// 那可能是状态栏窗口或更新窗，把它 order front 等于什么都没做。
+    static weak var mainWindow: NSWindow?
+
+    /// ✕ 的拦截器。必须**强引用**：`NSWindow.delegate` 是 weak 的，
+    /// 挂完就被释放的话拦截器等于没装。
+    private static var closeGuard: CloseGuard?
 
     /// SwiftUI 自动生成的那批键的共同前缀。
     private static let leakedKeyPrefix = "NSWindow Frame SwiftUI."
@@ -36,10 +45,59 @@ enum WindowRestore {
         guard let window = NSApplication.shared.windows.first(where: { $0.canBecomeMain }) else {
             return
         }
+        mainWindow = window
+
         // 先设名字再 setFrameUsingName：AppKit 会在设名字的那一刻把当前 frame 写进去，
         // 顺序反了就把「默认位置」当成「上次的位置」存下来了。
+        let hadSavedFrame = UserDefaults.standard.object(forKey: "NSWindow Frame " + autosaveName) != nil
         window.setFrameAutosaveName(autosaveName)
-        window.setFrameUsingName(autosaveName)
+        if hadSavedFrame {
+            window.setFrameUsingName(autosaveName)
+        } else {
+            placeBottomRight(window)
+        }
+
+        // ✕ **不销毁窗口，只隐藏**（与 Qt 的 `onClosing: close.accepted = false; hide()` 一致）。
+        //
+        // ★ 不拦的话是个死局：SwiftUI 的 `WindowGroup` 窗口一关就没了，而
+        //   `applicationShouldTerminateAfterLastWindowClosed` 又是 false（进程照样活着）——
+        //   于是点一下红点，界面**再也回不来**（实测：关掉之后窗口数恒为 0，
+        //   重新激活 app 也开不出来，只剩一个够不着的托盘进程）。
+        let guardian = CloseGuard()
+        closeGuard = guardian
+        window.delegate = guardian
+    }
+
+    /// 把窗口摆到当前屏**可用区**的右下角（已扣除菜单栏与程序坞）。
+    /// 与 Qt 的 `restoreWindowPos` 在「没有历史位置」时的落点一致。
+    private static func placeBottomRight(_ window: NSWindow) {
+        guard let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+        let size = window.frame.size
+        window.setFrameOrigin(CGPoint(x: visible.maxX - size.width,
+                                      y: visible.minY))
+    }
+
+    /// 把主窗拉回前台。窗口只是被隐藏过，所以这里总能拿到它。
+    static func showMainWindow() {
+        NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        mainWindow?.makeKeyAndOrderFront(nil)
+        // 兜底：万一还是多出来一个，延后一拍收掉（主路径靠
+        // `applicationShouldHandleReopen` 返回 false 拦住）。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { discardDuplicateMainWindows() }
+    }
+
+    /// ✕ 之后 SwiftUI 的 `WindowGroup` 会在「重新打开」时**再建一个**主窗
+    /// （实测重开之后窗口数是 2：一个在原位、一个在屏幕左上角）。
+    /// 这里把多出来的那些收掉，保证「只有一个主窗」这个不变式。
+    private static func discardDuplicateMainWindows() {
+        for window in NSApplication.shared.windows
+        where window !== mainWindow
+            && window.canBecomeMain
+            && window.frameAutosaveName.isEmpty
+            && window.title == mainWindow?.title {
+            window.orderOut(nil)
+        }
     }
 
     /// 清掉 SwiftUI 自动生成的那批带地址的键。
@@ -50,5 +108,18 @@ enum WindowRestore {
         for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(leakedKeyPrefix) {
             defaults.removeObject(forKey: key)
         }
+    }
+}
+
+/// ✕ 的拦截器：只隐藏、不销毁，并同时收掉 Dock 图标。
+///
+/// 收 Dock 图标是照 Qt 来的 —— `Main.qml` 的 `onVisibleChanged` 里
+/// `bridge.setMacDockVisible(visible)`：窗口一藏，Dock 上就不留图标，
+/// 回来的路只有托盘（或菜单栏）那一条。顺带也避开了「Dock 重开会再建一个窗」那个坑。
+private final class CloseGuard: NSObject, NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        NSApplication.shared.setActivationPolicy(.accessory)
+        return false
     }
 }

@@ -97,10 +97,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 结果整机断代理。真正退出走托盘菜单「退出程序」或 Cmd+Q。
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
-    /// 点 Dock 图标重新打开主窗（窗口被 ✕ 隐藏后唯一的回来方式之一）。
+    /// 点 Dock 图标重新打开主窗（窗口被 ✕ 隐藏后回来的方式之一；另一条是托盘的「控制面板」）。
+    ///
+    /// **返回 false**：这一位的语义是「要不要让 AppKit 再执行它的默认行为」。
+    /// 返回 true 的话，SwiftUI 的 `WindowGroup` 会**再建一个**主窗 ——
+    /// 实测重开之后屏幕上是两个 Coast 窗，一个在原位、一个在左上角。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { showMainWindow() }
-        return true
+        return false
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -150,11 +154,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showMainWindow() {
-        NSApplication.shared.setActivationPolicy(.regular)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
-    }
+    /// 拉回主窗。委托给 `WindowRestore` —— 它记着**哪一个**才是主窗；
+    /// 原来这里写的是 `windows.first`，那可能是状态栏窗口或更新窗，order front 等于没做。
+    private func showMainWindow() { WindowRestore.showMainWindow() }
 }
 
 /// 设备详情窗的 scene id。
