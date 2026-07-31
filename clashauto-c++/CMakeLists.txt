@@ -284,6 +284,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         target_sources(clashauto-qml PRIVATE
             src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
     endif()
+    # TUN 激活层（跨平台）：配地址/接管默认路由/Linux 策略路由，以及**原样还原**。
+    # 与设备层分开：设备层失败只是 TUN 起不来，这一层失败会改变整机路由。
+    target_sources(clashauto-qml PRIVATE src/net/TunSession.cpp src/net/TunSession.h)
     # 本机 TUN 入口（进程内「增强」）：把裸 IP 包合成以太帧后喂给同一套 NetStack/lwIP，
     # 上层一行不用改。共享的合成 MAC/以太头常量与设计总纲在 TunEndpoint.h。
     # macOS(utun) 待做。现在还没有调用方——先编进来，免得它悄悄腐烂。
