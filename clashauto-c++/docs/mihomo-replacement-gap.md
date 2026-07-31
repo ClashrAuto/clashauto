@@ -66,22 +66,58 @@ cc=10/5/0/0/0/0   socksFail=0                   ← 10 条全走进程内
 curl 的整整 8 秒里一帧都没被读走（对照实测：阻塞版 `ep.rx=1 ep.tx=0 tcpAcc=0`）。该分支作为反面
 教材留在驱动里（`COAST_TUNTEST_BLOCK=1`）。**生产代码未作任何改动。**
 
-### 挡在「增强」按钮前面的是环路，不是数据面
+### 环路问题：**已解决并三平台验过**（2026-07-31 晚）
 
-TUN 一旦接管默认路由，coast 自己的出站也会被路由进 TUN → 死循环。三个平台的做法不同，但都归结为
-**同一件事：本进程发起的连接必须绕开自己的 TUN**，因此都需要先有一个**统一的拨号收口**——
-现在 `QTcpSocket`/`QUdpSocket` 散落在约 10 处（`DirectOutbound`、`ShadowsocksOutbound`、
-`VlessOutbound`、`VmessOutbound`、`TlsClient`、`WsClient`、`QuicTransport`、`Socks5Client`），
-逐个改必然漏一个，而漏一个的表现就是「偶发死循环」。
+TUN 一旦接管默认路由，coast 自己的出站也会被路由进 TUN → 死循环（表现是整机断网，比不开 TUN 更糟）。
+现已落地 `SelfRouteGuard`（`src/net/core/SelfRouteGuard.h`）：探物理出口 → 把出站 socket 钉在它上面。
 
-| 平台 | 机制 | 要点 |
+**Qt 上的死结与解法**：选项必须在 `connect()` **之前**作用于 fd，而 Qt 在 `connectToHost()` 之前
+根本没建 socket。出路是 `prepareSocket()`：**先 `bind()`**（Qt 的 bind 会把 fd 建出来），拿到 fd
+打完选项再 connect；绑 `QHostAddress::Any` 成双栈并把 v4/v6 两个选项**都**打上，于是不必为了确定
+地址族先解析域名。
+
+| 平台 | 机制 | 验证（**都带反向对照**：钉到回环口必须连不通，否则"通过"可能只是选项压根没生效） |
 |---|---|---|
-| Linux | `SO_MARK` + 策略路由 | 出站 socket 打 `SO_MARK=0x…`；`ip rule add fwmark 0x… lookup main pref 100`，TUN 的默认路由放进更低优先级的独立表。**必须在 `connect()` 之前 setsockopt** → Qt 里要么走 `setSocketDescriptor(自建 fd)`，要么退而求其次用 cgroup + `nft mangle` 打标（不改一行出站代码，但要求进程在自己的 cgroup 里） |
-| Windows | `IP_UNICAST_IF` / `IPV6_UNICAST_IF` | 无 `SO_MARK`。把出站 socket 钉在**物理默认路由网卡**的 ifindex 上，路由查表就不会命中 wintun（WireGuard-windows / mihomo 同法）。配套：TUN 用 `0.0.0.0/1`+`128.0.0.0/1` 而非改默认路由 |
-| macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` | 同上，钉在 en0 之类的物理口。网络切换（WiFi↔有线、换网）时要重新探测并对**新建**连接生效 |
+| Windows | `IP_UNICAST_IF` / `IPV6_UNICAST_IF` | 真机（以太网 2 / ifIndex=22）：读回一致、连得通 223.5.5.5、钉回环口 `Network unreachable` → PASS。**set 要网络序、get 返回主机序**（实测，非文档推断） |
+| macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` | 真机 13.7.8（en0 / ifIndex=4）：同上 → PASS |
+| Linux | `SO_MARK` + 策略路由 | 容器实测（`tools/tunroute/rulecheck.sh`，`ip route get … mark …` 直接问内核）：不带 mark→coast0、带 mark→eth0 → PASS |
 
-三者共同还欠一个「当前物理默认路由网卡」的探测器 + 变更通知（Linux `RTNETLINK`、Windows
-`NotifyRouteChange2`、macOS route socket / SCNetworkReachability）。
+**Linux 那两条 rule 缺一不可，且 TUN 路由必须进独立表**：
+```
+ip rule add fwmark 0x43535431 lookup main pref 100   # 我们的包 → main（只有物理默认路由）
+ip rule add                   lookup 989  pref 200   # 其它包 → TUN 专用表
+```
+曾经写成「/1 路由进 main + rule 查 main」，那是自相矛盾的 —— 打了标的包查 main，而 main 里正躺着
+指向 TUN 的路由，`SO_MARK` 形同虚设。`rulecheck.sh` 里**两组配置都跑**：错误配置下带 mark 仍解析到
+`coast0`（反向对照成立，证明这个测试测得出问题），修好后才解析到物理口。
+
+**拨号点已全部收口**（审计要按 socket **建点**查，不能按 `connectToHost` 查 —— 协议出站大多经我们
+自己的 `TlsClient`/`UtlsClient`，保护加在类内部，调用处看不见）：
+```
+grep -rn "new QTcpSocket\|new QUdpSocket\|new QSslSocket" src/
+```
+覆盖 `DirectOutbound`(TCP+UDP)、`ShadowsocksOutbound`(TCP+UDP)、`VlessOutbound`、`VmessOutbound`、
+`TlsClient`、`UtlsClient`、`LatencyProbe`。审计顺带挖出 `LatencyProbe`（它拨的是代理服务器，同样
+会环路，且更隐蔽 —— 后台定时跑，环路了只表现为"延迟测不出来"）。
+
+⚠️ **唯一未覆盖：QUIC / Hysteria2**。它的 socket 由 msquic 内部创建，Qt 这条路够不着。
+`LocalTunService::start()` 因此会**主动拒绝**在有 QUIC 节点时启动并说明原因 —— 不让用户点下去
+才发现网没了。解法：msquic 的 `QUIC_PARAM_CONN_LOCAL_ADDRESS`（须在 `ConnectionStart` 之前设）。
+
+三者共同还欠一个「物理出口变更」的通知（Linux `RTNETLINK`、Windows `NotifyRouteChange2`、
+macOS route socket）：换网（WiFi↔有线）后新建连接会钉在一张已经没了的网卡上。现在只在
+`start()` 时探一次。
+
+### TUN 三层的现状
+
+| 层 | Linux | Windows | macOS |
+|---|---|---|---|
+| 设备层 `TunEndpoint_*` | ✅ 端到端（`cc=10/0/0/0/0/0`） | 🟡 编过 + 11 个导出符号对着真 DLL 核过；**建网卡要管理员，未真跑** | ✅ 系统调用序列真机验（utun7、6 个包、4 字节前缀为网络序 AF） |
+| 激活层 `TunSession` | 🟡 `ip rule` 设计已验（见上），C++ 分支未真跑 | 🟡 只 syntax-check | ✅ 真机**真接管默认路由**再还原，零残留 |
+| 会话层 `LocalTunService` | 🟡 自检钩子 `COAST_TUNSERVICE_SELFTEST` 已就位，容器里真跑**待完成** | 🟡 编过 | 🟡 编过 |
+
+`LocalTunService` 把四层串起来，启动顺序**不可换**：先开 `SelfRouteGuard`（必须早于任何出站）→
+建设备拿真名 → 起 NetStack → **最后**才接管路由。停止严格逆序。
 
 ---
 
@@ -111,9 +147,13 @@ TUN 一旦接管默认路由，coast 自己的出站也会被路由进 TUN → �
    浏览器是否照常上网。这是唯一挡在「本机流量也替换掉」前面的事。
 2. **本机入站的连接/流量可见性** —— 现在开了它，UI 反而看不到这部分流量，是个体验倒退。
 3. **选择状态搬进程内** —— 控制面脱离 REST 的第一步（组结构已经能自己解析了，缺的是"用户选了哪个"）。
-4. **TUN 接「增强」按钮** —— 数据面已验通（上一节），**卡点变成了「统一拨号收口 + 环路排除」**。
-   这一步做完之前不要动 UI：环路的表现是整机断网，比不接更糟。各平台权限（macOS 要 root helper）
-   仍在，且与 ① 的收益重叠。
+4. **TUN 接「增强」按钮** —— 数据面已验通、环路也已解决并三平台验过（上两节）。
+   现在只剩**一件事挡在前面**：`LocalTunService` 串起来之后的整体行为还没真跑过
+   （`COAST_TUNSERVICE_SELFTEST=1`，需要容器/虚机 + root）。
+   **它 PASS 之前不要动 UI** —— 四个组成部分各自有真机证据，不等于串起来就对；
+   而这个功能出错的代价是整机断网。
+5. **msquic 本地地址钉定** —— 关掉最后一个环路缺口（Hy2）。在那之前 `LocalTunService`
+   会拒绝在有 QUIC 节点时启动，用户不会误踩，所以它不阻塞 ④。
 
 ---
 
