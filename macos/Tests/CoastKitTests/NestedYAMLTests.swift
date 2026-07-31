@@ -90,3 +90,22 @@ struct AllowRulePersistenceTests {
         #expect(reloaded.noAllowRuleEnabled, "排除开关没存住")
     }
 }
+
+@Suite("新设备提醒的持久化")
+struct NewDeviceAlertPersistenceTests {
+
+    @Test("★ 开关写盘后重新加载还在")
+    func survivesReload() throws {
+        guard AppPaths.userDir.path.contains("coast-test-") else {
+            print("⏭  跳过:需要隔离数据根(跑 scripts/regression.sh)")
+            return
+        }
+        try FileManager.default.createDirectory(at: AppPaths.configDir,
+                                                withIntermediateDirectories: true)
+        #expect(AppConfig().newDeviceAlert == false, "默认应当是关 —— 热闹的网络里默认开会被通知淹没")
+        AppConfigLoader.persist(key: "newDevice", bool: true)
+        #expect(try AppConfigLoader.load().newDeviceAlert, "开关没存住")
+        AppConfigLoader.persist(key: "newDevice", bool: false)
+        #expect(try AppConfigLoader.load().newDeviceAlert == false, "关不掉")
+    }
+}

@@ -347,6 +347,35 @@ public final class AppState {
         theme.dark = newConfig.theme.lowercased() != "light"
     }
 
+    /// 新设备提醒开关。**立即落盘** —— 这是个开关不是草稿，不该等到别处点「应用」。
+    public func setNewDeviceAlert(_ on: Bool) {
+        config.newDeviceAlert = on
+        AppConfigLoader.persist(key: "newDevice", bool: on)
+    }
+
+    /// 已经见过的设备 MAC。首轮扫描**只记录不提醒** ——
+    /// 否则第一次打开设备页会把网络里所有设备一次性全弹出来。
+    private var knownDeviceMACs: Set<String> = []
+    private var deviceBaselineTaken = false
+
+    /// 设备页每轮扫描后调用：有没见过的设备就提醒。
+    public func noticeDevices(_ macs: [String]) {
+        let seen = Set(macs.filter { !$0.isEmpty })
+        guard deviceBaselineTaken else {
+            knownDeviceMACs = seen
+            deviceBaselineTaken = true
+            return
+        }
+        let fresh = seen.subtracting(knownDeviceMACs)
+        knownDeviceMACs.formUnion(seen)
+        guard config.newDeviceAlert, !fresh.isEmpty else { return }
+        for mac in fresh.sorted() {
+            append(log: String(format: "发现新设备 %@".t, mac))
+        }
+        Notifier.post(title: "发现新设备".t,
+                      body: String(format: "局域网里出现了 %d 台没见过的设备".t, fresh.count))
+    }
+
     public func toggleCore() { Task { await controller.toggleCore() } }
     public func toggleProxy() { Task { await controller.toggleProxy() } }
     public func toggleTun() { Task { await controller.toggleTun() } }

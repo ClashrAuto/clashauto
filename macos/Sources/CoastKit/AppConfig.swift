@@ -38,6 +38,12 @@ public struct AppConfig: Sendable, Equatable {
     // MARK: 更新
     public var mirror = false           // 下载走国内镜像（ghfast.top）
     public var receiveBeta = false      // YAML: beta —— 更新检查是否看 prerelease
+    /// 局域网出现没见过的设备时弹通知。YAML: `newDevice`。
+    ///
+    /// 默认**关**：这台机器所在的网络可能很热闹（公司、宿舍），默认开的话第一天就会被
+    /// 几十条通知淹没，用户的反应通常是把整个应用的通知权限关掉 —— 连要紧的那几条
+    /// （ARP 欺骗告警、核心意外退出）也一起听不见了。
+    public var newDeviceAlert = false
 
     public init() {}
 }
@@ -95,6 +101,7 @@ public enum AppConfigLoader {
         config.autoLanguage = YAMLText.bool(yaml, key: "autoLanguage", default: config.autoLanguage)
         config.mirror = YAMLText.bool(yaml, key: "mirror", default: config.mirror)
         config.receiveBeta = YAMLText.bool(yaml, key: "beta", default: config.receiveBeta)
+        config.newDeviceAlert = YAMLText.bool(yaml, key: "newDevice", default: config.newDeviceAlert)
         config.language = YAMLText.value(yaml, key: "language", default: config.language)!
         config.secret = YAMLText.value(yaml, key: "secret", default: "")!
 

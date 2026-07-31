@@ -1,5 +1,7 @@
+import AppKit
 import CoastKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// 局域网设备页。
 ///
@@ -21,6 +23,45 @@ struct DevicesPage: View {
     @State private var scanning = false
     @State private var expanded: String?
     @State private var search = ""
+    /// 已被「知道了」消掉的告警 id。
+    ///
+    /// 只记 id 不删数据：告警来自每 30 秒一轮的巡检，删掉下一轮又会冒出来。
+    /// 消掉的语义是「这条我看过了」，威胁本身还在（列表里仍然能通过设备状态看出来）。
+    @State private var dismissedAlerts: Set<String> = []
+    @State private var exportMessage = ""
+
+    /// CSV 导出。用原生保存面板，落盘位置由用户定 —— 直接写到某个固定目录的话，
+    /// 用户既找不到，也可能根本没有那个目录的写权限。
+    private func exportCSV() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "devices.csv"
+        panel.allowedContentTypes = [.commaSeparatedText]
+        panel.title = "导出设备列表".t
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        // 只导出**我们真的有**的列。Qt 那边还有 type/model/totalDown/totalUp，
+        // 但 Swift 的设备台账里没有这些字段 —— 补几列空值出来只会让人以为数据丢了。
+        let text = CSV.render(
+            header: ["name", "ip", "mac", "vendor", "online", "proxied", "firstSeen"],
+            rows: allRows.map { row in
+                let record = row.record
+                return [
+                    record?.alias.isEmpty == false ? record!.alias : row.discovered.displayName,
+                    row.discovered.ip,
+                    row.discovered.mac,
+                    row.discovered.vendor,
+                    row.online ? "1" : "0",
+                    row.proxyEnabled ? "1" : "0",
+                    record.map { ISO8601DateFormatter().string(from: $0.firstSeen) } ?? "",
+                ]
+            })
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            exportMessage = String(format: "已导出到 %@".t, url.path)
+        } catch {
+            exportMessage = String(format: "导出失败：%@".t, error.localizedDescription)
+        }
+    }
 
     private let browser = LanBrowser()
 
@@ -89,6 +130,13 @@ struct DevicesPage: View {
                 stat("在线".t, "\(allRows.filter(\.online).count)")
                 stat("代理中".t, "\(enabledCount)")
                 Spacer()
+                Toggle("新设备提醒".t, isOn: Binding(
+                    get: { state.config.newDeviceAlert },
+                    set: { state.setNewDeviceAlert($0) }))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.system(size: 11))
+                Button("导出".t) { exportCSV() }
                 Button { Task { await scan() } } label: {
                     Label(scanning ? "扫描中…".t : "重新扫描".t, systemImage: "arrow.clockwise")
                 }
@@ -98,6 +146,13 @@ struct DevicesPage: View {
                 Text("网关 ".t + (gatewayIP.isEmpty ? "-" : gatewayIP))
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textMuted)
+                if !exportMessage.isEmpty {
+                    Text(exportMessage)
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 Spacer()
                 TextField("搜索设备 / IP / 厂商".t, text: $search)
                     .textFieldStyle(.roundedBorder)
@@ -164,7 +219,7 @@ struct DevicesPage: View {
     @ViewBuilder
     private var proxyBanner: some View {
         // 安全告警排在提示条之前 —— 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。
-        ForEach(state.securityAlerts) { alert in
+        ForEach(state.securityAlerts.filter { !dismissedAlerts.contains($0.id) }) { alert in
             HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.shield.fill")
                     .font(.system(size: 11)).foregroundStyle(theme.danger)
@@ -173,6 +228,10 @@ struct DevicesPage: View {
                      : String(format: "%@ 也在劫持你代理的设备 %@".t, alert.offenderMAC, alert.subjectIP))
                     .font(.system(size: 11)).foregroundStyle(theme.danger)
                 Spacer()
+                Button("知道了".t) { dismissedAlerts.insert(alert.id) }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textMuted)
             }
         }
 
@@ -198,6 +257,8 @@ struct DevicesPage: View {
         scanning = true
         defer { scanning = false }
         discovered = await browser.scan()
+        // 每轮扫描后交给 AppState 判断有没有没见过的设备（首轮只记基线、不提醒）
+        state.noticeDevices(discovered.map(\.mac))
         reloadLedger()
     }
 
