@@ -218,6 +218,14 @@ void DevicesController::onCoreRunningChanged(bool up)
         // 内核停了/崩了：立刻撤销全部劫持并还原 ARP。台账里的「代理网络」开关**不动**——它是持久
         // 意图，内核回来时 resumeProxies 会自动补上。宁可让设备掉回真直连，也不能把它悬在一个
         // 没有出口的劫持里（那是彻底断网，比不代理糟得多）。
+        // ★ coastcore 开着时**不撤**：进程内引擎就是出口，设备不会悬在「没有出口的劫持」里。
+        //   （判不了的少数连接会回退到已经不在的 mihomo 而失败——那是可见的个别失败，
+        //   远好于把全部设备踢回真直连、彻底绕过代理。严格模式下连这种回退都没有。）
+        if (m_coastCore) {
+            emit gatewayError(QStringLiteral("核心已停止，但进程内内核开着——设备代理继续由本程序接管"));
+            m_resumeErr.clear();
+            return;
+        }
         if (m_gateway && !m_gateway->activeDevices().isEmpty()) {
             m_gateway->disableAll();
             m_armedIp.clear();
@@ -269,7 +277,11 @@ void DevicesController::resumeProxies()
     // ★ 内核不在跑就一台都不上（见构造函数里那段说明）。开关仍然开着，等 onCoreRunningChanged
     //   在内核起来时补。少了这道门禁，开机时序（劫持 2s 就绪、内核可能还在加载 rule-provider，
     //   或正等 TUN 的 UAC 确认）就会把设备劫持到一个空出口上，表现为「重启后设备全网断」。
-    if (m_core && !m_core->isRunning()) {
+    //   ★ coastcore 开着时**不适用**：那条数据面（DNS + TCP + UDP）整条都在本进程内，
+    //     进程内引擎自己就是出口，不存在「空出口」。此前这道门禁不看 coastcore，于是 mihomo
+    //     一停就把劫持全撤——哪怕进程内引擎完全有能力接管。那正是「完全替换 mihomo」真正的
+    //     拦路虎：数据面早就不需要核心了，app 却仍把核心存活当成能否代理的前提。
+    if (m_core && !m_core->isRunning() && !m_coastCore) {
         if (qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG"))
             std::fprintf(stderr, "[RESUME] 内核未运行，本轮不上劫持\n"), std::fflush(stderr);
         return;
