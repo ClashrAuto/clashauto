@@ -572,3 +572,15 @@
 
   这条是自审出来的，不是用户报的 —— 透明代理这条链路最新、最危险、且从没在真实 root 环境
   跑过，值得单独对抗性审一遍。
+- 2026-07-31：**继续对抗性审查:堵住 helper 两处纵深防御缺口**(173 用例全绿)。
+
+  审 helper 里所有以 root 执行的路径,发现两处直接信任 XPC 裸字符串:
+  1. **PF 规则注入**:`installPF` 把 `interface` 原样拼进 PF 规则喂给 pfctl。设备 IP 上一轮
+     已过 ARPPacket 解析器洗过(安全),但 interface 零校验 —— 带换行的串能**另起一条 PF 规则**。
+  2. **路径遍历**:`startCore` 的 `executable`/`config`/`userDir` 是裸字符串,helper 以 root
+     起 executable、按 userDir 拼日志路径,没做 `..` 卫生。
+
+  codesign 门是主防线,但 root 服务的原则是**不信任任何输入,即便来自"自己的 app"** ——
+  app 一旦被注入,这些就是直通 root 的路。加 `InputValidation`(网卡名白名单 + 路径卫生),
+  放**共享层** CoastHelperProtocol 而非 helper 内部:可单测(executableTarget 不能 @testable
+  import),且 app 侧下发前也能用同一套 fail-fast。新增 4 条用例把「什么该拒」钉死。

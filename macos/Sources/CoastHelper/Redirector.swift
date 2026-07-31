@@ -44,6 +44,9 @@ final class Redirector: @unchecked Sendable {
         queue.sync {
             stopLocked()   // 幂等：换设备列表时先把上一轮干净收掉
 
+            // ★ interface 会被原样拼进 PF 规则文本喂给 pfctl —— **必须白名单校验**,否则一个
+            //   带换行/空格的 interface 串能注入任意 PF 规则(helper 以 root 跑 pfctl)。纵深防御。
+            guard InputValidation.isValidInterface(interface) else { return "网卡名非法: \(interface)" }
             guard let gwIP = ARPPacket.ipv4Bytes(gatewayIPString) else { return "网关 IP 非法" }
             guard let gwMAC = ARPPacket.MAC(gatewayMACString) else { return "网关 MAC 非法" }
             guard let localMAC = Self.hardwareAddress(of: interface) else {

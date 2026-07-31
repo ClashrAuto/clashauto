@@ -101,6 +101,15 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
         queue.sync {
             stopCoreLocked()
 
+            // ★ 纵深防御:helper 以 root 起 executable、按 userDir 拼日志路径。codesign 门是
+            //   主防线,这里再挡一层路径卫生 —— 必须绝对路径、不含 `..` 段(防路径遍历)。
+            for (label, path) in [("核心", executable), ("配置", config), ("数据目录", userDir)] {
+                guard InputValidation.isSanePath(path) else {
+                    reply(false, "\(label)路径非法(需绝对路径且不含 ..): \(path)")
+                    return
+                }
+            }
+
             let fm = FileManager.default
             guard fm.isExecutableFile(atPath: executable) else {
                 reply(false, "核心不可执行: \(executable)")
