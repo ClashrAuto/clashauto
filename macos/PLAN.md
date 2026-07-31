@@ -542,3 +542,14 @@
   ⚠️ **真机联调还没做**：需要正式签名的 helper（ad-hoc 装不了，见阶段 8 的结论），
   本地只能验到「网关三要素取得到、配置规则生成对、报文字节对」。真设备上的
   「开开关即接管、关开关即恢复」得等签名构建。这一点如实记着，没假装跑通。
+- 2026-07-31：**打包收尾：entitlements + helper 的 redirect 能力进包**（168 用例全绿）。
+  - `CBPF` / `Redirector` 是**静态链进 helper 二进制**的（单 Mach-O 可执行文件），
+    所以打包无需额外拷贝 —— 已核对 helper 二进制里有 52 个 redirect/bpf/pfctl 符号。
+  - 补了两份 hardened-runtime entitlements（公证的硬要求，没有它们签名包一跑就被杀）：
+    · `coast.entitlements` —— 主程序：network.client（REST/下载/查更新）+ server（留一手）；
+    · `helper.entitlements` —— helper：同样两条网络能力。
+    **BPF/PF/sysctl 不在 entitlement 里** —— 它们靠的是 root 身份，hardened runtime 不拦这些
+    系统调用，为它们声明 entitlement 是没有意义的。这一点想清楚了才没往里塞多余权限。
+  - entitlements **只在真签时带**：ad-hoc + entitlements 会生成一份谁都能伪造的权限、反而误导。
+  - 已验证：两份 plist `plutil -lint` 通过、codesign 接受并真的把网络能力嵌进签名、
+    重打后 deep-strict 校验通过、种子仍从 `.app` 解析。

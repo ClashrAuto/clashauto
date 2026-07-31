@@ -89,14 +89,26 @@ if [[ "$SIGN_IDENTITY" != "-" ]]; then
 fi
 
 echo "==> 签名 (identity=$SIGN_IDENTITY)"
+# entitlements 只在**真签**时带：ad-hoc + entitlements 会生成一份谁都能伪造的权限，反而误导。
+# 真签时它们是 hardened runtime 放行网络能力的必需品。
+HELPER_ENT=()
+APP_ENT=()
+if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    HELPER_ENT=(--entitlements "$ROOT/Resources/helper.entitlements")
+    APP_ENT=(--entitlements "$ROOT/Resources/coast.entitlements")
+fi
+
+# 先内层后外层。helper 单独用它自己的 entitlements。
 codesign --force --sign "$SIGN_IDENTITY" \
     --identifier "com.yuehongsun.coast.helper" \
     --options runtime ${TIMESTAMP_FLAG[@]+"${TIMESTAMP_FLAG[@]}"} \
+    ${HELPER_ENT[@]+"${HELPER_ENT[@]}"} \
     "$APP/Contents/MacOS/com.yuehongsun.coast.helper"
 
 codesign --force --sign "$SIGN_IDENTITY" \
     --identifier "com.yuehongsun.coast" \
     --options runtime ${TIMESTAMP_FLAG[@]+"${TIMESTAMP_FLAG[@]}"} \
+    ${APP_ENT[@]+"${APP_ENT[@]}"} \
     "$APP"
 
 echo "==> 校验"
