@@ -20,6 +20,7 @@ add_executable(ibh main.cpp
   ${B}/core/ProxyConfig.cpp       ${B}/core/ProxyConfig.h
   ${B}/core/CoreDialerFactory.cpp ${B}/core/CoreDialerFactory.h
   ${B}/core/CoreRouter.cpp        ${B}/core/CoreRouter.h
+  ${B}/core/ProxyConfigBuilder.cpp ${B}/core/ProxyConfigBuilder.h
   ${B}/core/RuleEngine.cpp        ${B}/core/RuleEngine.h
   ${B}/core/DnsResolver.cpp       ${B}/core/DnsResolver.h
   ${B}/core/DirectOutbound.cpp    ${B}/core/DirectOutbound.h

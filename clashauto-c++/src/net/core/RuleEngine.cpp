@@ -483,9 +483,8 @@ QString RuleEngine::typeToString(Type t)
     return QStringLiteral("UNKNOWN");
 }
 
-namespace {
-
 // 解 YAML **双引号**标量里的转义序列。只做真会遇到的那几种。
+// （声明在 RuleEngine.h：ProxyConfigBuilder 解析 proxy-groups 组名时要用同一份实现。）
 //
 // ★★ 为什么非做不可：ConfigBuilder 生成的 full.yaml 把策略组名写成转义形式 ——
 //     `- "GEOIP,CN,\U0001F3AF 全球直连"`。剥掉引号后我们拿到的 target 是**字面量**
@@ -538,8 +537,6 @@ QString decodeYamlEscapes(const QString &in)
     }
     return out;
 }
-
-} // namespace
 
 RuleEngine::Rule RuleEngine::parseRule(const QString &line)
 {

@@ -14,6 +14,7 @@
 #include "core/CoreRouter.h"
 #include "IOutbound.h"
 #include "core/ProxyConfig.h"
+#include "core/ProxyConfigBuilder.h"
 #include "inbound/MixedInbound.h"
 
 #include <QCoreApplication>
@@ -180,6 +181,8 @@ int main(int argc, char **argv)
     // 先跑分流路由的判定自测（纯逻辑，不碰网络）。它钉住的是「什么时候必须回退核心」——
     // 这套判定松掉的后果是**误路由**（本该走节点的走了直连，或反过来），比崩溃难发现得多。
     bool ok = coastcore::routerSelfTest();
+    // proxy-groups 解析向量（含 emoji 转义 / 嵌套 / 成环）——它是"核心不可用时还能不能分流"的基础。
+    ok &= coastcore::proxyConfigSelfTest();
 
     {   // SOCKS5 CONNECT（域名形式）+ 紧随其后的早到数据
         const QByteArray host("127.0.0.1");

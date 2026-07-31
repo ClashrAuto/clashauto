@@ -1070,7 +1070,18 @@ void DevicesController::rebuildCoastCoreConfig()
     std::shared_ptr<const ProxyConfig> base = coastcore::buildProxyConfig(proxiesYaml, selected, mode);
     // 把「策略组 → 叶子节点」映射一并装进快照：Rule 模式的规则 target 绝大多数是**组名**
     //（🎯 全球直连 / 🚀 节点选择 …），没这张表就 nodeByName 必失配、整类回退核心。
-    const QHash<QString, QString> groupLeaf = m_clash ? m_clash->groupLeafMap() : QHash<QString, QString>();
+    QHash<QString, QString> groupLeaf = m_clash ? m_clash->groupLeafMap() : QHash<QString, QString>();
+    // ★ 核心不可用时的兜底：从我们**自己生成**的 full.yaml 里解析组结构。
+    //   这是数据面最后一条隐藏的 mihomo 依赖 —— 这张表平时来自核心 REST（**权威**：含用户手选、
+    //   由 store-selected 持久化），核心一停就空，于是 Rule 模式解析不出目标、整类回退到一个
+    //   已经不在的核心。解析出来的是「默认选择」（每组取第一个成员），不含手选，所以**只在
+    //   权威表拿不到时才用**：有核心时永远以核心为准，行为不变。
+    if (groupLeaf.isEmpty()) {
+        groupLeaf = coastcore::parseProxyGroupsLeaf(proxiesYaml);
+        if (!groupLeaf.isEmpty() && qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG"))
+            std::fprintf(stderr, "[CCCFG] 核心的组映射为空，改用 full.yaml 解析出的 %d 组\n",
+                         int(groupLeaf.size())), std::fflush(stderr);
+    }
     std::shared_ptr<const ProxyConfig> cfg =
         base ? std::make_shared<const ProxyConfig>(base->nodes(), base->selected(), base->mode(),
                                                    groupLeaf)

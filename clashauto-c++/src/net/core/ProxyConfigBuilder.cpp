@@ -1,7 +1,10 @@
 #include "ProxyConfigBuilder.h"
 
+#include "RuleEngine.h" // decodeYamlEscapes：组名的 emoji 转义与规则那边共用一份实现
+
 #include <QMap>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStringList>
 
 #include <cstdio>
@@ -328,6 +331,122 @@ QVector<ProxyNode> parseClashProxies(const QString &proxiesYaml, QString *warn)
     return nodes;
 }
 
+// —————————————— proxy-groups → 叶子映射（mihomo 不可用时的兜底，理由见头文件）——————————————
+namespace {
+
+// 剥掉 YAML 标量的引号，并解开双引号里的转义（\U0001F3AF 之类）。
+// ★ 必须解转义：ConfigBuilder 生成的 full.yaml 里 emoji 组名是写成 `"\U0001F3AF 全球直连"` 的，
+//   不解开就会拿到 10 个 ASCII 字符，和规则里的组名永远匹配不上——这个坑在 RuleEngine 上踩过一次
+//   （commit 733be40：Rule 模式几乎全在回退），这里用同一份 decodeYamlEscapes。
+QString unquoteScalar(QString v)
+{
+    v = v.trimmed();
+    if (v.size() >= 2 && ((v.startsWith('"') && v.endsWith('"'))
+                          || (v.startsWith('\'') && v.endsWith('\'')))) {
+        const bool dq = v.startsWith('"');
+        v = v.mid(1, v.size() - 2);
+        if (dq)
+            v = decodeYamlEscapes(v);
+    }
+    return v;
+}
+
+} // namespace
+
+QHash<QString, QString> parseProxyGroupsLeaf(const QString &fullYaml)
+{
+    // 第一遍：把每个组的成员列表读出来（只需要第一个成员，但整列表读出来便于将来扩展/调试）。
+    QHash<QString, QStringList> members;
+    QStringList order;
+    const QStringList lines = fullYaml.split(QLatin1Char('\n'));
+    bool inGroups = false;
+    bool inProxiesList = false;
+    QString cur;
+    for (const QString &raw : lines) {
+        const QString line = raw;
+        const QString t = line.trimmed();
+        if (t.isEmpty() || t.startsWith(QLatin1Char('#')))
+            continue;
+        const int indent = line.size() - QStringView(line).trimmed().size() > 0
+                               ? int(line.indexOf(QRegularExpression(QStringLiteral("\\S"))))
+                               : 0;
+        if (indent == 0) { // 顶层键
+            inGroups = (t.startsWith(QStringLiteral("proxy-groups:")));
+            inProxiesList = false;
+            cur.clear();
+            continue;
+        }
+        if (!inGroups)
+            continue;
+        if (t.startsWith(QStringLiteral("- "))) {
+            // 组列表项开头（`- name: X`）或成员项（`- 节点名`，缩进更深）
+            const QString rest = t.mid(2).trimmed();
+            if (inProxiesList && !rest.startsWith(QStringLiteral("name:"))) {
+                members[cur].append(unquoteScalar(rest));
+                continue;
+            }
+            inProxiesList = false;
+            if (rest.startsWith(QStringLiteral("name:"))) {
+                cur = unquoteScalar(rest.mid(5));
+                if (!cur.isEmpty() && !members.contains(cur)) {
+                    members.insert(cur, QStringList());
+                    order.append(cur);
+                }
+            }
+            continue;
+        }
+        if (t.startsWith(QStringLiteral("name:"))) {
+            cur = unquoteScalar(t.mid(5));
+            if (!cur.isEmpty() && !members.contains(cur)) {
+                members.insert(cur, QStringList());
+                order.append(cur);
+            }
+            inProxiesList = false;
+            continue;
+        }
+        if (t == QStringLiteral("proxies:")) {
+            inProxiesList = true;
+            continue;
+        }
+        if (t.startsWith(QStringLiteral("proxies:"))) { // 行内数组 `proxies: [A, B]`
+            QString arr = t.mid(8).trimmed();
+            if (arr.startsWith(QLatin1Char('[')) && arr.endsWith(QLatin1Char(']'))) {
+                arr = arr.mid(1, arr.size() - 2);
+                for (const QString &m : arr.split(QLatin1Char(',')))
+                    if (!m.trimmed().isEmpty())
+                        members[cur].append(unquoteScalar(m));
+            }
+            inProxiesList = false;
+            continue;
+        }
+        inProxiesList = false; // 其它键（type/url/interval…）结束成员列表
+    }
+
+    // 第二遍：每组沿「第一个成员」往下走到叶子，带环检测。
+    QHash<QString, QString> leaf;
+    for (const QString &g : order) {
+        QSet<QString> seen;
+        QString cursor = g;
+        bool ok = false;
+        while (true) {
+            if (seen.contains(cursor))
+                break; // 成环 → 该组不可解析，**不收录**（调用方据此回退核心，安全）
+            seen.insert(cursor);
+            const auto it = members.constFind(cursor);
+            if (it == members.constEnd()) { // 不是组 = 已经是节点名或 DIRECT/REJECT
+                ok = !cursor.isEmpty();
+                break;
+            }
+            if (it->isEmpty())
+                break; // 空组 → 无法解析
+            cursor = it->constFirst();
+        }
+        if (ok)
+            leaf.insert(g, cursor);
+    }
+    return leaf;
+}
+
 std::shared_ptr<const ProxyConfig> buildProxyConfig(const QString &proxiesYaml, const QString &selected,
                                                     ProxyConfig::Mode mode, QString *warn)
 {
@@ -581,6 +700,43 @@ bool proxyConfigSelfTest()
         &warnBad);
     check(bad.size() == 1 && !warnBad.isEmpty(),
           "bad node skipped, table survives, warn set");
+
+    // —— proxy-groups → 叶子（mihomo 不可用时的兜底解析）——
+    // 钉住四件事：①嵌套组一路走到具体节点；②emoji 组名的 YAML 转义被解开（`\U0001F3AF`）；
+    // ③内建 DIRECT 作为叶子；④互相引用成环的组**不收录**（调用方据此回退核心，绝不误路由）。
+    {
+        static const char kGroups[] =
+            "proxies:\n"
+            "  - {name: HK-01, type: trojan, server: a.com, port: 443, password: p}\n"
+            "proxy-groups:\n"
+            "  - name: \"\\U0001F680 \\u8282\\u70b9\\u9009\\u62e9\"\n"
+            "    type: select\n"
+            "    proxies:\n"
+            "      - HK-01\n"
+            "  - name: \"\\U0001F3AF \\u5168\\u7403\\u76f4\\u8fde\"\n"
+            "    type: select\n"
+            "    proxies: [DIRECT, HK-01]\n"
+            "  - name: nested\n"
+            "    type: select\n"
+            "    proxies:\n"
+            "      - \"\\U0001F680 \\u8282\\u70b9\\u9009\\u62e9\"\n"
+            "  - name: loopA\n"
+            "    type: select\n"
+            "    proxies:\n"
+            "      - loopB\n"
+            "  - name: loopB\n"
+            "    type: select\n"
+            "    proxies:\n"
+            "      - loopA\n";
+        const QHash<QString, QString> leaf = parseProxyGroupsLeaf(QString::fromUtf8(kGroups));
+        const QString rocket = QString::fromUtf8("\xF0\x9F\x9A\x80 \xE8\x8A\x82\xE7\x82\xB9\xE9\x80\x89\xE6\x8B\xA9");
+        const QString target = QString::fromUtf8("\xF0\x9F\x8E\xAF \xE5\x85\xA8\xE7\x90\x83\xE7\x9B\xB4\xE8\xBF\x9E");
+        check(leaf.value(rocket) == QStringLiteral("HK-01"), "groups: emoji 组名解转义 + 解析到节点");
+        check(leaf.value(target) == QStringLiteral("DIRECT"), "groups: 行内数组 + DIRECT 叶子");
+        check(leaf.value(QStringLiteral("nested")) == QStringLiteral("HK-01"), "groups: 嵌套组走到底");
+        check(!leaf.contains(QStringLiteral("loopA")) && !leaf.contains(QStringLiteral("loopB")),
+              "groups: 成环的组不收录（宁可回退核心也不误路由）");
+    }
 
     std::fprintf(stderr, "PROXYCFG: %s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "FAILED",
                  g_fail, g_fail == 1 ? "" : "s");

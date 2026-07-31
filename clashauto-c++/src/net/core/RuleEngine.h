@@ -32,6 +32,12 @@
 struct RuleSnapshot;
 class RuleGeoDb;
 
+// 解 YAML **双引号**标量里的转义（`\U0001F3AF` → 🎯 等）。实现与理由在 RuleEngine.cpp。
+// ★ 导出成 API 是因为它不只规则要用：ProxyConfigBuilder 解析 proxy-groups 的组名时踩的是
+//   **同一个**坑（emoji 组名以转义形式写在 full.yaml 里，不解开就永远匹配不上）。
+//   共用一份实现，避免两处各写一遍再慢慢漂移。
+QString decodeYamlEscapes(const QString &in);
+
 class RuleEngine
 {
 public:

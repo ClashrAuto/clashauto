@@ -16,6 +16,7 @@
 
 #include "ProxyConfig.h"
 
+#include <QHash>
 #include <QString>
 #include <QVector>
 
@@ -34,6 +35,21 @@ QVector<ProxyNode> parseClashProxies(const QString &proxiesYaml, QString *warn =
 //   selected 为当前选中节点名；mode 为分流模式。返回的 shared_ptr 可直接喂给 ProxyConfigStore::reload。
 std::shared_ptr<const ProxyConfig> buildProxyConfig(const QString &proxiesYaml, const QString &selected,
                                                     ProxyConfig::Mode mode, QString *warn = nullptr);
+
+// 从 full.yaml 的 `proxy-groups:` 解析出「策略组 → 叶子」映射。**mihomo 不可用时的兜底。**
+//
+// ★ 为什么需要：Rule 模式的规则 target 绝大多数是**组名**（🎯 全球直连 / 🚀 节点选择 …），
+//   没有这张表就 nodeByName 必失配、整类回退核心。平时这张表来自 mihomo 的 REST
+//   （ClashService::groupLeafMap，那是**权威**的——它含用户手选、并由核心的 store-selected 持久化）。
+//   但那正是数据面最后一条隐藏的 mihomo 依赖：核心一停，Rule 模式就解析不出目标、全部回退到
+//   一个已经不在的核心。本函数从我们**自己生成**的 full.yaml 里把组结构解析出来顶上。
+//
+// 解析规则（对齐 mihomo 在「用户没手选过」时的行为）：组的叶子 = 其 `proxies:` 列表的**第一项**；
+// 该项若还是组名就继续往下走，直到落到具体节点名或内建 DIRECT/REJECT。带环检测（组互相引用时
+// 该组判为不可解析，直接不收录 → 调用方回退核心，安全）。
+//
+// ⚠️ 局限（务必知情）：它给的是**默认选择**，不是用户手选。所以只在 mihomo 的权威表拿不到时才用。
+QHash<QString, QString> parseProxyGroupsLeaf(const QString &fullYaml);
 
 // 正确性自测（COAST_PROXYCFG_SELFTEST=1，见 main_qml.cpp）：用内置样例 YAML（ss / vmess / vless /
 // vless+reality / trojan / hysteria2 / tuic 各一条，含 ws-opts、sni、reality-opts、alpn，两种缩进形状）
