@@ -281,6 +281,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         target_sources(clashauto-qml PRIVATE
             src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
     endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # 本机 TUN 入口（进程内「增强」）：把裸 IP 包合成以太帧后喂给同一套 NetStack/lwIP，
+        # 上层一行不用改。目前只有 Linux 实现（linux/if_tun.h）；Windows(wintun)/macOS(utun) 待做。
+        # 现在还没有调用方——先编进来，免得它悄悄腐烂。
+        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_linux.cpp)
+    endif()
     target_sources(clashauto-qml PRIVATE
         src/net/NetStack.cpp src/net/NetStack.h
         src/net/NdpSpoofer.cpp src/net/NdpSpoofer.h  # IPv6 的 ICMPv6/NDP 投毒器（ArpSpoofer 的 v6 对应物）
