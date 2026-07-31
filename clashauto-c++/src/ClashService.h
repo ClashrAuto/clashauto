@@ -52,7 +52,10 @@ public:
     void setClearConnectionsOnSwitch(bool enabled);
     void selectNode(const QString &name);
     void clearConnections();
-    void fetchConnections(std::function<void(QJsonArray)> callback);
+    // invokeOnError=true：请求失败（核心不在/超时）也以**空数组**回调一次 —— 供 QmlBridge 的
+    // 连接列表合并用：核心不在时列表仍要刷新（进程内连接由 InprocTelemetry 补上），callback 不来
+    // 整个合并就停摆。默认 false 保持旧行为（DevicesController 等调用方失败时不动现状）。
+    void fetchConnections(std::function<void(QJsonArray)> callback, bool invokeOnError = false);
     void closeConnection(const QString &id);
     void refreshNodes();
     void testDelays(bool thenSpeed = false); // thenSpeed=true：延迟测完后，对有效延迟节点自动跑下载测速
