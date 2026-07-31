@@ -149,7 +149,9 @@ public final class AppState {
         // 放进 Task：自愈可能要注销 + 退避重试，最坏几秒钟，不能卡在启动路径上。
         Task { [weak self] in
             let heal = await MacHelperClient.ensureRegisteredForCurrentBuild()
-            if heal.isNoteworthy { self?.append(log: "免密助手：\(heal)") }
+            if heal.isNoteworthy {
+                self?.append(log: String(format: "免密助手：%@".t, "\(heal)"))
+            }
         }
 
         guard ProcessInfo.processInfo.environment["COAST_NO_AUTOSTART"] != "1" else {
@@ -210,7 +212,7 @@ public final class AppState {
                     changed = changed || result.changed
                 }
                 if changed {
-                    self.append(log: "订阅自动更新:有变化,已重建配置")
+                    self.append(log: "订阅自动更新:有变化,已重建配置".t)
                     await self.controller.rebuildConfig()
                 }
             }

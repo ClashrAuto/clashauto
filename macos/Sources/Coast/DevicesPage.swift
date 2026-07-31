@@ -61,7 +61,7 @@ struct DevicesPage: View {
             }
             .disabled(scanning)
             Spacer()
-            Text("\(rows.count) 台")
+            Text(String(format: "%d 台".t, rows.count))
                 .font(.system(size: 11)).foregroundStyle(theme.textMuted)
         }
         .padding(10)
@@ -107,7 +107,7 @@ struct DevicesPage: View {
             Image(systemName: enabledCount > 0 ? "network" : "info.circle")
                 .font(.system(size: 10)).foregroundStyle(theme.textMuted)
             if enabledCount > 0 {
-                Text("\(enabledCount) 台设备已接管 · 设备端无需任何配置")
+                Text(String(format: "%d 台设备已接管 · 设备端无需任何配置".t, enabledCount))
                     .font(.system(size: 10)).foregroundStyle(theme.textSecondary)
             } else {
                 Text("打开开关即可接管该设备的流量，设备端无需任何配置".t)

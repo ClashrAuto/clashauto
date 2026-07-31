@@ -122,7 +122,7 @@ struct BandwidthChart: View {
                     .stroke(theme.accentStrong.opacity(0.7), lineWidth: 1.5)
             }
             .overlay(alignment: .topLeading) {
-                Text("峰值 \(Formatting.rate(Int64(peak)))")
+                Text(String(format: "峰值 %@".t, Formatting.rate(Int64(peak))))
                     .font(.system(size: 10))
                     .foregroundStyle(theme.textMuted)
                     .padding(6)
@@ -350,7 +350,7 @@ struct TodayTrafficCard: View {
                 RoundedRectangle(cornerRadius: 1)
                     .fill(bytes > 0 ? theme.accent : theme.textMuted.opacity(0.15))
                     .frame(height: max(2, CGFloat(bytes) / CGFloat(peak) * 44))
-                    .help("\(hour) 点：\(Formatting.bytes(bytes))")
+                    .help(String(format: "%d 点：%@".t, hour, Formatting.bytes(bytes)))
             }
         }
         .frame(height: 44)

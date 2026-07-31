@@ -38,14 +38,14 @@ struct AboutPage: View {
                             .disabled(checking)
                         if appUpdateAvailable, let release = appRelease {
                             UpdateBadge(text: "new")
-                            Text("有新版 \(release.tag)")
+                            Text(String(format: "有新版 %@".t, release.tag))
                                 .font(.system(size: 12)).foregroundStyle(theme.danger)
                             Button("前往下载".t) { openReleasePage() }
                         }
                         Spacer()
                     }
                     if let coreTag {
-                        Text("内核最新版：\(coreTag)（在「设置 → 更新」里下载）")
+                        Text(String(format: "内核最新版：%@（在「设置 → 更新」里下载）".t, coreTag))
                             .font(.system(size: 11)).foregroundStyle(theme.textMuted)
                     }
                     if state.config.receiveBeta {
@@ -58,7 +58,7 @@ struct AboutPage: View {
                 }
 
                 if let release = appRelease, !release.notes.isEmpty {
-                    group("更新说明（\(release.tag)）") {
+                    group(String(format: "更新说明（%@）".t, release.tag)) {
                         Text(release.notes)
                             .font(.system(size: 11))
                             .foregroundStyle(theme.textSecondary)
@@ -118,7 +118,7 @@ struct AboutPage: View {
             coreTag = try await checker.latestCoreTag()
             message = appUpdateAvailable ? "" : "已是最新版本".t
         } catch {
-            message = "检查更新失败：\(error.localizedDescription)"
+            message = String(format: "检查更新失败：%@".t, error.localizedDescription)
         }
     }
 

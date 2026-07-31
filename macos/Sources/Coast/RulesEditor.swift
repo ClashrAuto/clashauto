@@ -14,6 +14,12 @@ struct RulesEditor: View {
     @State private var areas: [RulesStore.Area] = []
     @State private var filter = ""
     @State private var message = ""
+    /// 这条消息是不是错误。
+    ///
+    /// **不能靠 `message.hasPrefix("已")` 去猜** —— 成功文案是 `"已保存并应用".t`，
+    /// 翻译之后英文是 “Saved and applied”、日文是「保存して適用しました」，都不以「已」开头，
+    /// 于是**每一种非中文语言里保存成功都会被标成红色错误**。判据必须由设置方直接给出。
+    @State private var messageIsError = false
     @State private var tab = 0
 
     /// full.yaml 里现有的节点与策略组，供「目标策略」下拉用。
@@ -42,7 +48,7 @@ struct RulesEditor: View {
                 if !message.isEmpty {
                     Text(message)
                         .font(.system(size: 11))
-                        .foregroundStyle(message.hasPrefix("已") ? theme.textMuted : theme.danger)
+                        .foregroundStyle(messageIsError ? theme.danger : theme.textMuted)
                 }
                 Spacer()
                 Button("关闭".t) { dismiss() }
@@ -191,22 +197,27 @@ struct RulesEditor: View {
         // 完全无从关联到自己刚加的那条。
         for (offset, rule) in rules.enumerated() {
             if let reason = RulesStore.validate(rule) {
-                message = "第 \(offset + 1) 条规则：\(reason)"
+                message = String(format: "第 %d 条规则：%@".t, offset + 1, reason)
+                messageIsError = true
                 return
             }
         }
         for (offset, area) in areas.enumerated() {
             if let reason = RulesStore.validate(area) {
-                message = "第 \(offset + 1) 个分组：\(reason)"
+                message = String(format: "第 %d 个分组：%@".t, offset + 1, reason)
+                messageIsError = true
                 return
             }
         }
         guard store.save(rules: rules, areas: areas) else {
             message = "写入 rules.json 失败".t
+            messageIsError = true
             return
         }
         message = "已保存，正在重建配置…".t
+        messageIsError = false
         await state.controller.rebuildConfig()
         message = "已保存并应用".t
+        messageIsError = false
     }
 }

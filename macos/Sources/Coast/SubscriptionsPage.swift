@@ -109,7 +109,7 @@ struct SubscriptionsPage: View {
                     .font(.system(size: 13))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1)
-                Text("\(summary.enabledNodeCount)/\(summary.nodeCount) 个节点")
+                Text(String(format: "%d/%d 个节点".t, summary.enabledNodeCount, summary.nodeCount))
                     .font(.system(size: 10))
                     .foregroundStyle(theme.textMuted)
             }
@@ -241,7 +241,7 @@ struct SubscriptionsPage: View {
         defer { busy = false }
         var changed = false
         for index in summaries.indices {
-            message = "正在更新 \(summaries[index].name)…"
+            message = String(format: "正在更新 %@…".t, summaries[index].name)
             let result = await state.subscriptions.updateSubscription(at: index)
             changed = changed || result.changed
         }

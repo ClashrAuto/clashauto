@@ -48,7 +48,7 @@ struct SettingsPage: View {
                             draft.autoStart = newValue
                             // 开机自启是系统状态，不能等「应用」—— 立刻同步，并把系统的真实结果读回来。
                             if case .failure(let error) = LaunchAtLogin.setEnabled(newValue) {
-                                message = "设置开机自启失败：\(error.localizedDescription)"
+                                message = String(format: "设置开机自启失败：%@".t, error.localizedDescription)
                             }
                             draft.autoStart = LaunchAtLogin.isEnabled
                         }
@@ -117,7 +117,7 @@ struct SettingsPage: View {
 
                 section("系统".t) {
                     HStack(spacing: 8) {
-                        Text("免密助手：\(helperText)")
+                        Text(String(format: "免密助手：%@".t, helperText))
                             .font(.system(size: 12)).foregroundStyle(theme.textSecondary)
                         Spacer()
                         Button("安装".t) { Task { helperStatus = await state.controller.installHelper() } }
@@ -255,16 +255,16 @@ struct SettingsPage: View {
                 Task { @MainActor in
                     switch progress {
                     case .checking: coreStatus = "检查中…".t
-                    case .downloading(let percent): coreStatus = "下载中 \(percent)%"
+                    case .downloading(let percent): coreStatus = String(format: "下载中 %d%%".t, percent)
                     case .installing: coreStatus = "安装中…".t
                     case .done: coreStatus = "更新内核".t
                     case .failed: coreStatus = "更新内核".t
                     }
                 }
             }
-            message = "内核已更新到 \(tag)"
+            message = String(format: "内核已更新到 %@".t, tag)
         } catch {
-            message = "内核更新失败：\(error)"
+            message = String(format: "内核更新失败：%@".t, "\(error)")
         }
         coreStatus = "更新内核".t
         if wasRunning { await state.controller.startCore() }

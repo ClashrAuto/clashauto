@@ -62,6 +62,19 @@ else
     line "settings persist" "FAIL"; ((fail++))
 fi
 
+# —— 1c. 翻译检查 ——
+#
+# 三件事：覆盖率、有中文却没标 .t 的串、译文占位符与源串是否一致。
+# 后两项都会让脚本非零退出 —— 尤其是占位符：对不上时 String(format:) 会按错误类型读参数，
+# **只在那一种语言下崩**，开发机上（中文）永远复现不了。
+echo "== 翻译检查 =="
+if python3 scripts/i18n_check.py >/tmp/coast-i18n.log 2>&1; then
+    line "i18n" "PASS ($(grep -oE '[0-9]+/[0-9]+' /tmp/coast-i18n.log | head -1))"; ((pass++))
+else
+    grep -E "^❌|^     " /tmp/coast-i18n.log | head -12
+    line "i18n" "FAIL"; ((fail++))
+fi
+
 # —— 2. 打包 ——
 if [[ $BUILD -eq 1 ]]; then
     echo "== 打包 =="
