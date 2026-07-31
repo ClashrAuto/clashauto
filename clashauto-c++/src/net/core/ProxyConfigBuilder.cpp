@@ -220,6 +220,15 @@ bool toNode(const NodeFields &nf, ProxyNode *out)
     QString net = nf.top.value(QStringLiteral("network")).trimmed().toLower();
     n.network = (net == QStringLiteral("tcp")) ? QString() : net; // 空 = tcp
 
+    // ss 插件（obfs / v2ray-plugin / …）。进程内 ss 未实现任何插件，解析出来只为让拨号侧据此回退核心
+    // （见 registerShadowsocks 的守卫）——绝不拿裸 AEAD 去拨一个套了 obfs 的服务端。
+    n.plugin = unquote(nf.top.value(QStringLiteral("plugin"))).trimmed().toLower();
+
+    // hysteria2 的包混淆 obfs（salamander）。进程内 QUIC(msquic) 不掌握 UDP socket，无法在包层做混淆，
+    // 故未实现；解析出来只为让拨号侧据此回退核心（见 registerHysteria2 的守卫）——绝不拿明文 QUIC 去拨
+    // 一个只认混淆包的服务端（那样服务端整段静默丢弃，真机上表现为「网络不通」）。
+    n.obfs = unquote(nf.top.value(QStringLiteral("obfs"))).trimmed().toLower();
+
     // ws-opts（单行 flow 或块式）→ wsPath / wsHost
     const QString wsInline = nf.top.value(QStringLiteral("ws-opts"));
     const QStringList wsBlock = nf.blocks.value(QStringLiteral("ws-opts"));

@@ -63,6 +63,11 @@ public:
     //   所以 PASS 就等于「整条链路都在进程内」。
     static int selfTest();
 
+    // 出站探针（COAST_OUTBOUND_PROBE=1）：**完全不碰 TUN**，起本机入站 + 指定节点做出站。
+    // 用来把「节点/出站本身通不通」和「TUN 那层有没有问题」分开 —— 前提没验就测组合，
+    // 失败了分不清是哪一层（我已经在这上面误判过一次）。
+    static int outboundProbe();
+
 signals:
     void activeChanged();
     void logged(const QString &line);

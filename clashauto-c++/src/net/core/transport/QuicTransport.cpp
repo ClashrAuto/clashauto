@@ -120,6 +120,7 @@ public:
     void emitData(const QByteArray &b) { emit q->dataReceived(b); }
     void emitSendCompleted(qint64 n) { emit q->sendCompleted(n); }
     void emitPeerShutdown() { emit q->peerSendShutdown(); }
+    void emitPeerReceiveAborted() { emit q->peerReceiveAborted(); }
     void emitFailed(const QString &r)
     {
         if (closedEmitted)
@@ -185,8 +186,14 @@ public:
             post([this] { emitPeerShutdown(); });
             break;
         case QUIC_STREAM_EVENT_PEER_SEND_ABORTED:
+            // 对端 RESET_STREAM：它异常中止了**自己的发送方向**(下行)。这是真正的下行中止，作为 failed
+            // 上报（established 后由上层当作 close 处理，见 Hysteria2Outbound）。
+            post([this] { emitFailed(QStringLiteral("quic stream reset by peer (RESET_STREAM)")); });
+            break;
         case QUIC_STREAM_EVENT_PEER_RECEIVE_ABORTED:
-            post([this] { emitFailed(QStringLiteral("quic stream aborted by peer")); });
+            // 对端 STOP_SENDING：它不再读我们的**上行**。这**不是故障** —— 下行可能还有数据+FIN 在途。
+            // 单独发一个信号，绝不能走 failed（否则会拆连接、把已到的响应体丢掉，真机上表现为 curl=000）。
+            post([this] { emitPeerReceiveAborted(); });
             break;
         case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
             post([this] { emitClosed(); });
@@ -541,6 +548,24 @@ void QuicTransport::openConnection(const QString &host, quint16 port, const QByt
     //   双向保持 0：Hy2/TUIC 的服务器不会向客户端开双向流，不开口就不必伺候。
     QUIC_SETTINGS settings;
     std::memset(&settings, 0, sizeof(settings));
+    // —— 握手/空闲的耐心与保活 ——
+    // ★ 真机实测(HK hysteria2 机场节点, 从 Pi 拨)：服务端**忽略我们最初 1~2 个 Initial**(疑似首包
+    //   限速/防扫)，直到第 3 个 Initial(约 +3s, QUIC PTO 指数退避)才回握手。默认设置下这偶发触发
+    //   「空闲超时(status=0x3e)」→ 握手前功尽弃。给足耐心即可稳定：
+    //     · HandshakeIdleTimeoutMs —— 握手期最长静默。放到 20s，容得下多次 PTO 重传。
+    //     · IdleTimeoutMs —— 连接建立后的空闲上限。放到 30s（对齐 hysteria2 客户端惯例）。
+    //     · KeepAliveIntervalMs —— 主动保活(PING)，别让短暂空闲把连接判死；也顺带压制中间 NAT 老化。
+    //   这几项**不设**时吃 msquic 默认（握手 10s / 无保活），正是偶发失败的来源。
+    settings.HandshakeIdleTimeoutMs = 20000;
+    settings.IsSet.HandshakeIdleTimeoutMs = 1;
+    // ★ 不动 InitialRttMs（保持 msquic 默认 333ms）。曾试过压到 150ms 想让丢包时更快重传，但收益边际、
+    //   且更激进的 Initial 重传会放大「单位时间内的握手包数」——真机上疑似因此触发了机场服务端/链路的
+    //   反刷限速（连打上百次冷握手后，服务端对本机 IP 的新握手整段静默，而同机 mihomo 因重传更温和仍能拨通）。
+    //   与 mihomo 的默认行为对齐更稳。真正让 Hy2 能用的是下面几处协议 bug 的修复，不是这个旋钮。
+    settings.IdleTimeoutMs = 30000;
+    settings.IsSet.IdleTimeoutMs = 1;
+    settings.KeepAliveIntervalMs = 10000;
+    settings.IsSet.KeepAliveIntervalMs = 1;
     settings.PeerUnidiStreamCount = 16;
     settings.IsSet.PeerUnidiStreamCount = 1;
     settings.PeerBidiStreamCount = 0;

@@ -233,6 +233,11 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsSet("COAST_TUNSERVICE_SELFTEST"))
         return LocalTunService::selfTest();
 
+    // 出站探针（COAST_OUTBOUND_PROBE=1）：不碰 TUN，只验「这个节点经我们的进程内出站通不通」。
+    // 把前提和组合分开测 —— 两者混在一起时，一个 000 读不出任何结论。
+    if (qEnvironmentVariableIsSet("COAST_OUTBOUND_PROBE"))
+        return LocalTunService::outboundProbe();
+
     if (qEnvironmentVariableIsSet("COAST_SELFROUTE_SELFTEST")) {
         QString report;
         const bool ok = SelfRouteGuard::selfTest(&report);

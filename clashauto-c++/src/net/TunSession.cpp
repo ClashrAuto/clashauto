@@ -103,6 +103,26 @@ bool TunSession::start(const Config &cfg, QString *err)
         if (!run(ip, {"rule", "add", "fwmark", mark, "lookup", "main", "pref", "100"}, err))
             return bail(*err);
 
+        // ★★ QUIC/Hysteria2 的补丁 rule（pref 90，排在 TUN 表 pref 200 之前）。
+        //   真机实证（Pi，tcpdump）：只有 fwmark 那条时，Hy2 的 UDP 握手包**全部走 coast0 出去**
+        //   （5 个包在 coast0、0 个在物理口）→ 死循环，握手永不完成、curl=000。根因：msquic 自持
+        //   UDP socket，SelfRouteGuard 够不着它的 fd、**打不上 fwmark**，于是这些包不匹配 pref 100 的
+        //   fwmark 规则，落到 pref 200 的 TUN 表 → 进 coast0。
+        //   但 msquic **有**被 QUIC_PARAM_CONN_LOCAL_ADDRESS 把源地址钉在物理出口 IP 上（见
+        //   QuicTransport.cpp），所以按**源地址**兜一条 `from <物理IP> lookup main` 就能把它们捞回物理口。
+        //   只匹配「显式绑定了物理 IP 的 socket」——正是 msquic 那些；本机应用的 socket 未绑此源，
+        //   路由决定进 coast0 后源地址才变成 TUN 网卡地址，不会误命中，故不影响 TUN 对本机流量的接管。
+        for (const bool v6 : {false, true}) {
+            const QString phys = SelfRouteGuard::physicalAddress(v6);
+            if (phys.isEmpty())
+                continue;
+            const QString from = phys + (v6 ? QStringLiteral("/128") : QStringLiteral("/32"));
+            pushUndo(ip, {"rule", "del", "from", from, "lookup", "main", "pref", "90"});
+            QString ignore;
+            // 不致命：v6 物理地址常常没有；只要 v4 那条装上，IPv4 的 Hy2 就不再环路。装失败也不回滚整个接管。
+            run(ip, {"rule", "add", "from", from, "lookup", "main", "pref", "90"}, &ignore);
+        }
+
         // 其它所有包：pref 200，查 TUN 专用表
         pushUndo(ip, {"rule", "del", "lookup", table, "pref", "200"});
         if (!run(ip, {"rule", "add", "lookup", table, "pref", "200"}, err))

@@ -9,6 +9,7 @@
 #include "core/ProxyConfig.h"
 #include "core/ProxyConfigBuilder.h" // 自检可喂真实订阅：从 full.yaml 解析节点
 #include "core/SelfRouteGuard.h"
+#include "inbound/MixedInbound.h" // 出站探针：不碰 TUN，直接用本机入站验节点
 
 #include <QEventLoop>
 #include <QFile>
@@ -187,6 +188,87 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
 //   于是 curl 跑的那几秒里一帧都没被从 TUN 读走 → 必然超时 → 看起来像"TUN 不通"，
 //   实际是测试驱动自己把链路掐死了（当时 A/B 实测：阻塞版 rx=1、非阻塞版 rx=61）。
 //   所以这里用 QEventLoop + finished 信号，全程让事件循环转着。
+// 出站探针（COAST_OUTBOUND_PROBE=1）——**完全不碰 TUN**。
+//
+// 存在的理由是一次真实的误判：我拿真实订阅测「TUN + Hy2」，两组都 curl=000，差点就去改
+// TUN/QUIC 那边的代码 —— 可我**从没验证过这些节点经我们的进程内出站单独能不能用**。
+// 前提没验就测组合，失败了根本分不清是哪一层。这个探针就是补那个前提：
+//   起本机混合入站(127.0.0.1:<port>) → 用真实订阅的指定节点做出站 → curl -x 打过去
+// 链路里没有 TUN、没有 lwIP、没有路由改动。它不通 = 节点或出站实现的问题，与 TUN 无关。
+//
+// 严格模式(fallback=0)：想回退 mihomo 就当场失败，所以 PASS 即证明是我们自己的出站拨通的。
+int LocalTunService::outboundProbe()
+{
+    const QString yamlPath = qEnvironmentVariable("COAST_TUNSERVICE_YAML");
+    const QString wantNode = qEnvironmentVariable("COAST_TUNSERVICE_NODE");
+    const QString target = qEnvironmentVariableIsSet("COAST_TUNSERVICE_TARGET")
+            ? qEnvironmentVariable("COAST_TUNSERVICE_TARGET")
+            : QStringLiteral("http://223.5.5.5/");
+    if (yamlPath.isEmpty() || wantNode.isEmpty()) {
+        std::fprintf(stderr, "用法：COAST_OUTBOUND_PROBE=1 COAST_TUNSERVICE_YAML=<full.yaml> "
+                             "COAST_TUNSERVICE_NODE=<节点名> [COAST_TUNSERVICE_TARGET=<url>]\n");
+        return 2;
+    }
+    QFile yf(yamlPath);
+    if (!yf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        std::fprintf(stderr, "打不开 %s\n", qUtf8Printable(yamlPath));
+        return 2;
+    }
+    const QString yaml = QString::fromUtf8(yf.readAll());
+    yf.close();
+    // 让入站把每条会话的收口原因打出来 —— curl 只给一个 000，真实错误（TLS 校验失败 / 认证被拒 /
+    // 连接被拒 / 传输不支持回退核心…）全在这条日志里。不设的话探针只能告诉你「不通」，不告诉你「为什么」。
+    qputenv("COAST_INBOUND_VERBOSE", "1");
+    auto cfg = coastcore::buildProxyConfig(yaml, wantNode, ProxyConfig::Mode::Global);
+    const ProxyNode *hit = nullptr;
+    if (cfg) {
+        for (const ProxyNode &n : cfg->nodes()) {
+            if (n.name == wantNode) { hit = &n; break; }
+        }
+    }
+    if (!hit) {
+        std::fprintf(stderr, "解析不出节点「%s」——测下去只会测到别的东西\n", qUtf8Printable(wantNode));
+        return 2;
+    }
+    std::fprintf(stderr, "=== 出站探针（无 TUN）：节点「%s」type=%s server=%s:%u 目标=%s ===\n",
+                 qUtf8Printable(hit->name), qUtf8Printable(hit->type), qUtf8Printable(hit->server),
+                 unsigned(hit->port), qUtf8Printable(target));
+
+    auto store = std::make_shared<ProxyConfigStore>();
+    store->reload(cfg);
+    auto *factory = new CoreDialerFactory(store.get(), nullptr);
+    factory->setStrict(true); // 想回退 mihomo 就当场失败
+    factory->setRouter(coastcore::makeRouter(store, nullptr, false));
+
+    MixedInbound inbound(factory);
+    const quint16 port = 17891;
+    if (!inbound.listen(port)) {
+        std::fprintf(stderr, "入站监听 %u 失败\n", unsigned(port));
+        delete factory;
+        return 2;
+    }
+
+    QProcess p;
+    QEventLoop loop;
+    QObject::connect(&p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), &loop,
+                     &QEventLoop::quit);
+    p.start(QStringLiteral("curl"),
+            {QStringLiteral("-s"), QStringLiteral("-o"), QStringLiteral("/dev/null"),
+             QStringLiteral("-w"), QStringLiteral("%{http_code}"), QStringLiteral("--max-time"),
+             QStringLiteral("15"), QStringLiteral("-x"),
+             QStringLiteral("http://127.0.0.1:%1").arg(port), target});
+    QTimer::singleShot(20000, &loop, &QEventLoop::quit);
+    loop.exec();
+    const QString code = QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+    const bool ok = !code.isEmpty() && code != QStringLiteral("000");
+    std::fprintf(stderr, "经该节点 curl=%s  %s\n", qUtf8Printable(code),
+                 ok ? "✓ 出站本身没问题" : "✗ 出站就不通 —— 与 TUN 无关");
+    inbound.stop();
+    delete factory;
+    std::fprintf(stderr, "=== 出站探针 %s ===\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
+}
+
 int LocalTunService::selfTest()
 {
     const QString target = qEnvironmentVariableIsSet("COAST_TUNSERVICE_TARGET")

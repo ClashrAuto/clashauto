@@ -41,6 +41,8 @@ struct ProxyNode
     QString uuid;     // vmess / vless 的 UUID
     QString sni;      // trojan / tls 的 SNI（ServerName）
     QString network;  // 传输层："tcp" | "ws" | "grpc" | ...（留空=tcp）
+    QString plugin;   // ss 的插件（"obfs" | "v2ray-plugin" | ...；留空=无插件，裸 AEAD）——进程内 ss 未实现插件
+    QString obfs;     // hysteria2 的包混淆（"salamander" | ...；留空=无）——进程内 QUIC 未实现，见 registerHysteria2
     QString wsPath;   // ws 传输的 path
     QString wsHost;   // ws 传输的 Host 头
     bool tls = false; // 是否叠 TLS

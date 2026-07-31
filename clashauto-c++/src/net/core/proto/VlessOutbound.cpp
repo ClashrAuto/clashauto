@@ -582,8 +582,23 @@ void VlessOutboundUdp::emitClosed()
 
 void registerVless(OutboundRegistry &reg)
 {
+    // 本单元只实现了 tcp 与 ws 两种传输（见 VlessStream::start）。grpc/h2/httpupgrade 等未实现：
+    // 遇到就返回 nullptr，让拨号侧回退核心，绝不 fall through 到裸 TCP 去拨一个期待别种分帧的服务端
+    // （那会表现成「网络不通」，把「传输没实现」伪装成「节点坏了」）。理由详见 OutboundRegistry.h。
+    static const QStringList kSupported = {QStringLiteral("ws")};
     reg.registerProto(
         QStringLiteral("vless"),
-        [](const ProxyNode &n, QObject *p) -> IOutboundTcp * { return new VlessOutboundTcp(n, p); },
-        [](const ProxyNode &n, QObject *p) -> IOutboundUdp * { return new VlessOutboundUdp(n, p); });
+        [](const ProxyNode &n, QObject *p) -> IOutboundTcp * {
+            if (!coastTransportSupported(n.network, kSupported)) {
+                qInfo("[vless] 节点「%s」传输 network=%s 未实现（本单元仅 tcp/ws）→ 回退核心",
+                      qUtf8Printable(n.name), qUtf8Printable(n.network));
+                return nullptr;
+            }
+            return new VlessOutboundTcp(n, p);
+        },
+        [](const ProxyNode &n, QObject *p) -> IOutboundUdp * {
+            if (!coastTransportSupported(n.network, kSupported))
+                return nullptr;
+            return new VlessOutboundUdp(n, p);
+        });
 }

@@ -527,7 +527,15 @@ void MixedInbound::closeSession(Session *s, const char *why)
     if (!s || s->gone)
         return;
     s->gone = true;
-    Q_UNUSED(why);
+    // 会话收口原因通常无需刷屏；但排查「出站到底为什么不通」时它是唯一的真相来源
+    // （curl 只给一个 000）。COAST_INBOUND_VERBOSE=1 时把每条会话的收口原因 + 目标打出来
+    // —— 出站探针(outboundProbe)会自动开这个，好让 curl=000 背后的真实错误浮出来。
+    static const bool verbose = qEnvironmentVariableIsSet("COAST_INBOUND_VERBOSE");
+    if (verbose && why) {
+        std::fprintf(stderr, "[INBOUND] 会话收口 target=%s established=%d 原因=%s\n",
+                     qUtf8Printable(s->target), int(s->established), why);
+        std::fflush(stderr);
+    }
     m_sessions.remove(s);
     if (s->out) {
         s->out->disconnect(this);
@@ -550,6 +558,15 @@ void MixedInbound::closeSession(Session *s, const char *why)
     }
     if (s->client) {
         s->client->disconnect(this);
+        // ★ 先把还缓在写队列里的下行字节冲出去，再关。
+        //   典型场景：上游(如 Hy2 代理流)把「响应体 + FIN」几乎同时给过来 —— dataReceived 刚把响应体
+        //   write() 进客户端 socket 的写缓冲，紧接着 peerSendShutdown 就触发 closeSession。若此刻直接
+        //   close()+deleteLater()，QAbstractSocket 析构**不等**写缓冲排空，那段响应体会连同对象一起被丢，
+        //   客户端(curl)只看到连接被关、拿不到任何响应 → 表现为 curl=000。flush() 把写缓冲同步推进 OS
+        //   发送缓冲，随后 close() 再发 FIN，客户端就能读到完整响应再收到 EOF。（真机 Hy2 实证：源站
+        //   Connection: close 的 404 响应，修此点前 curl=000、修后 curl=404。）
+        if (s->client->state() == QAbstractSocket::ConnectedState && s->client->bytesToWrite() > 0)
+            s->client->flush();
         s->client->close();
         s->client->deleteLater();
         s->client = nullptr;

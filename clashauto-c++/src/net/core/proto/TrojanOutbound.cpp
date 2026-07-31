@@ -510,8 +510,22 @@ bool TrojanOutboundUdp::isReady() const
 
 void registerTrojan(OutboundRegistry &reg)
 {
+    // 本单元只做 Trojan-over-TLS 裸 TCP，不看 network、没实现 ws/grpc 传输封装。带 `network: ws/grpc`
+    // 的 trojan 节点若被静默当成裸 TLS 去拨，会失败并伪装成「网络不通」。故非裸 TCP 一律返回 nullptr
+    // 回退核心。理由详见 OutboundRegistry.h 的传输守卫注释。
     reg.registerProto(
         QStringLiteral("trojan"),
-        [](const ProxyNode &n, QObject *p) -> IOutboundTcp * { return new TrojanOutboundTcp(n, p); },
-        [](const ProxyNode &n, QObject *p) -> IOutboundUdp * { return new TrojanOutboundUdp(n, p); });
+        [](const ProxyNode &n, QObject *p) -> IOutboundTcp * {
+            if (!coastTransportSupported(n.network, {})) {
+                qInfo("[trojan] 节点「%s」传输 network=%s 未实现（本单元仅裸 TCP+TLS）→ 回退核心",
+                      qUtf8Printable(n.name), qUtf8Printable(n.network));
+                return nullptr;
+            }
+            return new TrojanOutboundTcp(n, p);
+        },
+        [](const ProxyNode &n, QObject *p) -> IOutboundUdp * {
+            if (!coastTransportSupported(n.network, {}))
+                return nullptr;
+            return new TrojanOutboundUdp(n, p);
+        });
 }

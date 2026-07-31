@@ -452,10 +452,29 @@ public:
         QObject::connect(proxy, &coastcore::QuicStream::sendCompleted, q,
                          [this](qint64 n) { emit q->upstreamBytesWritten(n); });
         QObject::connect(proxy, &coastcore::QuicStream::peerSendShutdown, q,
-                         [this] { emitClosed(); });
-        QObject::connect(proxy, &coastcore::QuicStream::closed, q, [this] { emitClosed(); });
+                         [this] {
+                             if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+                                 fprintf(stderr, "[HY2] proxy peerSendShutdown established=%d\n",
+                                         int(established));
+                             emitClosed();
+                         });
+        // 对端 STOP_SENDING(它不再读我们的上行)——常态收尾(源站响应完就 close)，**不是故障**：
+        // 只记一笔、绝不 emitClosed/fail。下行的响应体+FIN 还在路上，拆连接会把它们丢掉→curl=000。
+        QObject::connect(proxy, &coastcore::QuicStream::peerReceiveAborted, q, [this] {
+            if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+                fprintf(stderr, "[HY2] proxy peerReceiveAborted(STOP_SENDING) established=%d —— 忽略\n",
+                        int(established));
+        });
+        QObject::connect(proxy, &coastcore::QuicStream::closed, q, [this] {
+            if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+                fprintf(stderr, "[HY2] proxy closed established=%d\n", int(established));
+            emitClosed();
+        });
         QObject::connect(proxy, &coastcore::QuicStream::failed, q,
                          [this](const QString &r) {
+                             if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+                                 fprintf(stderr, "[HY2] proxy failed established=%d 原因=%s\n",
+                                         int(established), qUtf8Printable(r));
                              if (established)
                                  emitClosed();
                              else
@@ -513,6 +532,9 @@ public:
             const QByteArray rest = respRx.mid(pos);
             respRx.clear();
             established = true;
+            if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+                fprintf(stderr, "[HY2] TCPResponse status=%d 建立成功 rest=%d pending=%d\n",
+                        int(status), int(rest.size()), int(pending.size()));
             emit q->established();
             if (!pending.isEmpty()) {
                 proxy->send(pending);
@@ -522,6 +544,8 @@ public:
                 emit q->dataReceived(rest);
             return;
         }
+        if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+            fprintf(stderr, "[HY2] proxy 下行 %d 字节 readPaused=%d\n", int(b.size()), int(readPaused));
         if (!readPaused && !b.isEmpty())
             emit q->dataReceived(b);
     }
@@ -614,6 +638,9 @@ void Hysteria2OutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, co
     connect(d->quic, &coastcore::QuicTransport::connectionFailed, this,
             [this](const QString &r) { d->fail(r); });
     connect(d->quic, &coastcore::QuicTransport::connectionClosed, this, [this] {
+        if (qEnvironmentVariableIsSet("COAST_HY2_DEBUG"))
+            fprintf(stderr, "[HY2] connectionClosed established=%d 原因=%s\n", int(d->established),
+                    qUtf8Printable(d->quic->lastCloseReason()));
         if (d->established)
             d->emitClosed();
         else
@@ -995,13 +1022,28 @@ bool hysteria2QpackSelfTest(QString *why)
 
 // ============================ 注册 ============================
 
+// hysteria2 的包混淆(obfs, 目前只有 salamander)未实现：msquic 自持 UDP socket，不像 quic-go 能注入
+// PacketConn，无法在包层做混淆/去混淆。带 obfs 的节点若被拿明文 QUIC 去拨，服务端会**整段静默丢弃**
+// （去混淆明文包得到乱码 → 直接扔），真机上表现为「握手一直不回、看着像网络不通」。故有 obfs 一律返回
+// nullptr 回退核心(mihomo 支持 salamander)。真机实证：JP1(obfs=salamander) 明文拨 0/12，经 mihomo 8/8。
+// 理由与 grpc/plugin 同源，见 OutboundRegistry.h 的传输守卫注释。
+static bool hy2Unsupported(const ProxyNode &n)
+{
+    if (!n.obfs.isEmpty() && n.obfs != QStringLiteral("none")) {
+        qInfo("[hysteria2] 节点「%s」obfs=%s 未实现（msquic 无法在包层做混淆）→ 回退核心",
+              qUtf8Printable(n.name), qUtf8Printable(n.obfs));
+        return true;
+    }
+    return false;
+}
+
 void registerHysteria2(OutboundRegistry &reg)
 {
     auto tcp = [](const ProxyNode &n, QObject *p) -> IOutboundTcp * {
-        return new Hysteria2OutboundTcp(n, p);
+        return hy2Unsupported(n) ? nullptr : new Hysteria2OutboundTcp(n, p);
     };
     auto udp = [](const ProxyNode &n, QObject *p) -> IOutboundUdp * {
-        return new Hysteria2OutboundUdp(n, p);
+        return hy2Unsupported(n) ? nullptr : new Hysteria2OutboundUdp(n, p);
     };
     reg.registerProto(QStringLiteral("hysteria2"), tcp, udp);
     reg.registerProto(QStringLiteral("hy2"), tcp, udp); // 别名

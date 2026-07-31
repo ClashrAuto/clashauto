@@ -496,8 +496,23 @@ void RealityOutboundUdp::emitClosed()
 
 void registerReality(OutboundRegistry &reg)
 {
+    // RealityStream::start 只做裸 TCP 上的 REALITY(uTLS)+VLESS，**根本不看 network** —— 没实现 ws/grpc
+    // 等任何传输封装。真机上 vless(reality) 常带 `network: grpc`（本项目实测 HK-1 节点即是），早先它被
+    // 静默当成裸 TCP 去拨一个期待 gRPC 分帧的服务端 → 必然失败、且伪装成「网络不通」。现在：非裸 TCP
+    // 一律返回 nullptr 回退核心。理由详见 OutboundRegistry.h 的传输守卫注释。
     reg.registerProto(
         QStringLiteral("reality"),
-        [](const ProxyNode &n, QObject *p) -> IOutboundTcp * { return new RealityOutboundTcp(n, p); },
-        [](const ProxyNode &n, QObject *p) -> IOutboundUdp * { return new RealityOutboundUdp(n, p); });
+        [](const ProxyNode &n, QObject *p) -> IOutboundTcp * {
+            if (!coastTransportSupported(n.network, {})) {
+                qInfo("[reality] 节点「%s」传输 network=%s 未实现（本单元仅裸 TCP）→ 回退核心",
+                      qUtf8Printable(n.name), qUtf8Printable(n.network));
+                return nullptr;
+            }
+            return new RealityOutboundTcp(n, p);
+        },
+        [](const ProxyNode &n, QObject *p) -> IOutboundUdp * {
+            if (!coastTransportSupported(n.network, {}))
+                return nullptr;
+            return new RealityOutboundUdp(n, p);
+        });
 }

@@ -5,9 +5,16 @@
 
 ## 一句话现状
 
-**数据面已经不需要 mihomo 了**（真机验证：杀掉核心后网关照常服务）。局域网设备、本机入站、
-本机 TUN 三条路都已在进程内跑通，TUN 那条连环路规避都验过了 —— 只差把「增强」按钮接上去。
-**控制面还完全依赖它**（节点列表 / 选择 / 延迟 / 连接 / 流量 / 日志）—— 这是现在真正的大头。
+**数据面对「进程内实现了的那部分协议/传输」已能脱离 mihomo，但真实机场订阅里有相当比例的节点
+仍必须回退核心** —— 这是 2026-07-31 晚用真实订阅（Pi .91，对照同机 mihomo）复测后修正的结论。
+早先「数据面已经不需要 mihomo 了」的证据只有 **DIRECT 直连** 和 **拿 mihomo 当参照服务端的协议握手**，
+**真实机场节点从没验过**；一验就暴露两类问题（都已修，见下）：
+- **不支持的传输/插件被静默拨错**：`vless/reality network:grpc`、`hysteria2 obfs:salamander`、`ss plugin`
+  等，进程内没实现却不报错，拿错的传输去硬拨 → 失败且伪装成「网络不通」。现已在**创建阶段返回
+  nullptr 干净回退核心**（传输守卫，见 `proto/OutboundRegistry.h`）。
+- **Hysteria2 的真机 bug**：见下节。修完 HK2-HY2 真机可用（对照 mihomo）。
+
+**控制面仍完全依赖 mihomo**（节点列表 / 选择 / 延迟 / 连接 / 流量 / 日志）—— 这是现在真正的大头。
 
 ---
 
@@ -17,7 +24,31 @@
 |---|---|---|
 | 局域网被代理设备 | ✅ **进程内** | 真机：单请求 **0.70 ms**（同路内核转发 0.5 ms）、饱和 2883 conn/s、失败率 0% |
 | 本机应用流量（系统代理） | 🟡 **已接线，端到端未验** | 入站真机验过（7891，strict 下全部 200）；**系统代理改指它这一步需要真实桌面会话，未验** |
-| 本机 TUN | ✅ **整条链路验通，只差 UI 接线** | 隔离台 10/10 全 200 `cc=10/0/0/0/0/0`；**真接管默认路由**的整体自检在 x86_64 容器 + aarch64 真机两处 PASS。环路已解决（见下节） |
+| 本机 TUN | 🟡 **链路验通；QUIC 环路 Linux 侧刚补上，端到端绿灯未拿到** | 隔离台 10/10 全 200；**真接管默认路由**的整体自检（DIRECT 出站）两处 PASS。**但真实 QUIC 节点下的环路此前从未真验**——一验就发现 Linux 仍环路，已补 `ip rule from <物理IP> lookup main`（见下节） |
+
+### 真实机场节点：谁能进程内、谁必须回退核心（2026-07-31 真机复测）
+
+用用户真实订阅（Pi `/root/sub-full.yaml`，27 vless / 19 hysteria2 / 10 tuic）+ **不碰 TUN 的出站探针**
+（本机混合入站 → strict CoreDialerFactory → 该节点 → `curl -x`）逐节点验，并**同机 mihomo 做对照**：
+
+| 节点类型 | 进程内 | 证据 / 处置 |
+|---|---|---|
+| `hysteria2`（无 obfs，如 HK2-HY2） | ✅ **可用** | 修完 3 个 bug 后 HK2-HY2 探针 **8/10 → paced 15/15**（curl=404）；对照 mihomo 15/15。剩余偶发失败是该服务端**丢我们最初 1~2 个 Initial**（约 +3s）导致的握手长尾，非协议 bug |
+| `vless`+`reality-opts`+`network:grpc`（如 HK-1） | ⛔ **回退核心** | grpc 传输未实现。守卫日志 `[reality] network=grpc 未实现 → 回退核心`。**这正是「进程内拨不通真实节点」最初被发现的那个** |
+| `hysteria2`+`obfs:salamander`（如 JP1） | ⛔ **回退核心** | Salamander 包混淆未实现（msquic 自持 UDP socket，不像 quic-go 能注入 PacketConn）。真机：明文拨 **0/12**，经 mihomo **8/8**。守卫已挡 |
+| `ss`+`plugin`、`vless/vmess/trojan`+非 tcp/ws 传输 | ⛔ **回退核心** | 同类未实现，守卫一并挡（防静默拨错） |
+
+**三个 Hysteria2 真机 bug（都在「握手成功之后」，最隐蔽）**：
+1. **把对端 `STOP_SENDING` 当致命错**：源站响应完就 `Connection: close`，机场服务端据此对我们的**上行**发
+   `STOP_SENDING`（=它不再读我们，正常收尾）。旧代码把它和 `RESET_STREAM` 一起当 `failed` → 拆连接 →
+   **已到的响应体被丢弃**，表现为 curl=000。已拆成两个信号：`peerReceiveAborted`（STOP_SENDING，忽略）
+   vs `failed`（RESET_STREAM）。见 `QuicTransport.cpp` / `Hysteria2Outbound.cpp`。
+2. **关连接前不冲刷客户端写缓冲**：`dataReceived` 刚把响应体 `write()` 进 curl 的 socket，紧接着
+   `peerSendShutdown` 就 `closeSession` → `QAbstractSocket` 析构不等排空 → 响应体连同对象被丢 → curl=000。
+   `MixedInbound::closeSession` 现在**先 `flush()` 再 close**。修此点：curl=000 → 404。
+3. **QUIC 握手/空闲太紧**：未设 `HandshakeIdleTimeout`/`IdleTimeout`/`KeepAlive` → 偶发空闲超时。已显式给足
+   （对齐 hysteria2 客户端惯例）。（曾试压低 `InitialRttMs` 加速重传，但更激进的 Initial 疑似触发服务端
+   反刷限速 → **已回退**，与 mihomo 默认对齐更稳。）
 
 ### 「杀掉 mihomo 还能不能活」——能（真机）
 
@@ -30,8 +61,12 @@ cc=10/5/0/0/0/0   socksFail=0                   ← 10 条全走进程内
 
 为达成这一点，今天拆掉了三层依赖：
 
-1. **出站**（早已具备）：8 协议（Hy2 / Reality / SS / Trojan / TUIC / VLESS / VMess / Direct）
-   + 4 传输（QUIC / TLS / uTLS / WebSocket）+ 规则引擎 + DNS。
+1. **出站**：8 协议（Hy2 / Reality / SS / Trojan / TUIC / VLESS / VMess / Direct）+ 传输
+   （QUIC / TLS / uTLS / WebSocket）+ 规则引擎 + DNS。
+   ⚠️ **传输/插件覆盖是有限的**（真机复测才发现）：vless/vmess 只有 tcp+ws，reality/trojan 只有裸
+   TCP+TLS，**grpc/h2/httpupgrade 未实现**；ss **无插件**；hysteria2 **无 obfs(salamander)**；tuic 待
+   msquic 2.6。这些**在创建阶段返回 nullptr 干净回退核心**（传输守卫），绝不静默拨错。所以「进程内
+   出站」= 「订阅里恰好落在已实现协议+传输里的那些节点」，不是全部。
 2. **内核门禁**（`a1f5d1d`）：`onCoreRunningChanged` / `resumeProxies` 原本不看 `coastcore`，
    核心一停就把劫持**全撤**——哪怕进程内引擎完全有能力接管。这是最隐蔽的一层。
 3. **策略组映射**（`3cb1cfc`）：「组 → 叶子」原本只来自核心 REST，核心一停 Rule 模式就
@@ -67,10 +102,20 @@ cc=10/5/0/0/0/0   socksFail=0                   ← 10 条全走进程内
 curl 的整整 8 秒里一帧都没被读走（对照实测：阻塞版 `ep.rx=1 ep.tx=0 tcpAcc=0`）。该分支作为反面
 教材留在驱动里（`COAST_TUNTEST_BLOCK=1`）。**生产代码未作任何改动。**
 
-### 环路问题：**已解决并三平台验过**（2026-07-31 晚）
+### 环路问题：TCP 侧三平台验过；**QUIC 侧此前是个未真验的洞，现已补上（Linux 真机证）**
 
 TUN 一旦接管默认路由，coast 自己的出站也会被路由进 TUN → 死循环（表现是整机断网，比不开 TUN 更糟）。
 现已落地 `SelfRouteGuard`（`src/net/core/SelfRouteGuard.h`）：探物理出口 → 把出站 socket 钉在它上面。
+
+> ⚠️ **2026-07-31 晚更正**：本节标题原写「已解决并三平台验过」，那**只对 TCP 出站成立**。QUIC/Hysteria2
+> 的 socket 由 msquic 内部建，`SO_MARK` 打不上——而 Linux 的环路规避**恰恰**靠 `SO_MARK`。真机一验
+> （Pi .91，tcpdump）：TUN 接管时 Hy2 的握手 UDP 包 **5 个全走 coast0、0 个走物理口** → 铁证环路，
+> 与「三平台验过」的说法直接冲突。**根因**：`QUIC_PARAM_CONN_LOCAL_ADDRESS` 只钉了**源地址**、没打
+> `fwmark`，于是不命中 pref 100 的 fwmark 规则，落到 pref 200 的 TUN 表。**补法**（`TunSession.cpp`）：
+> 既然 msquic 已把源钉在物理 IP 上，就按**源地址**兜一条 `ip rule add from <物理IP> lookup main pref 90`。
+> 修后同一 tcpdump：**coast0 0 个、物理口 6 个** → 环路消除（反向对照成立）。
+> **仍欠**：修后没拿到「TUN 下真实 Hy2 端到端绿灯」——复测把 Pi 的 IP 打进了机场服务端反刷限速
+> （连打上百次冷握手），服务端对本机新握手整段静默；路由层已证不环路，但端到端那一格仍是空的。
 
 **Qt 上的死结与解法**：选项必须在 `connect()` **之前**作用于 fd，而 Qt 在 `connectToHost()` 之前
 根本没建 socket。出路是 `prepareSocket()`：**先 `bind()`**（Qt 的 bind 会把 fd 建出来），拿到 fd
@@ -101,9 +146,13 @@ grep -rn "new QTcpSocket\|new QUdpSocket\|new QSslSocket" src/
 `TlsClient`、`UtlsClient`、`LatencyProbe`。审计顺带挖出 `LatencyProbe`（它拨的是代理服务器，同样
 会环路，且更隐蔽 —— 后台定时跑，环路了只表现为"延迟测不出来"）。
 
-⚠️ **唯一未覆盖：QUIC / Hysteria2**。它的 socket 由 msquic 内部创建，Qt 这条路够不着。
-`LocalTunService::start()` 因此会**主动拒绝**在有 QUIC 节点时启动并说明原因 —— 不让用户点下去
-才发现网没了。解法：msquic 的 `QUIC_PARAM_CONN_LOCAL_ADDRESS`（须在 `ConnectionStart` 之前设）。
+**QUIC / Hysteria2 的环路**：它的 socket 由 msquic 内部创建，`SO_MARK` 那条路够不着。两级防护：
+① msquic 侧 `QUIC_PARAM_CONN_LOCAL_ADDRESS` 把源地址钉在物理出口（须在 `ConnectionStart` 之前设）；
+② **Linux 侧还必须**配一条 `ip rule from <物理IP> lookup main`——只钉源地址**不改变路由决策**，Linux 靠
+`fwmark`/源地址匹配的 rule 才真正把包引到物理表（见上文更正框，真机 tcpdump 证）。`LocalTunService::start()`
+现在**不再硬拒**有 QUIC 节点，改为**告警**（机制已上、Linux 环路真机证消除，但端到端绿灯未拿到——若开启后
+整机断网，关掉「增强」自救）。Windows/macOS 的 `IP_UNICAST_IF`/`IP_BOUND_IF` 是否也够（它们改的是**出口
+选择**而非仅源地址，理论上够），**尚无真机 QUIC 验证**。
 
 三者共同还欠一个「物理出口变更」的通知（Linux `RTNETLINK`、Windows `NotifyRouteChange2`、
 macOS route socket）：换网（WiFi↔有线）后新建连接会钉在一张已经没了的网卡上。现在只在

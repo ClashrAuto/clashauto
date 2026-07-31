@@ -76,7 +76,11 @@ signals:
     void dataReceived(const QByteArray &data); // 下行字节(已从 msquic 事件拷出)
     void sendCompleted(qint64 bytes);      // 这一批 bytes 已被 QUIC 栈确认(用于归还发送水位)
     void peerSendShutdown();               // 对端发完了(收到 FIN, 下行 EOF)
-    void failed(const QString &reason);    // 流启动失败 / 被对端 abort
+    // 对端 STOP_SENDING(它不再读我们的上行)——**不是故障**：对 TCP-over-QUIC 代理而言，这等价于
+    // 远端半关了它的读方向(如源站响应完毕即 Connection: close)。下行仍可能有数据在途，故绝不能
+    // 据此拆连接 —— 早先它和 RESET 一起被当成 failed，导致「响应体已收到却被丢弃、curl=000」。
+    void peerReceiveAborted();
+    void failed(const QString &reason);    // 流启动失败 / 被对端 RESET(发送方向异常中止)
     void closed();                         // 流彻底关闭(SHUTDOWN_COMPLETE)
 
 private:

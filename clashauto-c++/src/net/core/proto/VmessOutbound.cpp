@@ -1084,8 +1084,22 @@ bool VmessOutboundUdp::isReady() const
 // ============================================================================
 void registerVmess(OutboundRegistry &reg)
 {
+    // 只实现了 tcp 与 ws（见 Priv::setupTransport）。其余传输(grpc/h2/…)未实现 → 返回 nullptr 回退核心，
+    // 绝不拿错的传输去硬拨。理由详见 OutboundRegistry.h 的传输守卫注释。
+    static const QStringList kSupported = {QStringLiteral("ws")};
     reg.registerProto(
         QStringLiteral("vmess"),
-        [](const ProxyNode &n, QObject *p) -> IOutboundTcp * { return new VmessOutboundTcp(n, p); },
-        [](const ProxyNode &n, QObject *p) -> IOutboundUdp * { return new VmessOutboundUdp(n, p); });
+        [](const ProxyNode &n, QObject *p) -> IOutboundTcp * {
+            if (!coastTransportSupported(n.network, kSupported)) {
+                qInfo("[vmess] 节点「%s」传输 network=%s 未实现（本单元仅 tcp/ws）→ 回退核心",
+                      qUtf8Printable(n.name), qUtf8Printable(n.network));
+                return nullptr;
+            }
+            return new VmessOutboundTcp(n, p);
+        },
+        [](const ProxyNode &n, QObject *p) -> IOutboundUdp * {
+            if (!coastTransportSupported(n.network, kSupported))
+                return nullptr;
+            return new VmessOutboundUdp(n, p);
+        });
 }

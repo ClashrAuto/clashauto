@@ -663,12 +663,22 @@ bool ShadowsocksOutboundUdp::isReady() const
 
 void registerShadowsocks(OutboundRegistry &reg)
 {
+    // 进程内 ss 只实现了裸 AEAD（见 codec），**没有**任何插件层（obfs / v2ray-plugin / shadow-tls…）。
+    // 带 plugin 的 ss 节点若被静默当成裸 AEAD 去拨，握手就会错位、失败并伪装成「网络不通」。故有 plugin
+    // 一律返回 nullptr 回退核心。理由详见 OutboundRegistry.h 的传输守卫注释。
     reg.registerProto(
         QStringLiteral("ss"),
         [](const ProxyNode &n, QObject *p) -> IOutboundTcp * {
+            if (!n.plugin.isEmpty()) {
+                qInfo("[ss] 节点「%s」plugin=%s 未实现（本单元仅裸 AEAD）→ 回退核心",
+                      qUtf8Printable(n.name), qUtf8Printable(n.plugin));
+                return nullptr;
+            }
             return new ShadowsocksOutboundTcp(n, p);
         },
         [](const ProxyNode &n, QObject *p) -> IOutboundUdp * {
+            if (!n.plugin.isEmpty())
+                return nullptr;
             return new ShadowsocksOutboundUdp(n, p);
         });
 }
