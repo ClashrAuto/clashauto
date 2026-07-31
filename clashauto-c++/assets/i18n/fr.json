@@ -421,5 +421,10 @@
   "（未选）": "(non sélectionné)",
   "（驱动被限制为仅管理员可访问）": " (pilote restreint aux administrateurs)",
   "＋ 添加": "＋ Ajouter",
-  "已打开发布页，请手动下载安装": "Page de version ouverte — téléchargez et installez manuellement"
+  "已打开发布页，请手动下载安装": "Page de version ouverte — téléchargez et installez manuellement",
+  "共 %d 条": "%d au total",
+  "共 %d 组": "%d groupes",
+  "已保存并重建配置": "Enregistré et configuration reconstruite",
+  "程序更新": "Mise à jour de l'app",
+  "节点名正则（匹配到的节点会被收进这个组）": "Regex du nom de nœud (les nœuds correspondants entrent dans ce groupe)"
 }

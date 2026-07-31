@@ -65,6 +65,13 @@ public final class Theme {
     public let versionColor = Color(hex: 0x666666)
 
     // MARK: 控件
+    /// 输入类控件的底与描边。**手画的控件才需要它们** —— 设置页把 Qt 的
+    /// `ThemedField` / `ThemedCombo` / `ThemedSpin` / `PillButton` 逐个复刻了一遍，
+    /// 那些控件的底色与描边就是这两个令牌。（早先按「无人引用」删过一次，
+    /// 那时设置页还在用系统原生控件。）取值与 `qml/Theme.qml` 逐条相同。
+    public var inputBg: Color { dark ? Color(hex: 0x444444) : Color(hex: 0xEAEAEA) }
+    public var inputBorder: Color { dark ? Color(hex: 0x333333) : Color(hex: 0xCCCCCC) }
+
     public var footerComboBg: Color { dark ? Color(hex: 0x111111) : Color(hex: 0xFFFFFF) }
     public var switchTrackOff: Color { dark ? Color(hex: 0x666666) : Color(hex: 0xFFFFFF) }
     public var hover: Color { dark ? Color(hex: 0x3E3E3E) : Color(hex: 0xD2D2D2) }

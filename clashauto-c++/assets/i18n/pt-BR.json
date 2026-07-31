@@ -421,5 +421,10 @@
   "（未选）": "(não selecionado)",
   "（驱动被限制为仅管理员可访问）": " (driver restrito somente a administradores)",
   "＋ 添加": "＋ Adicionar",
-  "已打开发布页，请手动下载安装": "Página de versão aberta — baixe e instale manualmente"
+  "已打开发布页，请手动下载安装": "Página de versão aberta — baixe e instale manualmente",
+  "共 %d 条": "%d no total",
+  "共 %d 组": "%d grupos",
+  "已保存并重建配置": "Salvo e configuração reconstruída",
+  "程序更新": "Atualização do app",
+  "节点名正则（匹配到的节点会被收进这个组）": "Regex do nome do nó (os nós correspondentes entram neste grupo)"
 }

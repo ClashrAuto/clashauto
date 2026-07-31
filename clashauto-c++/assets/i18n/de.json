@@ -421,5 +421,10 @@
   "（未选）": "(nicht ausgewählt)",
   "（驱动被限制为仅管理员可访问）": " (Treiber nur für Administratoren)",
   "＋ 添加": "＋ Hinzufügen",
-  "已打开发布页，请手动下载安装": "Release-Seite geöffnet – bitte manuell herunterladen und installieren"
+  "已打开发布页，请手动下载安装": "Release-Seite geöffnet – bitte manuell herunterladen und installieren",
+  "共 %d 条": "%d gesamt",
+  "共 %d 组": "%d Gruppen",
+  "已保存并重建配置": "Gespeichert, Konfiguration neu erstellt",
+  "程序更新": "App-Update",
+  "节点名正则（匹配到的节点会被收进这个组）": "Regex für Knotennamen (passende Knoten kommen in diese Gruppe)"
 }

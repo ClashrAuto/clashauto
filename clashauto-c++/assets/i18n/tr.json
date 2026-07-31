@@ -421,5 +421,10 @@
   "（未选）": "(seçilmedi)",
   "（驱动被限制为仅管理员可访问）": " (sürücü yalnızca yöneticilere açık)",
   "＋ 添加": "＋ Ekle",
-  "已打开发布页，请手动下载安装": "Sürüm sayfası açıldı — lütfen elle indirip kurun"
+  "已打开发布页，请手动下载安装": "Sürüm sayfası açıldı — lütfen elle indirip kurun",
+  "共 %d 条": "toplam %d",
+  "共 %d 组": "%d grup",
+  "已保存并重建配置": "Kaydedildi ve yapılandırma yeniden oluşturuldu",
+  "程序更新": "Uygulama güncellemesi",
+  "节点名正则（匹配到的节点会被收进这个组）": "Düğüm adı regex'i (eşleşen düğümler bu gruba alınır)"
 }

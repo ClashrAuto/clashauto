@@ -422,5 +422,10 @@
   "（未选）": "(none selected)",
   "（驱动被限制为仅管理员可访问）": " (driver restricted to administrators only)",
   "＋ 添加": "＋ Add",
-  "已打开发布页，请手动下载安装": "Release page opened — please download and install manually"
+  "已打开发布页，请手动下载安装": "Release page opened — please download and install manually",
+  "共 %d 条": "%d total",
+  "共 %d 组": "%d groups",
+  "已保存并重建配置": "Saved and configuration rebuilt",
+  "程序更新": "App update",
+  "节点名正则（匹配到的节点会被收进这个组）": "Node-name regex (matching nodes are collected into this group)"
 }

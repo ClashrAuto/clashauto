@@ -421,5 +421,10 @@
   "（未选）": "(chưa chọn)",
   "（驱动被限制为仅管理员可访问）": " (trình điều khiển chỉ cho quản trị viên)",
   "＋ 添加": "＋ Thêm",
-  "已打开发布页，请手动下载安装": "Đã mở trang phát hành — vui lòng tải và cài đặt thủ công"
+  "已打开发布页，请手动下载安装": "Đã mở trang phát hành — vui lòng tải và cài đặt thủ công",
+  "共 %d 条": "%d mục",
+  "共 %d 组": "%d nhóm",
+  "已保存并重建配置": "Đã lưu và dựng lại cấu hình",
+  "程序更新": "Cập nhật ứng dụng",
+  "节点名正则（匹配到的节点会被收进这个组）": "Biểu thức chính quy tên nút (các nút khớp sẽ vào nhóm này)"
 }
