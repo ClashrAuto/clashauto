@@ -121,87 +121,29 @@ struct MainView: View {
     ///
     /// 当前模式直接作为按钮标题，省掉那行冗余的箭头指示：按钮上写着「规则」，
     /// 点开就是三个模式，没有第二种解释。
-    /// 模式切换：收起时是一颗按钮，点一下**就地展开成一排按钮**，选完自动收回。
+    /// 模式切换：收起是一颗按钮，点开就地展开成三颗，选完自动收回。
     ///
-    /// 不用弹出菜单，有两个理由：
-    /// 一是 `.buttonStyle(.glass)` 对 SwiftUI 的 `Menu` **不生效** —— 菜单自带一套外观，
-    /// 和旁边的玻璃胶囊摆在一起一眼两样（这个 SDK 也没有 `.glassEffect()` 能把玻璃
-    /// 单独贴到标签上）；
-    /// 二是只有三个选项，展开成一排比「点开→移到菜单→再点」少一次移动，
-    /// 而且切换前后当前项一直可见。
+    /// ★ 直接复用 `FooterSwitch` 本身，不另写一套外观。
+    ///   先前手写的那套(自己拼 HStack + .glassCapsule)与它走的是两条尺寸路径 ——
+    ///   FooterSwitch 用 .glassButton()（系统按钮样式，自带内边距）、宽度随文字，
+    ///   手写那套用 .glassCapsule()（纯背景）、宽度写死 76 —— 高和宽都对不上，
+    ///   而且改一处就得同步另一处。用同一个组件，尺寸一致是结构保证的，不是对出来的。
     private var modePicker: some View {
-        Group {
+        HStack(spacing: 6) {
             if modeExpanded {
-                // 展开后是**一个液态玻璃按钮组**。
-                //
-                // 三颗按钮各自 `.glassEffect(in: .capsule)`，再一起放进
-                // `GlassEffectContainer` —— 容器让相邻的玻璃互相「融合」（间距小于
-                // spacing 时会连成一片），这正是「一组」与「三颗各自独立」的区别所在：
-                // 不靠高亮去暗示，形状本身就说明了三选一。
-                // 像 tab:三段**紧挨、无各自圆角**,整组只有一层玻璃、只有外侧是圆的。
-                //
-                // 之前用 GlassGroup(spacing: 4) 是三颗各自成形的胶囊 —— 那读起来仍是
-                // 「三个按钮」。分段控件的语义靠的就是「连成一条、内部只用分隔区分」。
-                HStack(spacing: 0) {
-                    ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
-                        Button {
-                            state.setMode(title)
-                            withAnimation(.snappy(duration: 0.22)) { modeExpanded = false }
-                        } label: {
-                            modeLabel(title, active: index == state.modeIndex)
-                        }
-                        .buttonStyle(.plain)
-                        .background {
-                            // 选中段的底:胶囊形，压在整组玻璃**里面**，
-                            // 所以它不会给整组带来额外的圆角。
-                            if index == state.modeIndex {
-                                Capsule().fill(theme.accent.opacity(0.45))
-                            }
-                        }
+                ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
+                    FooterSwitch(label: title, isOn: index == state.modeIndex) {
+                        state.setMode(title)
+                        withAnimation(.snappy(duration: 0.22)) { modeExpanded = false }
                     }
                 }
-                .glassCapsule()
-                .fixedSize()
             } else {
-                Button {
+                FooterSwitch(label: AppState.modeTitles[state.modeIndex], isOn: true) {
                     withAnimation(.snappy(duration: 0.22)) { modeExpanded = true }
-                } label: {
-                    modeLabel(AppState.modeTitles[state.modeIndex], active: true)
                 }
-                .buttonStyle(.plain)
-                // ★ 与展开态走**同一条尺寸路径**。先前收起用 .glassButton()
-                //   （系统按钮样式，自带内边距）、展开用 .glassCapsule()（纯背景），
-                //   两者高度必然对不上 —— 这就是「展开后高度变了」的原因。
-                .glassCapsule()
-                .fixedSize()
             }
         }
     }
-
-    /// 与 `FooterSwitch` 逐项对齐的内部排版：spacing 6 / 圆点 8 / 字号 12 /
-    /// 横向内距 10 / 高度 24。少一项就会比旁边矮一圈或窄一截。
-    private func modeLabel(_ title: String, active: Bool) -> some View {
-        HStack(spacing: 6) {
-            // 圆点只在**收起态**出现 —— 那时它和旁边三个开关是同一种东西，需要状态点；
-            // 展开成分段之后，当前项由底色表达，再放一个点就是重复。
-            if !modeExpanded {
-                Circle()
-                    .fill(theme.accent)
-                    .frame(width: 8, height: 8)
-            }
-            Text(title)
-                .font(.system(size: 12))
-                .foregroundStyle(active ? theme.textPrimary : theme.textMuted)
-        }
-        // 定宽：展开后整组正好是收起态的 3 倍宽，收放时左右边界不会跳。
-        // 取 76 是「圆点 8 + 间距 6 + 两个汉字 24 + 左右内距 20」再留一点余量；
-        // 定死而不是随文字走，是因为「规则/全局/直连」在别的语言里长度差很多，
-        // 不定宽的话三段宽窄不一，看着就不像一个分段控件。
-        .frame(width: Self.modeSegmentWidth, height: 24)
-    }
-
-    /// 单个模式段的宽度。收起态与展开态共用 —— 保证展开正好是 3 倍。
-    private static let modeSegmentWidth: CGFloat = 76
 }
 
 /// 尚未实现的页面占位。**明确写出属于哪个阶段** —— 空白页会让人以为是坏了。
