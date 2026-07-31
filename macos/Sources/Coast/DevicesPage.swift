@@ -21,7 +21,9 @@ struct DevicesPage: View {
     @State private var discovered: [LanBrowser.Device] = []
     @State private var ledger: [String: DeviceStore.Device] = [:]
     @State private var scanning = false
-    @State private var expanded: String?
+    /// 点开的设备详情（Qt 那边是独立窗口，这里是 sheet）。页面本身只留列表 ——
+    /// 备注名 / 策略 / 流量都搬进详情里了，与 Qt 一致。
+    @State private var detail: Row?
     @State private var search = ""
     /// 已被「知道了」消掉的告警 id。
     ///
@@ -218,26 +220,18 @@ struct DevicesPage: View {
             VStack(spacing: 0) {
                 DeviceRow(row: row,
                           rejection: rejection(for: row),
-                          expanded: expanded == row.id,
                           onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
-                          onToggleExpand: { expanded = expanded == row.id ? nil : row.id })
-                // 展开区不再只在「已代理」时出现 —— 备注名与「为什么不能代理」这两件事,
-                // 恰恰是在还没开代理时最需要看到的。
-                if expanded == row.id, let record = row.record {
-                    PolicyBox(record: record,
-                              targets: state.clash.groups,
-                              rejection: rejection(for: row),
-                              onRename: { state.devices.setAlias(mac: row.id, $0); reloadLedger() },
-                              onPolicyChange: { mode, target in
-                                  setPolicy(row: row, mode: mode, target: target)
-                              })
-                }
+                          onOpenDetail: { detail = row })
             }
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        .sheet(item: $detail) { row in
+            DeviceDetailView(row: row, rejection: rejection(for: row))
+                .environment(state).environment(theme)
+        }
     }
 
     /// 底部横幅：说明当前状态。设备端零配置，所以这里没有任何要用户抄的东西。
@@ -296,18 +290,10 @@ struct DevicesPage: View {
     private func setProxy(row: Row, enabled: Bool) {
         _ = state.devices.setProxyEnabled(mac: row.discovered.mac, enabled, ip: row.discovered.ip)
         reloadLedger()
-        if enabled { expanded = row.id }   // 刚开启就把策略选择摊开
+        if enabled { detail = row }   // 刚开启就把详情打开（策略在里面选）
         Task { await state.controller.rebuildConfig() }
     }
 
-    private func setPolicy(row: Row, mode: DeviceStore.PolicyMode, target: String) {
-        guard var record = state.devices.device(mac: row.discovered.mac) else { return }
-        record.policyMode = mode
-        record.policyTarget = target
-        _ = state.devices.save(record)
-        reloadLedger()
-        Task { await state.controller.rebuildConfig() }
-    }
 }
 
 private struct DeviceRow: View {
@@ -316,9 +302,8 @@ private struct DeviceRow: View {
     /// 这台设备不可接管的原因（nil = 可以）。由页面算好传进来 ——
     /// 每行自己去查网关和本机 MAC 的话，一次渲染会重复读几十次系统表。
     var rejection: RedirectTargets.Rejection?
-    let expanded: Bool
     let onToggleProxy: (Bool) -> Void
-    let onToggleExpand: () -> Void
+    let onOpenDetail: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
@@ -359,8 +344,8 @@ private struct DeviceRow: View {
             Spacer(minLength: 8)
 
             if row.proxyEnabled {
-                Button(action: onToggleExpand) {
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                Button(action: onOpenDetail) {
+                    Image(systemName: "chevron.right")
                         .font(.system(size: 10))
                 }
                 .buttonStyle(.borderless)
@@ -395,60 +380,3 @@ private struct DeviceRow: View {
 
 /// 展开后只有策略选择。**没有凭据、没有地址** —— 设备端零配置是这个功能的全部意义，
 /// 让用户去抄任何东西都等于没做。
-private struct PolicyBox: View {
-    @Environment(Theme.self) private var theme
-    let record: DeviceStore.Device
-    let targets: [String]
-    var rejection: RedirectTargets.Rejection?
-    let onRename: (String) -> Void
-    let onPolicyChange: (DeviceStore.PolicyMode, String) -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-        if let rejection {
-            // 三种不可代理的情形各自说清楚 —— 只把开关变灰的话，用户只会觉得「点不动」，
-            // 不知道是自己点错了对象还是程序坏了。
-            Label(rejection.reason.t, systemImage: "info.circle")
-                .font(.system(size: 11))
-                .foregroundStyle(theme.textMuted)
-        }
-        HStack(spacing: 8) {
-            Text("备注名".t).font(.system(size: 11)).foregroundStyle(theme.textMuted)
-            TextField("为该设备起个名字".t, text: Binding(
-                get: { record.alias },
-                set: { onRename($0) }))
-                .textFieldStyle(.roundedBorder)
-                .frame(maxWidth: 200)
-            Spacer()
-        }
-        HStack(spacing: 8) {
-            Text("策略".t).font(.system(size: 11)).foregroundStyle(theme.textMuted)
-            Picker("", selection: Binding(
-                get: { record.policyMode },
-                set: { onPolicyChange($0, record.policyTarget) }
-            )) {
-                ForEach(DeviceStore.PolicyMode.allCases, id: \.self) { Text($0.title.t).tag($0) }
-            }
-            .labelsHidden().frame(width: 130)
-
-            if record.policyMode == .global {
-                Picker("", selection: Binding(
-                    get: { record.policyTarget },
-                    set: { onPolicyChange(.global, $0) }
-                )) {
-                    // 没选目标时 applyDevicePolicies 会跳过这条规则，给个明确占位而不是空白
-                    Text("（未选）".t).tag("")
-                    ForEach(targets, id: \.self) { Text($0).tag($0) }
-                }
-                .labelsHidden().frame(maxWidth: 200)
-            }
-            Spacer()
-        }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(theme.metricBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
-        .padding(.top, 4)
-    }
-}

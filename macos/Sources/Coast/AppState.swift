@@ -81,6 +81,9 @@ public final class AppState {
     public private(set) var connectionLedger = ConnectionLedger()
     /// 本次会话的流量构成(直连 vs 代理)。同一份快照攒出来,不额外发请求。
     public private(set) var composition = TrafficComposition()
+
+    /// 每台设备的实时速率与会话累计（设备详情窗用）。同样是同一份快照攒出来的。
+    public private(set) var deviceTraffic = DeviceTraffic()
     /// 口径：只算走代理的流量。与 Qt 版的默认一致。
     public var trafficProxyOnly = true { didSet { refreshTodayTraffic() } }
     /// 维度：进程 / 域名。（Qt 版还有「设备」，那一维依赖设备台账，见 PLAN 阶段 6/9。）
@@ -182,6 +185,16 @@ public final class AppState {
         }
     }
 
+    /// 把台账里的 IP→MAC 映射喂给历史库 —— 它在**落盘那一刻**把连接归到设备头上。
+    /// 设备开关变动或扫描完一轮时调一次即可，不必每拍。
+    public func refreshHistoryDeviceMap() {
+        var map: [String: String] = [:]
+        for device in devices.all() where !device.lastIP.isEmpty {
+            map[device.lastIP] = device.mac
+        }
+        history.setDeviceMap(map)
+    }
+
     /// 连接窗每次打开时清空账本 —— 否则上次会话的离线连接会一直挂在列表里。
     public func resetConnectionLedger() { connectionLedger.reset() }
 
@@ -236,6 +249,7 @@ public final class AppState {
             let rows = ConnectionRow.parse(connections)
             self?.connections = rows
             self?.connectionLedger.merge(rows)
+            self?.deviceTraffic.observe(rows)
             self?.composition.observe(connections)
         }
     }
@@ -253,6 +267,7 @@ public final class AppState {
         startSubscriptionAutoUpdate()     // 定时自动更新订阅
         startArpWatch()                   // 盯着有没有别人在做 ARP 欺骗
         startLatencyMonitor()             // 直连 / 到路由 / DNS / 代理 四个延迟
+        refreshHistoryDeviceMap()         // 历史库落盘时才认得出「这条连接是哪台设备的」
         // 启动就查一次更新 —— 侧栏的 "new" / "core" 角标是**不进关于页也要看得见**的，
         // 那正是它存在的意义。Qt 同样在启动路径上调 `AboutController::check()`。
         // 延后 3 秒:核心刚起来时经它出网的成功率高得多(直连 api.github.com 常年 403)。

@@ -426,5 +426,8 @@
   "共 %d 组": "%d grupos",
   "已保存并重建配置": "Salvo e configuração reconstruída",
   "程序更新": "Atualização do app",
-  "节点名正则（匹配到的节点会被收进这个组）": "Regex do nome do nó (os nós correspondentes entram neste grupo)"
+  "节点名正则（匹配到的节点会被收进这个组）": "Regex do nome do nó (os nós correspondentes entram neste grupo)",
+  "接口": "Interface",
+  "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。": "O tráfego deste dispositivo é encaminhado por este Mac. Sair, desligar ou suspender o devolve automaticamente ao roteador (restaurado em cerca de um segundo); em queda de energia ou encerramento forçado ele pode ficar sem rede por até uns 30 segundos.",
+  "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Ative “Abrir ao iniciar sessão” nos ajustes para que o proxy continue automaticamente após reiniciar."
 }

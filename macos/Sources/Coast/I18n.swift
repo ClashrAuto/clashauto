@@ -120,3 +120,17 @@ extension I18n {
         }
     }
 }
+
+extension I18n {
+    /// 语言选择器的候选：显示各语言的**自称**，值存语言码。两个数组一一对应、
+    /// 顺序与 Qt 的 `langCombo` 完全一致。
+    ///
+    /// 放在本文件里是有原因的：这些名字**故意不翻译**（用当前界面语言去翻译语言名的话，
+    /// 用户切到看不懂的语言后就再也找不回来了），而 `i18n_check.py` 正是靠
+    /// 「`I18n.swift` 免检」这条豁免放行它们。放在设置页里会被判成「漏标 .t」。
+    static let languageCodes = ["zh-CN", "en-US", "zh-TW", "ja", "ko", "ru",
+                                "es", "fr", "de", "pt-BR", "it", "tr", "vi"]
+    static let languageNames = ["简体中文", "English", "繁體中文", "日本語", "한국어", "Русский",
+                                "Español", "Français", "Deutsch", "Português", "Italiano",
+                                "Türkçe", "Tiếng Việt"]
+}

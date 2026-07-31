@@ -20,10 +20,22 @@ public final class HistoryStore: @unchecked Sendable {
         public var chain = ""      // 出口策略/节点（chains[0]）
         public var network = ""    // tcp/udp
         public var process = ""    // 发起进程
+        /// 发起方 IP。**不入库**，只用来在落盘那一刻解析成设备 MAC（见 `deviceResolver`）。
+        public var sourceIP = ""
         public var startedAt: Int64 = 0   // unix ms
         public var endedAt: Int64 = 0
         public var up: Int64 = 0
         public var down: Int64 = 0
+    }
+
+    /// 「某一天 → 上/下行」聚合（设备详情的近 7 天柱状图）。
+    public struct DayTotal: Sendable, Identifiable, Equatable {
+        /// `yyyy-MM-dd`。
+        public let day: String
+        public let up: Int64
+        public let down: Int64
+        public var id: String { day }
+        public var total: Int64 { up + down }
     }
 
     /// 「某一项 → 字节」聚合（今日流量卡的 Top N）。
@@ -49,6 +61,12 @@ public final class HistoryStore: @unchecked Sendable {
     /// 在途连接：id → 最后一次看到的样子。
     private var live: [String: Live] = [:]
     private var pending: [Record] = []
+    /// `sourceIP` → 设备 MAC。**在落盘那一刻解析**（与 Qt 同）—— 查询时再解析的话，
+    /// 设备换了 IP（DHCP 续租）就把历史流量算到别的设备头上了。
+    ///
+    /// 由 `AppState` 用 `DeviceStore` 的台账定期喂进来。没喂时 `mac` 列留空，
+    /// 「按设备」的聚合自然什么都查不到 —— 宁可查不到，也不写出错误数据。
+    private var deviceMap: [String: String] = [:]
     private let lock = NSLock()
 
     /// 攒够这么多条才写一次盘。
@@ -57,6 +75,13 @@ public final class HistoryStore: @unchecked Sendable {
     private struct Live {
         var record = Record()
         var seen = false
+    }
+
+    /// 更新 IP→MAC 映射。设备开关变动或扫描完一轮时调一次即可。
+    public func setDeviceMap(_ map: [String: String]) {
+        lock.lock()
+        defer { lock.unlock() }
+        deviceMap = map
     }
 
     public var isOpen: Bool { database?.isOpen ?? false }
@@ -86,6 +111,8 @@ public final class HistoryStore: @unchecked Sendable {
             """)
         // 查询就两类：「某时间段」和「按域名/进程聚合」，索引照着来。
         database.exec("CREATE INDEX IF NOT EXISTS conn_ended ON conn(ended_at)")
+        // 设备详情要按 mac 查「近 7 天」和「常用域名」，没有这条索引就是全表扫。
+        database.exec("CREATE INDEX IF NOT EXISTS conn_mac ON conn(mac, ended_at)")
         database.exec("PRAGMA user_version=1")
     }
 
@@ -111,6 +138,7 @@ public final class HistoryStore: @unchecked Sendable {
                 entry.record.destIP = metadata["destinationIP"] as? String ?? ""
                 entry.record.network = metadata["network"] as? String ?? ""
                 entry.record.process = metadata["process"] as? String ?? ""
+                entry.record.sourceIP = metadata["sourceIP"] as? String ?? ""
             }
             // host 可能**迟到** —— sniffer 嗅出域名后才填上。所以每拍都跟一次；
             // 但空值不覆盖已有值，否则会把已经拿到的域名又抹回 IP。
@@ -159,12 +187,13 @@ public final class HistoryStore: @unchecked Sendable {
     private func flushLocked() {
         guard let database, !pending.isEmpty else { return }
         let sql = """
-            INSERT INTO conn (host, dest_ip, chain, network, process, started_at, ended_at, up, down)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO conn (mac, host, dest_ip, chain, network, process, started_at, ended_at, up, down)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let statements = pending.map { record in
             (sql, [
-                SQLiteDatabase.Value.text(record.host),
+                SQLiteDatabase.Value.text(deviceMap[record.sourceIP] ?? ""),
+                .text(record.host),
                 .text(record.destIP),
                 .text(record.chain),
                 .text(record.network),
@@ -240,6 +269,75 @@ public final class HistoryStore: @unchecked Sendable {
             """, [.int(start), .int(end)]) { row in total = row.int(0) }
         return total
     }
+
+    // MARK: - 按设备（设备详情窗）
+
+    /// 某台设备近 N 天的每日上/下行。返回**恰好 N 项**、按日期升序，没有记录的那天补 0 ——
+    /// 缺天不补的话柱状图的横轴会跳着走（7 根柱子只画出 3 根，日期还不连续）。
+    public func recentDays(mac: String, days: Int = 7) -> [DayTotal] {
+        var buckets: [String: (up: Int64, down: Int64)] = [:]
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        if let database, !mac.isEmpty {
+            let start = calendar.date(byAdding: .day, value: -(days - 1), to: today) ?? today
+            database.query("""
+                SELECT ended_at, up, down FROM conn
+                WHERE mac = ? AND ended_at >= ?
+                """, [.text(mac), .int(Int64(start.timeIntervalSince1970 * 1000))]) { row in
+                let date = Date(timeIntervalSince1970: Double(row.int(0)) / 1000)
+                let key = Self.dayKey(calendar.startOfDay(for: date))
+                var bucket = buckets[key] ?? (0, 0)
+                bucket.up += row.int(1)
+                bucket.down += row.int(2)
+                buckets[key] = bucket
+            }
+        }
+
+        return (0..<days).reversed().map { offset in
+            let date = calendar.date(byAdding: .day, value: -offset, to: today) ?? today
+            let key = Self.dayKey(date)
+            let bucket = buckets[key] ?? (0, 0)
+            return DayTotal(day: key, up: bucket.up, down: bucket.down)
+        }
+    }
+
+    /// 某台设备的常用域名（按累计字节降序）。
+    public func topDomains(mac: String, limit: Int = 5) -> [GroupTotal] {
+        guard let database, !mac.isEmpty else { return [] }
+        var result: [GroupTotal] = []
+        database.query("""
+            SELECT host, SUM(up + down) AS bytes FROM conn
+            WHERE mac = ? AND host != ''
+            GROUP BY host ORDER BY bytes DESC LIMIT ?
+            """, [.text(mac), .int(Int64(limit))]) { row in
+            result.append(GroupTotal(key: row.text(0), bytes: row.int(1)))
+        }
+        return result
+    }
+
+    /// 某台设备的累计上/下行（保留期内的全部记录）。
+    public func total(mac: String) -> (up: Int64, down: Int64) {
+        guard let database, !mac.isEmpty else { return (0, 0) }
+        var result: (up: Int64, down: Int64) = (0, 0)
+        database.query("SELECT COALESCE(SUM(up),0), COALESCE(SUM(down),0) FROM conn WHERE mac = ?",
+                       [.text(mac)]) { row in result = (row.int(0), row.int(1)) }
+        return result
+    }
+
+    /// `yyyy-MM-dd`。锁 `en_US_POSIX` + 公历 —— 跟随区域设置的话，
+    /// 和历/佛历用户的 key 会是 R8-08-01 之类，与库里既有的对不上。
+    static func dayKey(_ date: Date) -> String {
+        formatterForDayKey.string(from: date)
+    }
+
+    private static let formatterForDayKey: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
 
     // MARK: - 工具
 

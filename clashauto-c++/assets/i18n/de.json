@@ -426,5 +426,8 @@
   "共 %d 组": "%d Gruppen",
   "已保存并重建配置": "Gespeichert, Konfiguration neu erstellt",
   "程序更新": "App-Update",
-  "节点名正则（匹配到的节点会被收进这个组）": "Regex für Knotennamen (passende Knoten kommen in diese Gruppe)"
+  "节点名正则（匹配到的节点会被收进这个组）": "Regex für Knotennamen (passende Knoten kommen in diese Gruppe)",
+  "接口": "Schnittstelle",
+  "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。": "Der Datenverkehr dieses Geräts wird von diesem Mac weitergeleitet. Beenden, Herunterfahren oder Ruhezustand geben es automatisch an den Router zurück (in etwa einer Sekunde wiederhergestellt); bei Stromausfall oder erzwungenem Beenden kann es bis zu etwa 30 Sekunden offline sein.",
+  "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Aktivieren Sie in den Einstellungen „Beim Anmelden starten“, damit das Proxying nach einem Neustart automatisch weiterläuft."
 }

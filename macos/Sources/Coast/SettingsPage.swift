@@ -173,10 +173,10 @@ struct SettingsPage: View {
                     }
                     CardDivider()
                     SettingRow(label: "语言".t) {
-                        ThemedCombo(options: Self.languageNames,
+                        ThemedCombo(options: I18n.languageNames,
                                     selection: Binding(
-                                        get: { max(0, Self.languageCodes.firstIndex(of: state.config.language) ?? 0) },
-                                        set: { setLanguage(Self.languageCodes[$0]) }),
+                                        get: { max(0, I18n.languageCodes.firstIndex(of: state.config.language) ?? 0) },
+                                        set: { setLanguage(I18n.languageCodes[$0]) }),
                                     width: 180,
                                     enabled: !state.config.autoLanguage)
                     }
@@ -581,15 +581,6 @@ struct SettingsPage: View {
         if wasRunning { await state.controller.startCore() }
     }
 
-    // MARK: 语言表
-
-    /// 显示各语言的**自称**，值存语言码。两个数组一一对应、顺序与 Qt 完全一致 ——
-    /// 用当前界面语言去翻译语言名的话，用户切到看不懂的语言后就再也找不回来了。
-    static let languageCodes = ["zh-CN", "en-US", "zh-TW", "ja", "ko", "ru",
-                                "es", "fr", "de", "pt-BR", "it", "tr", "vi"]
-    static let languageNames = ["简体中文", "English", "繁體中文", "日本語", "한국어", "Русский",
-                                "Español", "Français", "Deutsch", "Português", "Italiano",
-                                "Türkçe", "Tiếng Việt"]
 }
 
 /// 规则编辑草稿。`Identifiable` 是为了直接喂给 `.sheet(item:)` —— 用
