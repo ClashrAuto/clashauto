@@ -1,6 +1,7 @@
 import AppKit
 import CoastHelperProtocol
 import Foundation
+import Security
 import ServiceManagement
 
 /// 特权 helper 的应用侧封装：`SMAppService` 注册/注销 + XPC 客户端。
@@ -47,11 +48,108 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
     /// 注册 daemon。首次会让系统弹出「后台项已添加」并要求用户批准。
     nonisolated public static func register() throws -> RegistrationStatus {
         try SMAppService.daemon(plistName: plistName).register()
+        // 记下这次注册的是哪一份 helper，供 `ensureRegisteredForCurrentBuild()` 比对。
+        // 不记的话，安装后第一次启动会白白重注册一次（并多要一次用户批准）。
+        if let hash = helperCDHash() {
+            UserDefaults.standard.set(hash, forKey: registeredIdentityKey)
+        }
         return status()
     }
 
     nonisolated public static func unregister() throws {
         try SMAppService.daemon(plistName: plistName).unregister()
+    }
+
+    // MARK: - 重新安装后的自愈
+
+    /// `UserDefaults` 里记住「上次注册的是哪一份 helper」。
+    private static let registeredIdentityKey = "coast.helper.registeredCDHash"
+
+    /// helper 可执行文件的 cdhash —— 代码签名对内容的唯一摘要。
+    ///
+    /// 用它而不是 `CFBundleVersion` 当身份：同一个版本号重新构建、重新签名后 cdhash 就变了，
+    /// 而 launchd 认的恰恰是签名，不是版本号。版本号相同的替换正是最容易漏掉的那一类。
+    nonisolated private static func helperCDHash() -> String? {
+        let executable = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/MacOS/\(HelperConstants.machServiceName)")
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(executable as CFURL, [], &staticCode) == errSecSuccess,
+              let code = staticCode else { return nil }
+        var info: CFDictionary?
+        guard SecCodeCopySigningInformation(code, [], &info) == errSecSuccess,
+              let dict = info as? [String: Any],
+              let unique = dict[kSecCodeInfoUnique as String] as? Data else { return nil }
+        return unique.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// 确保当前这份 helper 真的是 launchd 注册的那一份；不是就重注册。
+    ///
+    /// **为什么必须有这个**：`SMAppService` 把注册和注册时那份包的代码签名绑在一起。
+    /// 原地替换 .app（应用内更新、从 DMG 拖覆盖、开发期重新打包）之后，旧注册**既不失效
+    /// 也拉不起来** —— `status()` 照报 `.enabled`，`isEnabled` 因此判为可用，而每一次 XPC
+    /// 调用都无人应答，挂满 15s 超时才失败。表现是「界面显示助手已启用，增强模式和系统代理
+    /// 却全哑了」，且日志里没有任何线索。这是实测出来的，不是推测。
+    ///
+    /// `ensureRegisteredForCurrentBuild` 的结局。**必须分得这么细** —— 第一版把
+    /// 「没装过」「取不到 cdhash」「确实没变」「重注册失败」全塌缩成一个 `false`，
+    /// 结果实测时看到「报未变更、状态却从 enabled 掉到 notRegistered」而无从判断走了哪条路。
+    public enum HealOutcome: Sendable, CustomStringConvertible {
+        /// 没安装过 helper —— 安装是用户的显式动作，不在这里替他决定。
+        case notInstalled
+        /// 读不到 helper 的代码签名摘要，无法判断是否变更；保持现状。
+        case identityUnavailable
+        /// helper 二进制未变，无需处理。
+        case unchanged
+        /// 检测到变更，已重新注册并启用。
+        case reregistered
+        /// 已重新注册，但需要用户去「系统设置 → 登录项」重新批准。
+        case needsApproval
+        /// 检测到变更，但重注册失败 —— helper 此刻不可用。
+        case failed(String)
+
+        public var description: String {
+            switch self {
+            case .notInstalled: return "未安装 helper"
+            case .identityUnavailable: return "读不到 helper 签名摘要"
+            case .unchanged: return "helper 未变更"
+            case .reregistered: return "helper 已变更，已重新注册并启用"
+            case .needsApproval: return "helper 已变更，已重新注册，待用户批准"
+            case .failed(let why): return "helper 已变更，重注册失败：\(why)"
+            }
+        }
+
+        /// 是否需要提醒用户 —— 只有真的做了事或真的坏了才值得打扰他。
+        public var isNoteworthy: Bool {
+            switch self {
+            case .notInstalled, .unchanged, .identityUnavailable: return false
+            case .reregistered, .needsApproval, .failed: return true
+            }
+        }
+    }
+
+    nonisolated public static func debugCurrentCDHash() -> String? { helperCDHash() }
+    nonisolated public static func debugRecordedCDHash() -> String? {
+        UserDefaults.standard.string(forKey: registeredIdentityKey)
+    }
+
+    @discardableResult
+    nonisolated public static func ensureRegisteredForCurrentBuild() -> HealOutcome {
+        // `.notRegistered` 也要放过去：替换 .app 之后系统有时会**自己**把注册作废，
+        // 而此时旧 daemon 往往还活着继续服务 —— 只看 `.enabled` 会漏掉这一支。
+        // 判据改成「以前装过」（有记录的 cdhash），而不是「现在还 enabled」。
+        let recorded = UserDefaults.standard.string(forKey: registeredIdentityKey)
+        guard recorded != nil || status() == .enabled else { return .notInstalled }
+        guard let current = helperCDHash() else { return .identityUnavailable }
+        guard recorded != current || status() != .enabled else { return .unchanged }
+        // 先注销再注册：直接 register() 不会覆盖已有的陈旧注册。
+        try? unregister()
+        do {
+            let status = try register()
+            UserDefaults.standard.set(current, forKey: registeredIdentityKey)
+            return status == .enabled ? .reregistered : .needsApproval
+        } catch {
+            return .failed(error.localizedDescription)
+        }
     }
 
     /// 打开「系统设置 → 登录项」，引导用户批准。注册后停在 `requiresApproval` 时必须给这条出路。

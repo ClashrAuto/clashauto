@@ -15,6 +15,7 @@ enum SelfTests {
         if environment["COAST_HELPER_SELFTEST"] == "1" { helperSelfTest() }
         if environment["COAST_XPC_SELFTEST"] == "1" { xpcSelfTest() }
         if environment["COAST_HELPER_UNREGISTER"] == "1" { helperUnregister() }
+        if environment["COAST_HELPER_HEAL"] == "1" { helperHeal() }
         if environment["COAST_SYSPROXY_SELFTEST"] == "1" { systemProxySelfTest() }
         if environment["COAST_PATHS_SELFTEST"] == "1" { pathsSelfTest() }
         if environment["COAST_TOPO_SELFTEST"] == "1" { topoSelfTest() }
@@ -114,6 +115,17 @@ enum SelfTests {
             print("注销失败: \(error.localizedDescription)")
             exit(1)
         }
+    }
+
+    /// 单独跑一次「包换了就重注册」的自愈逻辑，用于验证它确实生效。
+    private static func helperHeal() {
+        print("处理前状态: \(MacHelperClient.status())")
+        print("当前 cdhash: \(MacHelperClient.debugCurrentCDHash() ?? "<取不到>")")
+        print("已记录 cdhash: \(MacHelperClient.debugRecordedCDHash() ?? "<无记录>")")
+        let outcome = MacHelperClient.ensureRegisteredForCurrentBuild()
+        print("结果: \(outcome)")
+        print("处理后状态: \(MacHelperClient.status())")
+        exit(0)
     }
 
     private static func topoSelfTest() {

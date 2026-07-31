@@ -1,5 +1,6 @@
 import CoastHelperProtocol
 import Foundation
+import os.log
 import SystemConfiguration
 
 // 特权 helper（root daemon）。由 SMAppService 注册、launchd 按需拉起。
@@ -43,6 +44,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
     func setSystemProxy(enabled: Bool, host: String, port: Int,
                         bypassCommaSeparated: String,
                         withReply reply: @escaping (Bool, String) -> Void) {
+        Audit.log("setSystemProxy enabled=\(enabled) \(host):\(port)")
         // root 身份下 SCPreferencesCreate 直接可写，不需要 AuthorizationRef —— 全程免密。
         guard let prefs = SCPreferencesCreate(nil, "CoastHelper" as CFString, nil) else {
             reply(false, "SCPreferencesCreate 返回空")
@@ -98,6 +100,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
 
     func startCore(executable: String, config: String, userDir: String,
                    withReply reply: @escaping (Bool, String) -> Void) {
+        Audit.log("startCore exe=\(executable) config=\(config)")
         queue.sync {
             stopCoreLocked()
 
@@ -150,6 +153,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
     }
 
     func stopCore(withReply reply: @escaping (Bool, String) -> Void) {
+        Audit.log("stopCore")
         queue.sync {
             stopCoreLocked()
             reply(true, "")
@@ -160,6 +164,10 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
                        interface: String, gatewayIP: String, gatewayMAC: String,
                        redirPort: Int, dnsPort: Int,
                        withReply reply: @escaping (Bool, String) -> Void) {
+        // 接管别人的流量是本程序做过的最重的一件事，日志必须记全:接管了谁、冒充哪个网关、
+        // 走哪块网卡。出问题时(局域网异常、某台设备断网)这是唯一能自证「我做了什么」的记录。
+        Audit.log("startRedirect 设备=[\(deviceIPsCommaSep)] 网卡=\(interface) "
+                  + "网关=\(gatewayIP)/\(gatewayMAC) redir=\(redirPort) dns=\(dnsPort)")
         let ips = deviceIPsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         let macs = deviceMACsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         if let error = redirector.start(deviceIPs: ips, deviceMACs: macs, interface: interface,
@@ -172,6 +180,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
     }
 
     func stopRedirect(withReply reply: @escaping (Bool, String) -> Void) {
+        Audit.log("stopRedirect")
         redirector.stop()
         reply(true, "")
     }
@@ -195,8 +204,62 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
 }
 
 enum HelperVersion {
-    static let current = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+    /// 版本取自**所在 .app 的** Info.plist，而不是嵌进本可执行文件的那份。
+    ///
+    /// 嵌入段（`-sectcreate __TEXT __info_plist`）是链接期产物，而那个 plist 只作为一条
+    /// `-Xlinker` 参数存在，**不在 swift build 的依赖图里**：改了它，构建系统照样判定
+    /// 「无需重建」，嵌入段留着上一次的内容 —— 改了等于没改（实测如此，连 touch 源码强制
+    /// 重编都不保证重链）。于是嵌入的版本号永远停在模板里的 1.0。
+    ///
+    /// 而这个值不是装饰：`getVersion` 是唯一能问出「现在跑的到底是哪一份 helper」的探针，
+    /// 「.app 换了但 launchd 还拽着旧注册」这个真实故障就靠它才可观测
+    /// （见 `MacHelperClient.ensureRegisteredForCurrentBuild`）。恒为 1.0 等于探针失灵。
+    ///
+    /// helper 必然位于 `<App>.app/Contents/MacOS/` 下（launchd plist 的 BundleProgram 就这么写的），
+    /// 往上两级即 `Contents/Info.plist` —— 那份由 make_app.sh 真正打了版本号。
+    static let current: String = {
+        if let executable = Bundle.main.executableURL {
+            let info = executable
+                .deletingLastPathComponent()      // MacOS/
+                .deletingLastPathComponent()      // Contents/
+                .appendingPathComponent("Info.plist")
+            if let dict = NSDictionary(contentsOf: info) as? [String: Any],
+               let version = dict["CFBundleVersion"] as? String {
+                return version
+            }
+        }
+        // 兜底：不在 .app 里跑（开发期直接执行）时退回嵌入段。
+        return Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+    }()
 }
+
+/// 特权操作的审计日志。
+///
+/// 这个 daemon 以 root 改系统代理、起进程、往局域网发 ARP 接管别人的流量。这些动作**必须**
+/// 留痕：它没有终端(launchd 拉起)、没有界面，出了问题——某台设备断网、系统代理被改成意外的
+/// 值、核心以 root 跑起了不该跑的东西——除了系统日志没有第二处可查。
+/// 用 `%{public}@` 是因为 os_log 默认把字符串参数打码成 `<private>`，那样等于没记。
+/// 但也**只记调用参数**：这些是 IP/MAC/端口/路径，没有凭据 —— 系统日志是全机可读的。
+enum Audit {
+    private static let channel = OSLog(subsystem: "com.yuehongsun.coast.helper", category: "audit")
+
+    /// 先把消息拼好，再用单一 `%{public}@` 交给 os_log。
+    ///
+    /// **不要**写成 `os_log(format, log:, type:, args)` 转发变参 —— Swift 的 `CVarArg...`
+    /// 无法这样展开，数组会被当成**一个**参数，编译通过但输出全错。审计日志错了比没有更糟。
+    static func log(_ message: String) {
+        os_log("%{public}@", log: channel, type: .default, message)
+    }
+}
+
+// 启动即把「我是谁、从哪来」写进系统日志。
+//
+// 这是排查「launchd 到底在跑哪一份 helper」时**唯一**的线索来源：daemon 是 launchd 按需拉起的，
+// 没有终端可看；而它一旦跑起来就常驻，之后 .app 被替换掉它也照跑不误（版本值在进程启动时就
+// 固化了）。没有这行日志，「界面显示助手已启用、行为却是旧版的」这种状态无从辨认。
+// 用 os_log 而非 print：print 到 stdout 在 launchd 下直接进 /dev/null。
+Audit.log("Coast helper 启动 版本=\(HelperVersion.current) "
+          + "路径=\(Bundle.main.executableURL?.path ?? "?")")
 
 let service = HelperService()
 let listener = NSXPCListener(machServiceName: HelperConstants.machServiceName)

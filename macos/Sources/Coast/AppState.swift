@@ -139,6 +139,10 @@ public final class AppState {
         applySystemAppearanceIfNeeded()   // 启动时若跟随系统,先对齐一次
         startSystemAppearanceObserver()   // 之后系统外观变了也跟上
         startSubscriptionAutoUpdate()     // 定时自动更新订阅
+        // .app 被替换过(应用内更新/从 DMG 拖覆盖)就重注册 helper —— 否则 status() 照报
+        // enabled，XPC 却永远无人应答。详见 MacHelperClient.ensureRegisteredForCurrentBuild。
+        let heal = MacHelperClient.ensureRegisteredForCurrentBuild()
+        if heal.isNoteworthy { append(log: "检测到程序已更新：\(heal)") }
 
         guard ProcessInfo.processInfo.environment["COAST_NO_AUTOSTART"] != "1" else {
             append(log: "COAST_NO_AUTOSTART=1，跳过自动启动核心".t)
