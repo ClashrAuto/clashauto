@@ -9,6 +9,10 @@
 #include "../net/LanGateway.h"
 #include "../net/core/ProxyConfig.h"        // ProxyConfigStore/ProxyConfig（灰度：进程内出站快照）
 #include "../net/core/ProxyConfigBuilder.h" // coastcore::buildProxyConfig
+#include "../net/core/CoreRouter.h"        // 分流判定：与网关共用同一份实现
+#include "../net/core/CoreDialerFactory.h"  // 本机入站的拨号工厂
+#include "../net/inbound/MixedInbound.h"     // 本机 HTTP/SOCKS 入站
+#include "../net/Socks5Client.h"             // Socks5OutboundFactory：入站的回退工厂
 #include "../net/core/RuleEngine.h"
 #include "../net/core/DnsResolver.h"         // DNS 旁听器（灰度：学核心 fake-ip → 域名）
 
@@ -33,7 +37,8 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
                                     const AppConfig &config, QObject *parent)
     : QObject(parent), m_store(store), m_clash(clash), m_core(core), m_gateway(gateway),
       m_history(history), m_configDir(config.configDir), m_coastCore(config.coastcore),
-      m_coastStrict(config.coastcoreStrict)
+      m_coastStrict(config.coastcoreStrict), m_inboundPort(config.coastcoreInboundPort),
+      m_mixedPort(config.mixedPort)
 {
     m_scanner = new LanScanner(this);
 
@@ -147,7 +152,51 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
         rebuildCoastCoreConfig();
         if (m_gateway)
             m_gateway->setCoastCore(true, m_coastStrict, m_pcfgStore, m_ruleEngine, m_dnsResolver);
+        startLocalInbound();
     }
+}
+
+// 本机 HTTP/SOCKS 混合入站 —— CoastCore 的**第二个入口**。
+//
+// 在此之前进程内出站只服务局域网里被代理的设备，本机自己的流量 100% 走 mihomo；出站侧其实早就齐了
+// （8 协议 + QUIC/TLS/uTLS/WS + 规则 + DNS），缺的一直是「字节从哪进来」。见 docs/mihomo-replacement-gap.md。
+//
+// 复用**同一个** ProxyConfigStore / RuleEngine 和**同一份**分流实现（coastcore::makeRouter），
+// 所以本机流量与网关流量的选路结果必然一致 —— 不存在「两套逻辑要同步」。
+// 端口 0 = 关（默认），与 mihomo 的混合端口并存，便于同机 A/B 对比两个引擎。
+void DevicesController::startLocalInbound()
+{
+    if (m_localInbound || m_inboundPort <= 0 || !m_pcfgStore)
+        return;
+    // 回退工厂 = 拨 mihomo 的混合端口（与网关那条路的「每设备 SOCKS」不同：本机没有设备身份）。
+    auto *factory = new CoreDialerFactory(m_pcfgStore.get(), new Socks5OutboundFactory(m_mixedPort));
+    factory->setStrict(m_coastStrict);
+    factory->setRouter(coastcore::makeRouter(m_pcfgStore, m_ruleEngine, false));
+    m_localInbound = new MixedInbound(factory, this);
+    m_localInboundFactory = factory; // MixedInbound 不持有工厂，得由我们管生命周期
+    if (!m_localInbound->listen(static_cast<quint16>(m_inboundPort))) {
+        qWarning() << "本机入站: 监听" << m_inboundPort << "失败（端口被占？）";
+        stopLocalInbound();
+        return;
+    }
+    qInfo() << "本机入站: HTTP/SOCKS 已在 127.0.0.1:" << m_inboundPort
+            << "启用（进程内引擎；回退端口" << m_mixedPort << "）";
+}
+
+void DevicesController::stopLocalInbound()
+{
+    if (m_localInbound) {
+        m_localInbound->stop();
+        m_localInbound->deleteLater();
+        m_localInbound = nullptr;
+    }
+    delete m_localInboundFactory; // 必须在入站销毁之后：在途连接的出站对象由工厂造出
+    m_localInboundFactory = nullptr;
+}
+
+DevicesController::~DevicesController()
+{
+    stopLocalInbound(); // m_localInbound 有 parent 会自动收，但工厂是裸指针，且必须晚于入站销毁
 }
 
 bool DevicesController::hasProxiedDevices() const
@@ -1102,6 +1151,11 @@ void DevicesController::setCoastCoreEnabled(bool on)
     rebuildCoastCoreConfig(); // 先把快照建好，再切开关，避免开的那一刻拿到空快照
     if (m_gateway)
         m_gateway->setCoastCore(on, m_coastStrict, m_pcfgStore, m_ruleEngine, m_dnsResolver);
+    // 本机入站跟着总开关走：关掉 coastcore 就该退回「本机全走 mihomo」，否则开关名不副实。
+    if (on)
+        startLocalInbound();
+    else
+        stopLocalInbound();
     emit coastCoreEnabledChanged();
 }
 

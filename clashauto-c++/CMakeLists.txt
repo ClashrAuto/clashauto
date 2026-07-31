@@ -183,6 +183,8 @@ set(BACKEND_SOURCES
     src/net/core/ProxyConfigBuilder.cpp src/net/core/ProxyConfigBuilder.h
     src/net/core/DirectOutbound.cpp    src/net/core/DirectOutbound.h
     src/net/core/CoreDialerFactory.cpp src/net/core/CoreDialerFactory.h
+    # 分流判定的**唯一**实现：局域网网关与本机入站共用（复制一份就会开始漂移）
+    src/net/core/CoreRouter.cpp        src/net/core/CoreRouter.h
     # 协议出站的共享基建（跨平台）：AEAD/KDF 加密层(OpenSSL libcrypto)、TLS/WebSocket 传输原语、
     # 协议注册表（加协议=加文件+注册一行）。各协议出站单元并行建立在这之上。
     # Kdf 是纯 Qt（QCryptographicHash/QMessageAuthenticationCode），不依赖 OpenSSL，恒编入。

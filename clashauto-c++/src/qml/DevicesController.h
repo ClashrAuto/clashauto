@@ -104,6 +104,8 @@ public:
     Q_INVOKABLE void dismissSecurityAlerts(); // 用户手动关掉横幅（威胁若仍在，下次观察到会重新出现）
 
     // —— 灰度：进程内出站（实验；10c）——
+    ~DevicesController() override; // 收本机入站（工厂是裸指针，得显式收）
+
     bool coastCoreEnabled() const { return m_coastCore; }
     bool coastCoreStrict() const { return m_coastStrict; }
     // 落盘 config.yaml + 重建快照 + 把开关意图推给网关数据面。默认关时网关全走 mihomo（零行为变化）。
@@ -145,6 +147,9 @@ private:
     // 对不上 selected）+ 当前模式/选中 → 组装 ProxyConfig 快照灌进 m_pcfgStore（原子换手热更新），
     // 并把规则喂给 m_ruleEngine（本单元 Rule 模式回退核心，规则仅备用）。
     void rebuildCoastCoreConfig();
+    // 本机混合入站的起/停。端口 0（默认）时 start 是 no-op ⇒ 零行为变化。
+    void startLocalInbound();
+    void stopLocalInbound();
     // rebuildCoastCoreConfig + 重新把开关意图推给网关（保持热更新）。仅在灰度开着时才动作。
     void refreshCoastCore();
     void persistCoastCore(bool on); // 只改 config.yaml 的 coastcore 键，保留其余内容
@@ -234,6 +239,10 @@ private:
     // —— 灰度：进程内出站 ——
     QString m_configDir;                          // config.yaml / full.yaml 所在（构造时从 AppConfig 取）
     bool m_coastCore = false;                     // 灰度开关（默认关 = 零行为变化）
+    int m_inboundPort = 0;                        // 本机混合入站端口（0=关，默认）
+    int m_mixedPort = 7890;                       // mihomo 混合端口：本机入站的回退目标
+    class MixedInbound *m_localInbound = nullptr; // 本机 HTTP/SOCKS 入站（CoastCore 第二个入口）
+    class CoreDialerFactory *m_localInboundFactory = nullptr; // 入站不持有工厂，由本类管生命周期
     bool m_coastStrict = false;                   // 严格模式（默认关）
     std::shared_ptr<ProxyConfigStore> m_pcfgStore; // 出站配置快照持有者（app 生命周期常驻，与网关 worker 共享）
     std::shared_ptr<RuleEngine> m_ruleEngine;   // 分流规则引擎（本单元备用；Rule 模式回退核心）

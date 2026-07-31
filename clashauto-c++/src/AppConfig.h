@@ -41,6 +41,13 @@ struct AppConfig {
     // 用途是把「离完全替换 mihomo 还差多少」暴露出来 —— 静默回退会把差距藏起来。
     // 代价是这些连接会断，所以单独一个开关。（config.yaml 键 `coastcore_strict`）
     bool coastcoreStrict = false;
+
+    // 本机 HTTP/SOCKS 混合入站的监听端口（回环）。**0 = 关闭**（默认，零行为变化）。
+    // 打开后本机流量可以直接指向它，走**进程内引擎**而不是 mihomo —— 这是 CoastCore 的第二个
+    // 入口（第一个是局域网网关）。在此之前进程内出站只服务被代理的设备，本机自己 100% 走 mihomo。
+    // 与 mihomo 的混合端口（`port`，默认 7890）**并存**，便于同机 A/B 对比两个引擎。
+    // 只有 coastcore 开着时才有意义（关着时没有可用的配置快照）。（config.yaml 键 `coastcore_inbound`）
+    int coastcoreInboundPort = 0;
     QString language = "zh-CN";
 
     QString clashExecutable() const;

@@ -110,6 +110,8 @@ AppConfig AppConfigLoader::load()
     config.coastcore = boolFromYaml(yaml, "coastcore", config.coastcore); // 进程内数据面（默认关）
     // 严格模式：判不了就断，不回退核心（默认关）。只有 coastcore 开着时才有意义。
     config.coastcoreStrict = boolFromYaml(yaml, "coastcore_strict", config.coastcoreStrict);
+    // 本机混合入站端口（0=关，默认）。见 AppConfig::coastcoreInboundPort 的说明。
+    config.coastcoreInboundPort = intFromYaml(yaml, "coastcore_inbound", config.coastcoreInboundPort);
     config.language = valueFromYaml(yaml, "language", config.language);
     config.secret = valueFromYaml(yaml, "secret", QString());
 
