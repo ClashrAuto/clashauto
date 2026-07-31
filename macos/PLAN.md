@@ -2301,3 +2301,28 @@ macOS 上的对应物是 `NSWindow.contentMinSize`。新增 `.windowMinSize(widt
 再逐个排除 `.windowStyle(.hiddenTitleBar)` / `.windowGlass` / `.background(.ultraThinMaterial)`。
 
 `swift test` 308 全绿；`i18n_check.py` 248/248。
+
+
+## 2026-08-01(续三十一) · ★ 更正：上一条那个「主窗长不高」是我量错了
+
+上一条把「主窗高度卡在 430、拖不大」记成了一个没查出来的问题。**它不是问题**。
+
+真正的原因：那扇窗当时在 **y = 751**，而这台机器的屏幕才 1260 高。
+`set size` 与拖右下角都是**保持左上角不动、往下长**，1260 − 751 再扣掉程序坞，
+本来就只剩四百多点 —— macOS 把它按屏幕可见区**截住**了。窗口没有任何高度上限。
+
+验证：先把窗口挪到 (200, 60)，再 `set size to {1000, 700}` —— 结果是
+**1000×700，一次就成**。
+
+这一轮为此排除掉的（都是好的，只是白排）：`.windowGlass(.sidebar)`、
+`.windowStyle(.hiddenTitleBar)`、`contentMaxSize`、根视图的 `maxWidth/maxHeight`。
+三个试探性改动上一条已经全部撤掉、没留在代码里 —— 这次庆幸撤了，因为它们修的是一个
+根本不存在的 bug。
+
+**教训记在这里**：拿脚本量窗口尺寸时，先确认窗口**离屏幕边缘够远**。
+不然量到的是「屏幕还剩多少」，不是「窗口能长多大」。上一条那个结论就是这么来的。
+
+上一条真正有价值的那一半仍然成立且已保留：`WindowMinSize` 只在挂载时设一次
+（在 `updateNSView` 里反复写窗口约束本来就是错的），四个窗的最小尺寸都真的生效了。
+
+`swift test` 308 全绿；`i18n_check.py` 248/248。
