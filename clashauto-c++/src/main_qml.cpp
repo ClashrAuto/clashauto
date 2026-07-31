@@ -622,6 +622,9 @@ int main(int argc, char *argv[])
     // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
     lanGateway->recoverFromCrash();
     auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, history, config, &app);
+    // 「增强」按钮改走进程内 TUN 的接线（仅当 config 里 coastcore 打开时生效；关着时一行行为不变）。
+    // 必须在 devicesCtrl 之后：出站配置与分流规则要复用**它持有的那一份**，不能各建各的。
+    bridge.setInProcessTunSources(devicesCtrl);
     // Npcap 安装引导（Windows 专用；其它平台 supported()=false，设备页那条提示条不显示）。
     // 状态页「今日流量」卡的数据源（小时柱 + 进程/设备/域名 Top5）——同样是后置注入。
     bridge.setHistoryStore(history);

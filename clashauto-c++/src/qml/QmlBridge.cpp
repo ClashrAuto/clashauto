@@ -1,5 +1,8 @@
 #include "QmlBridge.h"
 
+#include "DevicesController.h"      // coastCoreEnabled / 共享的 store+rules
+#include "../net/LocalTunService.h" // 进程内 TUN（coastcore 打开时由它建 TUN）
+
 #include "../AppConfig.h"
 #include "../ClashService.h"
 #include "../CoreController.h"
@@ -175,7 +178,11 @@ void QmlBridge::refreshStatusFromCore()
     if (!m_core)
         return;
     const bool running = m_core->isRunning();
-    const bool tun = running && m_core->isTunEnabled();
+    // ★ 进程内 TUN 开着时，「增强」的真值在 LocalTunService 这边，不在核心那边。
+    //   少了这一条，每秒一次的状态轮询会把 m_tunEnabled 覆盖回核心的值（核心没开 TUN → false），
+    //   页脚开关就会在点开后**自己弹回去**，而 TUN 其实还在跑 —— 状态与实况相反，最坏的一种 UI bug。
+    const bool localTunOn = m_localTun && m_localTun->active();
+    const bool tun = localTunOn || (running && m_core->isTunEnabled());
     const bool proxy = running && m_core->isProxyEnabled();
     if (running == m_coreRunning && tun == m_tunEnabled && proxy == m_proxyEnabled)
         return;
@@ -197,12 +204,48 @@ void QmlBridge::toggleProxy()
         m_core->toggleProxy();
 }
 
+void QmlBridge::setInProcessTunSources(DevicesController *devices)
+{
+    m_devices = devices;
+}
+
 void QmlBridge::toggleTun()
 {
     // 增强(TUN) 开关统一入口（页脚开关 + 托盘共用，对齐 Widgets 版 onToggleTunRequested）。
     if (!m_core)
         return;
     const bool turningOn = !m_core->isTunEnabled();
+
+    // ★★ coastcore 打开时走**我们自己的 TUN**，不让 mihomo 建。按钮语义不变，仍是「开 TUN」。
+    //   这一段必须放在下面所有平台前置检查**之前** —— 那些检查（未装内核就拒绝、Windows 提权
+    //   重启、macOS 注册 helper）都是为 mihomo 的 TUN 服务的：进程内 TUN 压根不需要内核，
+    //   放在后面会被「未检测到 mihomo 内核」这类判断误拦，用户会看到一个完全说不通的提示。
+    //   （Windows 建 wintun 仍需管理员、macOS 建 utun 仍需 root —— 那两条由 LocalTunService
+    //    自己在 open() 时报错，错误信息里写明原因，不在这里预判。）
+    if (m_devices && m_devices->coastCoreEnabled()) {
+        if (!m_localTun)
+            m_localTun = new LocalTunService(this);
+        if (m_localTun->active()) {
+            m_localTun->stop();
+            pushLog(tr("已关闭增强（进程内 TUN）"));
+        } else {
+            QString err;
+            connect(m_localTun, &LocalTunService::logged, this, &QmlBridge::pushLog,
+                    Qt::UniqueConnection);
+            if (!m_localTun->start(m_devices->proxyConfigStore(), m_devices->ruleEngine(),
+                                   /*socksFallbackPort=*/0, &err)) {
+                // 失败必须**说清楚原因**并且不翻开关：这里的两种失败（配置里有 QUIC 节点、
+                // 探不到物理出口）都是「开下去就整机断网」，拦住比开了再回滚重要。
+                pushLog(tr("开启增强失败：%1").arg(err));
+                return;
+            }
+            pushLog(tr("已开启增强（进程内 TUN，网卡 %1）").arg(m_localTun->ifname()));
+        }
+        m_tunEnabled = m_localTun->active();
+        emit statusChanged();
+        persistConfigBool(QStringLiteral("use"), m_tunEnabled);
+        return;
+    }
 #if defined(Q_OS_WIN)
     // 未安装内核：开启增强前先引导下载，否则提权重启也没有核心可跑（对齐 Widgets promptDownloadCore）。
     if (turningOn && !m_core->isCoreInstalled()) {

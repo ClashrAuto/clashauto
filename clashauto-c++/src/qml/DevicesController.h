@@ -112,6 +112,13 @@ public:
     ~DevicesController() override; // 收本机入站（工厂是裸指针，得显式收）
 
     bool coastCoreEnabled() const { return m_coastCore; }
+
+    // 「进程内增强(TUN)」要复用**同一份**出站配置与分流实现 —— 复制一份就会开始漂移
+    //（网关和 TUN 用两套规则，用户改了设置只有一边生效，这类 bug 极难查）。
+    // 二者都是 app 生命周期常驻的 shared_ptr：内容会被 rebuild 换掉，但对象身份不变，
+    // 所以拿一次存起来是安全的。
+    std::shared_ptr<ProxyConfigStore> proxyConfigStore() const { return m_pcfgStore; }
+    std::shared_ptr<RuleEngine> ruleEngine() const { return m_ruleEngine; }
     bool coastCoreStrict() const { return m_coastStrict; }
     bool localInboundEnabled() const { return m_inboundPort > 0; }
     int localInboundPort() const { return kLocalInboundPort; }

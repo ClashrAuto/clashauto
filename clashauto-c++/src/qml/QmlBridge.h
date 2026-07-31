@@ -19,7 +19,9 @@
 class AppConfig;
 class ClashService;
 class CoreController;
+class DevicesController;
 class DeviceStore;
+class LocalTunService;
 class HistoryStore;
 class SubscriptionStore;
 class QJsonArray;
@@ -133,6 +135,14 @@ public:
     Q_INVOKABLE void toggleCore();
     Q_INVOKABLE void toggleProxy();
     Q_INVOKABLE void toggleTun();
+
+    // 「增强」按钮改走**进程内 TUN** 的接线口。传 nullptr / 不调 = 维持原样（用 mihomo 的 TUN）。
+    //
+    // ★ 按钮语义**不变**：还是「开 TUN」。区别只在 coastcore 打开时由我们自己的
+    //   LocalTunService 建 TUN，而不是让 mihomo 去建。coastcore 关着时一行行为都不变。
+    // ★ 出站配置与分流实现取自 DevicesController 的**同一份** store/rules —— 复制一份就会
+    //   开始漂移（网关和 TUN 用两套规则，用户改了设置只有一边生效）。
+    void setInProcessTunSources(DevicesController *devices);
     Q_INVOKABLE void setMode(const QString &display); // 传中文「规则/全局/直连」即可
     Q_INVOKABLE void selectNode(const QString &rawName);
     // 禁用当前正在使用的节点：把它从订阅池摘除并重建配置（对齐旧项目 disableNodeByName）。
@@ -233,6 +243,10 @@ private:
     bool m_autoTheme = false; // 是否跟随系统深浅色（config.autoTheme）；控制是否响应系统外观变化
     bool m_closeToTray = false; // 关闭到托盘（config.mini）：启动静默 + ✕ 隐藏；默认关（实际值由 config 覆盖）
     bool m_nodeSwitchNote = true; // 切换节点是否发系统通知（config.note）；设置页实时更新，仅它为真时发通知
+    // 「进程内增强(TUN)」：coastcore 打开时由它建 TUN，而不是让 mihomo 建。
+    // 懒创建（第一次真的要开才 new），关掉后保留对象以便复用。
+    DevicesController *m_devices = nullptr;   // 出站配置/分流的**唯一**来源，见 setInProcessTunSources
+    LocalTunService *m_localTun = nullptr;
     CoreController *m_core = nullptr;
     ClashService *m_clash = nullptr;
     SubscriptionStore *m_subs = nullptr;
