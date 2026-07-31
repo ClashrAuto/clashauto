@@ -290,6 +290,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         # wintun.dll 运行期动态加载（仓库没有它的 .lib/.h），所以这里不需要额外 link 什么；
         # 用到的 ConvertInterfaceLuidToIndex 来自已链接的 iphlpapi。
         target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_win.cpp src/net/TunEndpoint.h)
+    elseif(APPLE)
+        # utun：系统自带（PF_SYSTEM/kern_control），无需额外库。
+        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_mac.cpp src/net/TunEndpoint.h)
     endif()
     target_sources(clashauto-qml PRIVATE
         src/net/NetStack.cpp src/net/NetStack.h
