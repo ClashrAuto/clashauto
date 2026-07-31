@@ -83,9 +83,15 @@ enum SelfTests {
         nonisolated(unsafe) var finished = false
         Task.detached {
             do {
-                let version = try await MacHelperClient().version()
+                let client = MacHelperClient()
+                let version = try await client.version()
                 print("helper 版本: \(version)")
                 print("✅ XPC 通道可用 —— 双向代码签名鉴权已放行")
+                // 再走一次**带审计**的调用，确认 `NSXPCConnection.current()` 在方法体里
+                // 真能取到调用方 PID（它在某些上下文会返回 nil，那样审计行就少了「谁让它做的」）。
+                // 选 stopCore：helper 没起过核心时它是无副作用的空操作。
+                try await client.stopCore()
+                print("已触发一次带审计的调用(stopCore 空操作)，本进程 PID = \(getpid())")
                 exitCode = 0
             } catch {
                 print("❌ XPC 调用失败: \(error)")
