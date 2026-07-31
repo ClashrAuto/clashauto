@@ -32,6 +32,13 @@ cmake --build build-ninja
 .\build-ninja\Coast.exe          # OUTPUT_NAME is "Coast" on Windows (was clashauto.exe)
 ```
 
+**Windows local builds need the Npcap SDK** — headers only (`L2Endpoint_win.cpp` includes `pcap.h`; `wpcap`
+never enters the link line). Without it the build dies at `fatal error: pcap.h`. On this machine it lives at
+`C:\Users\ultra\npcap-sdk`; set `$env:NPCAP_SDK='C:/Users/ultra/npcap-sdk'` before configuring. To fetch it
+fresh: `curl -x http://127.0.0.1:7890 -o sdk.zip https://npcap.com/dist/npcap-sdk-1.13.zip` — **npcap.com is
+unreachable without the local proxy** (a direct curl returns "Empty reply from server"). Do **not** keep it
+under the session scratchpad: that gets cleaned and the next build breaks again (happened once).
+
 `find_package(Qt6 … Widgets Network Qml Quick QuickControls2)`. `AUTOMOC`/`AUTORCC`/`AUTOUIC` are on, so new `Q_OBJECT` classes and `.qrc`/`.qml` changes are picked up — but **new `.cpp` files must be added by hand** to `CMakeLists.txt` (`BACKEND_SOURCES` / `QML_GLUE_SOURCES`), and new `.qml` files to the `qt_add_qml_module(... QML_FILES ...)` list. Build dirs: only `build-ninja/`, `build-qml/`, `build-release/` are in `.gitignore` — there is **no `build-*` wildcard**, so any other build dir you create shows up as untracked.
 
 ## Verifying a release — `validate/`
