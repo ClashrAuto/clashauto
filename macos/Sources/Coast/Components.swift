@@ -79,10 +79,12 @@ struct FooterSwitch: View {
             .frame(height: 24)
             .contentShape(Rectangle())
         }
-        // 液态玻璃：macOS 26 起的系统控件外观，比自己画一个圆角底更贴系统。
-        // 开着的用 prominent（更实、更亮）、关着的用普通玻璃 —— 状态差别一眼可见，
-        // 不必只靠那颗小圆点承担。旧系统由 glassButton 自动回落到 .bordered。
-        .glassButton(prominent: isOn)
+        // ★ 一律用普通玻璃，**不用 prominent**。
+        //
+        //   prominent 那一版的度量比 .glass 大一圈：同一排里开着的按钮会比关着的
+        //   明显更高更宽，四颗排在一起参差不齐。状态本来就有圆点和文字色两重表达
+        //   （Qt 那边也只靠圆点区分），没有理由再拿尺寸去说同一件事。
+        .glassButton()
         .onHover { hovering = $0 }
         .help(label)
     }
