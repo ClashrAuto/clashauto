@@ -29,6 +29,7 @@
 #if defined(Q_OS_MACOS)
 #include "../MacWindow.h"       // configureMacTitleBar / enableMacBlur（纯 C++ 接口，实现在 MacWindow.mm）
 #include "../MacHelperClient.h" // 开 TUN 前确保免密 helper 已启用（TUN 建 utun/改路由要 root）
+#include <unistd.h>            // geteuid：进程内 TUN 要本进程是 root，判不到就落回内核 TUN
 #endif
 #if defined(Q_OS_WIN)
 #include "../WinWindow.h" // setWindowsCaptionColor（DWM 标题栏染色，实现在 WinWindow.cpp）
@@ -268,6 +269,26 @@ void QmlBridge::toggleTun()
     //   （Windows 建 wintun 仍需管理员、macOS 建 utun 仍需 root —— 那两条由 LocalTunService
     //    自己在 open() 时报错，错误信息里写明原因，不在这里预判。）
     if (m_devices && m_devices->coastCoreEnabled()) {
+#if defined(Q_OS_WIN)
+        // ★ 权限不够时**不要**直接失败 —— 那是 coastcore 默认打开后我自己引入的倒退：
+        //   原来非管理员点「增强」会自动提权重启，改走进程内分支后变成一句"需要管理员"，
+        //   用户从能用变成不能用。这里保留原来的提权重启（建 wintun 网卡确实要管理员）。
+        if (turningOn && !isProcessElevated()) {
+            if (relaunchElevatedForTun())
+                return; // 提权实例接管，本实例即将退出
+            pushLog(tr("需要管理员权限才能开启增强（创建虚拟网卡）"));
+            return;
+        }
+#elif defined(Q_OS_MACOS)
+        // ★ macOS 上进程内 TUN 要**本进程**是 root（建 utun + 改路由），而我们拿不到 ——
+        //   免密 helper 给的是「核心以 root 冷启动」，不是把本进程提权。
+        //   所以非 root 时**不走进程内这条**，落回下面 mihomo 的 TUN（它由 helper 以 root 拉起，
+        //   是能用的）。宁可退回旧路径，也别让一个默认打开的开关在 mac 上恒失败。
+        if (turningOn && ::geteuid() != 0) {
+            pushLog(tr("macOS 下进程内 TUN 需要 root，本次改用内核 TUN"));
+        } else
+#endif
+        {
         if (!m_localTun)
             m_localTun = new LocalTunService(this);
         if (m_localTun->active()) {
@@ -290,6 +311,7 @@ void QmlBridge::toggleTun()
         emit statusChanged();
         persistConfigBool(QStringLiteral("use"), m_tunEnabled);
         return;
+        } // 进程内分支（macOS 非 root 时不进这里，落到下面的内核 TUN）
     }
 #if defined(Q_OS_WIN)
     // 未安装内核：开启增强前先引导下载，否则提权重启也没有核心可跑（对齐 Widgets promptDownloadCore）。
