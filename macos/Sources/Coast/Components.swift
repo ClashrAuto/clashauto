@@ -79,12 +79,17 @@ struct FooterSwitch: View {
             .frame(height: 24)
             .contentShape(Rectangle())
         }
-        // ★ 一律用普通玻璃，**不用 prominent**。
+        // ★ 用 `.glassCapsule()` 而不是 `.glassButton()`。
         //
-        //   prominent 那一版的度量比 .glass 大一圈：同一排里开着的按钮会比关着的
-        //   明显更高更宽，四颗排在一起参差不齐。状态本来就有圆点和文字色两重表达
-        //   （Qt 那边也只靠圆点区分），没有理由再拿尺寸去说同一件事。
-        .glassButton()
+        //   `.glassButton()` 是**系统按钮样式**，会自己加一层内边距，我控制不了；
+        //   而模式按钮组只能整组上一层玻璃（`.glassCapsule()`）—— 两条路径的最终高度
+        //   永远差一截，怎么调都对不齐。统一走 glassCapsule 之后，尺寸完全由这里的
+        //   `padding` + `frame` 决定，单颗开关与整组分段必然同高。
+        //
+        //   也不用 prominent：它的度量比普通玻璃大一圈，同一排里开着的按钮会更高更宽。
+        //   状态有圆点和文字色两重表达（Qt 也只靠圆点区分），没必要再拿尺寸去说同一件事。
+        .buttonStyle(.plain)
+        .glassCapsule()
         .onHover { hovering = $0 }
         .help(label)
     }

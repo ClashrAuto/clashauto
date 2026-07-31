@@ -102,12 +102,21 @@ struct MainView: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // ★ 让日志行**先**被压缩。不给优先级的话，SwiftUI 会去截右侧按钮上的
+                //   文字 —— 展开模式按钮组时第一个选项就变成了「…」，按钮上的字没了，
+                //   而左边那行日志本来就是可有可无的信息。
+                .layoutPriority(0)
 
             FooterSwitch(label: "增强".t, isOn: state.controller.isTunEnabled) { state.toggleTun() }
             FooterSwitch(label: "网页".t, isOn: state.controller.isProxyEnabled) { state.toggleProxy() }
             FooterSwitch(label: "核心".t, isOn: state.controller.isCoreRunning) { state.toggleCore() }
 
+            // ★ `.fixedSize()` 是关键：按钮永远不被压缩。
+            //   只加 layoutPriority 不够 —— 那只影响「谁先拿到空间」，空间真不够时
+            //   SwiftUI 仍会去截按钮上的字，展开时第一个选项就成了「…」，
+            //   而按钮少一个字就不知道点的是什么。左边那行日志才是该先让位的。
             modePicker
+                .fixedSize()
         }
         .padding(.horizontal, 8)
     }
@@ -121,28 +130,60 @@ struct MainView: View {
     ///
     /// 当前模式直接作为按钮标题，省掉那行冗余的箭头指示：按钮上写着「规则」，
     /// 点开就是三个模式，没有第二种解释。
-    /// 模式切换：收起是一颗按钮，点开就地展开成三颗，选完自动收回。
+    /// 模式切换：收起是一颗按钮，点开就地展开成**一个连体的按钮组**（分段控件）。
     ///
-    /// ★ 直接复用 `FooterSwitch` 本身，不另写一套外观。
-    ///   先前手写的那套(自己拼 HStack + .glassCapsule)与它走的是两条尺寸路径 ——
-    ///   FooterSwitch 用 .glassButton()（系统按钮样式，自带内边距）、宽度随文字，
-    ///   手写那套用 .glassCapsule()（纯背景）、宽度写死 76 —— 高和宽都对不上，
-    ///   而且改一处就得同步另一处。用同一个组件，尺寸一致是结构保证的，不是对出来的。
+    /// 三段紧挨、没有各自的圆角，整组只有一层玻璃、只有外侧是圆的 ——
+    /// 这才是「同一组、三选一」；三颗各自成形的胶囊读起来仍是三个独立按钮。
+    ///
+    /// 每段的内部排版与 `FooterSwitch` 完全一致（圆点 8 + 间距 6 + 字号 12 +
+    /// 横向内距 10 + 高度 24），且两者都走 `.glassCapsule()`，所以
+    /// 单颗开关与整组分段必然同高，整组正好是单颗的三倍宽。
     private var modePicker: some View {
-        HStack(spacing: 6) {
+        Group {
             if modeExpanded {
-                ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
-                    FooterSwitch(label: title, isOn: index == state.modeIndex) {
-                        state.setMode(title)
-                        withAnimation(.snappy(duration: 0.22)) { modeExpanded = false }
+                HStack(spacing: 0) {
+                    ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
+                        Button {
+                            state.setMode(title)
+                            withAnimation(.snappy(duration: 0.22)) { modeExpanded = false }
+                        } label: {
+                            modeSegment(title, active: index == state.modeIndex)
+                        }
+                        .buttonStyle(.plain)
+                        .background {
+                            // 选中段的底压在整组玻璃**里面**，不会给整组带来额外圆角
+                            if index == state.modeIndex {
+                                Capsule().fill(theme.accent.opacity(0.45))
+                            }
+                        }
                     }
                 }
+                .glassCapsule()
             } else {
-                FooterSwitch(label: AppState.modeTitles[state.modeIndex], isOn: true) {
+                Button {
                     withAnimation(.snappy(duration: 0.22)) { modeExpanded = true }
+                } label: {
+                    modeSegment(AppState.modeTitles[state.modeIndex], active: true)
                 }
+                .buttonStyle(.plain)
+                .glassCapsule()
             }
         }
+    }
+
+    /// 一段的内容。与 `FooterSwitch` 的内部排版逐项一致。
+    private func modeSegment(_ title: String, active: Bool) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(active ? theme.accent : theme.switchTrackOff)
+                .frame(width: 8, height: 8)
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(active ? theme.textPrimary : theme.textMuted)
+                .fixedSize()
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 24)
     }
 }
 
