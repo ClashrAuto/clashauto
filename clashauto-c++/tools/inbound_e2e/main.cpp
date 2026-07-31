@@ -12,6 +12,7 @@
 // 用法: ./ibh            （自带靶服务器，不需要任何节点/订阅/外网）
 #include "core/CoreDialerFactory.h"
 #include "core/CoreRouter.h"
+#include "IOutbound.h"
 #include "core/ProxyConfig.h"
 #include "inbound/MixedInbound.h"
 
@@ -309,6 +310,62 @@ int main(int argc, char **argv)
                      "           要分离出引擎自身的开销，缺的对照是「同机 mihomo 走同一条路」，尚未做。\n",
                      N, pct(dir, 0.5), pct(dir, 0.9), dir.size(), pct(via, 0.5), pct(via, 0.9),
                      via.size(), pct(via, 0.5) - pct(dir, 0.5), pct(dir, 0.5));
+    }
+
+    // ---- 拨号器本身的开销：CoreDialerFactory→DirectOutbound 的 connectTo→established
+    //      vs 裸 QTcpSocket 连同一个靶机。这条路上**没有 lwIP、没有入站解析**，量的就是
+    //      「进程内拨号那一跳」自己。真机上 connMs 空载也大量落在 1~10ms 桶，可疑。
+    {
+        auto pct = [](QVector<double> v, double p) {
+            std::sort(v.begin(), v.end());
+            return v.isEmpty() ? 0.0 : v.at(qBound(0, int(v.size() * p), v.size() - 1));
+        };
+        const int N = 300;
+        QVector<double> raw, viaDialer;
+
+        for (int i = 0; i < N; ++i) { // 裸 socket 基线
+            QTcpSocket sk;
+            QEventLoop loop;
+            QTimer to;
+            to.setSingleShot(true);
+            QObject::connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
+            QObject::connect(&sk, &QTcpSocket::connected, &loop, &QEventLoop::quit);
+            QElapsedTimer t;
+            t.start();
+            sk.connectToHost(QHostAddress::LocalHost, tport);
+            to.start(3000);
+            loop.exec();
+            if (sk.state() == QAbstractSocket::ConnectedState)
+                raw.push_back(t.nsecsElapsed() / 1e6);
+        }
+        for (int i = 0; i < N; ++i) { // 经进程内拨号工厂
+            IOutboundTcp *out = factory.createTcp(nullptr);
+            if (!out)
+                break;
+            QEventLoop loop;
+            QTimer to;
+            to.setSingleShot(true);
+            QObject::connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
+            QObject::connect(out, &IOutboundTcp::established, &loop, &QEventLoop::quit);
+            QObject::connect(out, &IOutboundTcp::failed, &loop, &QEventLoop::quit);
+            QElapsedTimer t;
+            t.start();
+            out->connectTo(QStringLiteral("127.0.0.1"), tport, QStringLiteral("local"));
+            to.start(3000);
+            loop.exec();
+            if (out->isEstablished())
+                viaDialer.push_back(t.nsecsElapsed() / 1e6);
+            out->closeTunnel();
+            delete out;
+        }
+        std::fprintf(stderr,
+                     "  [INFO] 拨号一跳（connectTo→established，无 lwIP、无入站解析，%d 次）\n"
+                     "         裸 QTcpSocket : p50 %.3f  p90 %.3f  p99 %.3f ms (n=%d)\n"
+                     "         进程内拨号工厂: p50 %.3f  p90 %.3f  p99 %.3f ms (n=%d)\n"
+                     "         ⇒ 拨号器自身开销 p50 %.3f ms\n",
+                     N, pct(raw, 0.5), pct(raw, 0.9), pct(raw, 0.99), raw.size(),
+                     pct(viaDialer, 0.5), pct(viaDialer, 0.9), pct(viaDialer, 0.99),
+                     viaDialer.size(), pct(viaDialer, 0.5) - pct(raw, 0.5));
     }
 
     // ---- 证伪检查：上面两个大流量用例**必须真的把水位顶上去**，否则节流分支根本没跑，
