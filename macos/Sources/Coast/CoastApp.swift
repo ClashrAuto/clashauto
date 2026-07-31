@@ -14,6 +14,7 @@ struct CoastApp: App {
         WindowGroup("Coast") {
             RootView()
                 .frame(minWidth: 640, minHeight: 430)
+                .windowMinSize(width: 640, height: 430)      // Qt: Main.qml 的 minimumWidth/Height
                 // 整窗毛玻璃。用 NSVisualEffectView 而不是 `.ultraThinMaterial` ——
                 // 后者采样不到窗口后面的桌面，深色主题下就是一块灰底。
                 .windowGlass(.sidebar)
@@ -31,6 +32,7 @@ struct CoastApp: App {
         // （截图里就是这样：整条动作行不见了）。独立窗口不受主窗尺寸约束。
         Window("Coast 更新".t, id: UpdateWindowID.value) {
             UpdateWindowRoot()
+                .windowMinSize(width: 460, height: 420)      // Qt: UpdateWindow.qml
         }
         .defaultSize(width: 600, height: 560)
         .keyboardShortcut(nil)
@@ -40,6 +42,7 @@ struct CoastApp: App {
         // `devices.selectedDevice` 同义）：窗口开着时点列表里另一台，内容跟着换。
         Window("设备详情".t, id: DeviceDetailWindowID.value) {
             DeviceDetailWindowRoot()
+                .windowMinSize(width: 420, height: 420)      // Qt: DeviceDetailWindow.qml
         }
         .defaultSize(width: 600, height: 720)
 
@@ -47,6 +50,7 @@ struct CoastApp: App {
         // 主窗被拖到最小宽（640）时它**横向溢出**—— 实测左边的「Online (0)」直接被切掉半截。
         Window("连接".t, id: ConnectionsWindowID.value) {
             ConnectionsWindowRoot()
+                .windowMinSize(width: 480, height: 320)      // Qt: ConnectionsWindow.qml
         }
         .defaultSize(width: 720, height: 480)
     }
