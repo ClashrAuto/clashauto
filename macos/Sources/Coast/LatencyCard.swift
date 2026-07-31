@@ -35,6 +35,7 @@ struct LatencyCard: View {
                             .font(.system(size: 13))
                             .foregroundStyle(theme.textPrimary)
                         Text("直连".t)
+                            .lineLimit(1)
                             .font(.system(size: 10))
                             .foregroundStyle(theme.textMuted)
                     }

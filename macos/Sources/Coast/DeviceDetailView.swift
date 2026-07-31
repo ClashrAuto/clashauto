@@ -102,6 +102,7 @@ struct DeviceDetailView: View {
                 VStack(alignment: .trailing, spacing: 2) {
                     BigSwitch(isOn: proxyEnabled, enabled: canToggle) { toggleProxy() }
                     Text("代理网络".t)
+                        .lineLimit(1)
                         .font(.system(size: 10))
                         .foregroundStyle(theme.textMuted)
                 }
@@ -184,7 +185,7 @@ struct DeviceDetailView: View {
 
     private var aliasRow: some View {
         HStack(spacing: 8) {
-            Text("备注名".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
+            Text("备注名".t).font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
                 .frame(width: 64, alignment: .leading)
             ThemedField(text: $alias, placeholder: "为该设备起个名字".t, width: nil)
                 .frame(height: 28)
@@ -198,7 +199,7 @@ struct DeviceDetailView: View {
     private var trafficCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("实时流量".t).font(.system(size: 14)).foregroundStyle(theme.textPrimary)
+                Text("实时流量".t).font(.system(size: 14)).foregroundStyle(theme.textPrimary).lineLimit(1)
                 Spacer(minLength: 0)
                 Text("↓ " + Formatting.rate(sample.rateDown))
                     .font(.system(size: 13)).foregroundStyle(Color(hex: 0x5B_B4_4B))
@@ -252,7 +253,7 @@ struct DeviceDetailView: View {
         if total > 0 {
             let maximum = max(1, recentDays.map(\.total).max() ?? 1)
             VStack(alignment: .leading, spacing: 6) {
-                Text("近 7 天".t).font(.system(size: 14)).foregroundStyle(theme.textPrimary)
+                Text("近 7 天".t).font(.system(size: 14)).foregroundStyle(theme.textPrimary).lineLimit(1)
                 HStack(alignment: .bottom, spacing: 6) {
                     ForEach(recentDays) { day in
                         VStack(spacing: 3) {
@@ -297,7 +298,7 @@ struct DeviceDetailView: View {
         if rejection == nil {
             let record = recordOrDefault
             HStack(spacing: 8) {
-                Text("策略".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                Text("策略".t).font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
                     .frame(width: 64, alignment: .leading)
                 ThemedCombo(options: DeviceStore.PolicyMode.allCases.map { $0.title.t },
                             selection: Binding(
@@ -344,7 +345,7 @@ struct DeviceDetailView: View {
     private var connectionsBlock: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text("连接".t).font(.system(size: 14)).foregroundStyle(theme.textPrimary)
+                Text("连接".t).font(.system(size: 14)).foregroundStyle(theme.textPrimary).lineLimit(1)
                 Text("(\(connections.count))").font(.system(size: 10)).foregroundStyle(theme.textMuted)
                 Spacer(minLength: 0)
                 if !connections.isEmpty {

@@ -51,6 +51,7 @@ struct UpdateView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Coast 更新".t)
+                .lineLimit(1)
                 .font(.system(size: 16))
                 .foregroundStyle(theme.textPrimary)
 
@@ -122,6 +123,7 @@ struct UpdateView: View {
             switch tab {
             case .app:
                 Text("当前版本: ".t + AppInfo.version)
+                    .lineLimit(1)
                     .font(.system(size: 13))
                     .foregroundStyle(theme.textSecondary)
                 Text(state.appRelease?.tag ?? "")
@@ -141,6 +143,7 @@ struct UpdateView: View {
 
             case .geoip:
                 Text("GeoIP 数据库".t)
+                    .lineLimit(1)
                     .font(.system(size: 15))
                     .foregroundStyle(theme.textPrimary)
                 notesLabel("说明".t)
@@ -223,6 +226,7 @@ struct UpdateView: View {
             HStack(spacing: 5) {
                 MirrorCheckbox(isOn: state.config.mirror) { toggleMirror() }
                 Text("国内代理下载".t)
+                    .lineLimit(1)
                     .font(.system(size: 12))
                     .foregroundStyle(theme.textSecondary)
                     .onTapGesture { toggleMirror() }

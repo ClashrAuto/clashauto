@@ -132,6 +132,7 @@ struct ConnectionsCard: View {
             Divider().overlay(theme.divider)
 
             Text("最近连接".t)
+                .lineLimit(1)
                 .font(.system(size: 11))
                 .foregroundStyle(theme.textMuted)
 

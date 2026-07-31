@@ -151,7 +151,7 @@ struct SettingsPage: View {
                             get: { state.config.autoUpdateMinutes },
                             set: { persist(key: "autoUpdate", int: $0, apply: { $0.autoUpdateMinutes = $1 }) }
                         ), width: 140)
-                        Text("分钟".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                        Text("分钟".t).font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
                     }
                 }
 
@@ -213,12 +213,12 @@ struct SettingsPage: View {
                     }
                     CardDivider()
                     SettingRow(label: "程序更新".t) {
-                        Text("接收测试版".t).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+                        Text("接收测试版".t).font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
                         ThemedSwitch(isOn: bool(\.receiveBeta, key: "beta"))
                     }
                     CardDivider()
                     SettingRow(label: "mihomo 内核".t) {
-                        Text("国内加速".t).font(.system(size: 13)).foregroundStyle(theme.textSecondary)
+                        Text("国内加速".t).font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
                         ThemedSwitch(isOn: bool(\.mirror, key: "mirror"))
                         PillButton(title: coreBusy ? coreStatus : "更新内核".t,
                                    width: 120, enabled: !coreBusy) {
@@ -294,7 +294,7 @@ struct SettingsPage: View {
                 }
                 Spacer(minLength: 0)
                 Text(String(format: "共 %d 组".t, areas.count))
-                    .font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                    .font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
             }
             .padding(.horizontal, 10)
 
@@ -335,7 +335,7 @@ struct SettingsPage: View {
                 ThemedField(text: $ruleFilter, placeholder: "搜索规则（类型/节点/值）".t, width: 220)
                 Spacer(minLength: 0)
                 Text(String(format: "共 %d 条".t, rules.count))
-                    .font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                    .font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
             }
             .padding(.horizontal, 10)
 

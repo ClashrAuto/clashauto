@@ -94,6 +94,7 @@ struct SubscriptionsPage: View {
     private var toolbar: some View {
         HStack(spacing: 6) {
             Text("订阅".t)
+                .lineLimit(1)
                 .font(.system(size: 18))
                 .foregroundStyle(theme.textPrimary)
             Text("(\(summaries.count))")
@@ -441,6 +442,7 @@ private struct DeleteConfirmSheet: View {
                     dismiss()
                 } label: {
                     Text("删除".t)
+                        .lineLimit(1)
                         .font(.system(size: 13))
                         .foregroundStyle(.white)
                         .frame(width: 84, height: 30)
@@ -474,7 +476,7 @@ private struct SubscriptionNodesSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 4) {
-                Text("订阅节点".t).font(.system(size: 16)).foregroundStyle(theme.textPrimary)
+                Text("订阅节点".t).font(.system(size: 16)).foregroundStyle(theme.textPrimary).lineLimit(1)
                 Text("(\(nodes.count))").font(.system(size: 11)).foregroundStyle(theme.textMuted)
                     .padding(.bottom, 2)
                 Spacer(minLength: 0)

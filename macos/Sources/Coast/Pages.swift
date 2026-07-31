@@ -115,6 +115,7 @@ struct NodesPage: View {
             // 顶栏固定 30 高（搜索框 28，展开时不撑高整行）、间距 6 —— 与 Qt 逐项一致。
             HStack(spacing: 6) {
                 Text("节点".t)
+                    .lineLimit(1)
                     .font(.system(size: 18))
                     .foregroundStyle(theme.textPrimary)
                 Text("(\(visibleNodes.count))")
@@ -590,6 +591,7 @@ struct CompositionCard: View {
             // 两个问题连着看才有意义。
             Divider().overlay(theme.divider).padding(.vertical, 2)
             Text("用量最多".t)
+                .lineLimit(1)
                 .font(.system(size: 11))
                 .foregroundStyle(theme.textMuted)
             if topRows.isEmpty {

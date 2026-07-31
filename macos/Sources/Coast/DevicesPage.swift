@@ -217,6 +217,7 @@ struct DevicesPage: View {
                              alertLabel: Bool, export: Bool) -> some View {
         HStack(spacing: 16) {
             Text("设备".t)
+                .lineLimit(1)
                 .font(.system(size: 18))
                 .foregroundStyle(theme.textPrimary)
             stat("在线".t, "\(allRows.filter(\.online).count)/\(allRows.count)")
@@ -227,7 +228,7 @@ struct DevicesPage: View {
             // 「今天这个网络一共用了多少」。
             if today {
                 HStack(spacing: 8) {
-                    Text("今日".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                    Text("今日".t).font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
                     Text("↓ " + Formatting.bytes(todayTotals.down))
                         .font(.system(size: 12)).foregroundStyle(Color(hex: 0x5B_B4_4B))
                     Text("↑ " + Formatting.bytes(todayTotals.up))
