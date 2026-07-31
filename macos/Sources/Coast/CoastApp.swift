@@ -42,6 +42,13 @@ struct CoastApp: App {
             DeviceDetailWindowRoot()
         }
         .defaultSize(width: 600, height: 720)
+
+        // 连接窗同理：Qt 是 720×480 的独立窗（最小 480×320）。做成 sheet 的话，
+        // 主窗被拖到最小宽（640）时它**横向溢出**—— 实测左边的「Online (0)」直接被切掉半截。
+        Window("连接".t, id: ConnectionsWindowID.value) {
+            ConnectionsWindowRoot()
+        }
+        .defaultSize(width: 720, height: 480)
     }
 }
 
@@ -157,6 +164,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 拉回主窗。委托给 `WindowRestore` —— 它记着**哪一个**才是主窗；
     /// 原来这里写的是 `windows.first`，那可能是状态栏窗口或更新窗，order front 等于没做。
     private func showMainWindow() { WindowRestore.showMainWindow() }
+}
+
+/// 连接窗的 scene id。
+enum ConnectionsWindowID { static let value = "coast.connections" }
+
+/// 连接窗的根视图。**不能用 `@State` 接** `sharedForWindows`，理由见 `UpdateWindowRoot`。
+private struct ConnectionsWindowRoot: View {
+    var body: some View {
+        if let state = AppState.sharedForWindows {
+            ConnectionsView()
+                .environment(state)
+                .environment(state.theme)
+        } else {
+            Color.clear
+        }
+    }
 }
 
 /// 设备详情窗的 scene id。

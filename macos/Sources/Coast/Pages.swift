@@ -18,7 +18,8 @@ struct StatusPage: View {
 
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
-    @State private var showingConnections = false
+    /// 打开独立的连接窗（Qt 那边也是独立顶层窗）。
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ScrollView {
@@ -51,7 +52,7 @@ struct StatusPage: View {
                 }
                 HStack(spacing: 10) {
                     ConnectionsCard(recent: recentRows,
-                                    onOpenAll: { showingConnections = true },
+                                    onOpenAll: { openWindow(id: ConnectionsWindowID.value) },
                                     onClearAll: { state.closeAllConnections() },
                                     deviceName: deviceName(for:))
                         .frame(height: 268)
@@ -80,9 +81,6 @@ struct StatusPage: View {
             .padding(.leading, 10)
             .padding(.vertical, 10)
             .padding(.trailing, 10)
-        }
-        .sheet(isPresented: $showingConnections) {
-            ConnectionsView().environment(state).environment(theme)
         }
     }
 }

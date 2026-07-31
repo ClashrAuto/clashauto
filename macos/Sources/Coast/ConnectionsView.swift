@@ -5,12 +5,11 @@ import SwiftUI
 /// 720×480、顶栏 Online(N)/Offline(N) 分段 + Search、卡片列表
 /// （● 圆点 + `[type] host` + 进程/出口链/下载/上传四枚徽标 + ✕ 删除）。
 ///
-/// Qt 那边是独立顶层窗；这里沿用本项目既有做法以 sheet 呈现（状态页连接卡点开）。
+/// **独立顶层窗**，与 Qt 一致（720×480，最小 480×320）。做成 sheet 的话主窗被拖到
+/// 最小宽（640）时它会横向溢出 —— 实测左边的「Online (0)」被切掉半截。
 struct ConnectionsView: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
-    @Environment(\.dismiss) private var dismiss
-
     @State private var query = ""
     @State private var showOnline = true
     @State private var showOffline = true
@@ -40,7 +39,7 @@ struct ConnectionsView: View {
             .padding(.horizontal, 5)
             .padding(.bottom, 5)
         }
-        .frame(width: 720, height: 480)
+        .frame(minWidth: 480, minHeight: 320)
         .background(theme.card)
         // 每次打开清空账本，避免上次会话的离线连接残留（与 Qt 的 onVisibleChanged 一致）。
         .task { state.resetConnectionLedger() }
