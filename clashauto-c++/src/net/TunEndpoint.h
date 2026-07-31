@@ -13,6 +13,12 @@
 // 合成 MAC 放在这里而不是各平台 .cpp 里：**两端必须一致**，且 NetStack::addDevice 要用 peer MAC
 // 登记静态邻居。放各自文件里迟早漂移（Linux 一个值、Windows 另一个值，只在真机上才炸）。
 // TUN 上只有「本机」一个来源，不需要区分设备；ARP/NDP 在 TUN 上不存在（没有二层邻居）。
+//
+// ★ 状态：Linux 端的**数据面已真机验通**（TUN → NetStack → 进程内出站 → 真目标，10/10 全 200、
+//   cc=10/0/0/0/0/0），验证台见 tools/gwbench/tunstack.cpp。但**还没接到「增强」按钮上**，
+//   卡点不在设备层：TUN 一旦接管默认路由，coast 自己的出站也会被路由进 TUN → 死循环。
+//   接线前必须先有「统一拨号收口 + 每平台的自身流量排除」（Linux SO_MARK+策略路由 /
+//   Windows IP_UNICAST_IF / macOS IP_BOUND_IF）。方案见 docs/mihomo-replacement-gap.md。
 #include <QByteArray>
 
 class IL2Endpoint;

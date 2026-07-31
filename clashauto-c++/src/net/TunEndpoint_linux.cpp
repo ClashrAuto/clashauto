@@ -135,11 +135,3 @@ IL2Endpoint *createTunEndpoint(QObject *parent)
 {
     return new TunEndpointLinux(parent);
 }
-
-// TUN 上「对端」的合成 MAC —— NetStack::addDevice 要用它登记静态邻居。
-// 值的唯一出处已挪进 TunEndpoint.h（coastcore::tunPeerMac）；这里保留一个**非内联**的自由函数，
-// 因为验证驱动是按 `QByteArray tunPeerMac();` 声明后直接链接本文件的，去掉就是未定义符号。
-QByteArray tunPeerMac()
-{
-    return coastcore::tunPeerMac();
-}
