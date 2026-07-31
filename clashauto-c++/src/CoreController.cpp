@@ -543,6 +543,21 @@ void CoreController::rebuildConfig()
     reloadConfig();
 }
 
+// 进程内入站起/停时由 DevicesController 调用（listen 成功之后才传端口，停时传 0）。
+// 系统代理正开着就**就地重设**到新端口，让「本机流量走进程内引擎」这个切换无需重启。
+void CoreController::setLocalInboundPort(int port)
+{
+    if (port == m_localInboundPort)
+        return;
+    m_localInboundPort = port > 0 ? port : 0;
+    if (!m_sysproxyActive)
+        return; // 系统代理没开：下次 startProxy 自然会用上新端口
+    emit logUpdated(port > 0
+                        ? tr("系统代理改指进程内入站 127.0.0.1:%1").arg(port)
+                        : tr("进程内入站已停，系统代理改回核心端口 %1").arg(m_config.mixedPort));
+    startProxy(); // 幂等：各平台的实现都是「直接设成新值」，不需要先 stop
+}
+
 void CoreController::startProxy()
 {
 #if defined(Q_OS_MACOS)
@@ -551,7 +566,7 @@ void CoreController::startProxy()
     // helper 就绪：以 root 设代理，全程免密（首选）。否则回退 Option B（进程内 SCPreferences + 一次性授权）。
     if (MacHelper::isReady()) {
         QString herr;
-        if (!MacHelper::setSystemProxy(true, m_config.host, m_config.mixedPort, macBypass, &herr)) {
+        if (!MacHelper::setSystemProxy(true, m_config.host, proxyPort(), macBypass, &herr)) {
             emit logUpdated(tr("设置系统代理失败（helper）：%1").arg(herr));
             return;
         }
@@ -566,7 +581,7 @@ void CoreController::startProxy()
     }
     QString err;
     if (!macApplyProxies(static_cast<AuthorizationRef>(m_macAuthRef), true,
-                         m_config.host, m_config.mixedPort, macBypass, &err)) {
+                         m_config.host, proxyPort(), macBypass, &err)) {
         emit logUpdated(tr("设置系统代理失败：%1").arg(err));
         return;
     }
@@ -574,7 +589,7 @@ void CoreController::startProxy()
     emit logUpdated("Start sysproxy ok!");
 #elif defined(Q_OS_WIN)
     // 进程内直调 WinINET，无子进程、无外部二进制
-    const QString server = QString("%1:%2").arg(m_config.host).arg(m_config.mixedPort);
+    const QString server = QString("%1:%2").arg(m_config.host).arg(proxyPort());
     if (!setWinSystemProxy(true, server, QStringLiteral("localhost;127.*;10.*;172.16.*;192.168.*;<local>"))) {
         emit logUpdated(tr("设置系统代理失败（WinINET InternetSetOption）"));
         return;
@@ -588,7 +603,7 @@ void CoreController::startProxy()
         emit logUpdated(tr("设置系统代理失败：gsettings 不可用（非 GNOME 系桌面？）"));
         return;
     }
-    const QString port = QString::number(m_config.mixedPort);
+    const QString port = QString::number(proxyPort());
     for (const char *schema : {"org.gnome.system.proxy.http", "org.gnome.system.proxy.https", "org.gnome.system.proxy.socks"}) {
         runHidden("gsettings", {"set", QString::fromLatin1(schema), "host", m_config.host}, 10000);
         runHidden("gsettings", {"set", QString::fromLatin1(schema), "port", port}, 10000);
@@ -611,7 +626,7 @@ void CoreController::stopProxy()
     // helper 就绪：以 root 清代理（免密）。否则回退 Option B（复用本会话已持有的授权）。
     if (MacHelper::isReady()) {
         QString herr;
-        if (!MacHelper::setSystemProxy(false, m_config.host, m_config.mixedPort, {}, &herr)) {
+        if (!MacHelper::setSystemProxy(false, m_config.host, proxyPort(), {}, &herr)) {
             emit logUpdated(tr("还原系统代理失败（helper）：%1").arg(herr));
         }
         m_sysproxyActive = false;
@@ -622,7 +637,7 @@ void CoreController::stopProxy()
     if (m_macAuthRef) {
         QString err;
         if (!macApplyProxies(static_cast<AuthorizationRef>(m_macAuthRef), false,
-                             m_config.host, m_config.mixedPort, {}, &err)) {
+                             m_config.host, proxyPort(), {}, &err)) {
             emit logUpdated(tr("还原系统代理失败：%1").arg(err));
         }
     }

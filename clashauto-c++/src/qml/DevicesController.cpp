@@ -181,10 +181,18 @@ void DevicesController::startLocalInbound()
     }
     qInfo() << "本机入站: HTTP/SOCKS 已在 127.0.0.1:" << m_inboundPort
             << "启用（进程内引擎；回退端口" << m_mixedPort << "）";
+    // ★ 只在 listen **成功之后**才告诉 CoreController —— 系统代理据此改指这个端口，
+    //   于是本机应用的流量也走进程内引擎。用「确实在听」而不是「配置里写了」做依据，
+    //   否则端口被占时会把系统代理指到没人监听的端口上 = 本机直接断网。
+    if (m_core)
+        m_core->setLocalInboundPort(m_inboundPort);
 }
 
 void DevicesController::stopLocalInbound()
 {
+    // 先把系统代理改回核心端口，再拆入站——顺序反了会留一个「代理指着已关端口」的窗口。
+    if (m_core && m_localInbound)
+        m_core->setLocalInboundPort(0);
     if (m_localInbound) {
         m_localInbound->stop();
         m_localInbound->deleteLater();
