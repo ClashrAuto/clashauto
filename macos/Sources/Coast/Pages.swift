@@ -178,105 +178,101 @@ struct NodesPage: View {
     /// 搜索框是否展开。Qt 默认只显示一个放大镜，点开才出输入框（右侧 ✕ 清空并收起）——
     /// 节点页顶栏本来就挤，常驻一个输入框会把「节点 (N)」和右边的动作图标挤到一起。
     @State private var searchShown = false
-    /// 只看测得通的节点。对应配置项 `nodeOnlyAvailable`（`node:`）——
-    /// 那个配置一直存在，却从来没有界面开关，等于用户改不了。
-    @State private var onlyAvailable = false
+
 
     /// 按搜索词与「仅可用」筛过的节点。
     ///
     /// 搜索**不区分大小写**：节点名里中英文混排是常态（`香港01 - HK Airport`），
     /// 大小写敏感的话用户搜 `hk` 会一个都搜不到，而他不会想到是大小写的问题。
     private var visibleNodes: [NodeInfo] {
-        NodeFilter.apply(state.clash.nodes, keyword: search, onlyAvailable: onlyAvailable)
+        // 「仅可用」跟随**设置页**那一项（Qt 就是这么放的），页面上不再单独放一个勾选框。
+        NodeFilter.apply(state.clash.nodes, keyword: search,
+                         onlyAvailable: state.config.nodeOnlyAvailable)
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(spacing: 8) {
+            // 顶栏固定 30 高（搜索框 28，展开时不撑高整行）、间距 6 —— 与 Qt 逐项一致。
             HStack(spacing: 6) {
-                // Qt: 标题 18pt + 计数 9pt,整行固定 30 高(搜索框展开时不撑高)
                 Text("节点".t)
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 18))
                     .foregroundStyle(theme.textPrimary)
                 Text("(\(visibleNodes.count))")
                     .font(.system(size: 9))
                     .foregroundStyle(theme.textMuted)
 
-                if !state.clash.groups.isEmpty {
-                    Picker("", selection: Binding(
-                        get: { state.clash.selectedGroup },
-                        set: { state.clash.setSelectedGroup($0) }
-                    )) {
-                        ForEach(state.clash.groups, id: \.self) { Text($0).tag($0) }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: 240)
-                }
+                // 搜索：默认只有一个放大镜，点开才出输入框（右侧 ✕ 清空并收起）。
+                // 常驻输入框会把「节点 (N)」和右边的动作图标挤到一起。
                 if searchShown {
-                    HStack(spacing: 4) {
+                    ZStack(alignment: .trailing) {
                         TextField("搜索节点".t, text: $search)
                             .textFieldStyle(.plain)
-                            .frame(width: 150)
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.textPrimary)
+                            .padding(.leading, 8)
+                            .padding(.trailing, 24)
+                            .frame(height: 28)
+                            .background {
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .fill(theme.inputBg)
+                            }
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .stroke(theme.inputBorder, lineWidth: 1)
+                            }
                         Button {
                             search = ""
                             searchShown = false
                         } label: {
-                            Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                            Image(systemName: "xmark").font(.system(size: 14))
+                                .foregroundStyle(theme.textMuted)
                         }
                         .buttonStyle(.plain)
-                        .foregroundStyle(theme.textMuted)
+                        .padding(.trailing, 7)
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(theme.metricBg)
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .frame(maxWidth: .infinity)
                 } else {
                     Button { searchShown = true } label: {
-                        Image(systemName: "magnifyingglass").font(.system(size: 12))
+                        Image(systemName: "magnifyingglass").font(.system(size: 16))
+                            .foregroundStyle(theme.textMuted)
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(theme.textMuted)
-                    .help("搜索节点".t)
+                    .padding(.leading, 4)
+                    Spacer(minLength: 0)
                 }
 
-                Toggle("仅可用节点".t, isOn: $onlyAvailable)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 11))
-                Spacer()
-
-                GlassGroup(spacing: 2) {
-                    Button { Task { await state.clash.testDelays() } } label: {
-                        Image(systemName: "bolt").font(.system(size: 12))
-                            .foregroundStyle(theme.textMuted)
-                            .padding(.horizontal, 7).padding(.vertical, 4)
-                    }
-                    .buttonStyle(.plain)
-                    .glassCapsule()
-                    .help("测延迟".t)
-
-                // 测速：空闲显示刷新图标，测速中持续旋转（对齐 Qt 的 refresh-line / loader-4-line）
-                    Button { state.clash.startSpeedTestForValidNodes() } label: {
-                        Image(systemName: state.clash.speedTesting
-                              ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
-                            .font(.system(size: 12))
-                            .foregroundStyle(theme.textMuted)
-                            .padding(.horizontal, 7).padding(.vertical, 4)
+                // 测速：空闲 refresh-line、测速中持续旋转（Qt 换的是 loader-4-line 字形，
+                // 这里换 SF Symbol 的对应物）。
+                Button { state.clash.startSpeedTestForValidNodes() } label: {
+                    Image(systemName: state.clash.speedTesting
+                          ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+                        .font(.system(size: 19))
+                        .foregroundStyle(theme.accent)
                         .rotationEffect(.degrees(state.clash.speedTesting ? 360 : 0))
                         .animation(state.clash.speedTesting
                                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
                                    : .default,
                                    value: state.clash.speedTesting)
                 }
-                    .buttonStyle(.plain)
-                    .glassCapsule()
-                    .disabled(state.clash.speedTesting)
-                    .help(state.clash.speedTesting ? "测速中…".t : "测速".t)
+                .buttonStyle(.plain)
+                .disabled(state.clash.speedTesting)
+                .help("测速".t)
+
+                // 帮助：打开在线文档。Qt 有这颗按钮，Swift 侧一直没有。
+                Button {
+                    if let url = URL(string: "https://clashr-auto.gitbook.io/") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    Image(systemName: "questionmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(theme.textMuted)
                 }
+                .buttonStyle(.plain)
+                .padding(.trailing, 5)
+                .help("帮助".t)
             }
             .frame(height: 30)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-
-            Divider().overlay(theme.divider)
 
             if visibleNodes.isEmpty {
                 VStack(spacing: 6) {
@@ -311,6 +307,8 @@ struct NodesPage: View {
                 .scrollContentBackground(.hidden)
             }
         }
+        // Qt: `anchors.margins: 10`，各页自管内距（StackLayout 那边是 0）。
+        .padding(10)
     }
 }
 
@@ -333,6 +331,8 @@ struct NodeRow: View {
     let onApply: () -> Void
     let onDisable: () -> Void
 
+    @State private var hovering = false
+
     /// 药丸文案：优先显示实测速度，没有则显示延迟。
     private var badgeText: String {
         if node.speed > 0 { return Formatting.rate(node.speed) }
@@ -346,7 +346,7 @@ struct NodeRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(node.name)
                     .font(.system(size: 12))
@@ -364,36 +364,48 @@ struct NodeRow: View {
             }
             Spacer(minLength: 8)
 
+            // 药丸：半径 5、宽 = 文字 + 10、高 = 文字 + 6、**深色字压在实色底上**
+            // （Qt 写死 `#222222`）—— 底色本身就是延迟档位的颜色，字再用同色就看不清了。
             Text(badgeText)
-                .font(.system(size: 10))
-                .foregroundStyle(badgeColor)
+                .font(.system(size: 12))
+                .foregroundStyle(Color(hex: 0x22_22_22))
                 .padding(.horizontal, 5)
                 .padding(.vertical, 3)
-                .background(badgeColor.opacity(0.15))
-                .clipShape(Capsule())
+                .background {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous).fill(badgeColor)
+                }
 
+            // 单个按钮：非活动行「应用」= 切换到该节点；活动（正在使用）行「禁用」=
+            // 把它从订阅池摘除并重建配置。宽 82、**撑满行高**、悬停才有底色。
+            //
+            // 切换在途：目标行显示转圈，其余行文字压到 0.35 透明表示不可点 ——
+            // 只禁目标行的话，用户会在等待期间连点好几个节点，排出一串切换请求，
+            // 最后停在哪个全看运气。
             Button(action: node.active ? onDisable : onApply) {
                 Group {
                     if isTarget {
                         ProgressView().controlSize(.small)
                     } else {
-                        // 长译文（某些语言的「禁用/应用」）在按钮内省略,不撑破固定宽
                         Text(node.active ? "禁用".t : "应用".t)
                             .font(.system(size: 12))
+                            .foregroundStyle(theme.textSecondary)
                             .lineLimit(1)
                             .truncationMode(.tail)
+                            .opacity(switching && !isTarget ? 0.35 : 1)
                     }
                 }
-                .frame(width: 74, height: 22)
+                .frame(width: 82)
+                .frame(maxHeight: .infinity)
+                .background(hovering && !switching ? theme.hover : .clear)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            // 活动行的「禁用」是破坏性动作，用着色玻璃与普通「应用」区分开
-            .glassCapsule(tinted: node.active ? theme.danger.opacity(0.35) : nil)
             .disabled(switching)
+            .onHover { hovering = $0 }
         }
-        .padding(.horizontal, 8)
+        .padding(.leading, 8)
         .frame(height: 40)                       // Qt: NodeRow height: 40
-        .background(node.active ? theme.accent.opacity(0.12) : theme.metricBg.opacity(0.5))
+        .background(node.active ? theme.nodeRowActive : theme.nodeRowBg)
         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))   // Qt: radius 4
     }
 }
