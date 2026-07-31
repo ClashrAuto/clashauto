@@ -877,9 +877,13 @@ jobs:
     # 只依赖 windows（release 由它创建，mac DMG 随后追加）；mac 构建与 linux 无关，
     # 不因 linux 失败被 skip。
     needs: [windows]
-    # ★ 只在主分支触发。外部签名仓库(integemjack/schat.build)会把公证好的 DMG 覆盖到
-    #   release 上，beta 也走这条就会拿测试版的包盖掉正式版 —— 所以测试版**不出 macOS DMG**。
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    # ★★ 已停用（2026-07-31）：macOS 的发布包改为**只出 Swift 版**（见 macos-swift job）。
+    #    这条腿会让外部仓库 integemjack/schat.build 把 Qt 版的签名 DMG --clobber 到同一个
+    #    Release 上，于是同一个 release 里出现两个 macOS 包；而 app 内的一键更新是按扩展名
+    #    挑第一个 .dmg 的，老版本会挑到哪个纯看运气。二者只能留一个。
+    #    保留整个 job 而不是删掉：要恢复 Qt 版发布时，把下面的 if 改回原来那行即可，
+    #    原条件是 `github.event_name == 'push' && (ref == master || ref == main)`。
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Trigger macOS build via empty commit
@@ -946,7 +950,20 @@ jobs:
           major="$(echo "$base" | cut -d. -f1)"
           minor="$(echo "$base" | cut -d. -f2)"
           count="$(git rev-list --count HEAD)"
-          echo "version=${major}.${minor}.${count}" >> "$GITHUB_OUTPUT"
+          version="${major}.${minor}.${count}"
+          # 主分支 = 正式版，其余分支 = prerelease。tag 再缀短 sha，
+          # 防「两个分支各 +N 撞到同一个号」。口径与 windows/linux job 完全一致。
+          if [ "$GITHUB_REF" = "refs/heads/master" ] || [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            is_pre=false; tag="v${version}"
+          else
+            is_pre=true; tag="v${version}-beta.${GITHUB_SHA:0:7}"
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "prerelease=${is_pre}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release version: $version tag=$tag prerelease=$is_pre"
 
       - name: Build
         working-directory: macos
@@ -1061,3 +1078,29 @@ jobs:
           name: Coast-swift-macos-universal
           path: macos/out/*
           if-no-files-found: error
+
+      - name: Release notes
+        if: github.event_name == 'push'
+        run: printf '%s\n' "${COMMIT_MSG}" > macos/out/release-notes.md
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+
+      # macOS 的发布包**只出这一个**（Swift 版）。Qt 那条 mac 腿已停发（见下方 trigger-mac）。
+      # 之所以必须二选一：app 内的一键更新是**按扩展名挑资源**的
+      # （UpdateChecker.macAsset 取第一个 .dmg），同一个 Release 上并存两个 macOS 包时，
+      # 老版本会挑到哪个纯看运气。
+      - name: Upload to GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.prerelease == 'true' && format('Coast {0} (beta · {1})', steps.ver.outputs.version, github.ref_name) || format('Coast {0}', steps.ver.outputs.version) }}
+          prerelease: ${{ steps.ver.outputs.prerelease == 'true' }}
+          target_commitish: ${{ github.sha }}
+          body_path: macos/out/release-notes.md
+          # prerelease 绝不能占 latest：/releases/latest 是正式版通道，被 beta 占了会把所有
+          # 没开「接收测试版」的用户推到测试版上去。
+          make_latest: ${{ steps.ver.outputs.prerelease == 'true' && 'false' || 'true' }}
+          overwrite_files: true
+          files: |
+            macos/out/Coast-*
