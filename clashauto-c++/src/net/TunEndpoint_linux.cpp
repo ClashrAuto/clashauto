@@ -1,20 +1,13 @@
 // TUN 端点（Linux）—— 把「本机全量流量」接进已有的用户态栈。
 //
-// ★ 关键设计：**它伪装成一个 IL2Endpoint（以太网端点），而不是给 NetStack 加一条 L3 通道。**
-//   TUN 收发的是**裸 IP 包**，而 NetStack/lwIP 这一整套（netif、设备表、DNS 劫持、fake-ip 反查、
-//   按目的地选出站）都是按以太帧写的。若为 TUN 另开一条 L3 路径，等于把这套逻辑再实现一遍——
-//   正是本项目一直在避免的「两套逻辑慢慢漂移」。所以这里在最底层做转换：
-//     · 读：给 IP 包**前置 14 字节以太头**（dst=本机 MAC、src=合成的设备 MAC、
-//       ethertype 按 IP 版本取 0x0800/0x86DD）后交给上层；
-//     · 写：把上层给的以太帧**剥掉 14 字节**，只把 IP 包写回 TUN。
-//   上层一行都不用改，网关那条路验过的东西（含 lwIP 的 accept-all 补丁）直接复用。
-//
-// 合成的设备 MAC 是固定的：TUN 上只有「本机」这一个来源，不需要区分设备。ARP/NDP 在 TUN 上
-// 不存在（没有二层邻居），所以 ARP 请求帧不会出现；lwIP 侧靠 NetStack::addDevice 登记的
-// 静态邻居直接出帧。
+// 设计总纲（为什么伪装成 IL2Endpoint、合成 MAC 为什么固定）见 **TunEndpoint.h**，那里也是
+// 两个平台共用的以太头长度与合成 MAC 的唯一出处；Windows 版是 TunEndpoint_win.cpp。
+// 一句话：读时给裸 IP 包前置 14 字节以太头、写时剥掉，上层 NetStack/lwIP 一行不改。
 //
 // 权限：创建 /dev/net/tun 与配置地址/路由需要 CAP_NET_ADMIN（root）。拿不到就 open 失败并说明原因，
 // 由上层决定回退 mihomo 的 TUN。
+#include "TunEndpoint.h"
+
 #include "IL2Endpoint.h"
 
 #include <QByteArray>
@@ -31,11 +24,9 @@
 #include <unistd.h>
 
 namespace {
-constexpr int kEthHdr = 14;
-// 合成的对端 MAC：TUN 上没有真实二层邻居，随便取一个**本地管理**地址（第二个字节 0x02 位）
-// 即可，只要全程一致。用固定值而不是随机：日志/抓包里一眼认得出是 TUN 合成的。
-constexpr unsigned char kPeerMac[6] = {0x02, 0x43, 0x4f, 0x41, 0x53, 0x54}; // 02:"COAST"
-constexpr unsigned char kLocalMac[6] = {0x02, 0x43, 0x4f, 0x41, 0x53, 0x01};
+constexpr int kEthHdr = coastcore::kTunEthHdr;
+constexpr const unsigned char *kPeerMac = coastcore::kTunPeerMac;
+constexpr const unsigned char *kLocalMac = coastcore::kTunLocalMac;
 } // namespace
 
 class TunEndpointLinux final : public IL2Endpoint
@@ -146,7 +137,9 @@ IL2Endpoint *createTunEndpoint(QObject *parent)
 }
 
 // TUN 上「对端」的合成 MAC —— NetStack::addDevice 要用它登记静态邻居。
+// 值的唯一出处已挪进 TunEndpoint.h（coastcore::tunPeerMac）；这里保留一个**非内联**的自由函数，
+// 因为验证驱动是按 `QByteArray tunPeerMac();` 声明后直接链接本文件的，去掉就是未定义符号。
 QByteArray tunPeerMac()
 {
-    return QByteArray(reinterpret_cast<const char *>(kPeerMac), 6);
+    return coastcore::tunPeerMac();
 }

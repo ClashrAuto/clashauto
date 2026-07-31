@@ -281,11 +281,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         target_sources(clashauto-qml PRIVATE
             src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
     endif()
+    # 本机 TUN 入口（进程内「增强」）：把裸 IP 包合成以太帧后喂给同一套 NetStack/lwIP，
+    # 上层一行不用改。共享的合成 MAC/以太头常量与设计总纲在 TunEndpoint.h。
+    # macOS(utun) 待做。现在还没有调用方——先编进来，免得它悄悄腐烂。
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        # 本机 TUN 入口（进程内「增强」）：把裸 IP 包合成以太帧后喂给同一套 NetStack/lwIP，
-        # 上层一行不用改。目前只有 Linux 实现（linux/if_tun.h）；Windows(wintun)/macOS(utun) 待做。
-        # 现在还没有调用方——先编进来，免得它悄悄腐烂。
-        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_linux.cpp)
+        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_linux.cpp src/net/TunEndpoint.h)
+    elseif(WIN32)
+        # wintun.dll 运行期动态加载（仓库没有它的 .lib/.h），所以这里不需要额外 link 什么；
+        # 用到的 ConvertInterfaceLuidToIndex 来自已链接的 iphlpapi。
+        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_win.cpp src/net/TunEndpoint.h)
     endif()
     target_sources(clashauto-qml PRIVATE
         src/net/NetStack.cpp src/net/NetStack.h
