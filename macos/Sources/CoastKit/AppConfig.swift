@@ -118,6 +118,19 @@ public enum AppConfigLoader {
         persist(key: key, raw: String(value))
     }
 
+    /// 写 `section:` 下的两级键。`use_rule` 那四个设置就在这一层。
+    public static func persist(section: String, key: String, raw value: String) {
+        let url = AppPaths.userConfig
+        let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        let updated = YAMLText.setNestedValue(existing, section: section, key: key, value: value)
+        AppPaths.makeWritable(url)
+        try? updated.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    public static func persist(section: String, key: String, bool value: Bool) {
+        persist(section: section, key: key, raw: value ? "true" : "false")
+    }
+
     public static func persist(key: String, raw value: String) {
         let url = AppPaths.userConfig
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""

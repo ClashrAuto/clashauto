@@ -19,9 +19,31 @@ public enum YAMLText {
 
     /// 顶层标量：`^key: value`（去掉可选引号，截断行内 `#` 注释）。
     public static func value(_ text: String, key: String, default fallback: String? = nil) -> String? {
-        let pattern = "(?m)^\(NSRegularExpression.escapedPattern(for: key)):[ \\t]*['\"]?([^'\"\\r\\n#]+)"
-        guard let captured = firstCapture(pattern, in: text) else { return fallback }
-        return captured.trimmingCharacters(in: .whitespaces)
+        let pattern = "(?m)^\(NSRegularExpression.escapedPattern(for: key)):" + scalarTail
+        guard let captured = scalar(pattern, in: text) else { return fallback }
+        // 无值（`key:` 后面空着）时沿用旧语义：当作没写，退回默认值。
+        return captured.isEmpty ? fallback : captured
+    }
+
+    /// 标量值的三种写法：单引号、双引号、裸值。
+    ///
+    /// **引号内允许 `#`**，裸值遇 `#` 才当注释截断 —— 这是 YAML 的规则，也是唯一正确的读法。
+    /// 早先只有一个 `['"]?([^'"\r\n#]*)`：写进去的 `"机场#1"` 读回来是 `机场`，
+    /// 用户的正则被**静默截断成另一条规则**，而且改了设置当场生效、重启才露馅。
+    private static let scalarTail = "[ \\t]*(?:'([^'\\r\\n]*)'|\"([^\"\\r\\n]*)\"|([^\\r\\n#]*))"
+
+    /// 取 `scalarTail` 三个分支里真正匹配上的那一个。
+    private static func scalar(_ pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range) else { return nil }
+        for group in 1...3 where match.range(at: group).location != NSNotFound {
+            guard let captured = Range(match.range(at: group), in: text) else { continue }
+            // 引号内的内容原样保留（含前后空格是有意义的）；裸值去掉两侧空白。
+            return group == 3 ? String(text[captured]).trimmingCharacters(in: .whitespaces)
+                              : String(text[captured])
+        }
+        return nil
     }
 
     public static func bool(_ text: String, key: String, default fallback: Bool) -> Bool {
@@ -38,9 +60,9 @@ public enum YAMLText {
                                    default fallback: String? = nil) -> String? {
         let sectionPattern = "(?m)^\(NSRegularExpression.escapedPattern(for: section)):\\n((?:  [^\\n]*\\n?)*)"
         guard let block = firstCapture(sectionPattern, in: text) else { return fallback }
-        let keyPattern = "(?m)^  \(NSRegularExpression.escapedPattern(for: key)):[ \\t]*['\"]?([^'\"\\r\\n#]*)"
-        guard let captured = firstCapture(keyPattern, in: block) else { return fallback }
-        return captured.trimmingCharacters(in: .whitespaces)
+        let keyPattern = "(?m)^  \(NSRegularExpression.escapedPattern(for: key)):" + scalarTail
+        guard let captured = scalar(keyPattern, in: block) else { return fallback }
+        return captured
     }
 
     public static func nestedBool(_ text: String, section: String, key: String, default fallback: Bool) -> Bool {
@@ -64,6 +86,44 @@ public enum YAMLText {
         }
         let separator = (text.isEmpty || text.hasSuffix("\n")) ? "" : "\n"
         return text + separator + line + "\n"
+    }
+
+    /// 就地改写**两级**标量：`section:` 下缩进两格的 `key:`。
+    ///
+    /// 与 `nestedValue` 的解析约定严格对称（段落块 = `^section:` 之后每行恰好两格缩进；
+    /// 段内键 = `^  key:`）—— 读写各写一套约定，正是这个项目里反复咬人的那类 bug。
+    ///
+    /// 三种情形：键在 → 只改那一行；段在但键不在 → 插到段首；段也不在 → 追加整段。
+    /// 无论哪种都不重排其它字节：用户手写的注释和键序不该因为改了一个开关就乱掉。
+    public static func setNestedValue(_ text: String, section: String,
+                                      key: String, value: String) -> String {
+        let escapedSection = NSRegularExpression.escapedPattern(for: section)
+        let escapedKey = NSRegularExpression.escapedPattern(for: key)
+        let sectionPattern = "(?m)^\(escapedSection):[ \\t]*\\n((?:  [^\\n]*\\n?)*)"
+        let range = NSRange(text.startIndex..., in: text)
+        guard let sectionRegex = try? NSRegularExpression(pattern: sectionPattern),
+              let match = sectionRegex.firstMatch(in: text, range: range),
+              let blockRange = Range(match.range(at: 1), in: text) else {
+            // 段落不存在：整段追加。
+            let separator = (text.isEmpty || text.hasSuffix("\n")) ? "" : "\n"
+            return text + separator + "\(section):\n  \(key): \(value)\n"
+        }
+        let block = String(text[blockRange])
+        let keyPattern = "(?m)^  \(escapedKey)[ \\t]*:.*$"
+        let blockRangeNS = NSRange(block.startIndex..., in: block)
+        if let keyRegex = try? NSRegularExpression(pattern: keyPattern),
+           keyRegex.firstMatch(in: block, range: blockRangeNS) != nil {
+            let template = NSRegularExpression.escapedTemplate(for: "  \(key): \(value)")
+            let updated = keyRegex.stringByReplacingMatches(
+                in: block, range: blockRangeNS, withTemplate: template)
+            return text.replacingCharacters(in: blockRange, with: updated)
+        }
+        // 段在、键不在：插到段首，紧跟在 `section:` 那一行之后。
+        return text.replacingCharacters(in: blockRange, with: "  \(key): \(value)\n" + block)
+    }
+
+    public static func setNestedBool(_ text: String, section: String, key: String, value: Bool) -> String {
+        setNestedValue(text, section: section, key: key, value: value ? "true" : "false")
     }
 
     public static func setBool(_ text: String, key: String, value: Bool) -> String {

@@ -53,6 +53,15 @@ else
     line "swift test" "FAIL"; ((fail++))
 fi
 
+# —— 1b. 设置项落盘检查 ——
+echo "== 设置项落盘检查 =="
+if python3 scripts/settings_persist_check.py >/dev/null 2>&1; then
+    line "settings persist" "PASS"; ((pass++))
+else
+    python3 scripts/settings_persist_check.py || true
+    line "settings persist" "FAIL"; ((fail++))
+fi
+
 # —— 2. 打包 ——
 if [[ $BUILD -eq 1 ]]; then
     echo "== 打包 =="

@@ -211,6 +211,15 @@ struct SettingsPage: View {
         AppConfigLoader.persist(key: "mirror", bool: draft.mirror)
         AppConfigLoader.persist(key: "autoLanguage", bool: draft.autoLanguage)
         AppConfigLoader.persist(key: "language", raw: draft.language)
+        // ★ 这四个此前**只更新内存、从不落盘** —— 用户填完正则、点应用、节点当场被过滤，
+        //   重启后全丢。根因是 YAMLText 只有嵌套读、没有嵌套写，界面接上了而写入这条
+        //   管道压根不存在。正则要加引号：里面常有空格、`|`、`#`。
+        AppConfigLoader.persist(section: "use_rule", key: "allow",
+                                raw: YAMLText.quoted(draft.allowRule))
+        AppConfigLoader.persist(section: "use_rule", key: "noallow",
+                                raw: YAMLText.quoted(draft.noAllowRule))
+        AppConfigLoader.persist(section: "use_rule", key: "allowUse", bool: draft.allowRuleEnabled)
+        AppConfigLoader.persist(section: "use_rule", key: "noallowUse", bool: draft.noAllowRuleEnabled)
         I18n.shared.applyConfig(draft)
 
         state.applyConfig(draft)
