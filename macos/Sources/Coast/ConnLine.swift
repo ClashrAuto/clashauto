@@ -93,29 +93,28 @@ struct ConnectionsCard: View {
                         Text("连接".t)
                             .font(.system(size: 13))
                             .foregroundStyle(theme.accent)
-                        HStack(spacing: 0) {
+                        // 两个动作是一组，用融合玻璃：形状上连成一片，
+                        // 比原来「手画一个底 + 中间画一条线」更贴系统。
+                        GlassGroup(spacing: 2) {
                             Button(action: onOpenAll) {
                                 Image(systemName: "eye").font(.system(size: 12))
                                     .foregroundStyle(theme.textPrimary)
+                                    .padding(.horizontal, 7).padding(.vertical, 3)
                             }
                             .buttonStyle(.plain)
+                            .glassCapsule()
                             .help("查看全部连接".t)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
-                            Rectangle().fill(theme.divider).frame(width: 1, height: 14)
                             Button(action: onClearAll) {
                                 // 垃圾桶用危险色 —— 这是不可撤销的批量断开，
                                 // 和旁边的「查看」不该长得一样。
                                 Image(systemName: "trash").font(.system(size: 12))
                                     .foregroundStyle(theme.danger)
+                                    .padding(.horizontal, 7).padding(.vertical, 3)
                             }
                             .buttonStyle(.plain)
+                            .glassCapsule()
                             .help("全部断开".t)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3)
                         }
-                        .background(theme.navSelected)
-                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                     }
                     Text(String(state.connectionsCount))
                         .font(.system(size: 24, weight: .regular))

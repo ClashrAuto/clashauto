@@ -138,7 +138,11 @@ struct MainView: View {
                 // `GlassEffectContainer` —— 容器让相邻的玻璃互相「融合」（间距小于
                 // spacing 时会连成一片），这正是「一组」与「三颗各自独立」的区别所在：
                 // 不靠高亮去暗示，形状本身就说明了三选一。
-                GlassGroup(spacing: 4) {
+                // 像 tab:三段**紧挨、无各自圆角**,整组只有一层玻璃、只有外侧是圆的。
+                //
+                // 之前用 GlassGroup(spacing: 4) 是三颗各自成形的胶囊 —— 那读起来仍是
+                // 「三个按钮」。分段控件的语义靠的就是「连成一条、内部只用分隔区分」。
+                HStack(spacing: 0) {
                     ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
                         Button {
                             state.setMode(title)
@@ -147,10 +151,16 @@ struct MainView: View {
                             modeLabel(title, active: index == state.modeIndex)
                         }
                         .buttonStyle(.plain)
-                        .glassCapsule(tinted: index == state.modeIndex
-                                      ? theme.accent.opacity(0.5) : nil)
+                        .background {
+                            // 选中段的底:胶囊形，压在整组玻璃**里面**，
+                            // 所以它不会给整组带来额外的圆角。
+                            if index == state.modeIndex {
+                                Capsule().fill(theme.accent.opacity(0.45))
+                            }
+                        }
                     }
                 }
+                .glassCapsule()
                 .fixedSize()
             } else {
                 Button {
@@ -158,7 +168,11 @@ struct MainView: View {
                 } label: {
                     modeLabel(AppState.modeTitles[state.modeIndex], active: true)
                 }
-                .glassButton()
+                .buttonStyle(.plain)
+                // ★ 与展开态走**同一条尺寸路径**。先前收起用 .glassButton()
+                //   （系统按钮样式，自带内边距）、展开用 .glassCapsule()（纯背景），
+                //   两者高度必然对不上 —— 这就是「展开后高度变了」的原因。
+                .glassCapsule()
                 .fixedSize()
             }
         }
@@ -168,16 +182,26 @@ struct MainView: View {
     /// 横向内距 10 / 高度 24。少一项就会比旁边矮一圈或窄一截。
     private func modeLabel(_ title: String, active: Bool) -> some View {
         HStack(spacing: 6) {
-            Circle()
-                .fill(active ? theme.accent : theme.switchTrackOff)
-                .frame(width: 8, height: 8)
+            // 圆点只在**收起态**出现 —— 那时它和旁边三个开关是同一种东西，需要状态点；
+            // 展开成分段之后，当前项由底色表达，再放一个点就是重复。
+            if !modeExpanded {
+                Circle()
+                    .fill(theme.accent)
+                    .frame(width: 8, height: 8)
+            }
             Text(title)
                 .font(.system(size: 12))
                 .foregroundStyle(active ? theme.textPrimary : theme.textMuted)
         }
-        .padding(.horizontal, 10)
-        .frame(height: 24)
+        // 定宽：展开后整组正好是收起态的 3 倍宽，收放时左右边界不会跳。
+        // 取 76 是「圆点 8 + 间距 6 + 两个汉字 24 + 左右内距 20」再留一点余量；
+        // 定死而不是随文字走，是因为「规则/全局/直连」在别的语言里长度差很多，
+        // 不定宽的话三段宽窄不一，看着就不像一个分段控件。
+        .frame(width: Self.modeSegmentWidth, height: 24)
     }
+
+    /// 单个模式段的宽度。收起态与展开态共用 —— 保证展开正好是 3 倍。
+    private static let modeSegmentWidth: CGFloat = 76
 }
 
 /// 尚未实现的页面占位。**明确写出属于哪个阶段** —— 空白页会让人以为是坏了。

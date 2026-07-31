@@ -235,28 +235,34 @@ struct NodesPage: View {
                     .font(.system(size: 11))
                 Spacer()
 
-                Button { Task { await state.clash.testDelays() } } label: {
-                    Image(systemName: "bolt").font(.system(size: 12))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(theme.textMuted)
-                .help("测延迟".t)
+                GlassGroup(spacing: 2) {
+                    Button { Task { await state.clash.testDelays() } } label: {
+                        Image(systemName: "bolt").font(.system(size: 12))
+                            .foregroundStyle(theme.textMuted)
+                            .padding(.horizontal, 7).padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                    .glassCapsule()
+                    .help("测延迟".t)
 
                 // 测速：空闲显示刷新图标，测速中持续旋转（对齐 Qt 的 refresh-line / loader-4-line）
-                Button { state.clash.startSpeedTestForValidNodes() } label: {
-                    Image(systemName: state.clash.speedTesting
-                          ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
-                        .font(.system(size: 12))
+                    Button { state.clash.startSpeedTestForValidNodes() } label: {
+                        Image(systemName: state.clash.speedTesting
+                              ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.textMuted)
+                            .padding(.horizontal, 7).padding(.vertical, 4)
                         .rotationEffect(.degrees(state.clash.speedTesting ? 360 : 0))
                         .animation(state.clash.speedTesting
                                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
                                    : .default,
                                    value: state.clash.speedTesting)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(theme.textMuted)
-                .disabled(state.clash.speedTesting)
-                .help(state.clash.speedTesting ? "测速中…".t : "测速".t)
+                    .buttonStyle(.plain)
+                    .glassCapsule()
+                    .disabled(state.clash.speedTesting)
+                    .help(state.clash.speedTesting ? "测速中…".t : "测速".t)
+                }
             }
             .frame(height: 30)
             .padding(.horizontal, 10)
@@ -370,10 +376,11 @@ struct NodeRow: View {
                             .truncationMode(.tail)
                     }
                 }
-                .frame(width: 74)
+                .frame(width: 74, height: 22)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(.plain)
+            // 活动行的「禁用」是破坏性动作，用着色玻璃与普通「应用」区分开
+            .glassCapsule(tinted: node.active ? theme.danger.opacity(0.35) : nil)
             .disabled(switching)
         }
         .padding(.horizontal, 8)

@@ -49,6 +49,7 @@ struct LatencyCard: View {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 12))
                         .foregroundStyle(theme.accent)
+                        .padding(6)
                         .rotationEffect(.degrees(monitor.probing ? 360 : 0))
                         .animation(monitor.probing
                                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
@@ -56,6 +57,7 @@ struct LatencyCard: View {
                                    value: monitor.probing)
                 }
                 .buttonStyle(.plain)
+                .glassCapsule()
                 .disabled(monitor.probing)
                 .help("重新测一轮".t)
             }
