@@ -63,6 +63,9 @@ class DevicesController final : public QObject
     // 灰度：进程内出站（实验）。默认关 = 零行为变化（网关全走 mihomo）。设置页开关绑定它。
     Q_PROPERTY(bool coastCoreEnabled READ coastCoreEnabled WRITE setCoastCoreEnabled NOTIFY coastCoreEnabledChanged)
     Q_PROPERTY(bool coastCoreStrict READ coastCoreStrict WRITE setCoastCoreStrict NOTIFY coastCoreStrictChanged)
+    // 本机 HTTP/SOCKS 入站（CoastCore 的第二个入口）。开=监听 kLocalInboundPort，关=不监听。
+    Q_PROPERTY(bool localInboundEnabled READ localInboundEnabled WRITE setLocalInboundEnabled NOTIFY localInboundEnabledChanged)
+    Q_PROPERTY(int localInboundPort READ localInboundPort CONSTANT)
 
 public:
     DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
@@ -108,10 +111,13 @@ public:
 
     bool coastCoreEnabled() const { return m_coastCore; }
     bool coastCoreStrict() const { return m_coastStrict; }
+    bool localInboundEnabled() const { return m_inboundPort > 0; }
+    int localInboundPort() const { return kLocalInboundPort; }
     // 落盘 config.yaml + 重建快照 + 把开关意图推给网关数据面。默认关时网关全走 mihomo（零行为变化）。
     Q_INVOKABLE void setCoastCoreEnabled(bool on);
     // 严格模式：判不了的连接拒绝回退核心、直接失败。只有 coastCoreEnabled 开着时才有意义。
     Q_INVOKABLE void setCoastCoreStrict(bool on);
+    Q_INVOKABLE void setLocalInboundEnabled(bool on);
 
 signals:
     void scanningChanged();
@@ -125,6 +131,7 @@ signals:
     void securityChanged();                    // 安全告警集合变化 → 横幅/徽标刷新
     void securityAlertRaised(const QString &title, const QString &body); // 新威胁 → main 连托盘通知
     void coastCoreEnabledChanged();            // 灰度开关变化 → 设置页开关刷新
+    void localInboundEnabledChanged();         // 本机入站开关变化 → 设置页开关刷新
     void coastCoreStrictChanged();
 
 private:
@@ -148,6 +155,7 @@ private:
     // 并把规则喂给 m_ruleEngine（本单元 Rule 模式回退核心，规则仅备用）。
     void rebuildCoastCoreConfig();
     // 本机混合入站的起/停。端口 0（默认）时 start 是 no-op ⇒ 零行为变化。
+    void persistLocalInbound(int port);
     void startLocalInbound();
     void stopLocalInbound();
     // rebuildCoastCoreConfig + 重新把开关意图推给网关（保持热更新）。仅在灰度开着时才动作。
@@ -239,6 +247,9 @@ private:
     // —— 灰度：进程内出站 ——
     QString m_configDir;                          // config.yaml / full.yaml 所在（构造时从 AppConfig 取）
     bool m_coastCore = false;                     // 灰度开关（默认关 = 零行为变化）
+    // 本机入站的默认端口。**不与 mihomo 的混合端口（7890）冲突**，两者并存，
+    // 这样同一台机器上可以 A/B 对比两个引擎。
+    static constexpr int kLocalInboundPort = 7891;
     int m_inboundPort = 0;                        // 本机混合入站端口（0=关，默认）
     int m_mixedPort = 7890;                       // mihomo 混合端口：本机入站的回退目标
     class MixedInbound *m_localInbound = nullptr; // 本机 HTTP/SOCKS 入站（CoastCore 第二个入口）

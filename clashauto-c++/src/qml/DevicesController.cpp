@@ -1120,6 +1120,45 @@ void DevicesController::persistCoastCore(bool on)
     }
 }
 
+// 本机入站开关：写 config.yaml 的 coastcore_inbound（端口号，0=关），并即时起/停。
+// 只有 coastcore 本身开着时才真正监听 —— 关着时没有可用的出站配置快照，监听了也只能全回退。
+void DevicesController::setLocalInboundEnabled(bool on)
+{
+    const int want = on ? kLocalInboundPort : 0;
+    if (want == m_inboundPort)
+        return;
+    m_inboundPort = want;
+    persistLocalInbound(want);
+    if (m_coastCore) {
+        if (on)
+            startLocalInbound();
+        else
+            stopLocalInbound();
+    }
+    emit localInboundEnabledChanged();
+}
+
+void DevicesController::persistLocalInbound(int port)
+{
+    // 与 persistCoastCoreStrict 同一套「只改这一个键、保留其余内容」的写法。
+    const QString path = QDir(m_configDir).filePath(QStringLiteral("config.yaml"));
+    QString yaml = readFileText(path);
+    const QString line = QStringLiteral("coastcore_inbound: %1").arg(port);
+    static const QRegularExpression re(QStringLiteral("(?m)^coastcore_inbound:.*$"));
+    if (re.match(yaml).hasMatch()) {
+        yaml.replace(re, line);
+    } else {
+        if (!yaml.isEmpty() && !yaml.endsWith(QLatin1Char('\n')))
+            yaml += QLatin1Char('\n');
+        yaml += line + QLatin1Char('\n');
+    }
+    QFile out(path);
+    if (out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        out.write(yaml.toUtf8());
+        out.close();
+    }
+}
+
 void DevicesController::persistCoastCoreStrict(bool on)
 {
     // 只改 config.yaml 的 coastcore_strict 键、保留其余内容（复刻 SettingsController::persistConfigScalar）。

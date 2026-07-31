@@ -555,13 +555,17 @@ Item {
                                 ThemedSwitch { id: coastStrictSwitch; enabled: devices.coastCoreEnabled
                                     checked: devices.coastCoreStrict
                                     onToggled: devices.setCoastCoreStrict(checked) } }
+                            SettingRow { label: qsTr("本机代理入口（127.0.0.1:%1）").arg(devices.localInboundPort)
+                                ThemedSwitch { id: localInboundSwitch; enabled: devices.coastCoreEnabled
+                                    checked: devices.localInboundEnabled
+                                    onToggled: devices.setLocalInboundEnabled(checked) } }
                             Label {
                                 Layout.fillWidth: true
                                 Layout.topMargin: 2
                                 wrapMode: Text.WordWrap
                                 color: Theme.textMuted
                                 font.pixelSize: 11
-                                text: qsTr("开启后网关这条数据面（DNS + TCP + UDP）整条都在本进程内跑，不再经过 mihomo：直连/全局/规则三种模式都在进程内分流，设备的 DNS 也由本程序直接应答。个别判不了的情形（协议未编入、规则需先解析 IP）仍会回退 mihomo，回退次数与原因见日志的 cc= 一栏。\n严格模式：连这些也不回退，直接让该连接失败——用来暴露「还差什么」，代价是那些连接会断。默认两个都关闭时行为不变（网关全走核心）。")
+                                text: qsTr("开启后网关这条数据面（DNS + TCP + UDP）整条都在本进程内跑，不再经过 mihomo：直连/全局/规则三种模式都在进程内分流，设备的 DNS 也由本程序直接应答。个别判不了的情形（协议未编入、规则需先解析 IP）仍会回退 mihomo，回退次数与原因见日志的 cc= 一栏。\n严格模式：连这些也不回退，直接让该连接失败——用来暴露「还差什么」，代价是那些连接会断。默认两个都关闭时行为不变（网关全走核心）。\n本机代理入口：在回环上多开一个 HTTP/SOCKS5 混合端口，走的是同一套进程内分流与出站。它与 mihomo 的 %1 端口**并存**，把浏览器/终端指过去即可对比两个引擎。").arg(settings.mixedPort)
                             }
                         }
 
