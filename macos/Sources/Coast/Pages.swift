@@ -37,6 +37,13 @@ struct StatusPage: View {
                     StatusDot(label: "核心".t, on: state.controller.isCoreRunning)
                     StatusDot(label: "网页代理".t, on: state.controller.isProxyEnabled)
                     StatusDot(label: "增强(TUN)".t, on: state.controller.isTunEnabled)
+                    if state.controller.isCoreRunning, state.clash.coreUnresponsive {
+                        // 「进程活着但核心没响应」—— 灯是亮的、一切却都不通。不点破的话
+                        // 用户只会看到一个显示正常、实际全废的界面。
+                        Label("核心无响应(进程在,但 API 不通)".t, systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.danger)
+                    }
                     if state.controller.isTunEnabled, !state.controller.isPrivileged {
                         // 这个组合是「增强灯亮着却不全局」的根因，必须当场说清楚，
                         // 否则用户完全无从查起。

@@ -49,6 +49,20 @@ public final class ClashService {
 
     private let api: ClashAPI
     private var trafficTask: Task<Void, Never>?
+
+    /// 核心进程还在，但**已经连续几轮拿不到 `/traffic` 数据**。
+    ///
+    /// 「进程活着」不等于「核心可用」：mihomo 卡死、REST 端口被别人占住导致绑定失败、
+    /// 配置热重载中途崩在半路 —— 这些情况下进程都在，界面照样显示「运行中」，
+    /// 而实际上什么都不通，用户完全无从查起。
+    ///
+    /// 用**连续失败计数**而不是直接照搬 `coreReachable`：后者在刚启动、第一帧数据到达
+    /// 之前天然是 false，直接拿去点亮警告会闪一下假警报。
+    public private(set) var coreUnresponsive = false
+    private var failedStreamRounds = 0
+    /// 连续几轮拿不到数据才算「没响应」。看门狗一轮 2s，两轮≈4s —— 够躲开启动抖动，
+    /// 又不至于让用户对着一个坏掉的核心干等太久。
+    private static let unresponsiveThreshold = 2
     private var connectionsTask: Task<Void, Never>?
     private var nodesTask: Task<Void, Never>?
     private var speedTask: Task<Void, Never>?
@@ -96,6 +110,8 @@ public final class ClashService {
 
     public func stop() {
         trafficTask?.cancel(); trafficTask = nil
+        failedStreamRounds = 0
+        coreUnresponsive = false
         connectionsTask?.cancel(); connectionsTask = nil
         nodesTask?.cancel(); nodesTask = nil
         speedTask?.cancel(); speedTask = nil
@@ -127,11 +143,17 @@ public final class ClashService {
                         self.up = sample.up
                         self.down = sample.down
                         self.coreReachable = true      // 有流数据 = 核心在跑
+                        self.failedStreamRounds = 0
+                        self.coreUnresponsive = false
                     }
                 } catch {
                     // 流结束或出错都落到这里，下面统一等 2s 再重连
                 }
                 self.coreReachable = false
+                self.failedStreamRounds += 1
+                if self.failedStreamRounds >= Self.unresponsiveThreshold {
+                    self.coreUnresponsive = true
+                }
                 try? await Task.sleep(for: .seconds(2))
             }
         }
