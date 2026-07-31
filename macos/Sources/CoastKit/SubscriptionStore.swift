@@ -151,6 +151,42 @@ public final class SubscriptionStore: @unchecked Sendable {
         }
     }
 
+    /// 把「实时节点名」反查回订阅里的下标。
+    ///
+    /// 实时名 = `「订阅节点名 - 订阅名」`（见 `ConfigBuilder`）。Qt 版还会给某些订阅的节点
+    /// 加 `[speedtest]` 后缀，那是它的遗留字段 —— 这里一并容忍，好让从 Qt 版迁移过来的
+    /// 用户（其 full.yaml 里可能带着这种名字）也能对上。
+    ///
+    /// 写成**纯函数**：真正的禁用要写盘 + 重建配置，没法在测试里随便跑；
+    /// 而「名字对不对得上」恰恰是最容易错、也最值得单独钉住的一环。
+    public static func locateNode(liveName: String,
+                                  in catalog: [(subscription: String, nodes: [String])])
+        -> (subscription: Int, node: Int)? {
+        for (subIndex, entry) in catalog.enumerated() {
+            for (nodeIndex, node) in entry.nodes.enumerated() {
+                let base = "\(node) - \(entry.subscription)"
+                if liveName == base || liveName == base + "[speedtest]" {
+                    return (subIndex, nodeIndex)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// 禁用一个**正在使用**的节点：从订阅池里摘除。调用方负责随后重建配置。
+    ///
+    /// 返回是否真的改动了。找不到对应订阅节点时返回 false —— 这不是异常：
+    /// 组名、`DIRECT`、`REJECT` 这些都不是订阅里的节点，点到它们时什么都不该发生。
+    @discardableResult
+    public func disableNode(liveName: String) -> Bool {
+        let summaries = load()
+        let catalog = summaries.enumerated().map { index, summary in
+            (subscription: summary.name, nodes: nodes(at: index).map(\.name))
+        }
+        guard let hit = Self.locateNode(liveName: liveName, in: catalog) else { return false }
+        return setNodeEnabled(subscription: hit.subscription, node: hit.node, false)
+    }
+
     public func setAllNodesEnabled(subscription: Int, _ enabled: Bool) -> Bool {
         mutate { document in
             guard let block = document.blockRange(at: subscription) else { return false }

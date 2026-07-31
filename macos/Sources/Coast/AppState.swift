@@ -356,6 +356,26 @@ public final class AppState {
     public func closeAllConnections() { clash.clearConnections() }
     public func selectNode(_ name: String) { clash.selectNode(name) }
 
+    /// 禁用**正在使用**的那个节点：从订阅池摘除 → 重建配置 → 立刻重拉列表。
+    ///
+    /// 组行的 `now` 非空时禁的是它的叶子（`节点选择 → 自动选择 → HK-6` 禁的是 HK-6）——
+    /// 禁掉组本身没有意义，用户想踢掉的是那个具体的、此刻正在服务的节点。
+    ///
+    /// 重拉列表这一步不能省：不拉的话被禁的节点还留在界面上，再点一次就切到一个
+    /// 配置里已经没有的节点，核心直接报错。
+    public func disableCurrentNode(_ node: NodeInfo) {
+        let live = node.now.isEmpty ? node.name : node.now
+        guard subscriptions.disableNode(liveName: live) else {
+            append(log: String(format: "「%@」不在任何订阅里,无法禁用".t, live))
+            return
+        }
+        append(log: String(format: "已禁用节点「%@」,正在重建配置".t, live))
+        Task {
+            await controller.rebuildConfig()
+            clash.refreshNodes()
+        }
+    }
+
     /// 页脚模式下拉的档位。
     ///
     /// `clash.mode` 存的是规范值（Rule/Global/Direct），而下拉显示的是本地化文案 ——

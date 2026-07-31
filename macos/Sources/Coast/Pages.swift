@@ -165,6 +165,9 @@ struct NodesPage: View {
     @Environment(Theme.self) private var theme
 
     @State private var search = ""
+    /// 搜索框是否展开。Qt 默认只显示一个放大镜，点开才出输入框（右侧 ✕ 清空并收起）——
+    /// 节点页顶栏本来就挤，常驻一个输入框会把「节点 (N)」和右边的动作图标挤到一起。
+    @State private var searchShown = false
     /// 只看测得通的节点。对应配置项 `nodeOnlyAvailable`（`node:`）——
     /// 那个配置一直存在，却从来没有界面开关，等于用户改不了。
     @State private var onlyAvailable = false
@@ -180,6 +183,13 @@ struct NodesPage: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
+                Text("节点".t)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(theme.textPrimary)
+                Text("(\(visibleNodes.count))")
+                    .font(.system(size: 12))
+                    .foregroundStyle(theme.textMuted)
+
                 if !state.clash.groups.isEmpty {
                     Picker("", selection: Binding(
                         get: { state.clash.selectedGroup },
@@ -190,18 +200,60 @@ struct NodesPage: View {
                     .labelsHidden()
                     .frame(maxWidth: 240)
                 }
-                TextField("搜索节点".t, text: $search)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 200)
+                if searchShown {
+                    HStack(spacing: 4) {
+                        TextField("搜索节点".t, text: $search)
+                            .textFieldStyle(.plain)
+                            .frame(width: 150)
+                        Button {
+                            search = ""
+                            searchShown = false
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(theme.textMuted)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(theme.metricBg)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                } else {
+                    Button { searchShown = true } label: {
+                        Image(systemName: "magnifyingglass").font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(theme.textMuted)
+                    .help("搜索节点".t)
+                }
+
                 Toggle("仅可用节点".t, isOn: $onlyAvailable)
                     .toggleStyle(.checkbox)
                     .font(.system(size: 11))
                 Spacer()
-                Button("测延迟".t) { Task { await state.clash.testDelays() } }
-                Button(state.clash.speedTesting ? "测速中…".t : "测速".t) {
-                    state.clash.startSpeedTestForValidNodes()
+
+                Button { Task { await state.clash.testDelays() } } label: {
+                    Image(systemName: "bolt").font(.system(size: 12))
                 }
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.textMuted)
+                .help("测延迟".t)
+
+                // 测速：空闲显示刷新图标，测速中持续旋转（对齐 Qt 的 refresh-line / loader-4-line）
+                Button { state.clash.startSpeedTestForValidNodes() } label: {
+                    Image(systemName: state.clash.speedTesting
+                          ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
+                        .font(.system(size: 12))
+                        .rotationEffect(.degrees(state.clash.speedTesting ? 360 : 0))
+                        .animation(state.clash.speedTesting
+                                   ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                                   : .default,
+                                   value: state.clash.speedTesting)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(theme.textMuted)
                 .disabled(state.clash.speedTesting)
+                .help(state.clash.speedTesting ? "测速中…".t : "测速".t)
             }
             .padding(10)
 
@@ -227,9 +279,10 @@ struct NodesPage: View {
             } else {
                 List(visibleNodes) { node in
                     NodeRow(node: node,
-                            switching: state.clash.switchingTo == node.name) {
-                        state.selectNode(node.name)
-                    }
+                            switching: state.clash.switchingTo != nil,
+                            isTarget: state.clash.switchingTo == node.name,
+                            onApply: { state.selectNode(node.name) },
+                            onDisable: { state.disableCurrentNode(node) })
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                 }
@@ -240,66 +293,83 @@ struct NodesPage: View {
     }
 }
 
+/// 节点列表行。严格对齐 Qt 的 `NodeRow.qml`：
+/// 名称（省略号）+ 延迟/速度**药丸** + **单个按钮**（非活动行「应用」/ 活动行「禁用」）。
+///
+/// 关键行为也照搬：
+/// - 「禁用」只出现在**正在使用**的那一行 —— 它把该节点从订阅池摘除并重建配置，
+///   是个破坏性动作，放在任意一行上太容易误触；
+/// - 切换在途时，**目标行转圈、其余行全部不可点**。只禁目标行的话，用户会在等待期间
+///   连点好几个节点，排出一串切换请求，最后停在哪个全看运气。
 struct NodeRow: View {
     @Environment(Theme.self) private var theme
+
     let node: NodeInfo
+    /// 是否有切换/禁用在途（此时所有行的按钮都禁用）。
     var switching: Bool = false
-    let onSelect: () -> Void
+    /// 本行是否为切换目标（是则按钮显示转圈帧）。
+    var isTarget: Bool = false
+    let onApply: () -> Void
+    let onDisable: () -> Void
 
-    var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 10) {
-                // 切换在途时转圈,给「点到了、正在切」的即时反馈;否则用活动圆点
-                if switching {
-                    ProgressView().controlSize(.small).frame(width: 8, height: 8)
-                } else {
-                    Circle()
-                        .fill(node.active ? theme.accent : theme.textMuted.opacity(0.4))
-                        .frame(width: 8, height: 8)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(node.name)
-                        .font(.system(size: 13))
-                        .foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-                    if !node.now.isEmpty {
-                        Text("→ \(node.now)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(theme.textMuted)
-                            .lineLimit(1)
-                    }
-                }
-
-                Spacer(minLength: 8)
-
-                if node.speed > 0 {
-                    Text(Formatting.rate(node.speed))
-                        .font(.system(size: 11))
-                        .foregroundStyle(theme.accentStrong)
-                }
-                Text(node.delay > 0 ? "\(node.delay) ms" : "—")
-                    .font(.system(size: 11))
-                    .foregroundStyle(delayColor)
-                    .frame(width: 56, alignment: .trailing)
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 40)
-            .background(node.active ? theme.nodeRowActive : theme.nodeRowBg)
-            .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+    /// 药丸文案：优先显示实测速度，没有则显示延迟。
+    private var badgeText: String {
+        if node.speed > 0 { return Formatting.rate(node.speed) }
+        if node.delay > 0 { return "\(node.delay) ms" }
+        return "-"
     }
 
-    /// 延迟配色：越低越绿，超时用中性灰而不是红 —— 红色在这个列表里留给真正的错误。
-    private var delayColor: Color {
-        switch node.delay {
-        case 1..<200: return Color(hex: 0x4DA13E)
-        case 200..<500: return Color(hex: 0xC69A54)
-        case 500...: return Color(hex: 0xA84343)
-        default: return theme.textMuted
+    private var badgeColor: Color {
+        if node.speed > 0 { return theme.accent }
+        return theme.latencyColor(node.delay > 0 ? node.delay : -1)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(node.name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(node.active ? theme.textPrimary : theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if !node.now.isEmpty {
+                    // 组行：显示它此刻实际走到的叶子。禁用时禁的也是这个叶子。
+                    Text("→ \(node.now)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(theme.textMuted)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            Spacer(minLength: 8)
+
+            Text(badgeText)
+                .font(.system(size: 10))
+                .foregroundStyle(badgeColor)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 3)
+                .background(badgeColor.opacity(0.15))
+                .clipShape(Capsule())
+
+            Button(action: node.active ? onDisable : onApply) {
+                Group {
+                    if isTarget {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(node.active ? "禁用".t : "应用".t)
+                            .font(.system(size: 11))
+                    }
+                }
+                .frame(width: 44)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(switching)
         }
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(node.active ? theme.accent.opacity(0.12) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
 
