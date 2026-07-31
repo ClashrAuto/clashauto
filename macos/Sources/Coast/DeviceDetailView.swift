@@ -206,6 +206,14 @@ struct DeviceDetailView: View {
                     .font(.system(size: 13)).foregroundStyle(Color(hex: 0xB1_4A_4A))
             }
 
+            // 90 高的实时带宽折线。Qt 那边喂的是这台设备的**下行**速率，
+            // 固定 1s 一拍（它专门加了个定时器，因为挂在「选中设备变了」上会让入点节奏乱掉，
+            // 曲线一顿一顿）。这里的数据源 `downHistory` 本来就是每拍推一个点，节奏天然是稳的。
+            BandwidthChart(samples: sample.downHistory,
+                           title: "下载".t,
+                           lineColor: Color(hex: 0x5B_B4_4B))
+                .frame(height: 90)
+
             // 会话 / 今日 / 累计三块**定宽**，窗口一窄要能折行（Qt 用的是 Flow，
             // 放 RowLayout 里窗口一窄就整排溢出到卡片外）。
             HStack(alignment: .top, spacing: 16) {

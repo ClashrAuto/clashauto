@@ -18,15 +18,16 @@ struct TrafficCard: View {
     /// 最近若干拍的速率（字节/秒），越靠后越新。
     let samples: [Double]
 
-    /// 刻度：取当前窗口峰值向上取整到 32 KB/s 的整数倍，至少 128 KB/s。
+    /// 量程：**128KB 基准 / 2MB 步进**，与 `qml/BandwidthChart.qml` 的 `currentMax()`
+    /// 逐字相同（原来这里是「32KB 台阶」，是我自己编的，两张图的刻度因此对不上）。
     ///
-    /// 固定刻度会让小流量时曲线贴着底边看不出形状，纯自适应又会让刻度数字每秒跳；
-    /// 按 32 KB/s 台阶取整是两者的折中 —— 与 Qt 卡上那组 32/64/96/128 的观感一致。
+    /// 固定量程会让小流量时曲线贴着底边看不出形状，纯自适应又会让刻度数字每秒乱跳；
+    /// 「先垫一个 128KB 的底、超了再按 2MB 一档一档往上跳」是两者的折中。
     private var scaleMax: Double {
+        let base = 131_072.0        // 128 KB
+        let step = 2_097_152.0      // 2 MB
         let peak = samples.max() ?? 0
-        let step = 32.0 * 1024
-        let steps = max(4.0, (peak / step).rounded(.up))
-        return steps * step
+        return peak > base ? (peak / step).rounded(.up) * step : base
     }
 
     private var gridLines: [Double] {
