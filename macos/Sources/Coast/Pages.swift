@@ -6,6 +6,16 @@ import SwiftUI
 /// 流量指标 + 实时带宽图。对齐 `qml/StatusPage.qml` 的上半部分；
 /// 「今日流量」「连接速览」两块依赖历史库，随阶段 6 补。
 struct StatusPage: View {
+    /// 最近建立的 5 条。
+    private var recentRows: [ConnectionRow] { ConnectionRow.recent(state.connections, limit: 5) }
+    /// 跑量最多的 5 条。
+    private var topRows: [ConnectionRow] { ConnectionRow.top(state.connections, limit: 5) }
+
+    /// 发起方的设备名。判定逻辑在 `ConnectionRow.deviceLabel` —— 状态页两张卡共用一份。
+    private func deviceName(for row: ConnectionRow) -> String {
+        ConnectionRow.deviceLabel(for: row, proxied: state.proxiedDeviceLabels)
+    }
+
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
     @State private var showingConnections = false
@@ -16,14 +26,17 @@ struct StatusPage: View {
                 HStack(spacing: 10) {
                     MetricCard(symbol: "arrow.up", title: "上传".t, value: state.upText)
                     MetricCard(symbol: "arrow.down", title: "下载".t, value: state.downText)
-                    // 连接卡可点 —— 打开实时连接查看器(对齐 Qt 的 ConnectionsWindow)
-                    Button { showingConnections = true } label: {
-                        MetricCard(symbol: "link", title: "连接".t, value: String(state.connectionsCount))
-                    }
-                    .buttonStyle(.plain)
-                    .help("查看全部连接".t)
                     MetricCard(symbol: "tray.and.arrow.down", title: "累计下载".t, value: state.totalDownText)
                 }
+
+                // 「连接」卡：计数 + 右上角两个动作 + 最近建立的 5 条。
+                // 对齐 Qt `StatusPage.qml` 的同名卡 —— 那边把「最近连接」直接摊在状态页上，
+                // 而不是只给一个计数、点开才看得到：状态页的用处就是**不点任何东西**也能
+                // 看出现在在跑什么。
+                ConnectionsCard(recent: recentRows,
+                                onOpenAll: { showingConnections = true },
+                                onClearAll: { state.closeAllConnections() },
+                                deviceName: deviceName(for:))
 
                 BandwidthChart(samples: state.bandwidthSamples)
                     .frame(height: 160)
@@ -387,6 +400,14 @@ struct TodayTrafficCard: View {
 
 /// 本次会话的流量构成:直连 vs 代理,一根占比条 + 两个数值。对齐 Qt 的 directBytes/proxyBytes。
 struct CompositionCard: View {
+    /// 跑量最多的 5 条。与「最近连接」是两个不同的榜 —— 刚建立的连接往往还没跑量。
+    private var topRows: [ConnectionRow] { ConnectionRow.top(state.connections, limit: 5) }
+
+    /// 发起方的设备名。判定逻辑在 `ConnectionRow.deviceLabel` —— 状态页两张卡共用一份。
+    private func deviceName(for row: ConnectionRow) -> String {
+        ConnectionRow.deviceLabel(for: row, proxied: state.proxiedDeviceLabels)
+    }
+
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
 
@@ -413,6 +434,23 @@ struct CompositionCard: View {
                 legend(theme.accent, "代理".t, comp.proxyBytes)
                 legend(theme.textMuted.opacity(0.4), "直连".t, comp.directBytes)
                 Spacer()
+            }
+
+            // 「用量最多」—— Qt 把它放在同一张「总流量」卡里，而不是单开一张：
+            // 占比条回答「代理/直连各占多少」，这份列表回答「那些量到底是谁跑的」，
+            // 两个问题连着看才有意义。
+            Divider().overlay(theme.divider).padding(.vertical, 2)
+            Text("用量最多".t)
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textMuted)
+            if topRows.isEmpty {
+                Text("暂无流量".t)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textMuted)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.vertical, 12)
+            } else {
+                ConnLineList(items: topRows, rows: 5, deviceName: deviceName)
             }
         }
         .padding(10)

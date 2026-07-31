@@ -21,6 +21,11 @@ public final class Theme {
 
     // MARK: 品牌色
     public let accent = Color(hex: 0x4898F8)
+    /// 「直连」的色点。取值与 Qt 的 `StatusPage.qml` 一致（`#48a5a7`）——
+    /// 状态页两张连接列表靠它和 `accent` 区分这条走没走代理。
+    /// 不跟随明暗切换：它要和 `accent` 形成固定对比，换一套值就失去了「一眼分辨」的作用。
+    public var directDot: Color { Color(hex: 0x48A5A7) }
+
     public var accentStrong: Color { dark ? Color(hex: 0x83BDFF) : Color(hex: 0x1F6FD2) }
     public let danger = Color(hex: 0xFF4D4F)
 

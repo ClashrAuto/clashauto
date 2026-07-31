@@ -77,6 +77,12 @@ public final class AppState {
     /// 维度：进程 / 域名。（Qt 版还有「设备」，那一维依赖设备台账，见 PLAN 阶段 6/9。）
     public var trafficDimension: HistoryStore.Dimension = .process { didSet { refreshTodayTraffic() } }
 
+    /// 被代理设备的 (IP, 别名) 列表，供连接行标注发起设备。
+    /// 每帧都查一次数据库太浪费，而这份名单只在设备开关变动时才会变。
+    public var proxiedDeviceLabels: [(ip: String, alias: String)] {
+        devices.proxiedDevices().map { (ip: $0.lastIP, alias: $0.alias) }
+    }
+
     // MARK: 局域网安全告警
 
     /// 当前成立的 ARP 欺骗告警。设备页据此显示警示条。
