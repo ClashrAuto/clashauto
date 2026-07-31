@@ -877,12 +877,15 @@ jobs:
     # 只依赖 windows（release 由它创建，mac DMG 随后追加）；mac 构建与 linux 无关，
     # 不因 linux 失败被 skip。
     needs: [windows]
-    # ★★ 已停用（2026-07-31）：macOS 的发布包改为**只出 Swift 版**（见 macos-swift job）。
-    #    这条腿会让外部仓库 integemjack/schat.build 把 Qt 版的签名 DMG --clobber 到同一个
-    #    Release 上，于是同一个 release 里出现两个 macOS 包；而 app 内的一键更新是按扩展名
-    #    挑第一个 .dmg 的，老版本会挑到哪个纯看运气。二者只能留一个。
-    #    保留整个 job 而不是删掉：要恢复 Qt 版发布时，把下面的 if 改回原来那行即可，
-    #    原条件是 `github.event_name == 'push' && (ref == master || ref == main)`。
+    # ★★ 已停用（2026-07-31）：macOS 只发 **Swift 版**，触发签名的活儿挪到了 `macos-swift`
+    #    job 里的 "Trigger signed macOS build" 那一步 —— 两条腿都往同一个 Release 传 macOS
+    #    包的话，app 内的一键更新（按扩展名挑第一个 .dmg）会挑到哪个纯看运气。
+    #
+    #    与旧版的关键差别：新那步会把**目标 release tag** 一并传给 schat.build。
+    #    早先只推一个空提交，对方只能自己猜发到哪个 release，于是 beta 分支的构建会把
+    #    签名 DMG 盖到正式版上 —— 这正是当初把 beta 的 mac 包整个停掉的原因。
+    #    保留整个 job 而不是删掉：要恢复 Qt 版发布时，把下面的 if 改回
+    #    `github.event_name == 'push' && (ref == master || ref == main)` 即可。
     if: false
     runs-on: ubuntu-latest
     steps:
@@ -1083,22 +1086,50 @@ jobs:
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
 
-      # macOS 的发布包**只出这一个**（Swift 版）。Qt 那条 mac 腿已停发（见下方 trigger-mac）。
-      # 之所以必须二选一：app 内的一键更新是**按扩展名挑资源**的
-      # （UpdateChecker.macAsset 取第一个 .dmg），同一个 Release 上并存两个 macOS 包时，
-      # 老版本会挑到哪个纯看运气。
-      - name: Upload to GitHub Release
+      # ★ 不在这里发 Release。签名与公证由外部仓库 integemjack/schat.build 做
+      #   （本仓库的 CI 拿不到 Developer ID 私钥，也不该拿到）。这里只把**未签名**的产物
+      #   留成 Actions artifact 供排查，然后触发对方去签、去传。
+      #
+      #   触发时必须带上**目标 release tag**：早先只推一个空提交，对方只能自己猜发到哪个
+      #   release，于是 beta 分支的构建会把签名 DMG 盖到正式版的 release 上 —— 这正是当初
+      #   把 beta 的 mac 包整个停掉的原因。把 tag 显式传过去，beta 和正式版就各回各家。
+      - name: Trigger signed macOS build (integemjack/schat.build)
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.ver.outputs.tag }}
-          name: ${{ steps.ver.outputs.prerelease == 'true' && format('Coast {0} (beta · {1})', steps.ver.outputs.version, github.ref_name) || format('Coast {0}', steps.ver.outputs.version) }}
-          prerelease: ${{ steps.ver.outputs.prerelease == 'true' }}
-          target_commitish: ${{ github.sha }}
-          body_path: macos/out/release-notes.md
-          # prerelease 绝不能占 latest：/releases/latest 是正式版通道，被 beta 占了会把所有
-          # 没开「接收测试版」的用户推到测试版上去。
-          make_latest: ${{ steps.ver.outputs.prerelease == 'true' && 'false' || 'true' }}
-          overwrite_files: true
-          files: |
-            macos/out/Coast-*
+        env:
+          SCHAT_TOKEN: ${{ secrets.SCHAT_BUILD_TOKEN }}
+          SCHAT_REPO: ${{ secrets.SCHAT_BUILD_REPO }}
+          SCHAT_BRANCH: ${{ secrets.SCHAT_BUILD_BRANCH }}
+          TARGET_TAG: ${{ steps.ver.outputs.tag }}
+          TARGET_PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+          TARGET_VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SCHAT_TOKEN:-}" ] || [ -z "${SCHAT_REPO:-}" ]; then
+            echo "::warning::SCHAT_BUILD_TOKEN/REPO 未配置，跳过 macOS 签名构建触发"
+            exit 0
+          fi
+          branch="${SCHAT_BRANCH:-clashauto-mac}"
+          tmp="$(mktemp -d)"
+          origin="https://x-access-token:${SCHAT_TOKEN}@github.com/${SCHAT_REPO}.git"
+          mask() { sed 's#x-access-token:[^@]*@#x-access-token:***@#g'; }
+          git clone --depth 1 --branch "$branch" "$origin" "$tmp/repo" 2>&1 | mask
+          cd "$tmp/repo"
+          git config user.name "clashauto-ci"
+          git config user.email "ci@clashauto.local"
+          # 参数走**提交说明**而不是文件：对方分支上除了 workflow 没有别的内容，
+          # 改文件会污染它的历史；而 commit message 在 on:push 里用
+          # `github.event.head_commit.message` 就能原样读到。
+          # 键值一行一个，好解析、也好在 Actions 日志里一眼看清这次要发到哪。
+          git commit --allow-empty -m "trigger: clashauto macOS (swift)" \
+            -m "source-repo: ${GITHUB_REPOSITORY}" \
+            -m "source-sha: ${GITHUB_SHA}" \
+            -m "source-ref: ${GITHUB_REF_NAME}" \
+            -m "product: coast-swift" \
+            -m "release-tag: ${TARGET_TAG}" \
+            -m "prerelease: ${TARGET_PRERELEASE}" \
+            -m "version: ${TARGET_VERSION}"
+          git push "$origin" "HEAD:${branch}" 2>&1 | mask
+          echo "已触发签名构建 → ${SCHAT_REPO}@${branch}"
+          echo "  源: clashauto@${GITHUB_SHA} (${GITHUB_REF_NAME})"
+          echo "  目标 release: ${TARGET_TAG} (prerelease=${TARGET_PRERELEASE})"
