@@ -63,21 +63,30 @@ struct TrafficCard: View {
                 }
             }
 
-            HStack(alignment: .top, spacing: 8) {
+            // 图标 + 标题/数值。带背景折线时**只占卡片顶部一条 64 高的带子**（内容在带子里
+            // 居中）：卡片会随窗口长高，若还按整卡居中，图和字就会在卡片中央撞在一起，
+            // 且窗口越高字越往下漂。尺寸逐项照抄 `qml/MetricCard.qml`：
+            // 左内距 14 / 右 10 / 间距 12、图标 28、标题 13、数值 24，标题与数值同为品牌色。
+            HStack(spacing: 12) {
                 Image(systemName: symbol)
-                    .font(.system(size: 18))
-                    .foregroundStyle(theme.textSecondary)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 12)).foregroundStyle(accent)
-                    Text(value).font(.system(size: 22, weight: .medium)).foregroundStyle(accent)
+                    .font(.system(size: 28))
+                    .foregroundStyle(theme.dark ? Color(hex: 0xAA_AA_AA) : Color(hex: 0x88_88_88))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.system(size: 13)).foregroundStyle(accent)
+                        .lineLimit(1).truncationMode(.tail)
+                    Text(value).font(.system(size: 24)).foregroundStyle(accent)
+                        .lineLimit(1).truncationMode(.tail)
                 }
-                Spacer()
+                Spacer(minLength: 0)
             }
-            .padding(12)
+            .padding(.leading, 14)
+            .padding(.trailing, 10)
+            .frame(height: 64)
         }
         .frame(height: 170)
         .background(theme.metricBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        // Qt 这几张卡是 `radius: 4`，比 `Theme.radius`(5) 小一档 —— 照抄。
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 }
 

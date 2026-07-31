@@ -22,7 +22,7 @@ struct StatusPage: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 10) {
                 // ★ 双列网格,与 Qt 的 `GridLayout { columns: 2; rowSpacing/columnSpacing: 10 }`
                 //   一致;卡高也照搬(上传/下载 170,其余 268)。
                 //
@@ -35,12 +35,15 @@ struct StatusPage: View {
                 // 两个 HStack 各自定高，间距完全可控，也更贴近 Qt 的 GridLayout 行为
                 // （那边每张卡都写死 Layout.preferredHeight）。
                 HStack(spacing: 10) {
+                    // ★ 这里必须是**速率**。Qt 用的是 `bridge.upText`，那是
+                    //   `speedText(up)`（带 `/s`）。原来写的是 `Formatting.bytes(...)`，
+                    //   于是把「1.2 MB/s」显示成了「1.2 MB」—— 一个把速率读成总量的错。
                     TrafficCard(symbol: "arrow.up.square", title: "上传".t,
-                                value: Formatting.bytes(state.clash.up),
+                                value: state.upText,
                                 accent: theme.uploadAccent,
                                 samples: state.bandwidthSamples.map(\.up))
                     TrafficCard(symbol: "arrow.down.square", title: "下载".t,
-                                value: Formatting.bytes(state.clash.down),
+                                value: state.downText,
                                 accent: theme.downloadAccent,
                                 samples: state.bandwidthSamples.map(\.down))
                 }
@@ -49,13 +52,13 @@ struct StatusPage: View {
                                     onOpenAll: { showingConnections = true },
                                     onClearAll: { state.closeAllConnections() },
                                     deviceName: deviceName(for:))
-                        .frame(height: 230)
+                        .frame(height: 268)
                     LatencyCard(monitor: state.latency)
-                        .frame(height: 230)
+                        .frame(height: 268)
                 }
                 HStack(spacing: 10) {
-                    CompositionCard().frame(height: 230)
-                    TodayTrafficCard().frame(height: 230)
+                    CompositionCard().frame(height: 268)
+                    TodayTrafficCard().frame(height: 268)
                 }
 
                 // 三盏状态灯已移除:页脚本来就有「核心 / 网页 / 增强」三个开关，
@@ -70,7 +73,11 @@ struct StatusPage: View {
                         .font(.system(size: 11)).foregroundStyle(theme.danger)
                 }
             }
-            .padding(14)
+            // 页面内距对齐 Qt：左/上/下 10，**右边不留** —— 滚动条要贴页面右缘，
+            // 而不是悬在离边 10 的空中；内容列自己收窄 10 补回来。
+            .padding(.leading, 10)
+            .padding(.vertical, 10)
+            .padding(.trailing, 10)
         }
         .sheet(isPresented: $showingConnections) {
             ConnectionsView().environment(state).environment(theme)
@@ -98,10 +105,11 @@ struct MetricCard: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.6)
         }
-        .padding(10)
+        // Qt 这几张卡：内距 12、`radius: 4`（比 Theme.radius(5) 小一档）。
+        .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 }
 
@@ -576,10 +584,11 @@ struct TodayTrafficCard: View {
                 }
             }
         }
-        .padding(10)
+        // Qt 这几张卡：内距 12、`radius: 4`（比 Theme.radius(5) 小一档）。
+        .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 
     private var hourlyBars: some View {
@@ -589,11 +598,11 @@ struct TodayTrafficCard: View {
             ForEach(Array(state.todayHourly.enumerated()), id: \.offset) { hour, bytes in
                 RoundedRectangle(cornerRadius: 1)
                     .fill(bytes > 0 ? theme.accent : theme.textMuted.opacity(0.15))
-                    .frame(height: max(2, CGFloat(bytes) / CGFloat(peak) * 44))
+                    .frame(height: max(1, CGFloat(bytes) / CGFloat(peak) * 34))
                     .help(String(format: "%d 点：%@".t, hour, Formatting.bytes(bytes)))
             }
         }
-        .frame(height: 44)
+        .frame(height: 34)
     }
 }
 
@@ -658,10 +667,11 @@ struct CompositionCard: View {
                 ConnLineList(items: topRows, rows: 5, deviceName: deviceName)
             }
         }
-        .padding(10)
+        // Qt 这几张卡：内距 12、`radius: 4`（比 Theme.radius(5) 小一档）。
+        .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 
     private func legend(_ color: Color, _ label: String, _ bytes: Int64) -> some View {

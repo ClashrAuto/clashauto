@@ -71,7 +71,7 @@ struct LatencyCard: View {
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 
     private func row(_ label: String, _ ms: Int, sub: String) -> some View {

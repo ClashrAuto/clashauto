@@ -142,6 +142,6 @@ struct ConnectionsCard: View {
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))   // Qt: radius 4
     }
 }
