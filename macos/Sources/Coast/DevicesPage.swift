@@ -79,16 +79,16 @@ struct DevicesPage: View {
                                   localMACs: localMACs)
     }
     /// 代理中的台数。
-    /// 代理中的台数。
     ///
     /// 用 `allRows` 而不是筛过的 `rows`：这是「这个网络里有几台在被代理」的统计，
     /// 跟用户此刻在搜什么无关。用 `rows` 的话，一搜索这个数就跳，看着像状态突变。
     private var enabledCount: Int { allRows.filter(\.proxyEnabled).count }
 
-    /// 经搜索筛过的行。
+    /// 经搜索与「仅在线」筛过的行。
     private var rows: [Row] {
         allRows.filter { row in
-            DeviceFilter.matches(keyword: search, fields: DeviceFilter.haystack(
+            guard !onlineOnly || row.online else { return false }
+            return DeviceFilter.matches(keyword: search, fields: DeviceFilter.haystack(
                 alias: row.record?.alias ?? "",
                 hostname: row.discovered.hostname,
                 vendor: row.discovered.vendor,
@@ -118,80 +118,114 @@ struct DevicesPage: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
+        // Qt 的设备页没有任何分隔线：概览条 / 搜索行 / 列表靠 10 的行距分开。
+        VStack(spacing: 10) {
             header
-            Divider().overlay(theme.divider)
             if rows.isEmpty { emptyState } else { list }
-            Divider().overlay(theme.divider)
             proxyBanner
         }
         .task { await scan() }
     }
 
-    /// 概览头。对齐 Qt 设备页顶部那一块：标题 + 在线/代理中两个计数 + 网关。
-    ///
-    /// 计数用**在线**而不是「发现的总数」：邻居表里会留着早就搬走的设备，
-    /// 拿总数当「我家有几台设备」会一直偏大，越用越离谱。
+    /// 概览条。**逐元素对齐** `qml/DevicesPage.qml` 顶部那一行：
+    /// 设备(18) | 在线 N/M | 代理中 N | 今日 ↓x ↑y | ——— | 新设备提醒 + 34×18 开关 | 导出 | 网关 X。
+    /// 项间距 16；「在线 / 代理中 / 今日」都是**标签在前、数值在后**，两者都是 12px
+    /// —— 原来是「大号数值 + 小标签」，那是另一种读法（像仪表盘），Qt 是一行紧凑的状语。
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 16) {
                 Text("设备".t)
-                    .font(.system(size: 18, weight: .medium))
+                    .font(.system(size: 18))
                     .foregroundStyle(theme.textPrimary)
-                stat("在线".t, "\(allRows.filter(\.online).count)")
-                stat("代理中".t, "\(enabledCount)")
-                Spacer()
-                Toggle("新设备提醒".t, isOn: Binding(
-                    get: { state.config.newDeviceAlert },
-                    set: { state.setNewDeviceAlert($0) }))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .font(.system(size: 11))
-                Button {
-                    exportCSV()
-                } label: {
-                    Text("导出".t).font(.system(size: 12))
-                        .padding(.horizontal, 10).frame(height: 24)
+                stat("在线".t, "\(allRows.filter(\.online).count)/\(allRows.count)")
+                stat("代理中".t, "\(enabledCount)", valueColor: theme.accent)
+
+                // 全部设备**今日**累计上/下行。实时总速率状态页已经有一份（而且更完整 ——
+                // 那是核心的全局速率，不受「能不能归属到某台设备」影响）；这里该回答的是
+                // 「今天这个网络一共用了多少」。
+                HStack(spacing: 8) {
+                    Text("今日".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                    Text("↓ " + Formatting.bytes(todayTotals.down))
+                        .font(.system(size: 12)).foregroundStyle(Color(hex: 0x5B_B4_4B))
+                    Text("↑ " + Formatting.bytes(todayTotals.up))
+                        .font(.system(size: 12)).foregroundStyle(Color(hex: 0xB1_4A_4A))
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 5) {
+                    Text("新设备提醒".t).font(.system(size: 11)).foregroundStyle(theme.textMuted)
+                    // 34×18 的小开关（比设置页那颗 46×24 小一圈）—— Qt 这里就是两套尺寸。
+                    SmallSwitch(isOn: state.config.newDeviceAlert) {
+                        state.setNewDeviceAlert(!state.config.newDeviceAlert)
+                    }
+                }
+
+                // 「导出」在 Qt 里是一段**品牌色文字**，不是按钮 —— 它是个低频动作，
+                // 做成按钮会和旁边的开关抢注意力。
+                Button { exportCSV() } label: {
+                    Text("导出".t).font(.system(size: 11)).foregroundStyle(theme.accent)
                 }
                 .buttonStyle(.plain)
-                .glassCapsule()
-                Button { Task { await scan() } } label: {
-                    Label(scanning ? "扫描中…".t : "重新扫描".t, systemImage: "arrow.clockwise")
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 10).frame(height: 24)
-                }
-                .buttonStyle(.plain)
-                .glassCapsule()
-                .disabled(scanning)
-            }
-            HStack(spacing: 8) {
+
                 Text("网关 ".t + (gatewayIP.isEmpty ? "-" : gatewayIP))
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textMuted)
-                if !exportMessage.isEmpty {
-                    Text(exportMessage)
-                        .font(.system(size: 11))
-                        .foregroundStyle(theme.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                Spacer()
+            }
+            .padding(.trailing, 10)
+
+            // 搜索 / 仅在线 / 重扫：一行三件，两个方钮都是 28×28。
+            HStack(spacing: 6) {
                 TextField("搜索设备 / IP / 厂商".t, text: $search)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(maxWidth: 220)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(theme.textPrimary)
+                    .padding(.horizontal, 8)
+                    .frame(height: 28)
+                    .background {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous).fill(theme.inputBg)
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .stroke(theme.inputBorder, lineWidth: 1)
+                    }
+
+                SquareToggle(symbol: "circle.fill", on: onlineOnly) { onlineOnly.toggle() }
+                SquareToggle(symbol: "arrow.clockwise", on: false, accent: true, spinning: scanning) {
+                    Task { await scan() }
+                }
+                .disabled(scanning)
+            }
+            .padding(.trailing, 10)
+
+            if !exportMessage.isEmpty {
+                Text(exportMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1).truncationMode(.middle)
             }
         }
-        .padding(10)
+        // 右内距**不写在这里**：设备列表要一直铺到页面最右缘，它的滚动条才是贴着窗口右侧的。
+        // 上面几行各自补 10 回来（与 Qt 的做法完全一致）。
+        .padding(.leading, 10)
+        .padding(.top, 10)
     }
 
-    private func stat(_ label: String, _ value: String) -> some View {
+    /// 今日全网上/下行。几条 SUM 聚合，不必每帧算 —— 跟着扫描那一拍刷新即可。
+    @State private var todayTotals: (up: Int64, down: Int64) = (0, 0)
+
+    /// 只看在线设备。
+    @State private var onlineOnly = false
+
+    private func stat(_ label: String, _ value: String,
+                      valueColor: Color? = nil) -> some View {
         HStack(spacing: 4) {
-            Text(value)
-                .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(theme.textPrimary)
             Text(label)
                 .font(.system(size: 12))
                 .foregroundStyle(theme.textMuted)
+            Text(value)
+                .font(.system(size: 12))
+                .foregroundStyle(valueColor ?? theme.textSecondary)
         }
     }
 
@@ -225,6 +259,9 @@ struct DevicesPage: View {
             }
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
+            // Qt: 列表 `spacing: 4`，行宽 = 列表宽 - 10（行右端与上面几行对齐，
+            // 滚动条正好悬在那条 10px 的空隙上）。
+            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 10))
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
@@ -281,6 +318,8 @@ struct DevicesPage: View {
         // 每轮扫描后交给 AppState 判断有没有没见过的设备（首轮只记基线、不提醒）
         state.noticeDevices(discovered.map(\.mac))
         reloadLedger()
+        // 今日全网上/下行是几条 SUM 聚合，跟着扫描那一拍刷新即可，不必每帧算。
+        todayTotals = state.history.todayUpDown(scope: .all)
     }
 
     private func reloadLedger() {
@@ -380,3 +419,61 @@ private struct DeviceRow: View {
 
 /// 展开后只有策略选择。**没有凭据、没有地址** —— 设备端零配置是这个功能的全部意义，
 /// 让用户去抄任何东西都等于没做。
+
+/// 概览条上那颗 34×18 的小开关（比设置页那颗 46×24 小一圈 —— Qt 这里就是两套尺寸）。
+struct SmallSwitch: View {
+    @Environment(Theme.self) private var theme
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .fill(isOn ? theme.accent : theme.switchTrackOff)
+                .frame(width: 34, height: 18)
+            Circle()
+                .fill(.white)
+                .frame(width: 14, height: 14)
+                .offset(x: isOn ? 34 - 14 - 2 : 2)
+        }
+        .frame(width: 34, height: 18)
+        .animation(.easeInOut(duration: 0.12), value: isOn)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: action)
+    }
+}
+
+/// 搜索行右侧那两颗 28×28 的方钮（仅在线 / 重扫）。
+struct SquareToggle: View {
+    @Environment(Theme.self) private var theme
+    let symbol: String
+    let on: Bool
+    var accent = false
+    var spinning = false
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: accent ? 15 : 12))
+                .foregroundStyle(on ? .white : (accent ? theme.accent : theme.textMuted))
+                .rotationEffect(.degrees(spinning ? 360 : 0))
+                .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                           : .default, value: spinning)
+                .frame(width: 28, height: 28)
+                .background {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(on ? theme.accent : (hovering ? theme.hover : theme.inputBg))
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .stroke(on ? theme.accent : theme.inputBorder, lineWidth: 1)
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}

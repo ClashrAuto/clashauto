@@ -270,6 +270,19 @@ public final class HistoryStore: @unchecked Sendable {
         return total
     }
 
+    /// 今日的上行 / 下行分开算。设备页概览条那句「今日 ↓x ↑y」要的是两个数，
+    /// 而 `todayTotal` 只给合计。
+    public func todayUpDown(scope: Scope = .all) -> (up: Int64, down: Int64) {
+        guard let database else { return (0, 0) }
+        let (start, end) = Self.todayRange()
+        var result: (up: Int64, down: Int64) = (0, 0)
+        database.query("""
+            SELECT COALESCE(SUM(up),0), COALESCE(SUM(down),0) FROM conn
+            WHERE ended_at >= ? AND ended_at < ? \(Self.scopeClause(scope))
+            """, [.int(start), .int(end)]) { row in result = (row.int(0), row.int(1)) }
+        return result
+    }
+
     // MARK: - 按设备（设备详情窗）
 
     /// 某台设备近 N 天的每日上/下行。返回**恰好 N 项**、按日期升序，没有记录的那天补 0 ——
