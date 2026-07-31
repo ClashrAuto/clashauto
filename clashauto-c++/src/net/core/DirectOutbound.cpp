@@ -1,5 +1,7 @@
 #include "DirectOutbound.h"
 
+#include "SelfRouteGuard.h" // 自身流量排除：TUN 开着时把出站钉在物理出口上，否则死循环
+
 #include <QNetworkDatagram>
 #include <QNetworkProxy>
 #include <QTcpSocket>
@@ -113,6 +115,13 @@ void DirectOutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, const
         }
     });
     connect(d->sock, &QTcpSocket::disconnected, this, [this] { d->emitClosed(); });
+
+    // 自身流量排除：TUN 开着时把这条 socket 钉在物理出口上，否则我们自己的直连会被路由进
+    // 自己的 TUN → 死循环。必须在 connectToHost **之前**（见 SelfRouteGuard::prepareSocket）。
+    // 失败只记日志、照常拨号：没有环路保护也好过连不上。TUN 没开时它是空操作。
+    QString guardErr;
+    if (!SelfRouteGuard::prepareSocket(d->sock, &guardErr))
+        qWarning("[SelfRouteGuard] 直连出站未能钉住物理出口：%s", qUtf8Printable(guardErr));
 
     // dstHost 可为 IPv4/IPv6 字面量或域名 —— connectToHost 会自行解析域名。
     d->sock->connectToHost(dstHost, dstPort);
@@ -268,12 +277,16 @@ void DirectOutboundUdp::associate(const QString & /*user*/)
     });
 
     // 双栈绑定（QHostAddress::Any = 同时监听 v4/v6），这样同一个会话既能发 v4 目标也能发 v6 目标。
+    // 绑完立刻钉物理出口（UDP 这条路 bind 已经把 fd 建出来了，prepareSocket 会跳过 bind 直接打选项）。
     if (!d->udp->bind(QHostAddress(QHostAddress::Any), 0)) {
         // bind 失败：异步报 failed（与 ready 一样延到下一拍，保证上层此刻已 connect 上信号）。
         const QString reason = d->udp->errorString();
         QTimer::singleShot(0, this, [this, reason] { d->fail(reason); });
         return;
     }
+    QString guardErr;
+    if (!SelfRouteGuard::prepareSocket(d->udp, &guardErr))
+        qWarning("[SelfRouteGuard] 直连 UDP 未能钉住物理出口：%s", qUtf8Printable(guardErr));
 
     // ★ ready() 必须异步发：NetStack 是先 createUdp()、connect 好 ready 槽、才 associate() 的；
     //   若在此同步 emit ready()，那一下上层还没连上信号，就会丢。延到下一个事件循环 tick 再发。

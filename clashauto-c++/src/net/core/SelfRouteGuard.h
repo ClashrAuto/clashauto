@@ -20,7 +20,18 @@
 //   Socks5Client）。逐个改必然漏一个，而漏一个的表现就是偶发死循环。所以先有收口，再谈接线。
 //
 // 用法：进程启动/网络变化时 refreshPhysicalInterface()；每个出站 socket 在 connect 前
-//   applyToFd()。未启用（TUN 没开）时 applyToFd() 直接返回 true 且什么都不做。
+//   prepareSocket()。未启用（TUN 没开）时是空操作。
+//
+// ★★ 已知**未覆盖**的一条路，接 TUN 之前必须解决：**QUIC / Hysteria2**。
+//   它的 socket 由 msquic 内部创建（见 transport/QuicTransport.cpp），Qt 这条路根本够不着，
+//   于是 prepareSocket 对它无效 —— TUN 开着时 Hy2 会走进环路。
+//   解法是走 msquic 自己的接口把本地地址钉在物理出口的 IP 上（QUIC_PARAM_CONN_LOCAL_ADDRESS，
+//   必须在 ConnectionStart 之前设）。在那之前，**TUN 与 Hy2 节点不能同时用**。
+//
+// 审计方法（改动出站时照这个查，别照 connectToHost 查）：
+//   grep -rn "new QTcpSocket\|new QUdpSocket\|new QSslSocket" src/
+//   按 connect 点查会漏 —— 协议出站大多经我们自己的 TlsClient/UtlsClient，保护加在那两个类
+//   内部，调用处看不到 prepareSocket，容易被误判成没保护而重复加。
 #include <QString>
 
 class QAbstractSocket;

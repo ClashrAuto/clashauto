@@ -1,5 +1,6 @@
 #include "VlessOutbound.h"
 
+#include "../SelfRouteGuard.h" // 自身流量排除：TUN 开着时把出站钉在物理出口上
 #include "OutboundRegistry.h"
 #include "../transport/TlsClient.h"
 #include "../transport/WsClient.h"
@@ -119,6 +120,13 @@ void VlessStream::start(quint8 cmd, const QString &dstHost, quint16 dstPort)
                     [this](QAbstractSocket::SocketError) { onTransportError(m_tcp->errorString()); });
             connect(m_tcp, &QTcpSocket::disconnected, this, [this] { onTransportClosed(); });
             m_bottom = m_tcp;
+            // 自身流量排除（必须在 connectToHost 之前）。独立块作用域：本段出现多次。
+            {
+                QString guardErr;
+                if (!SelfRouteGuard::prepareSocket(m_tcp, &guardErr))
+                    qWarning("[SelfRouteGuard] vless 出站未能钉住物理出口：%s",
+                             qUtf8Printable(guardErr));
+            }
             m_tcp->connectToHost(m_node.server, m_node.port);
         }
     } else {
@@ -146,6 +154,13 @@ void VlessStream::start(quint8 cmd, const QString &dstHost, quint16 dstPort)
                     [this](QAbstractSocket::SocketError) { onTransportError(m_tcp->errorString()); });
             connect(m_tcp, &QTcpSocket::disconnected, this, [this] { onTransportClosed(); });
             m_bottom = m_tcp;
+            // 自身流量排除（必须在 connectToHost 之前）。独立块作用域：本段出现多次。
+            {
+                QString guardErr;
+                if (!SelfRouteGuard::prepareSocket(m_tcp, &guardErr))
+                    qWarning("[SelfRouteGuard] vless 出站未能钉住物理出口：%s",
+                             qUtf8Printable(guardErr));
+            }
             m_tcp->connectToHost(m_node.server, m_node.port);
         }
     }

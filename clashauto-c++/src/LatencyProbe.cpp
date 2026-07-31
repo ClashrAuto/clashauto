@@ -1,6 +1,7 @@
 #include "LatencyProbe.h"
 
 #include "ClashService.h"
+#include "net/core/SelfRouteGuard.h" // 自身流量排除：TUN 开着时把探测钉在物理出口上
 
 #include <QDnsLookup>
 #include <QElapsedTimer>
@@ -122,6 +123,11 @@ void LatencyProbe::probeTcp(const QString &host, quint16 port, int *slot)
     QTimer::singleShot(kTimeoutMs, sock, [settle] { settle(-1); });
 
     ++m_pending;
+    // 自身流量排除：测的是**代理服务器**，TUN 开着时这条 socket 同样会被路由进自己的 TUN。
+    // 延迟探测比出站更隐蔽：它在后台定时跑，环路了只表现为"延迟测不出来"，不容易联想到 TUN。
+    QString guardErr;
+    if (!SelfRouteGuard::prepareSocket(sock, &guardErr))
+        qWarning("[SelfRouteGuard] 延迟探测未能钉住物理出口：%s", qUtf8Printable(guardErr));
     sock->connectToHost(host, port);
 }
 

@@ -1,5 +1,7 @@
 #include "TlsClient.h"
 
+#include "../SelfRouteGuard.h" // 自身流量排除：TUN 开着时把出站钉在物理出口上
+
 #include <QNetworkProxy>
 #include <QSslConfiguration>
 #include <QSslSocket>
@@ -68,6 +70,11 @@ void TlsClient::connectToHost(const QString &host, quint16 port, const QString &
     const QString peerName = sni.isEmpty() ? host : sni;
     if (!peerName.isEmpty())
         m_sock->setPeerVerifyName(peerName);
+    // 自身流量排除：必须在发起连接**之前**。connectToHostEncrypted 和 connectToHost 一样，
+    // 之前拿不到 fd —— prepareSocket 先 bind 把 fd 逼出来再打选项。TUN 没开时是空操作。
+    QString guardErr;
+    if (!SelfRouteGuard::prepareSocket(m_sock, &guardErr))
+        qWarning("[SelfRouteGuard] TLS 出站未能钉住物理出口：%s", qUtf8Printable(guardErr));
     m_sock->connectToHostEncrypted(host, port, peerName);
 }
 

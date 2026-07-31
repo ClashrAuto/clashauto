@@ -1,5 +1,6 @@
 #include "ShadowsocksOutbound.h"
 
+#include "../SelfRouteGuard.h" // 自身流量排除：TUN 开着时把出站钉在物理出口上
 #include "../ProxyConfig.h"
 #include "../crypto/Aead.h"
 #include "../crypto/Kdf.h"
@@ -389,6 +390,10 @@ void ShadowsocksOutboundTcp::connectTo(const QString &dstHost, quint16 dstPort, 
     });
     connect(d->sock, &QTcpSocket::disconnected, this, [this] { d->emitClosed(); });
 
+    // 自身流量排除（必须在 connectToHost 之前，见 SelfRouteGuard::prepareSocket）。
+    QString guardErr;
+    if (!SelfRouteGuard::prepareSocket(d->sock, &guardErr))
+        qWarning("[SelfRouteGuard] ss 出站未能钉住物理出口：%s", qUtf8Printable(guardErr));
     d->sock->connectToHost(d->server, d->port); // 域名交给 QTcpSocket 解析
 }
 
@@ -580,6 +585,10 @@ void ShadowsocksOutboundUdp::associate(const QString & /*user*/)
         QTimer::singleShot(0, this, [this, reason] { d->fail(reason); });
         return;
     }
+    // 自身流量排除：bind 已把 fd 建出来，prepareSocket 会跳过 bind 直接打选项。
+    QString guardErr;
+    if (!SelfRouteGuard::prepareSocket(d->udp, &guardErr))
+        qWarning("[SelfRouteGuard] ss UDP 未能钉住物理出口：%s", qUtf8Printable(guardErr));
 
     // ss 服务器地址：字面量直接用；域名经 QHostInfo 异步解析。ready() 延到地址就绪后再发（且必须异步，
     // 同 DirectOutboundUdp：上层先 connect ready 槽再 associate，同步 emit 会丢）。

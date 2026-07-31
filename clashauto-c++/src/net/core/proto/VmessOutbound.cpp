@@ -1,5 +1,6 @@
 #include "VmessOutbound.h"
 
+#include "../SelfRouteGuard.h"     // 自身流量排除：TUN 开着时把出站钉在物理出口上
 #include "../ProxyConfig.h"        // ProxyNode
 #include "OutboundRegistry.h"      // OutboundRegistry
 #include "../crypto/Aead.h"        // coastcore::Aead（AES-128-GCM / ChaCha20-Poly1305 密封/解封）
@@ -647,6 +648,14 @@ public:
                              [this](QAbstractSocket::SocketError) {
                                  established ? emitClosed() : fail(raw->errorString());
                              });
+            // 自身流量排除（必须在 connectToHost 之前）。用独立块作用域：本文件里这段出现多次，
+            // 裸声明一个变量会在同一作用域里撞名。
+            {
+                QString guardErr;
+                if (!SelfRouteGuard::prepareSocket(raw, &guardErr))
+                    qWarning("[SelfRouteGuard] vmess 出站未能钉住物理出口：%s",
+                             qUtf8Printable(guardErr));
+            }
             raw->connectToHost(serverHost, serverPort);
         } else if (tlsOn) {
             tls = new TlsClient(q);
@@ -682,6 +691,14 @@ public:
                              [this](QAbstractSocket::SocketError) {
                                  established ? emitClosed() : fail(raw->errorString());
                              });
+            // 自身流量排除（必须在 connectToHost 之前）。用独立块作用域：本文件里这段出现多次，
+            // 裸声明一个变量会在同一作用域里撞名。
+            {
+                QString guardErr;
+                if (!SelfRouteGuard::prepareSocket(raw, &guardErr))
+                    qWarning("[SelfRouteGuard] vmess 出站未能钉住物理出口：%s",
+                             qUtf8Printable(guardErr));
+            }
             raw->connectToHost(serverHost, serverPort);
         }
     }
@@ -949,6 +966,14 @@ public:
                              [this](QAbstractSocket::SocketError) {
                                  established ? emitClosed() : fail(raw->errorString());
                              });
+            // 自身流量排除（必须在 connectToHost 之前）。用独立块作用域：本文件里这段出现多次，
+            // 裸声明一个变量会在同一作用域里撞名。
+            {
+                QString guardErr;
+                if (!SelfRouteGuard::prepareSocket(raw, &guardErr))
+                    qWarning("[SelfRouteGuard] vmess 出站未能钉住物理出口：%s",
+                             qUtf8Printable(guardErr));
+            }
             raw->connectToHost(serverHost, serverPort);
         } else if (tlsOn) {
             tls = new TlsClient(q);
@@ -975,6 +1000,14 @@ public:
                              [this](QAbstractSocket::SocketError) {
                                  established ? emitClosed() : fail(raw->errorString());
                              });
+            // 自身流量排除（必须在 connectToHost 之前）。用独立块作用域：本文件里这段出现多次，
+            // 裸声明一个变量会在同一作用域里撞名。
+            {
+                QString guardErr;
+                if (!SelfRouteGuard::prepareSocket(raw, &guardErr))
+                    qWarning("[SelfRouteGuard] vmess 出站未能钉住物理出口：%s",
+                             qUtf8Printable(guardErr));
+            }
             raw->connectToHost(serverHost, serverPort);
         }
     }

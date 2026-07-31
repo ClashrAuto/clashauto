@@ -1,6 +1,7 @@
 #include "UtlsClient.h"
 
-#include "../crypto/Aead.h" // 复用记录层 AEAD（AES-GCM / ChaCha20-Poly1305）
+#include "../SelfRouteGuard.h" // 自身流量排除：TUN 开着时把出站钉在物理出口上
+#include "../crypto/Aead.h"    // 复用记录层 AEAD（AES-GCM / ChaCha20-Poly1305）
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -227,6 +228,10 @@ void UtlsClient::connectToHost(const QString &host, quint16 port, const QString 
     });
     connect(m_sock, &QAbstractSocket::errorOccurred, this,
             [this](QAbstractSocket::SocketError) { onSocketError(); });
+    // 自身流量排除：必须在 connectToHost 之前（见 SelfRouteGuard::prepareSocket）。
+    QString guardErr;
+    if (!SelfRouteGuard::prepareSocket(m_sock, &guardErr))
+        qWarning("[SelfRouteGuard] uTLS 出站未能钉住物理出口：%s", qUtf8Printable(guardErr));
     m_sock->connectToHost(host, port);
 }
 
