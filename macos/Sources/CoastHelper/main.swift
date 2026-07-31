@@ -29,8 +29,18 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
         connection.exportedObject = self
         // ★ 命门：连接一断（app 正常退出 / 崩溃 / 被 SIGKILL）就把被欺骗的设备复原。
         //   没有这一步，app 意外死掉时那些设备会一直把本机当网关、直接断网十几分钟。
-        connection.invalidationHandler = { [weak self] in self?.redirector.stop() }
-        connection.interruptionHandler = { [weak self] in self?.redirector.stop() }
+        // ★ 只认**发起接管的那一条**连接。
+        //
+        //   客户端是「每次调用建一条连接、用完即弃」的，随便一次 getVersion 结束都会走到这里。
+        //   早先这里无条件 `redirector.stop()`，等于 startRedirect 一返回、那条连接一 invalidate
+        //   就把刚建立的接管撤掉 —— 接管从来不可能维持住。（实测：任何一次普通调用之后
+        //   日志里都会出现一条撤销。）
+        connection.invalidationHandler = { [weak self, weak connection] in
+            self?.clientVanished(connection, reason: "invalidated")
+        }
+        connection.interruptionHandler = { [weak self, weak connection] in
+            self?.clientVanished(connection, reason: "interrupted")
+        }
         connection.resume()
         return true
     }
@@ -169,6 +179,8 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
         Audit.log("startRedirect 设备=[\(deviceIPsCommaSep)] 网卡=\(interface) "
                   + "网关=\(gatewayIP)/\(gatewayMAC) redir=\(redirPort) dns=\(dnsPort)",
                   caller: NSXPCConnection.current())
+        // 先取住这条连接:reply 之后 `NSXPCConnection.current()` 就不在本次调用上下文里了。
+        let caller = NSXPCConnection.current()
         let ips = deviceIPsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         let macs = deviceMACsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         if let error = redirector.start(deviceIPs: ips, deviceMACs: macs, interface: interface,
@@ -176,8 +188,24 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
                                         redirPort: redirPort, dnsPort: dnsPort) {
             reply(false, error)
         } else {
+            // **只在真的接管成功后**才记下发起方。失败时记下的话会留一个悬空 owner ——
+            // 那条连接稍后断开时会去撤销一个根本不存在的接管（无害但会误导日志），
+            // 更糟的是它会挡住下一次真正的接管去认领 owner。
+            queue.sync { redirectOwner = caller }
             reply(true, "")
         }
+    }
+
+    /// 发起接管的那条连接。只有它断开才意味着「app 没了，把设备放回去」。
+    private var redirectOwner: NSXPCConnection?
+
+    private func clientVanished(_ connection: NSXPCConnection?, reason: String) {
+        queue.sync {
+            guard let owner = redirectOwner, owner === connection else { return }
+            Audit.log("接管发起方的连接已\(reason) —— app 可能已崩溃/被强杀，撤销接管")
+            redirectOwner = nil
+        }
+        redirector.stop()
     }
 
     func terminate(withReply reply: @escaping () -> Void) {
@@ -194,6 +222,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
 
     func stopRedirect(withReply reply: @escaping (Bool, String) -> Void) {
         Audit.log("stopRedirect", caller: NSXPCConnection.current())
+        queue.sync { redirectOwner = nil }
         redirector.stop()
         reply(true, "")
     }

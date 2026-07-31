@@ -191,17 +191,32 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
 
     // MARK: - XPC
 
-    /// 每次调用建一条连接、用完即弃。helper 是按需拉起的 daemon，长连接除了让状态更难推理
-    /// 没有别的好处；这几个调用都不在热路径上。
-    private func withProxy<T: Sendable>(
-        timeout: Duration = .seconds(15),
-        _ body: @escaping @Sendable (CoastHelperProtocol, @escaping @Sendable (Result<T, Error>) -> Void) -> Void
-    ) async throws -> T {
+    /// **接管期专用的长连接。**
+    ///
+    /// helper 把「撤销设备接管」绑在连接失效上（app 崩了就把设备放回去，那是命门）。
+    /// 于是接管必须由一条**活着的**连接持有 —— 用完即弃的短连接一返回就 invalidate，
+    /// helper 立刻就把刚建立的接管撤了。这条连接从 `startRedirect` 活到 `stopRedirect`。
+    private var redirectConnection: NSXPCConnection?
+
+    private func makeConnection() -> NSXPCConnection {
         let connection = NSXPCConnection(machServiceName: HelperConstants.machServiceName,
                                          options: .privileged)
         connection.remoteObjectInterface = NSXPCInterface(with: CoastHelperProtocol.self)
         connection.resume()
-        defer { connection.invalidate() }
+        return connection
+    }
+
+    /// 默认每次调用建一条连接、用完即弃。helper 是按需拉起的 daemon，长连接除了让状态更难
+    /// 推理没有别的好处；这几个调用都不在热路径上。
+    ///
+    /// 传 `on:` 可复用一条已有连接（接管期那条），此时**不**在返回时 invalidate。
+    private func withProxy<T: Sendable>(
+        timeout: Duration = .seconds(15),
+        on existing: NSXPCConnection? = nil,
+        _ body: @escaping @Sendable (CoastHelperProtocol, @escaping @Sendable (Result<T, Error>) -> Void) -> Void
+    ) async throws -> T {
+        let connection = existing ?? makeConnection()
+        defer { if existing == nil { connection.invalidate() } }
 
         return try await withThrowingTaskGroup(of: T.self) { group in
             group.addTask {
@@ -287,7 +302,20 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
         // IP 与 MAC 用两个逗号串平行传，下标一一对应（helper 侧 zip 回去）
         let ips = devices.map(\.ip).joined(separator: ",")
         let macs = devices.map(\.mac).joined(separator: ",")
-        let _: Bool = try await withProxy { helper, done in
+        // 建一条**活着的**连接并留住它 —— 见 `redirectConnection` 的说明。
+        redirectConnection?.invalidate()
+        let connection = makeConnection()
+        redirectConnection = connection
+        // 启动失败就别留着这条连接 —— 它对应的接管根本没建立起来，留着只是个活着的
+        // 空连接，还会让下一次 startRedirect 白白多 invalidate 一次。
+        var started = false
+        defer {
+            if !started {
+                connection.invalidate()
+                redirectConnection = nil
+            }
+        }
+        let _: Bool = try await withProxy(on: connection) { helper, done in
             helper.startRedirect(deviceIPsCommaSep: ips, deviceMACsCommaSep: macs,
                                  interface: interface,
                                  gatewayIP: gatewayIP, gatewayMAC: gatewayMAC,
@@ -295,10 +323,17 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
                 done(ok ? .success(true) : .failure(HelperError.remote(error)))
             }
         }
+        started = true
     }
 
     public func stopRedirect() async throws {
-        let _: Bool = try await withProxy { helper, done in
+        // 用接管期那条连接发停止请求；没有它（app 重启后想清理残留）就临时建一条。
+        let connection = redirectConnection
+        defer {
+            connection?.invalidate()
+            redirectConnection = nil
+        }
+        let _: Bool = try await withProxy(on: connection) { helper, done in
             helper.stopRedirect { ok, error in
                 done(ok ? .success(true) : .failure(HelperError.remote(error)))
             }

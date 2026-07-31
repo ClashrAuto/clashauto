@@ -846,3 +846,48 @@ SMAppService 状态: enabled → helper 版本: 0.8.0 → ✅ XPC 通道可用
 
 - 把 `static let` 改成计算属性后，若该符号被用作 public 默认参数，增量构建会残留旧的
   默认参数生成器符号 → `ld: symbol(s) not found`。必须 `rm -rf .build` 整清。
+
+
+## 2026-07-31(续二) · 零配置透明代理**从来就不可能工作过**
+
+有了能真装的 helper 之后，用审计日志查连接生命周期，撞上一个**致命且此前完全不可见**的设计冲突：
+
+- helper 把「撤销设备接管」绑在连接失效上（`invalidationHandler` / `interruptionHandler`
+  → `redirector.stop()`）。这是命门：app 崩了必须把被 ARP 欺骗的设备放回去，
+  否则那几台设备会一直把本机当网关、直接断网十几分钟。
+- 而客户端 `MacHelperClient.withProxy` 是**每次调用建一条连接、用完即弃**
+  （`defer { connection.invalidate() }`）。
+
+两条单看都合理，合起来是：`startRedirect` 一返回，那条连接就 invalidate，
+helper 立刻把刚建立的接管撤掉。**接管从来维持不住一秒。**
+
+实证（在真 helper 上跑一次最普通的 `getVersion`）：
+
+```
+audit] 客户端连接 invalidated → 撤销接管
+audit] stopCore [caller pid=24950]
+audit] 客户端连接 invalidated → 撤销接管
+```
+
+任何一次普通调用之后都跟着一条撤销 —— 这条日志是这一轮才加的，
+在此之前这个冲突**没有任何可观测的痕迹**，且只会在真机接管时暴露
+（而真机接管一直被「没有可用签名」挡着）。
+
+**修法**（两端都要动，缺一不可）：
+
+- helper：`redirectOwner` 只记**发起接管的那条**连接，且只在 `redirector.start` 真的成功
+  之后才记。只有它断开才撤销接管，普通调用的连接来去自如。
+  （失败也记的话会留一个悬空 owner，挡住下一次真正的接管认领。）
+- 客户端：接管期持有一条**长连接**（`redirectConnection`），从 `startRedirect` 活到
+  `stopRedirect`；`withProxy` 加 `on:` 参数复用它且不在返回时 invalidate。
+  启动失败则立即释放，不留空连接。
+
+验证：修好后再跑普通调用，日志里不再出现撤销；`startRedirect`/`stopRedirect`
+都走 `CoastController` 持有的**同一个** `MacHelperClient` 实例（`private let helper`），
+长连接挂在正确的对象上。
+
+### 仍需真机确认
+
+「发起方连接断开 → 撤销接管」这一半**没法在不真做 ARP 欺骗的前提下验证**。
+handler 会可靠触发是已证实的（正是靠它才发现这个 bug），新增的只是 owner 过滤。
+真机接管测试要改动局域网状态，等你明确同意再做。
