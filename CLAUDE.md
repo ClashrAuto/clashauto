@@ -10,6 +10,7 @@ The git repo root tracks:
 - **`clashauto-c++/`** — the app source (the only thing you edit). *Historical dir name — the product is **Coast**; the folder is left named `clashauto-c++` on purpose (renaming it would churn CI paths).*
 - **`validate/`** — a Docker "download latest release + validate all platforms" harness (below).
 - **`.github/workflows/release.yml`** — CI / release.
+- **`clash/`** — a **git submodule** ([`ClashrAuto/clash`](https://github.com/ClashrAuto/clash)), our fork of MetaCubeX/**mihomo** renamed to `coast`. Kept a submodule so upstream stays mergeable (`upstream` remote → MetaCubeX/mihomo; take upstream changes by **merge**, never by hand-porting). CI does *not* check it out — the app still downloads a core binary at runtime, so the submodule is source-of-truth for the fork, not a build input. Clone with `--recurse-submodules` (or `git submodule update --init`) if you need it.
 
 > **The app is self-contained.** It used to depend on a sibling `Clashr-Auto/` directory (the original Electron app, used as a runtime resource bundle). That dependency is **gone** — all seed resources (base `config/*.yaml`, `Country.mmdb`, Windows `wintun.dll`) are **embedded in the binary via qrc** (`clashauto-c++/assets/bundle/`, listed in `resources.qrc` + a Windows-only `resources_win.qrc`), and the mihomo core is downloaded in-app on first use. `AppConfigLoader::load()` no longer searches for any sibling directory and `AppConfig::sourceRoot` was removed. **Do not reintroduce a Clashr-Auto dependency.**
 
