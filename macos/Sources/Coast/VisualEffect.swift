@@ -78,14 +78,20 @@ struct GlassButtonModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
-            if prominent {
-                content.buttonStyle(.glassProminent)
-            } else {
-                content.buttonStyle(.glass)
+            // 全圆角（胶囊）。Liquid Glass 的默认形状是圆角矩形，
+            // 而胶囊才是这套材质在系统各处的常见形态 —— 玻璃的高光沿着连续曲率走，
+            // 直角处会把高光切断，看起来像贴了一层膜而不是一块玻璃。
+            Group {
+                if prominent {
+                    content.buttonStyle(.glassProminent)
+                } else {
+                    content.buttonStyle(.glass)
+                }
             }
+            .buttonBorderShape(.capsule)
         } else {
             // 旧系统回落到 bordered —— 观感最接近，也不会显得突兀。
-            content.buttonStyle(.bordered)
+            content.buttonStyle(.bordered).buttonBorderShape(.capsule)
         }
     }
 }
