@@ -88,7 +88,7 @@ private:
     QNetworkAccessManager m_network;
     QNetworkAccessManager m_delayNetwork;    // 延迟测速专用：与轮询/切换分开连接池，避免 63 个测速请求
                                              // 占满 6 连接/主机导致 pollNodes/selectNode 排队卡住
-    QNetworkAccessManager m_speedNetwork;    // 下载测速专用：代理指向混合端口，走选中节点下载测速文件
+    QNetworkAccessManager m_speedNetwork;    // 下载测速专用连接池：调核心的 /proxies/<name>/speed，不挤占轮询/切换
     QNetworkReply *m_trafficReply = nullptr; // 常开的 /traffic 流；nullptr 表示未连/已断
     QTimer m_trafficTimer;                    // 看门狗：定期确保 /traffic 流还活着，断了就重连
     QTimer m_connectionsTimer;
@@ -109,9 +109,5 @@ private:
     QHash<QString, qint64> m_measuredSpeeds; // 节点名 → 实测下载速度(字节/秒)；pollNodes 注入到 NodeInfo.speed
     QStringList m_speedQueue;                // 待测节点队列
     int m_speedActive = 0;                   // 进行中的下载数（并发上限 5）
-    bool m_speedSelecting = false;           // 「选组+建连」串行锁：同一时刻只允许一个握手，保证拨号钉在正确出站
-    bool m_speedTesting = false;             // 整轮测速进行中：轮询强制上报原活动节点，避免列表反复重建
-    bool m_speedRestoring = false;           // 收尾中：正在恢复原节点选择，防止重复收尾/重复恢复
-    QString m_speedGroup;                    // 测速期间用于选节点的主选择组
-    QString m_speedOriginalNode;             // 测速前的活动节点，结束后恢复
+    bool m_speedTesting = false;             // 整轮测速进行中：供 UI 切换按钮加载态
 };

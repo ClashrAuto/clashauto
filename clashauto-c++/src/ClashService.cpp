@@ -4,7 +4,6 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QNetworkProxy>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSet>
@@ -16,10 +15,12 @@
 namespace {
 // 下载测速目标：Cloudflare 全球 CDN，稳定且各地区节点都能就近命中；请求经混合端口走选中节点。
 // 只测「一段时间/一段字节」内的吞吐，不会真的下满 100MB（见下方 MAX_MS/MAX_BYTES 上限）。
-const char *kSpeedTestUrl = "https://speed.cloudflare.com/__down?bytes=104857600";
+// 下载测速目标。bytes= 就是本次测速的流量上限：核心侧只按时间窗口跑、没有字节上限，
+// 靠这个参数把单节点封在 20 MB（与改用核心测速前 Qt 侧 kSpeedMaxBytes 的口径一致），
+// 免得快节点在 3s 窗口里吃掉几百 MB。
+const char *kSpeedTestUrl = "https://speed.cloudflare.com/__down?bytes=20971520";
 constexpr int kSpeedConcurrency = 5;              // 并发下载数
-constexpr qint64 kSpeedMaxMs = 3000;              // 单节点测速窗口上限（毫秒，从首字节起算）
-constexpr qint64 kSpeedMaxBytes = 20LL * 1024 * 1024; // 单节点下载字节上限，避免快节点/整表测速跑满流量
+constexpr int kSpeedWindowMs = 3000;              // 传给核心的测速窗口（毫秒，核心从收到响应头起算）
 } // namespace
 
 ClashService::ClashService(QObject *parent) : QObject(parent)
@@ -276,12 +277,7 @@ void ClashService::startSpeedTest(const QStringList &names)
     m_speedTesting = true;
     m_speedQueue = names;
     m_speedActive = 0;
-    m_speedSelecting = false;
-    m_speedGroup = m_selectedGroup.isEmpty() ? QStringLiteral("GLOBAL") : m_selectedGroup;
-    m_speedOriginalNode = m_selectedNode;
     m_measuredSpeeds.clear(); // 每轮重测：清掉上轮速度，避免旧值残留
-    // 代理指向混合端口：本 QNAM 的所有请求都经核心代理，路由由规则送回主选择组 → 钉在当前选中的测速节点
-    m_speedNetwork.setProxy(QNetworkProxy(QNetworkProxy::HttpProxy, m_host, static_cast<quint16>(m_mixedPort)));
     emit logUpdated(tr("开始下载测速：%1 个节点（并发 %2）").arg(names.size()).arg(kSpeedConcurrency));
     emit speedTestRunning(true);
     pumpSpeedTest(); // 启动第一个握手；后续在每个下载「建连」后自动补位到并发上限
@@ -292,97 +288,45 @@ void ClashService::pumpSpeedTest()
     if (!m_speedTesting) {
         return;
     }
+    // 核心的 /proxies/<name>/speed 是「指名道姓测这个节点」，不碰选择组，
+    // 所以这里只是个简单的并发闸门：能起就起，起满为止。
+    while (m_speedActive < kSpeedConcurrency && !m_speedQueue.isEmpty()) {
+        beginSpeedDownload(m_speedQueue.takeFirst());
+    }
     if (m_speedQueue.isEmpty() && m_speedActive <= 0) {
-        if (m_speedRestoring) {
-            return; // 收尾（恢复原节点）已在进行，勿重复发起
-        }
-        // 全部测完：先恢复测速前的活动节点（原始 raw PUT，不触发清连接/通知），恢复确认后再收尾。
-        // 关键：恢复确认前保持 m_speedTesting=true，让轮询仍上报原节点，避免最后残留的测速节点
-        // 被当成「已切换」而误弹通知/触发整表重建（见 pollNodes 里的 m_speedTesting 覆盖）。
-        m_speedRestoring = true;
-        auto finish = [this] {
-            m_speedTesting = false;
-            m_speedRestoring = false;
-            emit logUpdated(tr("下载测速完成"));
-            emit speedTestRunning(false);
-            pollNodes(); // 立即刷新一次，让最终速度/排序落到列表
-        };
-        if (!m_speedOriginalNode.isEmpty()) {
-            const QString enc = QString::fromLatin1(QUrl::toPercentEncoding(m_speedGroup));
-            sendJsonRequest(QUrl(QString("http://%1:%2/proxies/%3").arg(m_host).arg(m_port).arg(enc)),
-                            "PUT", QJsonObject{{"name", m_speedOriginalNode}},
-                            [finish](bool, const QString &) { finish(); });
-        } else {
-            finish();
-        }
-        return;
+        m_speedTesting = false;
+        emit logUpdated(tr("下载测速完成"));
+        emit speedTestRunning(false);
+        pollNodes(); // 立即刷新一次，让最终速度/排序落到列表
     }
-    if (m_speedSelecting || m_speedActive >= kSpeedConcurrency || m_speedQueue.isEmpty()) {
-        return; // 正在握手 / 并发已满 / 暂无可起（等在途下载完成后再补位）
-    }
-    const QString name = m_speedQueue.takeFirst();
-    m_speedSelecting = true; // 串行化「选组+建连」：拿到锁，直到该下载建连成功才释放
-    const QString enc = QString::fromLatin1(QUrl::toPercentEncoding(m_speedGroup));
-    sendJsonRequest(QUrl(QString("http://%1:%2/proxies/%3").arg(m_host).arg(m_port).arg(enc)),
-                    "PUT", QJsonObject{{"name", name}}, [this, name](bool ok, const QString &error) {
-                        if (!ok) {
-                            m_measuredSpeeds.insert(name, 0);
-                            m_speedSelecting = false;
-                            emit logUpdated(tr("测速选中失败 %1: %2").arg(name, error));
-                            pumpSpeedTest();
-                            return;
-                        }
-                        beginSpeedDownload(name); // 已选中 → 立刻建连（钉在该节点上）
-                    });
 }
 
 void ClashService::beginSpeedDownload(const QString &name)
 {
     ++m_speedActive;
-    QNetworkRequest request(QUrl(QString::fromLatin1(kSpeedTestUrl)));
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    const QString encoded = QString::fromLatin1(QUrl::toPercentEncoding(name));
+    const QString target = QString::fromLatin1(QUrl::toPercentEncoding(QString::fromLatin1(kSpeedTestUrl)));
+    const QUrl url(QString("http://%1:%2/proxies/%3/speed?timeout=%4&url=%5")
+                       .arg(m_host).arg(m_port).arg(encoded).arg(kSpeedWindowMs).arg(target));
+    QNetworkRequest request(url);
+    applyAuth(request);
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    request.setTransferTimeout(6000); // 停顿兜底：6s 无数据即中止，防止卡死占用并发槽
+    // 核心侧的预算是「窗口 + 10s 拨号/握手余量」，这里必须给得更宽，
+    // 否则慢握手的节点会被 Qt 提前掐断、白白记成 0。
+    request.setTransferTimeout(kSpeedWindowMs + 12000);
 #endif
-    QNetworkReply *reply = m_speedNetwork.get(request);
-    auto *bytes = new qint64(0);
-    auto *timer = new QElapsedTimer;
-    auto *released = new bool(false);
-    timer->start();
-    // 释放串行锁并补位下一个握手：一旦本下载建连成功，就可以开始下一个节点的「选组+建连」。
-    // 此后本下载已钉死在当前节点，后续再切组也不影响它，于是多个下载得以真正并发。
-    auto release = [this, released] {
-        if (!*released) {
-            *released = true;
-            m_speedSelecting = false;
-            pumpSpeedTest();
+    QNetworkReply *reply = m_speedNetwork.get(request); // 专用连接池，不挤占轮询/切换
+    connect(reply, &QNetworkReply::finished, this, [this, reply, name] {
+        const QByteArray body = reply->readAll();
+        const bool ok = reply->error() == QNetworkReply::NoError;
+        reply->deleteLater();
+        qint64 bps = 0;
+        if (ok) {
+            // 核心返回 {"speed": <字节/秒>}；测不通时是 503，按 0 记。
+            bps = static_cast<qint64>(QJsonDocument::fromJson(body).object().value("speed").toDouble());
         }
-    };
-    connect(reply, &QNetworkReply::readyRead, this, [this, reply, bytes, timer, released, release] {
-        const qint64 chunk = reply->readAll().size(); // 必须读掉，避免缓冲无限增长
-        if (!*released) {
-            // 首批数据到达 = 建连+TLS 完成：以此刻为测速基准（归零字节/计时），排除建连耗时对速度的低估，
-            // 同时释放串行锁让下一个节点开始握手。
-            *bytes = 0;
-            timer->restart();
-            release();
-            return;
-        }
-        *bytes += chunk;
-        if (*bytes >= kSpeedMaxBytes || timer->elapsed() >= kSpeedMaxMs) {
-            reply->abort(); // 到达字节/时间上限：主动结束本次测速
-        }
-    });
-    connect(reply, &QNetworkReply::finished, this, [this, reply, name, bytes, timer, released, release] {
-        const qint64 ms = timer->elapsed();
-        const qint64 bps = (ms > 0) ? (*bytes * 1000 / ms) : 0; // 字节/秒——与 UI speedText 的字节单位一致
         m_measuredSpeeds.insert(name, bps);
         emit logUpdated(tr("测速 %1 -> %2 KB/s").arg(name).arg(bps / 1024));
-        reply->deleteLater();
-        release(); // 兜底：若从未 readyRead（失败/立即结束），在此释放串行锁
-        delete bytes;
-        delete timer;
-        delete released;
         --m_speedActive;
         pumpSpeedTest();
     });
@@ -530,12 +474,7 @@ void ClashService::pollNodes()
             }
         }
 
-        QString selected = group.value("now").toString(m_selectedNode);
-        // 测速期间，主选择组的 now 会随逐个测速临时切换——对 UI 强制上报原活动节点，
-        // 否则活动节点每秒都在变，会触发整表重建、通知乱弹（结束时 pumpSpeedTest 会恢复真实选择）。
-        if (m_speedTesting && !m_speedOriginalNode.isEmpty()) {
-            selected = m_speedOriginalNode;
-        }
+        const QString selected = group.value("now").toString(m_selectedNode);
         const QJsonArray all = group.value("all").toArray();
         m_selectedGroup = groupName.isEmpty() ? QStringLiteral("GLOBAL") : groupName;
         m_selectedNode = selected;
@@ -636,8 +575,6 @@ void ClashService::sendGet(const QUrl &url, std::function<void(const QJsonDocume
                 m_measuredSpeeds.clear();
                 if (m_speedTesting) { // 测速途中核心掉线：中止本轮，清运行态（在途下载会各自 finished 退出）
                     m_speedTesting = false;
-                    m_speedRestoring = false;
-                    m_speedSelecting = false;
                     m_speedActive = 0;
                     m_speedQueue.clear();
                     emit speedTestRunning(false);
