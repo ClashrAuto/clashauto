@@ -6,18 +6,29 @@
 
 #include "../DeviceStore.h"
 #include "IL2Endpoint.h"
+#include "InprocTelemetry.h" // 组合自测的第三方对照：两条路都该在控制面留下连接记录
+#include "LocalTunService.h" // 组合自测：网关在跑的同时开进程内 TUN
 #include "NdpSpoofer.h"
 #include "NetStack.h"
+#include "Socks5Client.h"           // 组合自测的回退工厂（打到假 SOCKS = 网关那条路的判据）
+#include "core/CoreDialerFactory.h" // 网关与 TUN **共用**的那一份出站工厂
+#include "core/ProxyConfig.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QEventLoop>
 #include <QHostAddress>
+#include <QProcess>
 #include <QSocketNotifier>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QThread>
 #include <QTimer>
 #include <QVector>
 #include <QtGlobal>
+
+#include <functional>
+#include <memory>
 
 #include <cerrno>
 #include <cstdio>
@@ -115,11 +126,14 @@ private:
 
 // 极简假 SOCKS5 服务器：完成 greeting/(可选)用户名认证/CONNECT，记录用户名，回一段 HTTP 标记响应。
 // 收到「带期望用户名的 CONNECT」即判定核心链路通过 → 退出码 0。
+// autoExit=false 时不退出进程，只累加 hits()/lastUser()——组合自测要在同一个进程里反复计数，
+// 「收到第一条 CONNECT 就 exit(0)」那套单次判定在那里用不了。
 class FakeSocks : public QObject
 {
 public:
-    FakeSocks(quint16 port, const QString &expectUser, QObject *parent = nullptr)
-        : QObject(parent), m_expectUser(expectUser)
+    FakeSocks(quint16 port, const QString &expectUser, QObject *parent = nullptr,
+              bool autoExit = true)
+        : QObject(parent), m_expectUser(expectUser), m_autoExit(autoExit)
     {
         connect(&m_server, &QTcpServer::newConnection, this, &FakeSocks::onConn);
         if (!m_server.listen(QHostAddress::LocalHost, port))
@@ -186,8 +200,13 @@ private:
             s->write("HTTP/1.0 200 OK\r\nContent-Length: "
                      + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
             c->phase = 3;
-            std::fprintf(stderr, "SELFTEST: 收到 CONNECT，用户名='%s'（期望='%s'）\n",
-                         c->user.toLatin1().constData(), m_expectUser.toLatin1().constData());
+            ++m_hits;
+            m_lastUser = c->user;
+            std::fprintf(stderr, "SELFTEST: 收到 CONNECT，用户名='%s'（期望='%s'，累计 %d 次）\n",
+                         c->user.toLatin1().constData(), m_expectUser.toLatin1().constData(),
+                         m_hits);
+            if (!m_autoExit)
+                return; // 组合自测自己按 hits() 差值判定，不在这里下结论
             if (m_expectUser.isEmpty() || c->user == m_expectUser) {
                 std::fprintf(stderr, "SELFTEST: PASS —— 整条链路(帧→lwIP握手→catch-all→SOCKS+身份)通\n");
                 QTimer::singleShot(500, qApp, [] { QCoreApplication::exit(0); }); // 留时间冲刷回程帧
@@ -198,8 +217,16 @@ private:
         }
     }
 
+public:
+    int hits() const { return m_hits; }          // 收到过几条完整 CONNECT（组合自测按差值判定）
+    QString lastUser() const { return m_lastUser; } // 最后一条 CONNECT 的用户名（验每设备身份）
+
+private:
     QTcpServer m_server;
     QString m_expectUser;
+    bool m_autoExit = true;
+    int m_hits = 0;
+    QString m_lastUser;
 };
 
 QByteArray envOr(const char *key, const QByteArray &def)
@@ -275,6 +302,293 @@ int runGatewaySelfTest()
         QCoreApplication::exit(1);
     });
     return qApp->exec();
+}
+
+// ———————————— 组合自测：网关 + 进程内 TUN 同时跑（说明见头文件）————————————
+#if defined(Q_OS_LINUX)
+namespace {
+
+// 组合自测里「网关那一半」的持有者。**刻意放在一条独立工作线程上**，与正式 App 的 GatewayWorker
+// 同形（见 LanGateway_linux.cpp 的线程模型）：进程内 TUN 借栈时那一整段跨线程 marshal 的代码，
+// 只有栈真的不在主线程上才会被执行到 —— 全塞主线程跑等于把要测的东西绕过去了。
+class ComboGwWorker : public QObject
+{
+public:
+    ComboGwWorker(quint16 socksPort, ProxyConfigStore *store, const QString &serverIp)
+        : m_socksPort(socksPort), m_store(store), m_serverIp(serverIp)
+    {
+    }
+    ~ComboGwWorker() override { teardown(); }
+
+    // 建栈（幂等）。等价于 GatewayWorker::ensureStackLocal —— 进程内 TUN 借的正是它。
+    NetStack *ensureStack(QString *err)
+    {
+        if (m_net)
+            return m_net;
+        auto *net = new NetStack(m_socksPort, this);
+        if (!net->init(err)) {
+            delete net;
+            return nullptr;
+        }
+        m_net = net;
+        // 出站工厂**只有一份**，网关和 TUN 共用（正式 App 里由 applyCoastCoreLocal 装）。
+        // 这里让它给两条路各自一条**独立可判**的去向，免得一条路冒充另一条：
+        //   · 目的地 = 网关靶 IP → 返回空 → 回退 Socks5 → 打到假 SOCKS（网关那条路的唯一判据）
+        //   · 其余（TUN 的 curl 目标）→ DIRECT，真出网（TUN 那条路的唯一判据）
+        auto *f = new CoreDialerFactory(m_store, new Socks5OutboundFactory(m_socksPort));
+        const QString serverIp = m_serverIp;
+        f->setRouter([serverIp](const QString &dst, const QString &) -> QString {
+            return dst == serverIp ? QString() : QStringLiteral("DIRECT");
+        });
+        m_net->setOutboundFactory(f);
+        return m_net;
+    }
+
+    bool addGatewayNic(const QString &tap, const QByteArray &localMac, const QString &selfIp,
+                       const QString &mask, const QString &victimIp, const QByteArray &victimMac,
+                       const QString &user, QString *err)
+    {
+        if (!ensureStack(err))
+            return false;
+        auto *ep = new TapEndpoint(localMac, this);
+        if (!ep->openTap(tap, err)) {
+            delete ep;
+            return false;
+        }
+        if (!m_net->addNic(ep, localMac, selfIp, mask, err)) {
+            delete ep;
+            return false;
+        }
+        // 同线程直连（sender/context 都在本工作线程）——零拷贝帧的硬约束，见 IL2Endpoint.h。
+        QObject::connect(ep, &IL2Endpoint::frameReceived, m_net,
+                         [this, ep](const QByteArray &f) { m_net->inputFrame(ep, f); });
+        m_net->addDevice(victimIp, victimMac, user);
+        m_ep = ep;
+        return true;
+    }
+
+    void teardown()
+    {
+        if (m_ep && m_net) {
+            QObject::disconnect(m_ep, nullptr, m_net, nullptr);
+            m_net->removeNic(m_ep);
+        }
+        delete m_ep;
+        m_ep = nullptr;
+        delete m_net; // 借栈的 TUN 会在 aboutToDestroy 里就地摘干净自己
+        m_net = nullptr;
+    }
+
+private:
+    NetStack *m_net = nullptr;
+    TapEndpoint *m_ep = nullptr;
+    quint16 m_socksPort = 0;
+    ProxyConfigStore *m_store = nullptr;
+    QString m_serverIp;
+};
+
+// 事件循环全程在转的 curl（★ 绝不能用 waitForFinished：那不泵主事件循环，
+// TUN fd 的通知器与 lwIP 的泵会被掐死，看起来像"不通"，其实是测试驱动自己弄死的）。
+QString comboHttpCode(const QString &url, int timeoutSec)
+{
+    QProcess p;
+    QEventLoop loop;
+    QObject::connect(&p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), &loop,
+                     &QEventLoop::quit);
+    p.start(QStringLiteral("curl"),
+            {QStringLiteral("-s"), QStringLiteral("-o"), QStringLiteral("/dev/null"),
+             QStringLiteral("-w"), QStringLiteral("%{http_code}"), QStringLiteral("--max-time"),
+             QString::number(timeoutSec), url});
+    QTimer::singleShot(timeoutSec * 1000 + 3000, &loop, &QEventLoop::quit);
+    loop.exec();
+    return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+}
+
+} // namespace
+#endif // Q_OS_LINUX
+
+int runComboSelfTest()
+{
+#if !defined(Q_OS_LINUX)
+    std::fprintf(stderr, "COMBO: 仅 Linux 支持（需要 TAP + TUN + root）\n");
+    return 3;
+#else
+    const int mode = qEnvironmentVariable("COAST_COMBO_SELFTEST").toInt(); // 1=网关先，2=TUN 先
+    const QString tap = QString::fromLatin1(envOr("COAST_SELFTEST_TAP", "cst0"));
+    const QByteArray localMac =
+            parseMac(QString::fromLatin1(envOr("COAST_SELFTEST_LOCALMAC", "02:00:00:00:00:01")));
+    const QString victimIp = QString::fromLatin1(envOr("COAST_SELFTEST_VICTIM_IP", "10.9.9.1"));
+    const QString victimMacStr = QString::fromLatin1(envOr("COAST_SELFTEST_VICTIM_MAC", ""));
+    const QByteArray victimMac = parseMac(victimMacStr);
+    const quint16 socksPort =
+            QString::fromLatin1(envOr("COAST_SELFTEST_SOCKSPORT", "7899")).toUShort();
+    const QString selfIp = QString::fromLatin1(envOr("COAST_SELFTEST_LOCAL_IP", "10.9.9.254"));
+    const QString selfMask = QString::fromLatin1(envOr("COAST_SELFTEST_NETMASK", "255.255.255.0"));
+    const QString serverIp = QString::fromLatin1(envOr("COAST_SELFTEST_SERVER_IP", "192.0.2.10"));
+    const QString tunTarget =
+            QString::fromLatin1(envOr("COAST_TUNSERVICE_TARGET", "http://223.5.5.5/"));
+    const QString gwUrl = QStringLiteral("http://%1/").arg(serverIp);
+    if (localMac.isEmpty() || victimMac.isEmpty()) {
+        std::fprintf(stderr, "COMBO: 环境缺 LOCALMAC/VICTIM_MAC\n");
+        return 3;
+    }
+    const QString expectUser = DeviceStore::socksUser(victimMacStr);
+    std::fprintf(stderr, "=== 组合自测：%s ｜ tap=%s 网关靶=%s TUN 靶=%s ===\n",
+                 mode == 2 ? "先 TUN 后网关（反向顺序）" : "先网关后 TUN（复现线上顺序）",
+                 qUtf8Printable(tap), qUtf8Printable(gwUrl), qUtf8Printable(tunTarget));
+
+    auto *socks = new FakeSocks(socksPort, expectUser, qApp, /*autoExit=*/false);
+
+    // 出站配置：只有内建 DIRECT。分流由 ComboGwWorker 里那个 router 决定（两条路各自可判）。
+    auto store = std::make_shared<ProxyConfigStore>();
+    {
+        QVector<ProxyNode> nodes;
+        nodes.push_back(ProxyNode::direct());
+        store->reload(std::make_shared<const ProxyConfig>(nodes, QStringLiteral("DIRECT"),
+                                                          ProxyConfig::Mode::Direct));
+    }
+
+    QThread gwThread;
+    gwThread.setObjectName(QStringLiteral("ComboGwWorker"));
+    ComboGwWorker worker(socksPort, store.get(), serverIp);
+    worker.moveToThread(&gwThread);
+    gwThread.start();
+    auto onGw = [&worker](const std::function<void()> &fn) {
+        QMetaObject::invokeMethod(&worker, fn, Qt::BlockingQueuedConnection);
+    };
+    // 无论从哪条分支返回，都要把工作线程上的东西在工作线程上拆掉再退出。
+    auto shutdown = [&] {
+        onGw([&] { worker.teardown(); });
+        gwThread.quit();
+        gwThread.wait();
+    };
+
+    QString err;
+    bool ok = false;
+    if (mode != 2) {
+        onGw([&] {
+            ok = worker.addGatewayNic(tap, localMac, selfIp, selfMask, victimIp, victimMac,
+                                      expectUser, &err);
+        });
+        if (!ok) {
+            std::fprintf(stderr, "COMBO: 网关侧起不来：%s\n", qUtf8Printable(err));
+            shutdown();
+            return 3;
+        }
+        std::fprintf(stderr, "COMBO: 网关侧就绪（协议栈在独立工作线程上）\n");
+    }
+
+    // ——— ① 前提：两条路各自本来就通。少了这步，「失败」可能只是环境本来就没网 ———
+    const QString tunBefore = comboHttpCode(tunTarget, 8);
+    std::fprintf(stderr, "COMBO: [前提] 本机直连 %s → curl=%s\n", qUtf8Printable(tunTarget),
+                 qUtf8Printable(tunBefore));
+    if (tunBefore.isEmpty() || tunBefore == QStringLiteral("000")) {
+        std::fprintf(stderr, "COMBO: ✗ 前提不成立：本机本来就连不通目标\n");
+        shutdown();
+        return 2;
+    }
+    if (mode != 2) {
+        const int h0 = socks->hits();
+        const QString c = comboHttpCode(gwUrl, 8);
+        std::fprintf(stderr, "COMBO: [前提] 网关路 curl=%s，假 SOCKS CONNECT +%d\n",
+                     qUtf8Printable(c), socks->hits() - h0);
+        if (socks->hits() <= h0) {
+            std::fprintf(stderr, "COMBO: ✗ 前提不成立：网关路本来就不通（TAP/路由/邻居没配好？）\n");
+            shutdown();
+            return 2;
+        }
+    }
+
+    // ——— ② 开 TUN。修复前这一步必然失败：「已有一个网关协议栈实例在运行」———
+    LocalTunService svc;
+    QObject::connect(&svc, &LocalTunService::logged,
+                     [](const QString &l) { std::fprintf(stderr, "  | %s\n", qUtf8Printable(l)); });
+    svc.setStackProvider([&](QString *e) -> NetStack * {
+        NetStack *n = nullptr;
+        QMetaObject::invokeMethod(&worker, [&] { n = worker.ensureStack(e); },
+                                  Qt::BlockingQueuedConnection);
+        return n;
+    });
+    if (!svc.start(store, nullptr, /*socksFallbackPort=*/0, &err)) {
+        std::fprintf(stderr,
+                     "COMBO: ✗ 开 TUN 失败：%s\n"
+                     "       （若是「已有一个网关协议栈实例在运行」，就是本次要修的那条故障）\n",
+                     qUtf8Printable(err));
+        shutdown();
+        return 1;
+    }
+    std::fprintf(stderr, "COMBO: TUN 已开（网卡 %s）\n", qUtf8Printable(svc.ifname()));
+
+    if (mode == 2) {
+        // 反向顺序：TUN 先占了栈，网关此刻才来挂自己的网卡。
+        onGw([&] {
+            ok = worker.addGatewayNic(tap, localMac, selfIp, selfMask, victimIp, victimMac,
+                                      expectUser, &err);
+        });
+        if (!ok) {
+            std::fprintf(stderr, "COMBO: ✗ TUN 开着时网关挂不上网卡：%s\n", qUtf8Printable(err));
+            svc.stop();
+            shutdown();
+            return 1;
+        }
+        std::fprintf(stderr, "COMBO: 网关网卡已挂到 TUN 建起的那份栈上\n");
+    }
+
+    // ——— ③ 组合期间**两条路同时通**（本次修复的验收标准）———
+    // 三个互相独立的判据，谁也替不了谁：
+    //   · 网关路：假 SOCKS 的 CONNECT 计数 **且用户名必须是被劫持设备的 dev-<mac>**。
+    //     ★ 用户名这一条不是锦上添花 —— 第一次真机跑就是靠它抓出「本机 curl 被 TUN 的
+    //       pref 200 规则拐走了、根本没经过 TAP」（CONNECT 照样有，用户名却是 'local'）。
+    //       只看「有没有 CONNECT」会误判成通过。脚手架侧的修法见 validate/combo_selftest.sh。
+    //   · TUN 路：经真目标绕回来的真实 HTTP 返回码，必须与起服务前一致。
+    //   · 控制面：InprocTelemetry 的连接增量。**分两段量**（各自 curl 前后各抄一次），这样每条
+    //     增量都能归到具体那条路上；合在一起量只能得到一个总数，少了一条根本不知道少的是谁。
+    //     ★ 只对 TUN 那条路断言 >0。网关那条路在本自测里被 router 判成「回退」（这才打得到假
+    //       SOCKS），而 CoreDialerFactory **有意不登记回退连接**（那些由 mihomo 的 /connections
+    //       报，登了就是重复计数，见它 registerConn 处的注释）—— 所以 teleGw==0 是正确行为。
+    //       第一版在这里断言了 teleGw>0，等于要求代码做它明确声明不做的事，是断言写错了。
+    auto &tele = InprocTelemetry::instance();
+    const int hitsBefore = socks->hits();
+    const quint64 tele0 = tele.totalConns();
+    const QString gwDuring = comboHttpCode(gwUrl, 10);
+    const int gwDelta = socks->hits() - hitsBefore;
+    const quint64 teleAfterGw = tele.totalConns();
+    const QString tunDuring = comboHttpCode(tunTarget, 12);
+    const quint64 teleAfterTun = tele.totalConns();
+    const quint64 teleGw = teleAfterGw - tele0;   // 网关那条路登记了几条
+    const quint64 teleTun = teleAfterTun - teleAfterGw; // TUN 那条路登记了几条
+    const bool gwOk = gwDelta > 0 && socks->lastUser() == expectUser;
+    // ★ TUN 路的判定必须是「返回码对得上 **且** 控制面真的记到一条进程内连接」——
+    //   只看返回码是可以被蒙混过去的：万一流量压根没进 TUN（走了物理口直出），返回码照样正确。
+    //   teleTun 是「这条 curl 确实被我们的用户态栈终结过」的独立物证。
+    const bool tunOk = (tunDuring == tunBefore) && teleTun > 0;
+    std::fprintf(stderr,
+                 "COMBO: [组合] 网关路 curl=%s CONNECT+%d user='%s'(期望'%s') 控制面+%llu(回退连接"
+                 "不登记，0 属正常) %s\n"
+                 "COMBO: [组合] TUN 路  curl=%s（起服务前 %s） 控制面+%llu %s\n",
+                 qUtf8Printable(gwDuring), gwDelta, qUtf8Printable(socks->lastUser()),
+                 qUtf8Printable(expectUser), static_cast<unsigned long long>(teleGw),
+                 gwOk ? "✓" : "✗", qUtf8Printable(tunDuring), qUtf8Printable(tunBefore),
+                 static_cast<unsigned long long>(teleTun), tunOk ? "✓" : "✗");
+
+    // ——— ④ 关掉 TUN：网关那条路必须毫发无损，本机网络必须恢复 ———
+    const int hitsBeforeStop = socks->hits();
+    svc.stop();
+    const QString gwAfter = comboHttpCode(gwUrl, 8);
+    const int gwDeltaAfter = socks->hits() - hitsBeforeStop;
+    const QString tunAfter = comboHttpCode(tunTarget, 8);
+    const bool gwStillOk = gwDeltaAfter > 0;
+    const bool restored = (tunAfter == tunBefore);
+    std::fprintf(stderr,
+                 "COMBO: [关 TUN 后] 网关路 curl=%s CONNECT+%d %s ｜ 本机 curl=%s %s\n",
+                 qUtf8Printable(gwAfter), gwDeltaAfter, gwStillOk ? "✓ 网关不受影响" : "✗ 被拖累了",
+                 qUtf8Printable(tunAfter), restored ? "✓ 路由已还原" : "✗ 没还原干净");
+
+    shutdown();
+    const bool pass = gwOk && tunOk && gwStillOk && restored;
+    std::fprintf(stderr, "=== 组合自测 %s ===\n", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+#endif
 }
 
 // ———————————— NdpSpoofer::parseRouterAdvert 的纯解析自测（说明见头文件）————————————

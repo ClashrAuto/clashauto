@@ -283,6 +283,10 @@ public:
 
     // 以下方法皆在工作线程执行。
     void configureLocal(const QVector<LanGateway::NicSpec> &specs, quint16 socksPort);
+    // 确保「进程内那一份协议栈」存在（幂等）。首次创建时按当前 coastcore 意图装好出站/DNS。
+    // 供 configureLocal 与 LanGateway::acquireStack（进程内 TUN 借栈）共用 —— 两条路必须建出
+    // **同一个**栈，所以建栈这段只能有一份实现。失败返回 nullptr 并置 *err。
+    NetStack *ensureStackLocal(QString *err);
     bool enableDeviceLocal(const QString &mac, const QString &ip, const QString &socksUser,
                            QString *err);
     void disableDeviceLocal(const QString &mac);
@@ -707,25 +711,49 @@ void GatewayWorker::setCoastCoreLocal(bool enabled, bool strict,
     applyCoastCoreLocal();
 }
 
+NetStack *GatewayWorker::ensureStackLocal(QString *err)
+{
+    if (m_torndown) {
+        if (err)
+            *err = QStringLiteral("网关已停止");
+        return nullptr;
+    }
+    if (m_net)
+        return m_net; // 已经有了：网关和进程内 TUN 共用这一份（lwIP 只能有一份，见 NetStack.h）
+    auto *net = new NetStack(m_socksPort, this);
+    QString e;
+    if (!net->init(&e)) {
+        delete net;
+        if (err)
+            *err = e;
+        return nullptr;
+    }
+    m_net = net;
+    // 新建的 NetStack 是默认 Socks5OutboundFactory。若灰度已开着（重启/重连、或「TUN 先开」把栈
+    // 先建起来的场景），在这里补装 CoreDialerFactory，别让「重连丢状态」。
+    // 默认关（m_coastCore=false）时**完全不碰** NetStack。
+    if (m_coastCore)
+        applyCoastCoreLocal();
+    return m_net;
+}
+
 void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, quint16 socksPort)
 {
+    // ★ 端口变化要在建栈**之前**记下来，但「是否需要重建出站工厂」要看栈是不是早就存在了 ——
+    //   进程内 TUN 可能比第一次 configure 更早借走栈（acquireStack），那时 m_socksPort 还是 0，
+    //   建出来的回退工厂拨的是 0 号端口。等这里第一次拿到真实网关口，必须把工厂重建一遍，
+    //   否则网关那条路的回退永远拨不通，而且一句错都不报。
+    const bool portChanged = (m_net != nullptr) && (m_socksPort != socksPort);
     m_socksPort = socksPort;
 
     // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。都在工作线程上创建。
     QString err;
-    if (!m_net) {
-        m_net = new NetStack(socksPort, this);
-        if (!m_net->init(&err)) {
-            emit deviceError(QString(), QStringLiteral("协议栈初始化失败: ") + err);
-            delete m_net;
-            m_net = nullptr;
-            return;
-        }
-        // 新建的 NetStack 是默认 Socks5OutboundFactory。若灰度已开着（重启/重连场景），在这里补装
-        // CoreDialerFactory，别让「重连丢状态」。默认关（m_coastCore=false）时**完全不碰** NetStack。
-        if (m_coastCore)
-            applyCoastCoreLocal();
+    if (!ensureStackLocal(&err)) {
+        emit deviceError(QString(), QStringLiteral("协议栈初始化失败: ") + err);
+        return;
     }
+    if (portChanged)
+        applyCoastCoreLocal(); // 关着 coastcore 时它装的是 Socks5OutboundFactory(新端口)，同样正确
 
     QSet<QString> seen;
     int specIndex = -1;
@@ -1578,6 +1606,25 @@ QStringList LanGateway::activeDevices() const
 {
     QMutexLocker lk(&d->shared->mutex);
     return d->shared->active;
+}
+
+NetStack *LanGateway::acquireStack(QString *err)
+{
+    if (!d->workerReady()) {
+        if (err)
+            *err = QStringLiteral("网关工作线程不可用");
+        return nullptr;
+    }
+    // 与 configure 同一套投递：BlockingQueued，返回时栈已经建好并装上出站。建栈必须在工作线程上跑
+    // （NetStack 的 QTimer 泵、lwIP 的全局状态、以及后续二层/TUN 端点的通知器都要在那条线程上）。
+    NetStack *net = nullptr;
+    QString e;
+    QMetaObject::invokeMethod(
+        d->worker, [w = d->worker, &net, &e] { net = w->ensureStackLocal(&e); },
+        Qt::BlockingQueuedConnection);
+    if (!net && err)
+        *err = e.isEmpty() ? QStringLiteral("协议栈初始化失败") : e;
+    return net;
 }
 
 void LanGateway::setCoastCore(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,

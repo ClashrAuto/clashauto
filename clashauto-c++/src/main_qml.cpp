@@ -193,6 +193,12 @@ int main(int argc, char *argv[])
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
     if (qEnvironmentVariableIsSet("COAST_GATEWAY_SELFTEST"))
         return runGatewaySelfTest();
+    // 组合自测（COAST_COMBO_SELFTEST=1 先网关后 TUN / =2 反序）：**这次线上故障的验收标准**。
+    // 两条路各自都验过、组合从没验过 —— lwIP 只能有一份栈，而扫描每跑一轮网关就把它建起来了，
+    // 于是 TUN 自建栈必被判重拒掉，「增强」永远打不开。这条自测把「网关在跑 + 再开 TUN」真的跑一遍，
+    // 且两条路各有独立判据（假 SOCKS 的 CONNECT 计数 / 经 TUN 的真实 curl 返回码）。
+    if (qEnvironmentVariableIsSet("COAST_COMBO_SELFTEST"))
+        return runComboSelfTest();
     // RA 解析自测：纯字节解析，不碰网络、不需要 root、毫秒级。单列一个钩子是因为「从 RA 学 v6
     // 路由器」这条路在没有 IPv6 的网络上永远跑不到（本项目的测试台就是如此），没有它等于零覆盖。
     if (qEnvironmentVariableIsSet("COAST_NDP_RA_SELFTEST"))

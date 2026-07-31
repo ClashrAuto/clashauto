@@ -95,6 +95,9 @@ public:
     QString selectedMac() const { return m_selectedMac; }
     QVariantMap selectedDevice() const { return m_selectedDevice; }
     bool gatewayReady() const; // Linux 网关可用性（LanGateway::isAvailable）
+    // 网关实例（可空）。给 QmlBridge 把 LanGateway::acquireStack 接成进程内 TUN 的「共享协议栈来源」——
+    // lwIP 全进程只能有一份，TUN 必须挂到网关那一份上，而不是自己再建一个（见 NetStack.h 头注释）。
+    LanGateway *gateway() const { return m_gateway; }
 
     // —— UI 动作 ——
     Q_INVOKABLE void scan();                       // 手动全量扫描

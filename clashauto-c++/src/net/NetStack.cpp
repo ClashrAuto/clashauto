@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QHostAddress>
 #include <QList>
+#include <QMutex>
 #include <QSet>
 #include <QDateTime>
 #include <QElapsedTimer>
@@ -360,6 +361,12 @@ namespace {
 // 两个线程同时碰 lwIP/这些全局的情况。
 NetStack::Impl *g_impl = nullptr;
 bool g_debug = false;             // COAST_GATEWAY_DEBUG=1 时打诊断日志（自测/联调用）
+
+// 「进程内唯一已初始化实例」的登记表（见 NetStack::sharedInstance）。与 g_impl 一一对应，但**可被
+// 任意线程读**（GUI 线程要据此判断「栈已经在网关工作线程上了，我该 addNic 而不是新建」），所以单独
+// 存一份 owner 指针并加锁。写入点只有 init() 末尾与析构开头，都在栈自己的线程上。
+QMutex g_sharedMutex;
+NetStack *g_sharedOwner = nullptr;
 
 NetStack::Nic *nicOf(struct netif *netif)
 {
@@ -1239,6 +1246,15 @@ NetStack::NetStack(quint16 socksPort, QObject *parent)
 
 NetStack::~NetStack()
 {
+    // ★ 第一句：先通知「借用本栈挂了网卡的人」（进程内 TUN）自己摘干净。此刻 d 完好、且本析构就跑在
+    //   栈所属线程上，所以 DirectConnection 的槽里调 removeNic/removeDevice 是安全的。放到 QObject 的
+    //   `destroyed` 上就太晚了——那时 d 已经 delete 掉。
+    emit aboutToDestroy();
+    {
+        QMutexLocker lk(&g_sharedMutex);
+        if (g_sharedOwner == this)
+            g_sharedOwner = nullptr;
+    }
     // 诊断日志收尾：写掉最后一个采样窗口 + 一条停机标记。放在这里而不是 LanGateway::disableAll，
     // 是因为**本析构在工作线程上跑**（见 LanGateway_linux.cpp 的线程模型），与所有 sample() 调用
     // 同线程 —— GatewayDiag 的单线程前提得以保持。此刻 d->timer 还没被 delete d 干掉，但我们已经
@@ -1396,7 +1412,19 @@ bool NetStack::init(QString *err)
     d->timer->start();
 
     d->inited = true;
+    {
+        // 登记成「进程内那一份栈」。此后别的模块（进程内 TUN）用 sharedInstance() 拿到它并 addNic，
+        // 而不是再建一个（再建必然被上面的判重拒掉——lwIP 本来就只能有一份）。
+        QMutexLocker lk(&g_sharedMutex);
+        g_sharedOwner = this;
+    }
     return true;
+}
+
+NetStack *NetStack::sharedInstance()
+{
+    QMutexLocker lk(&g_sharedMutex);
+    return g_sharedOwner;
 }
 
 bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QString &localIp,
@@ -1465,8 +1493,15 @@ void NetStack::removeNic(IL2Endpoint *ep)
     Nic *nic = d->nics.take(ep);
     if (!nic)
         return;
-    if (d->inited)
+    if (d->inited) {
+        const bool wasDefault = (netif_default == &nic->nif);
         netif_remove(&nic->nif);
+        // ★ netif_remove 摘掉的若正是默认 netif，lwIP 会把 netif_default 置空 —— 于是剩下那张卡
+        //   变成「只有精确子网匹配才走得到」，ip4_route 的兜底出口没了。多网卡共栈（网关 + 进程内
+        //   TUN）时这条真的会踩到：先挂的那张是默认，先摘的偏偏也常是它。这里补一次改选。
+        if (wasDefault && !d->nics.isEmpty())
+            netif_set_default(&d->nics.constBegin().value()->nif);
+    }
     // 该卡上的 UDP 会话失去出口，一并收掉（设备重新发包会重建）。
     const QStringList victims = d->udp.keys();
     for (const QString &ip : victims) {

@@ -2,6 +2,7 @@
 
 #include "DevicesController.h"      // coastCoreEnabled / 共享的 store+rules
 #include "../net/InprocTelemetry.h" // 进程内引擎的控制面出口：连接快照/流量合计/日志（与 REST 合并）
+#include "../net/LanGateway.h"      // acquireStack：进程内 TUN 与网关**共用同一份 lwIP 协议栈**
 #include "../net/LocalTunService.h" // 进程内 TUN（coastcore 打开时由它建 TUN）
 #include "../net/core/ProxyConfig.h" // 核心缺席时从进程内配置喂节点列表
 
@@ -363,8 +364,23 @@ void QmlBridge::toggleTun()
         } else
 #endif
         {
-        if (!m_localTun)
+        if (!m_localTun) {
             m_localTun = new LocalTunService(this);
+            // ★ 协议栈来源：lwIP 全进程只能有一份，而局域网扫描每跑一轮网关就会把它建起来
+            //   （DevicesController::ensureGatewayConfigured）。TUN 若自己再 new 一个，init() 恒被
+            //   判重拒掉 →「增强」永远打不开（这正是线上报的那个故障）。所以这里把栈的取用接到
+            //   网关上：已有就用它那份、没有就让网关在**它自己的工作线程**上现建一份。
+            //   于是「先网关后 TUN」和「先 TUN 后网关」两种顺序拿到的都是同一份栈。
+            LanGateway *gw = m_devices ? m_devices->gateway() : nullptr;
+            m_localTun->setStackProvider([gw](QString *e) -> NetStack * {
+                if (!gw) {
+                    if (e)
+                        *e = tr("没有网关实例");
+                    return nullptr;
+                }
+                return gw->acquireStack(e);
+            });
+        }
         if (m_localTun->active()) {
             m_localTun->stop();
             pushLog(tr("已关闭增强（进程内 TUN）"));

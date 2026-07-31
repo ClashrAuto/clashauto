@@ -27,6 +27,7 @@
 class ProxyConfigStore; // CoastCore 出站配置快照的持有者（不完整类型，只经 shared_ptr 透传给工作线程）
 class RuleEngine;        // CoastCore 分流规则引擎（同上）
 class DnsResolver;       // DNS 旁听器：学核心分配的 fake-ip → 域名（同上）
+class NetStack;          // 用户态协议栈：本类持有那**唯一**一份，进程内 TUN 经 acquireStack 借用
 
 class LanGateway : public QObject
 {
@@ -86,6 +87,17 @@ public:
     // strict：判不了的连接**拒绝回退核心**、直接失败（默认关）。见 CoreDialerFactory::setStrict。
     void setCoastCore(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
                       std::shared_ptr<RuleEngine> rules, std::shared_ptr<DnsResolver> dns);
+
+    // 取用「进程内那一份 lwIP 协议栈」——已经有就直接给，没有就在**网关工作线程**上现建一个
+    // （并按当前 coastcore 意图把出站/DNS 装好）。可在 GUI 线程调用（内部 BlockingQueued 投过去，
+    // 与 configure 同一套投递方式，死锁论证见 LanGateway_linux.cpp 头部）。失败返回 nullptr 并置 *err。
+    //
+    // ★ 存在的理由：lwIP 全进程只能有一份（见 NetStack.h 头注释）。进程内 TUN 若自己 new 一个，
+    //   只要局域网扫描跑过一轮（每轮都会 configure → 建栈），它的 init() 就恒定被判重拒掉，
+    //   用户点「增强」永远开不了。正确做法是它把 TUN 网卡 addNic 到**这一份**栈上。
+    // ★ 调用方**不拥有**返回的栈：只可 addNic/removeNic，绝不可 delete；且所有调用必须 marshal
+    //   到 `netStack->thread()`（= 本网关的工作线程）上执行。栈销毁前会发 NetStack::aboutToDestroy。
+    NetStack *acquireStack(QString *err);
 
     QStringList activeDevices() const; // 当前被劫持的 mac 列表
 

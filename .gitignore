@@ -3,3 +3,7 @@ screenshots/
 *.png
 clashauto-c++/build-qml/
 clashauto-c++/build-release/
+
+# 参考用的上游源码克隆（mihomo / sing-box），不进仓库
+/clash/
+/ref/

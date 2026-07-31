@@ -22,6 +22,15 @@
 // （见 LanGateway_linux.cpp 的线程模型），在 headless 自测里是主线程。两者从不并存 → 单线程前提恒成立。
 // init() 创建的 QTimer 挂在**调用 init 的那个线程**的事件循环上周期 sys_check_timeouts()。
 // 所有公开方法（init/addNic/removeNic/addDevice/removeDevice/inputFrame）都只能在这同一个线程上调用。
+//
+// ★★ 「一个栈」是硬约束，不是可以放开的判重（改这里之前先读完这段）——
+//   曾经踩过的坑：进程内 TUN（LocalTunService）自己 new 了一个 NetStack，于是只要局域网扫描跑过一轮
+//   （DevicesController 每轮扫描都 ensureGatewayConfigured → 网关 worker 建栈），用户点「增强」就恒定
+//   拿到 init() 的那句「已有一个网关协议栈实例在运行」。**正确解法是 addNic()，不是放开判重**：
+//   lwip_init/ARP 表/PCB 链是全局的，两个 NetStack 从构造上就不可能共存。
+//   现在网关与 TUN **共用同一个栈**：谁先起谁建，后来者用 sharedInstance() 拿到它、addNic() 挂自己的
+//   网卡、removeNic() 摘掉自己（**绝不能 delete 别人的栈**）。栈的出站工厂也是共用的一份 —— 分流实现
+//   本来就该只有一份（复制一份就会开始漂移）。
 #include <QByteArray>
 #include <QObject>
 #include <QString>
@@ -42,6 +51,12 @@ public:
 
     // 初始化 lwIP + catch-all TCP 监听 + 定时器泵。全进程只能有一个实例。失败置 *err。
     bool init(QString *err);
+
+    // 进程内**唯一**那个已初始化的实例（init() 成功后登记，析构时注销；没有则 nullptr）。
+    // 可从任意线程调用（内部加锁）；但返回的指针只能在 `->thread()` 上使用 —— 其余线程必须把调用
+    // marshal 过去（BlockingQueuedConnection），见文件头的线程约束。
+    // 用途：让「网关」和「进程内 TUN」共用同一个栈，各自 addNic()/removeNic()，而不是各建一个。
+    static NetStack *sharedInstance();
 
     // 装一个「DNS 旁听器」：DNS 劫持的应答经我们手时交它学「核心分配的 fake-ip → 域名」，
     // 于是 accept 时能把 fake-ip 目的地**改写成域名**再交给出站（进程内出站才拨得通；回退核心时
@@ -90,6 +105,12 @@ public:
     // 能命名该类型。不暴露任何实现细节。
     struct Impl;
     struct Nic;
+
+signals:
+    // 析构的**第一句**就发（此刻 Impl 完好，removeNic/removeDevice 仍可安全调用；`destroyed` 太晚，
+    // 那时 Impl 已经没了）。给「借用本栈挂了自己网卡」的模块（进程内 TUN）一个在**本栈所属线程上**
+    // 同步摘干净自己的机会。★ 必须用 Qt::DirectConnection 接：队列连接排到时对象早已不在。
+    void aboutToDestroy();
 
 private:
     // UDP（含 DNS）不走 lwIP：手工解析设备发出的 UDP → Socks5Udp 转发；回程手工封包发回设备。

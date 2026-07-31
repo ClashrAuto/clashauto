@@ -18,6 +18,8 @@
 #include <QHostInfo>
 #include <QProcess>
 #include <QSet>
+#include <QStringList>
+#include <QThread>
 #include <QTimer>
 
 #include <cstdio>
@@ -51,7 +53,7 @@ LocalTunService::~LocalTunService()
 
 QString LocalTunService::ifname() const
 {
-    return m_ep ? m_ep->ifname() : QString();
+    return m_ifname; // 不去碰 m_ep：它属于协议栈那条线程（见头文件约束 1）
 }
 
 bool LocalTunService::blockedByQuicNode(const std::shared_ptr<ProxyConfigStore> &store, QString *why)
@@ -213,48 +215,100 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
 
     m_guardWasEnabled = SelfRouteGuard::enabled();
     SelfRouteGuard::setEnabled(true);
-
-    // ② 设备层
-    m_ep = createTunEndpoint(this);
-    if (!m_ep || !m_ep->open(desiredIfname(), err)) {
-        teardown();
-        return false;
-    }
-    const QString dev = m_ep->ifname();
-    if (dev.isEmpty()) {
-        if (err)
-            *err = tr("拿不到 TUN 网卡名");
-        teardown();
-        return false;
-    }
-    emit logged(tr("TUN 网卡：%1").arg(dev));
-
-    // ③ 用户态栈 + 出站
-    m_net = new NetStack(quint16(socksFallbackPort < 0 ? 0 : socksFallbackPort), this);
-    if (!m_net->init(err)) {
-        teardown();
-        return false;
-    }
-    if (!m_net->addNic(m_ep, m_ep->localMac(), QString::fromLatin1(kTunIp),
-                       QString::fromLatin1(kMask), err)) {
-        teardown();
-        return false;
-    }
-    // TUN 上只有「本机」一个来源，登记成一个静态邻居即可（没有 ARP，见 TunEndpoint.h）。
-    m_net->addDevice(QString::fromLatin1(kPeerIp), coastcore::tunPeerMac(),
-                     QStringLiteral("local"));
-
     m_store = std::move(store);
-    // 无 parent：**所有权交给 NetStack**（setOutboundFactory 取得所有权，~NetStack 会删它）。
-    // 我们只留一个裸指针用于 setStrict/setRouter，teardown 里置空即可，千万别自己再删一遍。
-    m_factory = new CoreDialerFactory(m_store.get(), nullptr);
-    m_factory->setStrict(socksFallbackPort <= 0); // 无回退口 = 严格：判不了就失败，不静默改道
-    m_factory->setInboundTag(QStringLiteral("Coast-TUN")); // 连接列表「类型」列：进程内 TUN 的连接
-    m_factory->setRouter(coastcore::makeRouter(m_store, std::move(rules), false));
-    m_net->setOutboundFactory(m_factory);
 
-    connect(m_ep, &IL2Endpoint::frameReceived, m_net,
-            [this](const QByteArray &f) { m_net->inputFrame(m_ep, f); });
+    // ② 协议栈：**先决定是借还是自建**（见头文件那段「协议栈是借来的」）。
+    //    借的话，后面整个设备层都得搬到栈所属的那条线程上去做。
+    {
+        QString shareErr;
+        NetStack *shared = nullptr;
+        if (m_stackProvider) {
+            shared = m_stackProvider(&shareErr);
+            if (!shared && !shareErr.isEmpty())
+                emit logged(tr("取用共享协议栈失败（%1），改为自建").arg(shareErr));
+        }
+        // provider 没接上（headless 自测）时也兜一下：万一进程里已经有一份，绝不能再建第二份 ——
+        // 那正是「已有一个网关协议栈实例在运行」这条错误的来源。
+        if (!shared)
+            shared = NetStack::sharedInstance();
+        if (shared) {
+            m_net = shared;
+            m_ownsNet = false;
+            m_netThread = shared->thread();
+            emit logged(tr("协议栈：挂到进程内已有的那一份上（多网卡共栈），出站沿用它已装的工厂 —— "
+                           "因此本次 TUN 连接在连接列表里的「类型」与严格模式跟随网关那一份设置"));
+        } else {
+            m_ownsNet = true;
+            m_netThread = QThread::currentThread();
+        }
+    }
+
+    // ③ 设备层 + 挂网卡 —— **整块**都必须跑在协议栈所属线程上：
+    //    · TUN 端点的 QSocketNotifier/QWinEventNotifier 必须在服务它的线程上创建；
+    //    · lwIP 的所有调用（init/addNic/addDevice）只能在栈自己的线程上；
+    //    · frameReceived→inputFrame 必须是**同线程直连**（零拷贝帧只在槽内有效，见 IL2Endpoint.h）。
+    //    三条里缺任何一条都是「偶发悬垂读 / 通知器永不触发」这种最难查的故障。
+    QString stageErr;
+    QStringList stageLog;
+    const int fallbackPort = socksFallbackPort;
+    const bool staged = runOnStackThread([&] {
+        // 无 parent：本对象在 GUI 线程，而端点必须属于栈的线程，父子必须同线程。
+        m_ep = createTunEndpoint(nullptr);
+        if (!m_ep) {
+            stageErr = tr("当前平台不支持进程内 TUN");
+            return;
+        }
+        if (!m_ep->open(desiredIfname(), &stageErr))
+            return;
+        m_ifname = m_ep->ifname();
+        if (m_ifname.isEmpty()) {
+            stageErr = tr("拿不到 TUN 网卡名");
+            return;
+        }
+        stageLog << tr("TUN 网卡：%1").arg(m_ifname);
+
+        if (m_ownsNet) {
+            m_net = new NetStack(quint16(fallbackPort < 0 ? 0 : fallbackPort), nullptr);
+            if (!m_net->init(&stageErr))
+                return;
+        }
+        if (!m_net->addNic(m_ep, m_ep->localMac(), QString::fromLatin1(kTunIp),
+                           QString::fromLatin1(kMask), &stageErr))
+            return;
+        // TUN 上只有「本机」一个来源，登记成一个静态邻居即可（没有 ARP，见 TunEndpoint.h）。
+        m_net->addDevice(QString::fromLatin1(kPeerIp), coastcore::tunPeerMac(),
+                         QStringLiteral("local"));
+
+        if (m_ownsNet) {
+            // 无 parent：**所有权交给 NetStack**（setOutboundFactory 取得所有权，~NetStack 会删它）。
+            // 我们只留一个裸指针用于 setStrict/setRouter，teardown 里置空即可，千万别自己再删一遍。
+            m_factory = new CoreDialerFactory(m_store.get(), nullptr);
+            m_factory->setStrict(fallbackPort <= 0); // 无回退口 = 严格：判不了就失败，不静默改道
+            m_factory->setInboundTag(QStringLiteral("Coast-TUN")); // 连接列表「类型」列
+            m_factory->setRouter(coastcore::makeRouter(m_store, rules, false));
+            m_net->setOutboundFactory(m_factory);
+        }
+        // ★ 借来的栈上**绝不能** setOutboundFactory：它取得所有权，会把网关那份 CoreDialerFactory
+        //   delete 掉（在途连接持有的是出站对象不是工厂，但网关之后新建的连接就没工厂可用了）。
+        //   分流实现本来就该共用同一份 —— 复制一份就会开始漂移。
+
+        connect(m_ep, &IL2Endpoint::frameReceived, m_net,
+                [this](const QByteArray &f) { m_net->inputFrame(m_ep, f); });
+    });
+    for (const QString &l : stageLog)
+        emit logged(l);
+    if (!staged || !stageErr.isEmpty()) {
+        if (err)
+            *err = staged ? stageErr : tr("协议栈线程不可用，无法建立 TUN");
+        teardown();
+        return false;
+    }
+    const QString dev = m_ifname;
+    // 栈销毁时（App 退出、网关被拆）就地把自己摘干净：直连 → 槽跑在栈自己的线程上，那时 lwIP
+    // 仍然完好。用 destroyed 太晚（Impl 已经没了），用队列连接更晚（对象早不在了）。
+    if (!m_ownsNet)
+        m_stackGoneConn = connect(m_net, &NetStack::aboutToDestroy, this,
+                                  [this] { detachFromSharedStack(); }, Qt::DirectConnection);
 
     // ④ 最后才接管路由 —— 此刻栈已经能收包，接管的瞬间就有人处理。
     m_sess = new TunSession();
@@ -525,28 +579,83 @@ void LocalTunService::stop()
     emit activeChanged();
 }
 
+// 在协议栈所属线程上同步跑 fn。同线程就直接调；跨线程用 BlockingQueued 投给栈对象。
+//
+// 死锁论证（与 LanGateway 头部那套一致）：本调用只发生在 GUI 线程 → 网关工作线程这一个方向；
+// 工作线程处理它时只碰自己的 lwIP/端点，不会反过来阻塞等 GUI（fn 里刻意不 emit 任何信号，
+// 日志先攒进 stageLog、回到 GUI 线程再发）。单向阻塞 ⇒ 无环 ⇒ 不可能死锁。
+bool LocalTunService::runOnStackThread(const std::function<void()> &fn)
+{
+    QThread *t = m_netThread ? m_netThread : QThread::currentThread();
+    if (t == QThread::currentThread()) {
+        fn();
+        return true;
+    }
+    if (!m_net)
+        return false; // 栈没了 → 那条线程上也没有我们的东西要动了
+    return QMetaObject::invokeMethod(m_net, fn, Qt::BlockingQueuedConnection);
+}
+
+// 借来的栈要被销毁了（NetStack::aboutToDestroy，直连，**跑在栈自己的线程上**）：就地把 TUN 网卡和
+// 端点摘掉。此刻 lwIP 仍然完好，removeNic/removeDevice 安全；晚一步就是悬垂指针。
+// 路由的还原不在这里做（那是 TunSession 的事，跑在 GUI 线程），teardown() 会接着做。
+void LocalTunService::detachFromSharedStack()
+{
+    if (!m_net || m_ownsNet)
+        return;
+    if (m_ep) {
+        disconnect(m_ep, nullptr, m_net, nullptr);
+        m_net->removeDevice(QString::fromLatin1(kPeerIp));
+        m_net->removeNic(m_ep);
+        m_ep->close();
+        delete m_ep; // 与栈同线程，直接删（端点的通知器必须在本线程析构）
+        m_ep = nullptr;
+    }
+    m_net = nullptr;
+    m_netThread = nullptr;
+}
+
 // 严格逆序拆。**每一步都要做**，中间失败不能中断 —— 半截状态（路由还给着一张已经没人读的 TUN）
 // 比彻底没起来危险得多。
 void LocalTunService::teardown()
 {
+    if (m_stackGoneConn) { // 先摘钩子，免得下面的动作再触发一次 detach
+        QObject::disconnect(m_stackGoneConn);
+        m_stackGoneConn = QMetaObject::Connection();
+    }
     if (m_sess) {
         m_sess->stop(); // 先还路由：让流量立刻回到物理网卡
         delete m_sess;
         m_sess = nullptr;
     }
-    if (m_net) {
-        delete m_net; // ★ 它会**连带删掉出站工厂**（见下）
-        m_net = nullptr;
-    }
+    // 栈相关的拆解全部回到栈的线程上（lwIP 调用 + 端点/通知器的析构都有线程要求）。
+    runOnStackThread([this] {
+        if (m_net && m_ep) {
+            // 先断帧路径，再摘网卡：否则拆到一半还有帧被喂进正在消失的 netif。
+            disconnect(m_ep, nullptr, m_net, nullptr);
+            m_net->removeDevice(QString::fromLatin1(kPeerIp));
+            m_net->removeNic(m_ep); // ★ 借来的栈只摘网卡，**绝不 delete**
+        }
+        if (m_ep) {
+            m_ep->close();
+            delete m_ep; // 与栈同线程 → 直接删（不能 deleteLater：那会排到别的线程的事件循环里）
+            m_ep = nullptr;
+        }
+        if (m_ownsNet && m_net) {
+            delete m_net; // ★ 只有自建的才删；它会**连带删掉出站工厂**（见下）
+            m_net = nullptr;
+        }
+    });
+    if (!m_ownsNet)
+        m_net = nullptr; // 借来的：只是松手，栈继续为网关服务
+    m_netThread = nullptr;
+    m_ownsNet = false;
     // ★★ 这里**绝不能**再 delete m_factory —— NetStack::setOutboundFactory 的契约是
     //   「取得所有权」，~NetStack 里就有一句 delete d->factory。第一版在这里又删了一遍，
     //   结果是停服务时 SIGSEGV（真机自检当场崩在这）。只置空，不释放。
+    //   （借栈时 m_factory 本来就是 nullptr —— 工厂是网关的，我们一根手指都不碰。）
     m_factory = nullptr;
-    if (m_ep) {
-        m_ep->close();
-        m_ep->deleteLater();
-        m_ep = nullptr;
-    }
+    m_ifname.clear();
     m_store.reset();
     SelfRouteGuard::setEnabled(m_guardWasEnabled);
     m_active = false;
