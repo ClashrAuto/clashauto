@@ -150,6 +150,19 @@ struct NodesPage: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
 
+    @State private var search = ""
+    /// 只看测得通的节点。对应配置项 `nodeOnlyAvailable`（`node:`）——
+    /// 那个配置一直存在，却从来没有界面开关，等于用户改不了。
+    @State private var onlyAvailable = false
+
+    /// 按搜索词与「仅可用」筛过的节点。
+    ///
+    /// 搜索**不区分大小写**：节点名里中英文混排是常态（`香港01 - HK Airport`），
+    /// 大小写敏感的话用户搜 `hk` 会一个都搜不到，而他不会想到是大小写的问题。
+    private var visibleNodes: [NodeInfo] {
+        NodeFilter.apply(state.clash.nodes, keyword: search, onlyAvailable: onlyAvailable)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -163,6 +176,12 @@ struct NodesPage: View {
                     .labelsHidden()
                     .frame(maxWidth: 240)
                 }
+                TextField("搜索节点".t, text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 200)
+                Toggle("仅可用节点".t, isOn: $onlyAvailable)
+                    .toggleStyle(.checkbox)
+                    .font(.system(size: 11))
                 Spacer()
                 Button("测延迟".t) { Task { await state.clash.testDelays() } }
                 Button(state.clash.speedTesting ? "测速中…".t : "测速".t) {
@@ -174,16 +193,25 @@ struct NodesPage: View {
 
             Divider().overlay(theme.divider)
 
-            if state.clash.nodes.isEmpty {
+            if visibleNodes.isEmpty {
                 VStack(spacing: 6) {
-                    Text("暂无节点".t).foregroundStyle(theme.textMuted)
-                    Text(state.controller.isCoreRunning ? "等待核心返回代理列表".t : "核心未运行".t)
-                        .font(.system(size: 11))
-                        .foregroundStyle(theme.textMuted)
+                    // 「一个都没有」与「筛没了」是两回事，提示必须分开 ——
+                    // 否则用户搜错一个字就以为节点全丢了。
+                    if state.clash.nodes.isEmpty {
+                        Text("暂无节点".t).foregroundStyle(theme.textMuted)
+                        Text(state.controller.isCoreRunning ? "等待核心返回代理列表".t : "核心未运行".t)
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textMuted)
+                    } else {
+                        Text("没有匹配的节点".t).foregroundStyle(theme.textMuted)
+                        Text(String(format: "共 %d 个节点被筛掉".t, state.clash.nodes.count))
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textMuted)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(state.clash.nodes) { node in
+                List(visibleNodes) { node in
                     NodeRow(node: node,
                             switching: state.clash.switchingTo == node.name) {
                         state.selectNode(node.name)
