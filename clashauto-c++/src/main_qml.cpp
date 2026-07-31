@@ -33,6 +33,7 @@
 #include "net/core/ProxyConfigBuilder.h"     // COAST_PROXYCFG_SELFTEST：proxies YAML → ProxyNode 解析自测
 #include "net/core/DnsMessage.h"            // COAST_DNS_SELFTEST：DNS 报文层 KAT
 #include "net/core/SelfRouteGuard.h"        // COAST_SELFROUTE_SELFTEST：自身流量排除（接 TUN 的前置）
+#include "net/LocalTunService.h"            // COAST_TUNSERVICE_SELFTEST：进程内 TUN 整体自检
 #include "net/inbound/MixedInbound.h"       // COAST_INBOUND_SELFTEST：本机 HTTP/SOCKS5 入站自测
 #ifdef COAST_HAVE_QUIC
 #include "net/core/proto/Hysteria2Outbound.h"   // COAST_QUIC_SELFTEST：Hy2 的 QPACK/Huffman KAT
@@ -225,6 +226,13 @@ int main(int argc, char *argv[])
     // 真连一次 → **反向对照**（钉到回环口必须连不通）。
     // 反向对照是这条自检的重点：读回一致只证明选项被存下了，不证明它在导流；少了它，
     // 「绑定完全没生效」也会显示 PASS。
+    // 进程内 TUN 整体自检（COAST_TUNSERVICE_SELFTEST=1）：起服务 → TUN **真的接管默认路由** →
+    // 发一条 HTTP 请求验证它经 TUN→NetStack→进程内出站 绕回来 → 停服务 → 核对路由已还原。
+    // ★ 只能在容器/虚机这类可牺牲的网络命名空间里跑（会真的接管默认路由），需要 root。
+    //   出站只装 DIRECT + 严格模式：想回退 mihomo 就当场失败，故 PASS = 整条链路都在进程内。
+    if (qEnvironmentVariableIsSet("COAST_TUNSERVICE_SELFTEST"))
+        return LocalTunService::selfTest();
+
     if (qEnvironmentVariableIsSet("COAST_SELFROUTE_SELFTEST")) {
         QString report;
         const bool ok = SelfRouteGuard::selfTest(&report);

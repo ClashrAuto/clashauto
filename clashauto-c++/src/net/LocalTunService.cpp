@@ -9,6 +9,12 @@
 #include "core/ProxyConfig.h"
 #include "core/SelfRouteGuard.h"
 
+#include <QEventLoop>
+#include <QProcess>
+#include <QTimer>
+
+#include <cstdio>
+
 namespace {
 // TUN 网卡上我们这一端的地址。198.18.0.0/15 是 RFC 2544 的**基准测试保留段**，现实网络里不会
 // 被路由，撞车概率比 10./172./192.168. 低得多 —— mihomo 的 TUN 也用这一段。
@@ -154,6 +160,74 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
     m_active = true;
     emit activeChanged();
     return true;
+}
+
+// ———————————————————————— 整体自检 ————————————————————————
+//
+// ★★ 这里有一个必须避开的坑，是 TUN 端到端第一次调试时栽过的：
+//   **绝不能用 QProcess::waitForFinished() 等 curl。** 那个调用只泵子进程自己的 IO，
+//   **不跑主事件循环**，而 TUN fd 的 QSocketNotifier 和 lwIP 的定时器泵全挂在主事件循环上。
+//   于是 curl 跑的那几秒里一帧都没被从 TUN 读走 → 必然超时 → 看起来像"TUN 不通"，
+//   实际是测试驱动自己把链路掐死了（当时 A/B 实测：阻塞版 rx=1、非阻塞版 rx=61）。
+//   所以这里用 QEventLoop + finished 信号，全程让事件循环转着。
+int LocalTunService::selfTest()
+{
+    const QString target = qEnvironmentVariableIsSet("COAST_TUNSERVICE_TARGET")
+            ? qEnvironmentVariable("COAST_TUNSERVICE_TARGET")
+            : QStringLiteral("http://223.5.5.5/");
+
+    auto httpCode = [](const QString &url, int timeoutSec) -> QString {
+        QProcess p;
+        QEventLoop loop;
+        QObject::connect(&p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), &loop,
+                         &QEventLoop::quit);
+        p.start(QStringLiteral("curl"),
+                {QStringLiteral("-s"), QStringLiteral("-o"), QStringLiteral("/dev/null"),
+                 QStringLiteral("-w"), QStringLiteral("%{http_code}"), QStringLiteral("--max-time"),
+                 QString::number(timeoutSec), url});
+        QTimer::singleShot(timeoutSec * 1000 + 3000, &loop, &QEventLoop::quit); // 硬兜底
+        loop.exec();                                                            // ★ 事件循环全程在转
+        return QString::fromUtf8(p.readAllStandardOutput()).trimmed();
+    };
+
+    std::fprintf(stderr, "=== LocalTunService 自检：目标 %s ===\n", qUtf8Printable(target));
+    const QString before = httpCode(target, 8);
+    std::fprintf(stderr, "起服务前： curl=%s\n", qUtf8Printable(before));
+    if (before.isEmpty() || before == QStringLiteral("000")) {
+        std::fprintf(stderr, "✗ 前提不成立：起服务前本来就连不通目标，后面测什么都没意义\n");
+        return 2; // ★ 先验前提。少了这一步，"失败"可能只是环境本来就没网
+    }
+
+    auto store = std::make_shared<ProxyConfigStore>();
+    QVector<ProxyNode> nodes;
+    nodes.push_back(ProxyNode::direct());
+    store->reload(std::make_shared<const ProxyConfig>(nodes, QStringLiteral("DIRECT"),
+                                                      ProxyConfig::Mode::Direct));
+
+    LocalTunService svc;
+    QObject::connect(&svc, &LocalTunService::logged, [](const QString &l) {
+        std::fprintf(stderr, "  | %s\n", qUtf8Printable(l));
+    });
+
+    QString err;
+    if (!svc.start(store, nullptr, 0, &err)) { // fallback=0 → 严格：想回退核心就当场失败
+        std::fprintf(stderr, "✗ 起服务失败：%s\n", qUtf8Printable(err));
+        return 1;
+    }
+
+    const QString during = httpCode(target, 10);
+    const bool ok = (during == before);
+    std::fprintf(stderr, "接管中： curl=%s %s\n", qUtf8Printable(during),
+                 ok ? "✓ 经 TUN→NetStack→进程内出站 绕回来了" : "✗ 不通（或返回码变了）");
+
+    svc.stop();
+    const QString after = httpCode(target, 8);
+    std::fprintf(stderr, "停服务后： curl=%s %s\n", qUtf8Printable(after),
+                 after == before ? "✓ 路由已还原" : "✗ 没还原干净");
+
+    const bool pass = ok && after == before;
+    std::fprintf(stderr, "=== LocalTunService 自检 %s ===\n", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
 }
 
 void LocalTunService::stop()

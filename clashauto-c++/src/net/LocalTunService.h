@@ -50,6 +50,16 @@ public:
     // *why 填一句可直接展示给用户的说明。
     static bool blockedByQuicNode(const std::shared_ptr<ProxyConfigStore> &store, QString *why);
 
+    // 整体自检（COAST_TUNSERVICE_SELFTEST=1）：起服务 → TUN **真的接管默认路由** →
+    // 从本机发一条 HTTP 请求 → 它必须经 TUN→NetStack→进程内出站→真目标绕回来 → 停服务 →
+    // 核对路由已还原、网络恢复。返回进程退出码（0=PASS）。
+    //
+    // ★ 只能在**容器/虚机这类可牺牲的网络命名空间**里跑：它会真的接管默认路由。
+    //   跑法见 tools/tunroute/README.md。需要 root。
+    // ★ 出站只装内建 DIRECT + 严格模式（fallback=0）：任何一次想回退 mihomo 都会当场失败，
+    //   所以 PASS 就等于「整条链路都在进程内」。
+    static int selfTest();
+
 signals:
     void activeChanged();
     void logged(const QString &line);
