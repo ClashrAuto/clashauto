@@ -46,6 +46,11 @@ public final class CoastController {
         core.onUnexpectedExit = { [weak self] in
             Task { await self?.handleUnexpectedCoreExit() }
         }
+        Task { [weak self] in
+            await self?.helper.setRedirectLostHandler { [weak self] in
+                Task { await self?.handleRedirectLost() }
+            }
+        }
     }
 
     public var isCoreInstalled: Bool { core.isCoreInstalled }
@@ -245,6 +250,19 @@ public final class CoastController {
         } catch {
             log("接管设备失败：\(error)")
         }
+    }
+
+    /// helper 在接管期间没了（崩溃 / 被强杀）。
+    ///
+    /// 接管随进程消失，但**设备侧的开关没变** —— 用户当初打开它就是授权了接管。
+    /// 新的 helper 由 launchd 按需拉起，且它启动时已经把上一条命遗留的内核状态收拾干净
+    /// （见 `Redirector.recoverFromCrashIfNeeded`），所以这里直接重新接管一次即可。
+    /// 不重来的话：`activeRedirectIPs` 一直挂着，界面显示那几台设备「已代理」，实际没有。
+    private func handleRedirectLost() async {
+        guard !activeRedirectIPs.isEmpty else { return }
+        log("免密助手在接管期间退出，正在重新接管")
+        activeRedirectIPs = []
+        await syncRedirect()
     }
 
     /// 热重载。

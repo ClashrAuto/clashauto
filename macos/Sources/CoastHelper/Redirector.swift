@@ -95,6 +95,12 @@ final class Redirector: @unchecked Sendable {
             }
 
             active = true
+            // 落一份崩溃恢复记录。**内核状态活得比进程久** —— PF anchor 和 ip.forwarding
+            // 是内核里的东西，helper 被 SIGKILL 掉时它们原样留着，而新拉起的实例
+            // `active == false`，`stop()` 会直接提前返回，于是这两样**永远回滚不了**。
+            // 后果不是「功能失效」而是「rdr 规则继续把流量重定向到一个没人监听的端口」——
+            // 正是这套设计极力避免的那种设备断网。
+            Self.writeCrashRecord(forwardingWasOn: forwardingWasOn)
             let source = DispatchSource.makeTimerSource(queue: queue)
             source.schedule(deadline: .now(), repeating: 1.0)  // 每秒重发，压过设备的正常 ARP 学习
             source.setEventHandler { [weak self] in self?.sendSpoof() }
@@ -103,6 +109,59 @@ final class Redirector: @unchecked Sendable {
             sendSpoof()   // 立即发一轮，不等第一个 tick
             return nil
         }
+    }
+
+    // MARK: - 跨进程崩溃恢复
+
+    /// 记录「此刻正处于接管中」，以及接管前 `ip.forwarding` 的原值。
+    ///
+    /// 放在 `/var/db/` 下：root 可写、不随用户数据迁移，重启后也还在（PF anchor 本身不跨
+    /// 重启，但 `ip.forwarding` 若被写进 sysctl 配置就会跨；宁可多恢复一次也不要漏）。
+    ///
+    /// `COAST_REDIRECT_RECORD` 可改写路径，仅用于验证恢复逻辑本身。生产上够不着：
+    /// launchd 拉起的 daemon 不继承用户环境，这个变量只有直接执行二进制时才可能存在。
+    private static var crashRecordPath: String {
+        ProcessInfo.processInfo.environment["COAST_REDIRECT_RECORD"]
+            ?? "/var/db/com.yuehongsun.coast.helper.redirect"
+    }
+
+    private static func writeCrashRecord(forwardingWasOn: Bool) {
+        try? (forwardingWasOn ? "1" : "0").write(
+            toFile: crashRecordPath, atomically: true, encoding: .utf8)
+    }
+
+    private static func clearCrashRecord() {
+        try? FileManager.default.removeItem(atPath: crashRecordPath)
+    }
+
+    /// helper 启动时调用：上次是不是死在接管中间？是就把内核状态收拾干净。
+    ///
+    /// 只做**明确属于我们**的回滚：清空我们自己命名的 anchor（不碰别人的 PF 规则），
+    /// 以及把 `ip.forwarding` 恢复成记录里的原值。没有记录就什么都不做 —— 正常退出的
+    /// 上一条命已经自己收拾过了。
+    ///
+    /// ARP 不在此列：欺骗随进程消失，设备的 ARP 缓存会自行老化（十几分钟），
+    /// 而我们已经不知道当时接管的是哪几台、真网关 MAC 是什么，无从定向复原。
+    static func recoverFromCrashIfNeeded(log: (String) -> Void) {
+        guard let record = try? String(contentsOfFile: crashRecordPath, encoding: .utf8) else { return }
+        let forwardingWasOn = record.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+        log("检测到上次接管未正常收尾(helper 疑似崩溃/被强杀)，正在回滚内核状态")
+        _ = runPfctlStatic(["-a", anchorName, "-F", "all"])
+        if !forwardingWasOn { _ = setIPForwarding(false) }
+        clearCrashRecord()
+        log("已清空 PF anchor \(anchorName);ip.forwarding 恢复为 \(forwardingWasOn ? "1(原本就开着)" : "0")")
+    }
+
+    /// 静态版 pfctl —— 恢复发生在任何 Redirector 实例产生之前。
+    private static func runPfctlStatic(_ arguments: [String]) -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
+        task.arguments = arguments
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do { try task.run() } catch { return false }
+        task.waitUntilExit()
+        return task.terminationStatus == 0
     }
 
     // MARK: - 停止 + 复原
@@ -138,6 +197,7 @@ final class Redirector: @unchecked Sendable {
         if pfInstalled { uninstallPF(); pfInstalled = false }
         // forwarding 只回滚我们开的那一次
         if !forwardingWasOn { _ = Self.setIPForwarding(false) }
+        Self.clearCrashRecord()   // 正常收尾了，不必再让下次启动去恢复
 
         active = false
         deviceIPs = []; deviceMACs = []

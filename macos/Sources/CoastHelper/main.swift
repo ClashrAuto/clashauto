@@ -309,6 +309,11 @@ enum Audit {
 // 没有终端可看；而它一旦跑起来就常驻，之后 .app 被替换掉它也照跑不误（版本值在进程启动时就
 // 固化了）。没有这行日志，「界面显示助手已启用、行为却是旧版的」这种状态无从辨认。
 // 用 os_log 而非 print：print 到 stdout 在 launchd 下直接进 /dev/null。
+// 上一条命可能死在接管中间(崩溃/被 SIGKILL/系统强制退出),那时 PF anchor 与
+// ip.forwarding 这些**内核状态**原样留着，而新实例的 `active` 是 false，
+// 走正常的 stop 路径会直接提前返回 —— 不在这里主动收拾就永远收拾不掉。
+Redirector.recoverFromCrashIfNeeded { Audit.log($0) }
+
 Audit.log("Coast helper 启动 版本=\(HelperVersion.current) "
           + "路径=\(Bundle.main.executableURL?.path ?? "?")")
 

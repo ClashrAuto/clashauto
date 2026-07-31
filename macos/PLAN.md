@@ -891,3 +891,49 @@ audit] 客户端连接 invalidated → 撤销接管
 「发起方连接断开 → 撤销接管」这一半**没法在不真做 ARP 欺骗的前提下验证**。
 handler 会可靠触发是已证实的（正是靠它才发现这个 bug），新增的只是 owner 过滤。
 真机接管测试要改动局域网状态，等你明确同意再做。
+
+
+## 2026-07-31(续三) · 接管的两个「进程死了但状态还在」缺口
+
+沿着上一条（连接生命周期）继续查**镜像方向**，找到两个：
+
+### 1. helper 崩溃后，内核状态永远回滚不掉
+
+`Redirector` 的内进程回滚很完整（start 每一步失败都回滚前面的），但 **PF anchor 和
+`ip.forwarding` 是内核里的东西，活得比进程久**。helper 被 SIGKILL 时它们原样留着；
+launchd 按需拉起的新实例 `active == false`，`stop()` 走 `guard active` 直接提前返回 ——
+于是这两样**永远收拾不掉**。后果不是「功能失效」，是 rdr 规则继续把流量重定向到一个
+没人监听的端口，即被接管设备持续断网。
+
+修：接管建立时往 `/var/db/com.yuehongsun.coast.helper.redirect` 落一份记录（内含接管前
+`ip.forwarding` 的原值），正常停止时删除；helper 启动时若发现记录还在，就说明上次死在
+接管中间 —— 清空**我们自己命名的** anchor（不碰别人的 PF 规则）、把 forwarding 恢复成
+记录里的原值、删记录。
+
+ARP 不在回滚之列：欺骗随进程消失，设备缓存会自行老化（十几分钟），而我们已经不知道
+当时接管的是哪几台、真网关 MAC 是什么，无从定向复原。
+
+**实证**（`COAST_REDIRECT_RECORD` 覆盖路径后直接跑 helper 二进制）：
+
+```
+audit] 检测到上次接管未正常收尾(helper 疑似崩溃/被强杀)，正在回滚内核状态
+audit] 已清空 PF anchor coast.redirect;ip.forwarding 恢复为 0
+audit] Coast helper 启动 版本=1.0 路径=...
+```
+
+顺序正确（恢复在启动行之前），记录被清除；无记录时不产生任何多余动作。
+
+### 2. app 不知道 helper 在接管期间没了
+
+上一条修的是「helper 误以为 app 没了」，这条是它的镜像。接管连接被中断时
+`activeRedirectIPs` 仍挂着，界面继续显示那几台设备「已代理」，实际上接管早随进程消失。
+
+修：客户端给接管连接装 `interruptionHandler` → `onRedirectLost`；`CoastController`
+收到后**重新接管一次**（设备侧开关没变，用户当初打开它就是授权了接管；而新 helper
+启动时已经把遗留内核状态收拾干净了）。`stopRedirect` 里先摘掉 handler —— 我方主动停
+不该被当成「丢了」。
+
+### 仍需真机
+
+这两条的「触发路径」都验过了（崩溃恢复端到端跑通、handler 装拆逻辑通过全量测试），
+但**真正的接管过程**仍未在真机跑过 —— 那会改动局域网状态，等你明确同意。

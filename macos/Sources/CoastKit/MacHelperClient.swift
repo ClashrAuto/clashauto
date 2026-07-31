@@ -198,6 +198,17 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
     /// helper 立刻就把刚建立的接管撤了。这条连接从 `startRedirect` 活到 `stopRedirect`。
     private var redirectConnection: NSXPCConnection?
 
+    /// 接管期的那条连接断了 —— 说明 **helper 侧**没了（崩溃 / 被强杀 / 被系统回收）。
+    ///
+    /// 这是上一条修复的镜像：那条修的是「helper 误以为 app 没了」，这条管的是
+    /// 「app 不知道 helper 没了」。不处理的话 `activeRedirectIPs` 会一直挂着，
+    /// 界面继续显示那些设备「已代理」，而实际上接管早就随进程消失了。
+    private var onRedirectLost: (@Sendable () -> Void)?
+
+    public func setRedirectLostHandler(_ handler: @escaping @Sendable () -> Void) {
+        onRedirectLost = handler
+    }
+
     private func makeConnection() -> NSXPCConnection {
         let connection = NSXPCConnection(machServiceName: HelperConstants.machServiceName,
                                          options: .privileged)
@@ -306,6 +317,10 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
         redirectConnection?.invalidate()
         let connection = makeConnection()
         redirectConnection = connection
+        // 只有**非我方主动**断开才算「丢了」：stopRedirect 里会先把 handler 摘掉。
+        connection.interruptionHandler = { [weak self] in
+            Task { await self?.redirectVanished() }
+        }
         // 启动失败就别留着这条连接 —— 它对应的接管根本没建立起来，留着只是个活着的
         // 空连接，还会让下一次 startRedirect 白白多 invalidate 一次。
         var started = false
@@ -326,9 +341,18 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
         started = true
     }
 
+    /// 接管连接被中断时走这里。摘掉自己再回调，避免 invalidate 时又触发一次。
+    private func redirectVanished() {
+        guard let connection = redirectConnection else { return }
+        connection.interruptionHandler = nil
+        redirectConnection = nil
+        onRedirectLost?()
+    }
+
     public func stopRedirect() async throws {
         // 用接管期那条连接发停止请求；没有它（app 重启后想清理残留）就临时建一条。
         let connection = redirectConnection
+        connection?.interruptionHandler = nil   // 我方主动停，不该当成「丢了」
         defer {
             connection?.invalidate()
             redirectConnection = nil
