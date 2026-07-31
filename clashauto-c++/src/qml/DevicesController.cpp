@@ -186,6 +186,34 @@ void DevicesController::startLocalInbound()
     //   否则端口被占时会把系统代理指到没人监听的端口上 = 本机直接断网。
     if (m_core)
         m_core->setLocalInboundPort(m_inboundPort);
+    // 读数刷新：只在入站开着时跑，关掉就停（别让一个 1s 定时器白白常驻）。
+    if (!m_inboundStatTimer) {
+        m_inboundStatTimer = new QTimer(this);
+        m_inboundStatTimer->setInterval(1000);
+        connect(m_inboundStatTimer, &QTimer::timeout, this,
+                [this] { emit localInboundStatusChanged(); });
+    }
+    m_inboundStatTimer->start();
+}
+
+// 一行可读状态，给设置页那一行用。没开时返回空串（QML 侧据此隐藏）。
+QString DevicesController::localInboundStatus() const
+{
+    if (!m_localInbound)
+        return QString();
+    const auto human = [](quint64 b) {
+        if (b < 1024)
+            return QStringLiteral("%1 B").arg(b);
+        if (b < 1024ull * 1024)
+            return QStringLiteral("%1 KB").arg(b / 1024.0, 0, 'f', 1);
+        if (b < 1024ull * 1024 * 1024)
+            return QStringLiteral("%1 MB").arg(b / (1024.0 * 1024), 0, 'f', 1);
+        return QStringLiteral("%1 GB").arg(b / (1024.0 * 1024 * 1024), 0, 'f', 2);
+    };
+    return tr("%1 活跃 · 累计 %2 · ↑%3 ↓%4")
+        .arg(m_localInbound->activeSessions())
+        .arg(m_localInbound->totalSessions())
+        .arg(human(m_localInbound->bytesUp()), human(m_localInbound->bytesDown()));
 }
 
 void DevicesController::stopLocalInbound()
@@ -193,6 +221,8 @@ void DevicesController::stopLocalInbound()
     // 先把系统代理改回核心端口，再拆入站——顺序反了会留一个「代理指着已关端口」的窗口。
     if (m_core && m_localInbound)
         m_core->setLocalInboundPort(0);
+    if (m_inboundStatTimer)
+        m_inboundStatTimer->stop();
     if (m_localInbound) {
         m_localInbound->stop();
         m_localInbound->deleteLater();

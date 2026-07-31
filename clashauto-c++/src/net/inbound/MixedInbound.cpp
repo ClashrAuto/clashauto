@@ -131,8 +131,10 @@ void MixedInbound::pumpClientToOut(Session *s)
     if (!s->out || !s->client)
         return;
     const QByteArray data = s->client->readAll();
-    if (!data.isEmpty())
+    if (!data.isEmpty()) {
+        m_bytesUp += quint64(data.size());
         s->out->write(data);
+    }
     // 出站积压过高 → 暂停从客户端读（QTcpSocket 没有 setReadPaused，用 readBufferSize 卡住）
     if (s->out->bytesToWrite() > kHighWater) {
         if (!s->upThrottled) {
@@ -331,6 +333,7 @@ void MixedInbound::startDial(Session *s, const QString &host, quint16 port,
     connect(out, &IOutboundTcp::dataReceived, this, [this, s](const QByteArray &d) {
         if (s->gone || !s->client)
             return;
+        m_bytesDown += quint64(d.size());
         s->client->write(d);
         if (s->client->bytesToWrite() > kHighWater && s->out && !s->downPaused) {
             s->downPaused = true;
@@ -366,8 +369,11 @@ void MixedInbound::startDial(Session *s, const QString &host, quint16 port,
     out->connectTo(host, port, m_user);
     // 契约允许（也要求）write() 早于/紧随 connectTo：早到的上行字节必须原样补发，
     // 绝不能丢——真机上「隧道建起来却一个字节不发」就是这么来的（见 IOutbound.h 的长注释）。
-    if (!early.isEmpty())
+    ++m_totalSessions;
+    if (!early.isEmpty()) {
+        m_bytesUp += quint64(early.size());
         out->write(early);
+    }
 }
 
 void MixedInbound::closeSession(Session *s, const char *why)

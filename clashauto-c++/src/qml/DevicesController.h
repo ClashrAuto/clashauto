@@ -66,6 +66,8 @@ class DevicesController final : public QObject
     // 本机 HTTP/SOCKS 入站（CoastCore 的第二个入口）。开=监听 kLocalInboundPort，关=不监听。
     Q_PROPERTY(bool localInboundEnabled READ localInboundEnabled WRITE setLocalInboundEnabled NOTIFY localInboundEnabledChanged)
     Q_PROPERTY(int localInboundPort READ localInboundPort CONSTANT)
+    // 一行可读状态（「12 连接 · ↑1.2 MB ↓8.4 MB」）。见 localInboundStatus() 上方的理由。
+    Q_PROPERTY(QString localInboundStatus READ localInboundStatus NOTIFY localInboundStatusChanged)
 
 public:
     DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
@@ -113,6 +115,9 @@ public:
     bool coastCoreStrict() const { return m_coastStrict; }
     bool localInboundEnabled() const { return m_inboundPort > 0; }
     int localInboundPort() const { return kLocalInboundPort; }
+    // ★ 本机入站的流量在别处**一点都看不到**：连接列表和流量图都来自 mihomo 的 REST，
+    //   而这条路压根不经过核心。不给个读数的话，用户开了开关只能盲信。这就是那个最小可见性。
+    QString localInboundStatus() const;
     // 落盘 config.yaml + 重建快照 + 把开关意图推给网关数据面。默认关时网关全走 mihomo（零行为变化）。
     Q_INVOKABLE void setCoastCoreEnabled(bool on);
     // 严格模式：判不了的连接拒绝回退核心、直接失败。只有 coastCoreEnabled 开着时才有意义。
@@ -132,6 +137,7 @@ signals:
     void securityAlertRaised(const QString &title, const QString &body); // 新威胁 → main 连托盘通知
     void coastCoreEnabledChanged();            // 灰度开关变化 → 设置页开关刷新
     void localInboundEnabledChanged();         // 本机入站开关变化 → 设置页开关刷新
+    void localInboundStatusChanged();          // 本机入站读数刷新（1s 一跳，仅在它开着时）
     void coastCoreStrictChanged();
 
 private:
@@ -254,6 +260,7 @@ private:
     int m_mixedPort = 7890;                       // mihomo 混合端口：本机入站的回退目标
     class MixedInbound *m_localInbound = nullptr; // 本机 HTTP/SOCKS 入站（CoastCore 第二个入口）
     class CoreDialerFactory *m_localInboundFactory = nullptr; // 入站不持有工厂，由本类管生命周期
+    QTimer *m_inboundStatTimer = nullptr;         // 本机入站读数刷新（只在它开着时跑）
     bool m_coastStrict = false;                   // 严格模式（默认关）
     std::shared_ptr<ProxyConfigStore> m_pcfgStore; // 出站配置快照持有者（app 生命周期常驻，与网关 worker 共享）
     std::shared_ptr<RuleEngine> m_ruleEngine;   // 分流规则引擎（本单元备用；Rule 模式回退核心）

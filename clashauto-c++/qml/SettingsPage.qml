@@ -556,6 +556,11 @@ Item {
                                     checked: devices.coastCoreStrict
                                     onToggled: devices.setCoastCoreStrict(checked) } }
                             SettingRow { label: qsTr("本机代理入口（127.0.0.1:%1）").arg(devices.localInboundPort)
+                                // 这条流量不经过 mihomo，所以连接列表/流量图都看不到它 —— 这里给个读数，
+                                // 否则用户开了开关只能盲信。
+                                Text { text: devices.localInboundStatus; color: Theme.textMuted
+                                    font.pixelSize: 11; visible: text.length > 0
+                                    Layout.preferredWidth: 210; elide: Text.ElideRight }
                                 ThemedSwitch { id: localInboundSwitch; enabled: devices.coastCoreEnabled
                                     checked: devices.localInboundEnabled
                                     onToggled: devices.setLocalInboundEnabled(checked) } }

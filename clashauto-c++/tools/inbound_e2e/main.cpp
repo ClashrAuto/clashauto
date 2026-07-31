@@ -371,6 +371,20 @@ int main(int argc, char **argv)
                      viaDialer.size(), pct(viaDialer, 0.5) - pct(raw, 0.5));
     }
 
+    // ---- 流量计数：UI 上那行读数的数据源。必须**真的在数**，否则读数恒零、比没有还误导。
+    //      上面已经跑过两个 8 MiB 用例，所以上下行都应当 ≥8 MiB，会话数 ≥5。
+    {
+        const quint64 up = inbound.bytesUp(), down = inbound.bytesDown();
+        const quint64 sess = inbound.totalSessions();
+        const bool ok2 = up >= quint64(kBigSize) && down >= quint64(kBigSize) && sess >= 5;
+        std::fprintf(stderr,
+                     "  [%s] 流量计数在数（会话 %llu，↑%.1f MiB ↓%.1f MiB）\n", ok2 ? "PASS" : "FAIL",
+                     static_cast<unsigned long long>(sess), up / 1048576.0, down / 1048576.0);
+        if (!ok2)
+            std::fprintf(stderr, "        期望 上下行各 ≥8 MiB、会话 ≥5\n");
+        ok &= ok2;
+    }
+
     // ---- 证伪检查：上面两个大流量用例**必须真的把水位顶上去**，否则节流分支根本没跑，
     //      PASS 是空的。这一条不通过就说明用例设计失效（载荷太小 / 水位太高 / 卡住没生效）。
     {

@@ -52,6 +52,15 @@ public:
     quint64 upThrottleHits() const { return m_upThrottleHits; }   // 客户端→出站：卡住客户端读
     quint64 downPauseHits() const { return m_downPauseHits; }     // 出站→客户端：暂停从上游读
 
+    // —— 流量/连接计数 ——
+    // ★ 存在的理由：接了本机入站之后，这部分流量在 UI 上**完全不可见**——连接列表和流量图都来自
+    //   mihomo 的 REST，而本机入站压根不经过它。于是「开了这个开关反而看不到自己的流量」，
+    //   是个体验倒退。这几个计数就是给 UI 用的最小可见性。
+    int activeSessions() const { return m_sessions.size(); }
+    quint64 totalSessions() const { return m_totalSessions; } // 累计建立过的连接数
+    quint64 bytesUp() const { return m_bytesUp; }             // 客户端 → 出站
+    quint64 bytesDown() const { return m_bytesDown; }         // 出站 → 客户端
+
     // 自检：起一个本地靶服务器 + 一个直连出站桩，用真实的 SOCKS5 / HTTP CONNECT / HTTP 绝对形式
     // 三种客户端各打一遍，校验协议解析与双向转发。返回 true = 全通过（结果打到 stderr）。
     // 由 COAST_INBOUND_SELFTEST=1 触发（见 main_qml.cpp），无需任何节点或网络。
@@ -75,4 +84,7 @@ private:
     QSet<Session *> m_sessions;
     quint64 m_upThrottleHits = 0;
     quint64 m_downPauseHits = 0;
+    quint64 m_totalSessions = 0;
+    quint64 m_bytesUp = 0;
+    quint64 m_bytesDown = 0;
 };
