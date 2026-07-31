@@ -84,7 +84,9 @@ struct UpdateView: View {
             actionRow
         }
         .padding(10)
-        .frame(width: 600, height: 560)
+        // 默认 600×560 由 scene 的 `.defaultSize` 给；这里只写**下限**（Qt 是 460×420）。
+        // 写死 `width/height` 的话窗口就成了不可缩放的死尺寸 —— 而 Qt 那边它是能拖小的。
+        .frame(minWidth: 460, minHeight: 420)
         .background(theme.card)
         .task { await load() }
     }
