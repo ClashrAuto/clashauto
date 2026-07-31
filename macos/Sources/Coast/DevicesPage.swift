@@ -145,10 +145,21 @@ struct DevicesPage: View {
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .font(.system(size: 11))
-                Button("导出".t) { exportCSV() }
+                Button {
+                    exportCSV()
+                } label: {
+                    Text("导出".t).font(.system(size: 12))
+                        .padding(.horizontal, 10).frame(height: 24)
+                }
+                .buttonStyle(.plain)
+                .glassCapsule()
                 Button { Task { await scan() } } label: {
                     Label(scanning ? "扫描中…".t : "重新扫描".t, systemImage: "arrow.clockwise")
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 10).frame(height: 24)
                 }
+                .buttonStyle(.plain)
+                .glassCapsule()
                 .disabled(scanning)
             }
             HStack(spacing: 8) {

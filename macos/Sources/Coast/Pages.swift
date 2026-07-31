@@ -444,25 +444,21 @@ struct TodayTrafficCard: View {
                         .font(.system(size: 22, weight: .medium)).foregroundStyle(theme.accent)
                 }
                 Spacer()
-                Picker("", selection: Binding(
-                    get: { state.trafficProxyOnly },
-                    set: { state.trafficProxyOnly = $0 })) {
-                    Text("全部".t).tag(false)
-                    Text("仅代理".t).tag(true)
-                }
-                .labelsHidden().pickerStyle(.segmented).frame(width: 130)
+                GlassSegmented(items: [(false, "全部".t), (true, "仅代理".t)],
+                               selection: Binding(get: { state.trafficProxyOnly },
+                                                  set: { state.trafficProxyOnly = $0 }),
+                               tint: theme.accent.opacity(0.45))
             }
 
             hourlyBars
 
             // 维度 tab：进程 / 设备 / 域名。「设备」这一维的数据(conn.mac)一直在写，
             // 却从来没有查询用它 —— 于是「这些流量是哪台设备跑的」在界面上无从回答。
-            Picker("", selection: $bindable.trafficDimension) {
-                Text("进程".t).tag(HistoryStore.Dimension.process)
-                Text("设备".t).tag(HistoryStore.Dimension.device)
-                Text("域名".t).tag(HistoryStore.Dimension.host)
-            }
-            .labelsHidden().pickerStyle(.segmented).frame(maxWidth: 220)
+            GlassSegmented(items: [(HistoryStore.Dimension.process, "进程".t),
+                                   (HistoryStore.Dimension.device, "设备".t),
+                                   (HistoryStore.Dimension.host, "域名".t)],
+                           selection: $bindable.trafficDimension,
+                           tint: theme.accent.opacity(0.45))
 
             if state.todayTop.isEmpty {
                 Text(state.history.isOpen ? "今天还没有已结束的连接".t : "历史库不可用".t)

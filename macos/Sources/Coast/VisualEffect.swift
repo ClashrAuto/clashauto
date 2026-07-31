@@ -139,3 +139,37 @@ extension View {
         }
     }
 }
+
+/// 液态玻璃分段控件：整组一层玻璃，段与段紧挨、没有各自的圆角。
+///
+/// 从页脚的模式切换抽出来 —— 界面上凡是「一组、单选」的地方都该长这样，
+/// 各写一套迟早会在圆角、内距、高度上漂移（页脚那处就来回对了好几版）。
+struct GlassSegmented<Value: Hashable>: View {
+    let items: [(value: Value, title: String)]
+    @Binding var selection: Value
+    /// 选中段的底色。
+    var tint: Color
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(items, id: \.value) { item in
+                Button {
+                    selection = item.value
+                } label: {
+                    Text(item.title)
+                        .font(.system(size: 11))
+                        .foregroundStyle(item.value == selection ? Color.white : .secondary)
+                        .padding(.horizontal, 10)
+                        .frame(height: 22)
+                        .fixedSize()
+                }
+                .buttonStyle(.plain)
+                .background {
+                    // 压在整组玻璃**里面**，不给整组带来额外圆角
+                    if item.value == selection { Capsule().fill(tint) }
+                }
+            }
+        }
+        .glassCapsule()
+    }
+}
