@@ -132,24 +132,25 @@ struct MainView: View {
     private var modePicker: some View {
         Group {
             if modeExpanded {
-                // 展开后是**一个按钮组**（分段控件），不是三颗各自独立的胶囊 ——
-                // 三颗独立按钮看不出「同一组、三选一」的语义，用户得靠高亮去猜哪个是当前项；
-                // 分段控件把「这几个是一组、只能选一个」画在了形状里。
-                // 用系统的 segmented：macOS 26 下它自己就是 Liquid Glass 外观，
-                // 不必手拼一个（这个 SDK 也没有 .glassEffect() 能贴玻璃）。
-                Picker("", selection: Binding(
-                    get: { state.modeIndex },
-                    set: { index in
-                        state.setMode(AppState.modeTitles[index])
-                        withAnimation(.snappy(duration: 0.22)) { modeExpanded = false }
-                    })) {
+                // 展开后是**一个液态玻璃按钮组**。
+                //
+                // 三颗按钮各自 `.glassEffect(in: .capsule)`，再一起放进
+                // `GlassEffectContainer` —— 容器让相邻的玻璃互相「融合」（间距小于
+                // spacing 时会连成一片），这正是「一组」与「三颗各自独立」的区别所在：
+                // 不靠高亮去暗示，形状本身就说明了三选一。
+                GlassGroup(spacing: 4) {
                     ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
-                        Text(title).tag(index)
+                        Button {
+                            state.setMode(title)
+                            withAnimation(.snappy(duration: 0.22)) { modeExpanded = false }
+                        } label: {
+                            modeLabel(title, active: index == state.modeIndex)
+                        }
+                        .buttonStyle(.plain)
+                        .glassCapsule(tinted: index == state.modeIndex
+                                      ? theme.accent.opacity(0.5) : nil)
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .controlSize(.small)
                 .fixedSize()
             } else {
                 Button {

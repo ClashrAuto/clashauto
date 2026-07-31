@@ -102,3 +102,40 @@ extension View {
         modifier(GlassButtonModifier(prominent: prominent))
     }
 }
+
+/// 一组互相融合的液态玻璃按钮（macOS 26+；旧系统回落成普通胶囊按钮）。
+///
+/// `GlassEffectContainer` 会让**间距小于 spacing** 的相邻玻璃互相融合、连成一片 ——
+/// 这正是「一组、三选一」与「三颗各自独立的按钮」的区别所在：不靠高亮去暗示，
+/// 形状本身就说明了关系。
+struct GlassGroup<Content: View>: View {
+    var spacing: CGFloat = 4
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: spacing) {
+                HStack(spacing: spacing) { content() }
+            }
+        } else {
+            HStack(spacing: spacing) { content() }
+        }
+    }
+}
+
+extension View {
+    /// 给单个视图上液态玻璃（胶囊形）。`tinted` 时带主题色 —— 用来标出组里的当前项。
+    @ViewBuilder
+    func glassCapsule(tinted: Color? = nil) -> some View {
+        if #available(macOS 26.0, *) {
+            if let tinted {
+                glassEffect(.regular.tint(tinted), in: .capsule)
+            } else {
+                glassEffect(.regular, in: .capsule)
+            }
+        } else {
+            // 旧系统：手画一个近似的胶囊底，形状一致、只是没有玻璃折射。
+            background(Capsule().fill(tinted ?? Color.gray.opacity(0.25)))
+        }
+    }
+}
