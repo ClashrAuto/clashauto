@@ -1125,6 +1125,60 @@ QStringList extractRuleLines(const QString &yaml)
 }
 } // namespace
 
+// —————————— 用户手选的落盘（核心缺席时的权威来源）——————————
+// 存成 configDir/selection.json：{"selected":"…","mode":"…"}。
+// 与已有的 groupmap.json 分开放：那份是「核心报回来的组→叶子映射」，这份是「用户点了什么」，
+// 来源与可信度不同，混在一起以后必然分不清谁覆盖谁。
+static QString selectionPath(const QString &configDir)
+{
+    return QDir(configDir).filePath(QStringLiteral("selection.json"));
+}
+
+void DevicesController::noteUserSelection(const QString &group, const QString &leaf)
+{
+    if (leaf.isEmpty())
+        return;
+    // ① 组→叶子：并进已有的缓存（核心不在时 rebuild 会重放它）
+    if (!group.isEmpty()) {
+        QHash<QString, QString> map = loadGroupMapCache();
+        map.insert(group, leaf);
+        saveGroupMapCache(map);
+    }
+    // ② 全局选中节点：Global 模式直接用它；Rule 模式下也是「用户最后点的那个」
+    QFile f(selectionPath(m_configDir));
+    QJsonObject o;
+    if (f.open(QIODevice::ReadOnly)) {
+        o = QJsonDocument::fromJson(f.readAll()).object();
+        f.close();
+    }
+    o.insert(QStringLiteral("selected"), leaf);
+    QFile w(selectionPath(m_configDir));
+    if (w.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        w.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+        w.close();
+    }
+    rebuildCoastCoreConfig(); // 立刻生效，不等下一次轮询
+}
+
+void DevicesController::noteUserMode(const QString &mode)
+{
+    if (mode.isEmpty())
+        return;
+    QFile f(selectionPath(m_configDir));
+    QJsonObject o;
+    if (f.open(QIODevice::ReadOnly)) {
+        o = QJsonDocument::fromJson(f.readAll()).object();
+        f.close();
+    }
+    o.insert(QStringLiteral("mode"), mode);
+    QFile w(selectionPath(m_configDir));
+    if (w.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        w.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+        w.close();
+    }
+    rebuildCoastCoreConfig();
+}
+
 void DevicesController::rebuildCoastCoreConfig()
 {
     if (!m_pcfgStore)
@@ -1137,8 +1191,22 @@ void DevicesController::rebuildCoastCoreConfig()
         proxiesYaml = readFileText(QDir(m_configDir).filePath(QStringLiteral("subscribe.yaml")));
 
     // 模式 + 选中：从 ClashService 的当前快照读（无网络往返）。拿不到时按 Rule / 空处理 → 回退，安全。
-    const QString modeStr = m_clash ? m_clash->mode() : QString();
-    const QString selected = m_clash ? m_clash->selectedNode() : QString();
+    QString modeStr = m_clash ? m_clash->mode() : QString();
+    QString selected = m_clash ? m_clash->selectedNode() : QString();
+    // ★ 核心缺席时回放用户手选：REST 快照给不出值就读 selection.json。
+    //   少了这一步，核心一停「模式」退回 Rule、「选中节点」变空 —— 用户刚点的节点悄悄失效，
+    //   而 UI 上还显示着它选中，是那种「看着对、实际没生效」的坑。有核心时不走这里，行为不变。
+    if (modeStr.isEmpty() || selected.isEmpty()) {
+        QFile sf(selectionPath(m_configDir));
+        if (sf.open(QIODevice::ReadOnly)) {
+            const QJsonObject o = QJsonDocument::fromJson(sf.readAll()).object();
+            sf.close();
+            if (modeStr.isEmpty())
+                modeStr = o.value(QStringLiteral("mode")).toString();
+            if (selected.isEmpty())
+                selected = o.value(QStringLiteral("selected")).toString();
+        }
+    }
     ProxyConfig::Mode mode = ProxyConfig::Mode::Rule;
     if (modeStr.compare(QStringLiteral("Global"), Qt::CaseInsensitive) == 0)
         mode = ProxyConfig::Mode::Global;

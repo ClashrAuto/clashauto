@@ -119,6 +119,15 @@ public:
     // 所以拿一次存起来是安全的。
     std::shared_ptr<ProxyConfigStore> proxyConfigStore() const { return m_pcfgStore; }
     std::shared_ptr<RuleEngine> ruleEngine() const { return m_ruleEngine; }
+
+    // 用户在 UI 上的手选**落盘**，供核心缺席时重放。
+    //
+    // ★ 为什么必须落盘：选中节点(selected)与模式(mode)平时都读自 ClashService 的 REST 快照 ——
+    //   核心一停两者皆空，于是进程内引擎退回「Rule + 无选中」，用户刚点的节点悄悄失效。
+    //   组→叶子映射（groupmap.json）此前已经落盘了，缺的正是这两个标量。
+    // ★ 有核心时以核心为准，行为不变：这两份只在 REST 快照给不出值时才被读。
+    void noteUserSelection(const QString &group, const QString &leaf);
+    void noteUserMode(const QString &mode);
     bool coastCoreStrict() const { return m_coastStrict; }
     bool localInboundEnabled() const { return m_inboundPort > 0; }
     int localInboundPort() const { return kLocalInboundPort; }

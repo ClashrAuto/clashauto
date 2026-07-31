@@ -422,6 +422,8 @@ void QmlBridge::setMode(const QString &display)
 {
     if (m_clash)
         m_clash->setMode(display); // ClashService 内部把中文/英文都映射成 Rule/Global/Direct
+    if (m_devices)
+        m_devices->noteUserMode(display); // 同 selectNode：核心缺席时靠它重放
     if (display != m_mode) {
         m_mode = display;
         emit modeChanged();
@@ -432,6 +434,11 @@ void QmlBridge::selectNode(const QString &rawName)
 {
     if (m_clash)
         m_clash->selectNode(rawName);
+    // ★ 同时把手选**落盘**给进程内引擎。核心在时这只是记一笔（引擎仍以核心的映射为准，行为不变）；
+    //   核心不在时它就是唯一的依据 —— 否则用户点了节点，UI 显示已选中，而进程内引擎还在用
+    //   「Rule + 无选中」，属于「看着对、实际没生效」。
+    if (m_devices)
+        m_devices->noteUserSelection(m_selectedGroup, rawName);
 }
 
 QString QmlBridge::spinnerGlyph() const
