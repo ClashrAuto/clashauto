@@ -22,6 +22,9 @@ struct MainView: View {
                     .padding(.trailing, theme.inset)
                 footer
                     .frame(height: theme.footerHeight)
+                    // 页脚右侧同样让出 5（它和内容卡在同一列里，Qt 那边这 5 是加在整列上的）。
+                    // 左侧**不留内距** —— Qt 的注释写着「底部状态栏左侧内容贴左对齐」。
+                    .padding(.trailing, theme.inset)
             }
         }
         // mac 上窗体本身透明、露出毛玻璃（见 CoastApp 的 .background(.ultraThinMaterial)）
@@ -145,7 +148,6 @@ struct MainView: View {
             modePicker
                 .fixedSize()
         }
-        .padding(.horizontal, 8)
     }
 
     /// 模式切换。**按钮点开菜单**，不是下拉框。

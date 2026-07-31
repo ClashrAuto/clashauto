@@ -2032,3 +2032,24 @@ Qt 的 `restoreWindowPos`：有历史且仍可见就恢复，否则**贴着当�
 （`TrayController.swift:64`）；补回去就绿。
 
 `swift test` 308 全绿；`i18n_check.py` 248/248；persist check 7/7。
+
+
+## 2026-08-01(续二十一) · 页脚内距、整窗背景拖动
+
+`qml/Main.qml` 最后两处没对上的：
+
+1. **页脚的内距。** Qt 的页脚 `RowLayout` 是 `anchors.leftMargin: 0`（注释写着
+   「底部状态栏左侧内容贴左对齐」），右侧则跟着整列的 `Layout.rightMargin: Theme.inset`
+   让出 5。Swift 侧是「左右各 8、右侧一路顶到窗口边缘」。改成左 0 / 右 5。
+2. **整窗背景拖动。** Qt 在窗口里铺了一个 `z:-1` 的 `DragHandler`：按住任意
+   **非交互**的空白/文字/卡片背景就能拖动整窗（列表、下拉这些控件会先吃掉按下事件，
+   所以在它们身上拖不会移动窗口）。macOS 上的等价物是
+   `NSWindow.isMovableByWindowBackground = true` —— AppKit 的判据与 Qt 那套
+   「不夺取的 grabPermissions」是同一个效果。此前只有标题栏那一条能拖。
+
+⚠️ 拖动是交互，**没有真的拖一次验证**（脚本模拟拖拽没成功），只确认了开关已打开。
+
+★ 截图时机器正好切到了**浅色主题**，顺带把浅色下的整壳看了一遍：侧栏、选中项那块白底、
+六张卡、延迟色阶、页脚玻璃按钮都正常 —— 这是之前一直没验过的一面。
+
+`swift test` 308 全绿；`i18n_check.py` 248/248。

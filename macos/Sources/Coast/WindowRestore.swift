@@ -63,6 +63,12 @@ enum WindowRestore {
         //   `applicationShouldTerminateAfterLastWindowClosed` 又是 false（进程照样活着）——
         //   于是点一下红点，界面**再也回不来**（实测：关掉之后窗口数恒为 0，
         //   重新激活 app 也开不出来，只剩一个够不着的托盘进程）。
+        // 按住窗口任意「非交互」空白/文字/卡片背景即可拖动整窗 —— 对齐 `Main.qml` 里
+        // 那个铺满窗口、z:-1 的 `DragHandler`。列表 / 输入框 / 按钮会先吃掉按下事件，
+        // 所以在它们身上按住拖不会移动窗口，只有空白处才触发（AppKit 的判据与 Qt 那套
+        // 「不夺取的 grabPermissions」是同一个效果）。
+        window.isMovableByWindowBackground = true
+
         let guardian = CloseGuard()
         closeGuard = guardian
         window.delegate = guardian
