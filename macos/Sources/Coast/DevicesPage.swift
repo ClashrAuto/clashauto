@@ -275,6 +275,7 @@ struct DevicesPage: View {
                           rejection: rejection(for: row),
                           sample: state.deviceTraffic.sample(ip: row.discovered.ip),
                           lastHost: lastHost(for: row),
+                          tick: state.pollTick,
                           onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
                           onOpenDetail: { openDetail(row) })
             }
@@ -362,6 +363,8 @@ private struct DeviceRow: View {
     var sample: DeviceTraffic.Sample = .empty
     /// 最后访问的地址（域名，没嗅探到就是目标 IP）。
     var lastHost = ""
+    /// 采样节拍，透传给背景那张流量图做连续左滑。
+    var tick: UInt64 = 0
     let onToggleProxy: (Bool) -> Void
     let onOpenDetail: () -> Void
 
@@ -427,7 +430,7 @@ private struct DeviceRow: View {
                 // 画出来永远是一条贴底的 0 线。速率是 0 也照画 —— 那正是
                 // 「已接管、此刻闲着」的样子，不是「没数据」。
                 if row.proxyEnabled {
-                    DeviceTrafficBg(up: sample.upHistory, down: sample.downHistory)
+                    DeviceTrafficBg(up: sample.upHistory, down: sample.downHistory, tick: tick)
                 }
             }
         }
@@ -558,6 +561,11 @@ private struct DeviceRow: View {
 struct DeviceTrafficBg: View {
     let up: [Double]
     let down: [Double]
+    /// 采样节拍。与 `BandwidthChart` 同理：曲线**连续左滑**，
+    /// 而不是每来一个样本整条跳一格（QML 那份注释专门讲了这件事）。
+    var tick: UInt64 = 0
+
+    @State private var lastPush = Date()
 
     /// 量程下限 128 KB/s。
     private static let floorScale = 131_072.0
@@ -568,45 +576,54 @@ struct DeviceTrafficBg: View {
     }
 
     var body: some View {
-        ZStack {
-            area(down, color: Color(hex: 0x5B_B4_4B))
-            area(up, color: Color(hex: 0xB1_4A_4A))
+        // 50ms ≈ 20fps，与 QML 那个 `Timer { interval: 50 }` 同一档；只在行可见时才有开销
+        // （非代理行根本不实例化这个视图）。
+        TimelineView(.periodic(from: .now, by: 0.05)) { context in
+            let phase = min(1, max(0, context.date.timeIntervalSince(lastPush)))
+            ZStack {
+                area(down, color: Color(hex: 0x5B_B4_4B), phase: phase)
+                area(up, color: Color(hex: 0xB1_4A_4A), phase: phase)
+            }
         }
+        .clipped()
         .allowsHitTesting(false)
+        .onChange(of: tick) { _, _ in lastPush = Date() }
     }
 
-    private func area(_ samples: [Double], color: Color) -> some View {
+    private func area(_ samples: [Double], color: Color, phase: Double) -> some View {
         GeometryReader { geo in
-            let path = areaPath(samples, in: geo.size)
+            let path = areaPath(samples, in: geo.size, phase: phase)
             ZStack {
                 path.fill(LinearGradient(colors: [color.opacity(0.22), color.opacity(0.02)],
                                          startPoint: .top, endPoint: .bottom))
-                strokePath(samples, in: geo.size).stroke(color.opacity(0.55), lineWidth: 1)
+                strokePath(samples, in: geo.size, phase: phase).stroke(color.opacity(0.55), lineWidth: 1)
             }
         }
     }
 
-    private func points(_ samples: [Double], in size: CGSize) -> [CGPoint] {
+    private func points(_ samples: [Double], in size: CGSize, phase: Double) -> [CGPoint] {
         guard samples.count > 1 else { return [] }
         let usable = size.height * Self.headroom
-        let dx = size.width / CGFloat(samples.count - 1)
+        // 多留一格给「滑进来的那一点」，否则最后一点滑到位时右边会空出一条缝。
+        let dx = size.width / CGFloat(samples.count - 2 > 0 ? samples.count - 2 : 1)
+        let shift = dx * CGFloat(phase)
         return samples.enumerated().map { index, value in
-            CGPoint(x: CGFloat(index) * dx,
+            CGPoint(x: CGFloat(index) * dx - shift,
                     y: size.height - usable * CGFloat(min(1, value / scale)))
         }
     }
 
-    private func strokePath(_ samples: [Double], in size: CGSize) -> Path {
+    private func strokePath(_ samples: [Double], in size: CGSize, phase: Double) -> Path {
         var path = Path()
-        let pts = points(samples, in: size)
+        let pts = points(samples, in: size, phase: phase)
         guard let first = pts.first else { return path }
         path.move(to: first)
         for point in pts.dropFirst() { path.addLine(to: point) }
         return path
     }
 
-    private func areaPath(_ samples: [Double], in size: CGSize) -> Path {
-        var path = strokePath(samples, in: size)
+    private func areaPath(_ samples: [Double], in size: CGSize, phase: Double) -> Path {
+        var path = strokePath(samples, in: size, phase: phase)
         guard !path.isEmpty else { return path }
         path.addLine(to: CGPoint(x: size.width, y: size.height))
         path.addLine(to: CGPoint(x: 0, y: size.height))

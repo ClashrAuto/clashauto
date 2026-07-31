@@ -241,6 +241,13 @@ public final class AppState {
     public var connectionsCount: Int { clash.connectionsCount }
     public var totalDownText: String { Formatting.bytes(clash.downloadTotal) }
 
+    /// 采样节拍。每推进一拍就 +1 —— 带宽折线靠它知道「新点是什么时候进来的」，
+    /// 才能把整条曲线**连续左滑**过去，而不是每来一个样本整条跳一格。
+    ///
+    /// 用计数器而不是让视图自己比对数组：数组到了上限之后长度不再变，`onChange(of:count)`
+    /// 从此再也不触发；而末位的值经常连着好几拍都是 0，比值也认不出「来了新的一拍」。
+    public private(set) var pollTick: UInt64 = 0
+
     /// 带宽图的采样序列。只留最近 60 拍（约 1 分钟），图上也就画这么多。
     public private(set) var bandwidthSamples: [(up: Double, down: Double)] = []
     private static let bandwidthWindow = 60
@@ -468,6 +475,7 @@ public final class AppState {
         Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                self.pollTick &+= 1
                 self.bandwidthSamples.append((Double(self.clash.up), Double(self.clash.down)))
                 if self.bandwidthSamples.count > Self.bandwidthWindow {
                     self.bandwidthSamples.removeFirst(self.bandwidthSamples.count - Self.bandwidthWindow)

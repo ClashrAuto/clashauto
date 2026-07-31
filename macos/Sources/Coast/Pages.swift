@@ -41,11 +41,13 @@ struct StatusPage: View {
                     TrafficCard(symbol: "arrow.up.square", title: "上传".t,
                                 value: state.upText,
                                 accent: theme.uploadAccent,
-                                samples: state.bandwidthSamples.map(\.up))
+                                samples: state.bandwidthSamples.map(\.up),
+                                tick: state.pollTick)
                     TrafficCard(symbol: "arrow.down.square", title: "下载".t,
                                 value: state.downText,
                                 accent: theme.downloadAccent,
-                                samples: state.bandwidthSamples.map(\.down))
+                                samples: state.bandwidthSamples.map(\.down),
+                                tick: state.pollTick)
                 }
                 HStack(spacing: 10) {
                     ConnectionsCard(recent: recentRows,

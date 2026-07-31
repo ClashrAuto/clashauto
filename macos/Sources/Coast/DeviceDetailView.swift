@@ -211,7 +211,8 @@ struct DeviceDetailView: View {
             // 曲线一顿一顿）。这里的数据源 `downHistory` 本来就是每拍推一个点，节奏天然是稳的。
             BandwidthChart(samples: sample.downHistory,
                            title: "下载".t,
-                           lineColor: Color(hex: 0x5B_B4_4B))
+                           lineColor: Color(hex: 0x5B_B4_4B),
+                           tick: state.pollTick)
                 .frame(height: 90)
 
             // 会话 / 今日 / 累计三块**定宽**，窗口一窄要能折行（Qt 用的是 Flow，
