@@ -46,10 +46,12 @@ struct AppConfig {
     // 代价是这些连接会断，所以单独一个开关。（config.yaml 键 `coastcore_strict`）
     bool coastcoreStrict = false;
 
-    // 本机 HTTP/SOCKS 混合入站的监听端口（回环）。**0 = 关闭**（默认，零行为变化）。
-    // 打开后本机流量可以直接指向它，走**进程内引擎**而不是 mihomo —— 这是 CoastCore 的第二个
-    // 入口（第一个是局域网网关）。在此之前进程内出站只服务被代理的设备，本机自己 100% 走 mihomo。
-    // 与 mihomo 的混合端口（`port`，默认 7890）**并存**，便于同机 A/B 对比两个引擎。
+    // 本机 HTTP/SOCKS 混合入站（回环）。**0 = 关闭**（默认，零行为变化）；**>0 = 开启**。
+    // ★ 语义（端口换位后）：这个值只当**开关**用，实际监听端口一律取 `mixedPort`（`port:`，默认
+    //   7890）—— 系统代理指向的端口不用变，本机流量就整个走**进程内引擎**；mihomo 的 mixed-port
+    //   同时挪到 `mixedPort+1`，只作为进程内不支持的节点（grpc/salamander/tuic…）的回退出口。
+    //   两个端口都由 `port:` 推导，用户改 `port:` 两边跟着走，不再写死 7890/7891。
+    //   （早期语义是「并存的第二端口 7891」——旧配置里写的具体数字现在只表示「开」。）
     // 只有 coastcore 开着时才有意义（关着时没有可用的配置快照）。（config.yaml 键 `coastcore_inbound`）
     int coastcoreInboundPort = 0;
     QString language = "zh-CN";

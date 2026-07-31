@@ -15,10 +15,15 @@
 #include "../net/Socks5Client.h"             // Socks5OutboundFactory：入站的回退工厂
 #include "../net/core/RuleEngine.h"
 #include "../net/core/DnsResolver.h"         // DNS 旁听器（灰度：学核心 fake-ip → 域名）
+#include "../net/GatewayDiag.h"              // cc= 分项计数：本机入站「进程内 vs 回退」的唯一读数
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
+#include <QHostAddress>
 #include <QRegularExpression>
+#include <QTcpSocket>
 
 #include <cstdio>
 #include <QFile>
@@ -38,7 +43,10 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
                                     const AppConfig &config, QObject *parent)
     : QObject(parent), m_store(store), m_clash(clash), m_core(core), m_gateway(gateway),
       m_history(history), m_configDir(config.configDir), m_coastCore(config.coastcore),
-      m_coastStrict(config.coastcoreStrict), m_inboundPort(config.coastcoreInboundPort),
+      // coastcore_inbound 只当**开关**用（>0=开）：实际监听端口一律归一成 mixedPort（端口换位，
+      // 见 startLocalInbound）。旧配置里写的 7891 之类具体数字在这里被吸收，不再各起各的端口。
+      m_coastStrict(config.coastcoreStrict),
+      m_inboundPort(config.coastcoreInboundPort > 0 ? config.mixedPort : 0),
       m_mixedPort(config.mixedPort)
 {
     m_scanner = new LanScanner(this);
@@ -164,37 +172,165 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
 //
 // 复用**同一个** ProxyConfigStore / RuleEngine 和**同一份**分流实现（coastcore::makeRouter），
 // 所以本机流量与网关流量的选路结果必然一致 —— 不存在「两套逻辑要同步」。
-// 端口 0 = 关（默认），与 mihomo 的混合端口并存，便于同机 A/B 对比两个引擎。
+//
+// ★ 端口换位（2026-07-31 起）：入站占 **mixedPort**（系统代理指向的那个口，不用改指向），
+//   mihomo 的 mixed-port 挪到 **mixedPort+1**，只作为进程内不支持的节点（grpc/salamander/tuic…）
+//   的回退出口。切换顺序是安全性的全部：
+//   ① 先试绑 mixedPort（核心没跑/没绑上时零窗口拿下）；
+//   ② 绑不上且核心在跑 → 先把核心挪到 mixedPort+1 并**确认新口起来**，再抢绑；
+//   ③ 还绑不上 = 端口在别的程序手里 → **回滚**核心回原端口，一切保持原样。
+//   任何失败路径都不允许停在「系统代理指着的端口没人听」——那等于整机断网。
 void DevicesController::startLocalInbound()
 {
-    if (m_localInbound || m_inboundPort <= 0 || !m_pcfgStore)
+    if (m_localInbound || m_inboundPort <= 0 || !m_pcfgStore || m_switching)
         return;
+    m_switching = true;
+    m_switchError.clear();
+
+    const bool swap = (m_inboundPort == m_mixedPort); // 现约定恒真；防御旧值走非换位路径
+    const int corePort = swap ? m_mixedPort + 1 : m_mixedPort; // mihomo（回退出口）所在的端口
+
     // 回退工厂 = 拨 mihomo 的混合端口（与网关那条路的「每设备 SOCKS」不同：本机没有设备身份）。
-    auto *factory = new CoreDialerFactory(m_pcfgStore.get(), new Socks5OutboundFactory(m_mixedPort));
+    // 换位后 mihomo 在 corePort —— 回退口必须跟着挪，否则「不支持的节点回退核心」整条断掉，
+    // 而那正是订阅里 reality+grpc / salamander 这些节点唯一的出路。
+    auto *factory = new CoreDialerFactory(
+        m_pcfgStore.get(), new Socks5OutboundFactory(static_cast<quint16>(corePort)));
     factory->setStrict(m_coastStrict);
     factory->setRouter(coastcore::makeRouter(m_pcfgStore, m_ruleEngine, false));
-    m_localInbound = new MixedInbound(factory, this);
-    m_localInboundFactory = factory; // MixedInbound 不持有工厂，得由我们管生命周期
-    if (!m_localInbound->listen(static_cast<quint16>(m_inboundPort))) {
-        qWarning() << "本机入站: 监听" << m_inboundPort << "失败（端口被占？）";
-        stopLocalInbound();
+    auto *inbound = new MixedInbound(factory, this);
+
+    // ① 先试绑：这就是「确认我们真能拿到端口」那一步。核心没跑（冷启动）或它其实没绑上
+    //   mixedPort（此前被别人占了）时，这里直接成功，全程零窗口。
+    bool listening = inbound->listen(static_cast<quint16>(m_inboundPort));
+    bool coreMoved = false;
+
+    if (!listening && swap && m_core && m_core->isRunning()) {
+        // ② 端口在别人手里，而核心正在跑 —— 大概率是 mihomo 按 full.yaml 绑着 mixed-port。
+        //    先把它挪到 corePort（重生成 full.yaml + PUT 热重载会重建 listener 完成换绑），
+        //    **确认新口真的起来了**再去抢绑原端口。
+        qInfo() << "本机入站: 端口换位，先把核心 mixed-port 挪到" << corePort;
+        m_core->setCoreMixedPort(corePort);
+        m_core->rebuildConfig();
+        coreMoved = true;
+        if (!waitTcpPortOpen(static_cast<quint16>(corePort), 6000)) {
+            // 热重载没把新口立起来（核心版本不支持端口热换绑？）→ 重启核心兜底。
+            qWarning() << "本机入站: 热重载后" << corePort << "未就绪，重启核心兜底";
+            m_core->stopCore();
+            m_core->startCore();
+            waitTcpPortOpen(static_cast<quint16>(corePort), 8000);
+        }
+        // mihomo 已让出 mixedPort → 抢绑（旧 listener 的释放可能略滞后，重试 ~3s）。
+        // 20ms 粒度重试：核心释放端口到我们接手之间是**唯一**一段「7890 无人监听」的窗口
+        //（那期间新连接会被拒），粒度就是窗口长度的上界，所以别用 100ms 这种省事的值。
+        QElapsedTimer t;
+        t.start();
+        while (!listening && t.elapsed() < 3000) {
+            listening = inbound->listen(static_cast<quint16>(m_inboundPort));
+            if (!listening)
+                QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 20);
+        }
+        if (!listening) {
+            // ③ 核心让出来了还绑不上 = 端口在**别的程序**手里。回滚：核心退回原端口，
+            //    一切保持原样。绝不停在「核心在 corePort、系统代理指着的 mixedPort 没人听」。
+            m_core->setCoreMixedPort(0);
+            m_core->rebuildConfig();
+            // 注意措辞：这里只能确认「原端口有人应答」，**不能**断定应答者就是核心 —— 抢走端口的
+            //   那个程序同样会应答。要紧的不变量恰恰是「有人服务」，不是「谁在服务」。
+            const bool served = waitTcpPortOpen(static_cast<quint16>(m_mixedPort), 6000);
+            coreMoved = false;
+            qWarning() << "本机入站: 端口" << m_inboundPort << "被其他程序占用，已回滚"
+                       << (served ? "（原端口仍有人服务）"
+                                  : "（⚠ 原端口无人应答——核心回绑失败且占用者也不在了）");
+        }
+    }
+
+    if (!listening) {
+        m_switchError = QStringLiteral("端口 %1 被其他程序占用，未切换（原持有者继续服务）")
+                            .arg(m_inboundPort);
+        emit gatewayError(m_switchError);
+        delete inbound; // 从未监听成功，无会话在途
+        delete factory;
+        m_inboundPort = 0; // 运行态归零：开关必须反映真实状态（配置里的意图由调用方决定去留）
+        m_switching = false;
+        emit localInboundEnabledChanged();
+        emit localInboundStatusChanged();
+        emit allInProcessChanged();
         return;
     }
+
+    m_localInbound = inbound;
+    m_localInboundFactory = factory; // MixedInbound 不持有工厂，得由我们管生命周期
+
+    if (swap && m_core) {
+        // 让核心（正在跑的和**下一次启动的**）都知道 mixed-port 已挪位。冷启动路径全靠这一行：
+        // 构造函数 → startLocalInbound（此刻核心还没起）→ 600ms 后 autoStartCore →
+        // startCore 里 ensureFullConfig 才写 full.yaml —— mixed-port 必须在那之前定好（时序要求）。
+        m_core->setCoreMixedPort(corePort);
+        if (!coreMoved && m_core->isRunning())
+            m_core->rebuildConfig(); // 首绑就成功但核心在跑 = 它本来就没绑上 mixedPort，把配置也挪正
+    }
+
     qInfo() << "本机入站: HTTP/SOCKS 已在 127.0.0.1:" << m_inboundPort
-            << "启用（进程内引擎；回退端口" << m_mixedPort << "）";
-    // ★ 只在 listen **成功之后**才告诉 CoreController —— 系统代理据此改指这个端口，
-    //   于是本机应用的流量也走进程内引擎。用「确实在听」而不是「配置里写了」做依据，
-    //   否则端口被占时会把系统代理指到没人监听的端口上 = 本机直接断网。
+            << "启用（进程内引擎；核心回退口" << corePort << "）";
+    // ★ 只在 listen **成功之后**才告诉 CoreController。端口换位下系统代理本来就指 mixedPort，
+    //   指向不变；这行让 proxyPort() 的内部状态与实况一致（非换位的旧路径仍靠它改指向）。
     if (m_core)
         m_core->setLocalInboundPort(m_inboundPort);
     // 读数刷新：只在入站开着时跑，关掉就停（别让一个 1s 定时器白白常驻）。
     if (!m_inboundStatTimer) {
         m_inboundStatTimer = new QTimer(this);
         m_inboundStatTimer->setInterval(1000);
-        connect(m_inboundStatTimer, &QTimer::timeout, this,
-                [this] { emit localInboundStatusChanged(); });
+        connect(m_inboundStatTimer, &QTimer::timeout, this, [this] {
+            emit localInboundStatusChanged();
+            // ★ 本机入站这条路**没有任何「进程内 vs 回退核心」的读数**：GatewayDiag 的采样由
+            //   NetStack 的泵驱动，而本机入站根本没有 NetStack。于是「切过去了，但真的是我们
+            //   在拨吗」只能靠猜 —— 测试也就无法证伪（curl 200 在回退核心时同样成立）。
+            //   COAST_INBOUND_VERBOSE=1 时按变化打一行分项计数，让这个问题有直接答案。
+            static const bool verbose = qEnvironmentVariableIsSet("COAST_INBOUND_VERBOSE");
+            if (!verbose)
+                return;
+            const auto &c = GatewayDiag::c;
+            static qint64 last = -1;
+            const qint64 sum = c.ccInProcess + c.fbNoRoute + c.fbNodeMissing + c.fbProtoMissing
+                               + c.fbUdpUnsupported + c.ccStrictRefused;
+            if (sum == last)
+                return;
+            last = sum;
+            std::fprintf(stderr,
+                         "[INBOUND] cc=%lld/%lld/%lld/%lld/%lld/%lld "
+                         "(进程内/无路由/无节点/缺协议/UDP不支持/严格拒绝) sessions=%d/%llu\n",
+                         static_cast<long long>(c.ccInProcess), static_cast<long long>(c.fbNoRoute),
+                         static_cast<long long>(c.fbNodeMissing),
+                         static_cast<long long>(c.fbProtoMissing),
+                         static_cast<long long>(c.fbUdpUnsupported),
+                         static_cast<long long>(c.ccStrictRefused),
+                         m_localInbound ? m_localInbound->activeSessions() : 0,
+                         static_cast<unsigned long long>(m_localInbound ? m_localInbound->totalSessions() : 0));
+            std::fflush(stderr);
+        });
     }
     m_inboundStatTimer->start();
+    m_switching = false;
+    emit allInProcessChanged();
+}
+
+// 等 127.0.0.1:port 能接受 TCP 连接（核心换绑端口后的确认）。期间用 ExcludeUserInputEvents
+// 泵事件循环 —— rebuildConfig 的 PUT /configs 得经事件循环才发得出去；用户输入被排除，
+// 切换过程不会被再点一次开关打断（另有 m_switching 双保险）。
+bool DevicesController::waitTcpPortOpen(quint16 port, int timeoutMs)
+{
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < timeoutMs) {
+        QCoreApplication::processEvents(QEventLoop::ExcludeUserInputEvents, 50);
+        QTcpSocket probe;
+        probe.connectToHost(QHostAddress::LocalHost, port);
+        if (probe.waitForConnected(250)) {
+            probe.abort();
+            return true;
+        }
+    }
+    return false;
 }
 
 // 「策略组 → 叶子」的落盘缓存。**这是让用户手选在核心缺席时不丢的唯一办法。**
@@ -256,9 +392,32 @@ QString DevicesController::localInboundStatus() const
         .arg(human(m_localInbound->bytesUp()), human(m_localInbound->bytesDown()));
 }
 
-void DevicesController::stopLocalInbound()
+// 反向切回。端口换位模式下顺序同样是安全性的全部：先停入站（mixedPort 释放）→ 把核心的
+// mixed-port 换回 mixedPort 并**确认它真的接手了**（系统代理一直指着这个口）→ 接不回来就把
+// 入站抢回来继续服务。宁可停在「仍是进程内」，也绝不留一个「系统代理指着空端口」的终态。
+bool DevicesController::stopLocalInbound(bool restoreCore)
 {
-    // 先把系统代理改回核心端口，再拆入站——顺序反了会留一个「代理指着已关端口」的窗口。
+    const bool swap = m_localInbound && m_localInbound->boundPort() == m_mixedPort;
+    // ★★ 放手之前先问一句「有没有人能接」。核心既没在跑、又没装（下载失败/被删）时，放手 =
+    //     mixedPort 从此无人监听，而系统代理正指着它 —— 本机直接断网。这种情况**拒绝切回**，
+    //     保持进程内入站继续服务并把原因摆出来（开关随之留在「开」，与真实状态一致）。
+    if (swap && restoreCore && m_core && !m_core->isRunning() && !m_core->isCoreInstalled()) {
+        m_switchError = QStringLiteral("mihomo 内核不可用，无法把端口 %1 交还——已保持进程内入站")
+                            .arg(m_mixedPort);
+        qWarning() << m_switchError;
+        emit gatewayError(m_switchError);
+        emit allInProcessChanged();
+        return false; // 调用方须放弃整个关闭动作（见头文件）
+    }
+    // ★ 把「生成 full.yaml + mihomo -t 校验」提前到**入站还在服务**的此刻做完（见
+    //   CoreController::prewarmConfig）：7890 的无人监听窗口 = 我们放手 → 核心接手，
+    //   而那次校验子进程原本正落在窗口里，真机实测让窗口长达约 1 秒。
+    if (swap && m_core && restoreCore && m_core->isRunning()) {
+        m_core->setCoreMixedPort(0);
+        m_core->prewarmConfig();
+    }
+    // 换位模式下 proxyPort() 换手前后都是 mixedPort（系统代理指向不变），这行只是内部状态归位；
+    // 旧的非换位路径仍靠它把系统代理从入站口改回核心口 —— 顺序必须在拆入站之前。
     if (m_core && m_localInbound)
         m_core->setLocalInboundPort(0);
     if (m_inboundStatTimer)
@@ -270,11 +429,50 @@ void DevicesController::stopLocalInbound()
     }
     delete m_localInboundFactory; // 必须在入站销毁之后：在途连接的出站对象由工厂造出
     m_localInboundFactory = nullptr;
+
+    if (swap && m_core) {
+        m_core->setCoreMixedPort(0); // 下一次 ensureFullConfig（含冷启动）就写回 mixedPort
+        if (restoreCore) {
+            m_switching = true;
+            bool ok = false;
+            if (m_core->isRunning()) {
+                m_core->rebuildConfig(); // full.yaml 回 mixedPort + force 热重载换绑
+                ok = waitTcpPortOpen(static_cast<quint16>(m_mixedPort), 6000);
+            }
+            if (!ok) {
+                // 核心没在跑（用户停过/崩了）或热重载没换绑成功 —— 起/重启它。**不做无谓的等待**：
+                // 没在跑时直接启动，别先白等 6 秒（那 6 秒里 mixedPort 是空的）。
+                qWarning() << "本机入站: 核心未接回" << m_mixedPort << "，重启核心兜底";
+                if (m_core->isRunning())
+                    m_core->stopCore();
+                m_core->startCore();
+                ok = waitTcpPortOpen(static_cast<quint16>(m_mixedPort), 8000);
+            }
+            m_switching = false;
+            if (!ok) {
+                // 核心接不回端口（第三方趁窗口抢了？核心起不来？）——回抢端口继续服务。
+                m_switchError = QStringLiteral("核心未能接回端口 %1，已恢复进程内入站继续服务")
+                                    .arg(m_mixedPort);
+                qWarning() << m_switchError;
+                emit gatewayError(m_switchError);
+                m_inboundPort = m_mixedPort;
+                startLocalInbound();
+                persistLocalInbound(m_inboundPort); // 与真实状态保持一致
+                emit localInboundEnabledChanged();
+            }
+        }
+    }
+    emit localInboundStatusChanged();
+    emit allInProcessChanged();
+    // 入站被「抢回来继续服务」时同样算没停成 —— 调用方据此保持开关为「开」。
+    return m_localInbound == nullptr;
 }
 
 DevicesController::~DevicesController()
 {
-    stopLocalInbound(); // m_localInbound 有 parent 会自动收，但工厂是裸指针，且必须晚于入站销毁
+    // 退出路径不做「归还端口 + 等核心接手」那套（核心马上要整个停掉，白等几秒拖慢退出）；
+    // 只拆入站与工厂。下次冷启动会按 config 里的意图重新走完整时序。
+    stopLocalInbound(false); // m_localInbound 有 parent 会自动收，但工厂是裸指针，且必须晚于入站销毁
 }
 
 bool DevicesController::hasProxiedDevices() const
@@ -1299,22 +1497,77 @@ void DevicesController::persistCoastCore(bool on)
     }
 }
 
-// 本机入站开关：写 config.yaml 的 coastcore_inbound（端口号，0=关），并即时起/停。
+// 本机入站开关：写 config.yaml 的 coastcore_inbound（>0=开，0=关），并即时起/停（含端口换位）。
 // 只有 coastcore 本身开着时才真正监听 —— 关着时没有可用的出站配置快照，监听了也只能全回退。
 void DevicesController::setLocalInboundEnabled(bool on)
 {
-    const int want = on ? kLocalInboundPort : 0;
-    if (want == m_inboundPort)
+    if (m_switching)
+        return; // 换位进行中（等端口时会泵事件循环），不接受再入
+    const int want = on ? m_mixedPort : 0; // 端口由 `port:` 推导，不再写死
+    if (want == m_inboundPort && (!on || (m_localInbound && m_localInbound->isListening())))
         return;
     m_inboundPort = want;
-    persistLocalInbound(want);
     if (m_coastCore) {
-        if (on)
+        if (on) {
             startLocalInbound();
-        else
-            stopLocalInbound();
+        } else if (!stopLocalInbound()) {
+            // 拒绝停止（核心不可用，端口交出去没人接）→ 整件事作废，状态回到「开着」。
+            m_inboundPort = m_mixedPort;
+            emit localInboundEnabledChanged();
+            return;
+        }
     }
+    // 持久化**结果**而不是意图：切换失败时 startLocalInbound 已把 m_inboundPort 归零（或
+    // stopLocalInbound 的回抢把它复位），照实写回 —— 配置、开关、真实监听三者永远一致。
+    persistLocalInbound(m_inboundPort);
     emit localInboundEnabledChanged();
+}
+
+// ———————————— 设置页总开关：「全部切换到进程内」 ————————————
+// 开 = coastcore（网关数据面）+ 本机入站（端口换位）一起开；strict 不动 —— 回退核心是这次
+// 切换的安全网（订阅里 grpc/salamander/tuic 那些进程内不支持的节点仍要靠它）。
+// 关 = 全部回落 mihomo：入站停、端口归还（核心回 mixedPort）、网关数据面也回核心。
+// 读值 allInProcess() 反映**真实状态**（入站确实在听），失败时 QML 开关自然回弹。
+bool DevicesController::allInProcess() const
+{
+    return m_coastCore && m_localInbound && m_localInbound->isListening();
+}
+
+void DevicesController::setAllInProcess(bool on)
+{
+    if (m_switching || on == allInProcess()) {
+        emit allInProcessChanged(); // 把开关顶回真实状态（切换中/已是目标态时点了也不动作）
+        return;
+    }
+    m_switchError.clear();
+    if (on) {
+        const bool coastCoreBefore = m_coastCore;
+        if (m_inboundPort != m_mixedPort) {
+            m_inboundPort = m_mixedPort;
+            emit localInboundEnabledChanged();
+        }
+        if (!m_coastCore)
+            setCoastCoreEnabled(true); // 会顺带 startLocalInbound（m_inboundPort 已就位）
+        else
+            startLocalInbound();
+        // 持久化结果：成功 = mixedPort，失败 = 0（startLocalInbound 已把运行态归零）。
+        persistLocalInbound(m_inboundPort);
+        // ★ 「别留半截状态」：入站没起来（端口被占）就把总开关整体回滚，包括这次顺带打开的
+        //   coastcore —— 否则用户看到开关弹回去，网关那条数据面却已经悄悄换了实现。
+        if (!allInProcess() && !coastCoreBefore && m_coastCore)
+            setCoastCoreEnabled(false);
+    } else {
+        if (m_inboundPort > 0 || m_localInbound) {
+            setLocalInboundEnabled(false); // 停入站 + 端口归还核心（含确认与回抢）
+            if (m_localInbound) {          // 被拒（核心不可用）→ 整体不关，保持进程内继续服务
+                emit allInProcessChanged();
+                return;
+            }
+        }
+        if (m_coastCore)
+            setCoastCoreEnabled(false); // 网关数据面回落 mihomo
+    }
+    emit allInProcessChanged();
 }
 
 void DevicesController::persistLocalInbound(int port)
@@ -1362,19 +1615,26 @@ void DevicesController::persistCoastCoreStrict(bool on)
 
 void DevicesController::setCoastCoreEnabled(bool on)
 {
-    if (on == m_coastCore)
+    if (on == m_coastCore || m_switching)
         return;
+    // 关闭时**先**把端口交还核心：交不回去就整体不关。顺序反了就会出现「开关显示关、
+    // 7890 还在我们手里、而快照/网关已经切回 mihomo」的半截状态。
+    if (!on && !stopLocalInbound()) {
+        emit coastCoreEnabledChanged(); // 顶回真实状态（仍是开）
+        emit allInProcessChanged();
+        return;
+    }
     m_coastCore = on;
     persistCoastCore(on);
     rebuildCoastCoreConfig(); // 先把快照建好，再切开关，避免开的那一刻拿到空快照
     if (m_gateway)
         m_gateway->setCoastCore(on, m_coastStrict, m_pcfgStore, m_ruleEngine, m_dnsResolver);
     // 本机入站跟着总开关走：关掉 coastcore 就该退回「本机全走 mihomo」，否则开关名不副实。
+    // （关的那一路已在函数开头停过入站，这里只管开。）
     if (on)
         startLocalInbound();
-    else
-        stopLocalInbound();
     emit coastCoreEnabledChanged();
+    emit allInProcessChanged();
 }
 
 void DevicesController::setCoastCoreStrict(bool on)

@@ -13,6 +13,12 @@ public:
     QString ensureFullConfig(bool tunEnabled);
     bool writeTunEnabled(const QString &filePath, bool enabled) const;
 
+    // 「全部切换到进程内」的端口换位：进程内入站占走 mixedPort 时，核心的 mixed-port 要挪到
+    // 别的端口（mixedPort+1，只作回退出口）。>0 = 覆盖 full.yaml 里写的 mixed-port；0 = 还原为
+    // m_config.mixedPort。只影响**下一次** ensureFullConfig 的产物，调用方负责热重载/重启核心。
+    void setCoreMixedPort(int port) { m_coreMixedPort = port; }
+    int coreMixedPort() const { return m_coreMixedPort > 0 ? m_coreMixedPort : m_config.mixedPort; }
+
     // 从 YAML 文本提取全部节点名 / 策略组名。静态公开：规则编辑器「节点」下拉
     // 需要读 full.yaml 列出全部候选（SettingsController::proxyGroupNames）。
     static QStringList proxyNames(const QString &yaml);
@@ -59,4 +65,5 @@ private:
     static QString yamlScalar(const QString &line); // 静态：供上面两个静态解析函数调用
 
     AppConfig m_config;
+    int m_coreMixedPort = 0; // >0 = 覆盖核心的 mixed-port（端口换位时 = mixedPort+1），见 setCoreMixedPort
 };

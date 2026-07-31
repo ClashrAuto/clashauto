@@ -548,29 +548,39 @@ Item {
                             icon: ""
                             title: qsTr("网关")
 
-                            SettingRow { label: qsTr("进程内内核（实验）")
-                                ThemedSwitch { id: coastCoreSwitch; checked: devices.coastCoreEnabled
-                                    onToggled: devices.setCoastCoreEnabled(checked) } }
+                            SettingRow { label: qsTr("全部切换到进程内")
+                                // 本机入站的实时读数（这条流量不经 mihomo，连接列表/流量图都看不到它）。
+                                Text { text: devices.localInboundStatus; color: Theme.textMuted
+                                    font.pixelSize: 11; visible: text.length > 0
+                                    Layout.preferredWidth: 210; elide: Text.ElideRight }
+                                ThemedSwitch { id: allInProcSwitch
+                                    checked: devices.allInProcess
+                                    onToggled: devices.setAllInProcess(checked) }
+                                // 开关必须反映**真实状态**而不是意图：切换失败时后端不改状态、
+                                // 只发 allInProcessChanged —— 这里把开关顶回实况（点击会掐断
+                                // 声明式绑定，必须显式回写，同 QmlBridge::refreshStatusFromCore 的教训）。
+                                Connections { target: devices
+                                    function onAllInProcessChanged() {
+                                        allInProcSwitch.checked = devices.allInProcess
+                                    } } }
+                            // 切换失败的原因：别让开关无声无息弹回去。
+                            Label { visible: devices.allInProcessError.length > 0
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                                color: Theme.danger
+                                font.pixelSize: 11
+                                text: devices.allInProcessError }
                             SettingRow { label: qsTr("严格模式（不回退到 mihomo）")
                                 ThemedSwitch { id: coastStrictSwitch; enabled: devices.coastCoreEnabled
                                     checked: devices.coastCoreStrict
                                     onToggled: devices.setCoastCoreStrict(checked) } }
-                            SettingRow { label: qsTr("本机代理入口（127.0.0.1:%1）").arg(devices.localInboundPort)
-                                // 这条流量不经过 mihomo，所以连接列表/流量图都看不到它 —— 这里给个读数，
-                                // 否则用户开了开关只能盲信。
-                                Text { text: devices.localInboundStatus; color: Theme.textMuted
-                                    font.pixelSize: 11; visible: text.length > 0
-                                    Layout.preferredWidth: 210; elide: Text.ElideRight }
-                                ThemedSwitch { id: localInboundSwitch; enabled: devices.coastCoreEnabled
-                                    checked: devices.localInboundEnabled
-                                    onToggled: devices.setLocalInboundEnabled(checked) } }
                             Label {
                                 Layout.fillWidth: true
                                 Layout.topMargin: 2
                                 wrapMode: Text.WordWrap
                                 color: Theme.textMuted
                                 font.pixelSize: 11
-                                text: qsTr("开启后网关这条数据面（DNS + TCP + UDP）整条都在本进程内跑，不再经过 mihomo：直连/全局/规则三种模式都在进程内分流，设备的 DNS 也由本程序直接应答。个别判不了的情形（协议未编入、规则需先解析 IP）仍会回退 mihomo，回退次数与原因见日志的 cc= 一栏。\n严格模式：连这些也不回退，直接让该连接失败——用来暴露「还差什么」，代价是那些连接会断。默认两个都关闭时行为不变（网关全走核心）。\n本机代理入口：在回环上多开一个 HTTP/SOCKS5 混合端口，走的是同一套进程内分流与出站。它与 mihomo 的 %1 端口**并存**，把浏览器/终端指过去即可对比两个引擎。").arg(settings.mixedPort)
+                                text: qsTr("打开后本机与网关的流量整条切到进程内引擎：系统代理照旧指向 %1（该端口改由本程序监听），mihomo 挪到 %2 只作为回退出口 —— 进程内暂不支持的节点（grpc / salamander 混淆 / tuic 等）仍会自动经它出站，所以保持它在跑。关闭则全部回落 mihomo，端口还原。\n严格模式：判不了的连接不回退、直接失败——用来暴露「还差什么」，日常请保持关闭。").arg(settings.mixedPort).arg(settings.mixedPort + 1)
                             }
                         }
 

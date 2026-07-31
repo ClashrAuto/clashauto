@@ -486,6 +486,29 @@ void CoreController::setUiPort(int port)
     // ConfigBuilder 持有 AppConfig 副本，用新端口重建它；下次 ensureFullConfig 会把
     // external-controller 写成 host:新端口。CoreController 自身的 /configs 调用也走新端口。
     m_configBuilder = ConfigBuilder(m_config);
+    // 重建 builder 会丢掉端口换位的覆盖值——补回去，否则改一次 API 端口就把核心悄悄挪回
+    // mixedPort、与正占着它的进程内入站相撞。
+    m_configBuilder.setCoreMixedPort(m_coreMixedPort);
+}
+
+void CoreController::setCoreMixedPort(int port)
+{
+    m_coreMixedPort = port > 0 ? port : 0;
+    m_configBuilder.setCoreMixedPort(m_coreMixedPort);
+    // 换回 0（还原）那一次也必须 force —— 此刻核心还听在换位端口上，非 force 重载不会把它搬回来。
+    m_forceNextReload = true;
+    m_prevalidatedPath.clear(); // 端口变了，之前预校验过的那份已经不是要加载的内容
+}
+
+void CoreController::prewarmConfig()
+{
+    m_prevalidatedPath.clear();
+    m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
+    const QString exe = m_config.clashExecutable();
+    if (m_fullConfigPath.isEmpty() || !QFileInfo::exists(exe))
+        return;
+    if (runHidden(exe, {"-t", "-d", m_config.userDir, "-f", m_fullConfigPath}) == 0)
+        m_prevalidatedPath = m_fullConfigPath; // 紧随其后的 reloadConfig 可跳过重复校验
 }
 
 void CoreController::setTunEnabled(bool enabled)
@@ -568,7 +591,11 @@ void CoreController::rebuildConfig()
 {
     m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
     emit logUpdated(QString("Config generated: %1").arg(m_fullConfigPath));
-    reloadConfig();
+    // 端口换位期间（m_coreMixedPort>0，或刚换回 0 但核心还听在旧口上）必须 force：mixed-port 在
+    // general 段里，普通热重载压根不看它。非换位场景保持原样（force 会连 general 一起重载，
+    // 没必要在每次改规则/订阅时都动它）。
+    reloadConfig(m_coreMixedPort > 0 || m_forceNextReload);
+    m_forceNextReload = false;
 }
 
 // 系统代理机制自检：读 → 设 → 读回核对 → **还原**。理由见头文件。
@@ -736,7 +763,7 @@ void CoreController::stopProxy()
 #endif
 }
 
-void CoreController::reloadConfig()
+void CoreController::reloadConfig(bool force)
 {
     if (!isRunning() || m_fullConfigPath.isEmpty()) {
         return;
@@ -746,7 +773,11 @@ void CoreController::reloadConfig()
     // 保留当前正在运行的好配置，避免坏配置覆盖导致核心失效。核心 exe 缺失时跳过校验直接按原逻辑走
     // （别因缺核心反而不重载）。这是同步的短进程调用，reloadConfig 在 UI 线程被调用且频率低（设置/规则变更），可接受。
     const QString exe = m_config.clashExecutable();
-    if (QFileInfo::exists(exe)) {
+    // prewarmConfig() 刚刚校验过同一份文件时跳过这次子进程调用（端口换手窗口里省下的就是它，
+    // 见 prewarmConfig 的说明）。用完即弃，避免后续重载误跳过校验。
+    const bool prevalidated = !m_prevalidatedPath.isEmpty() && m_prevalidatedPath == m_fullConfigPath;
+    m_prevalidatedPath.clear();
+    if (!prevalidated && QFileInfo::exists(exe)) {
         const int rc = runHidden(exe, {"-t", "-d", m_config.userDir, "-f", m_fullConfigPath});
         if (rc != 0) {
             emit logUpdated(tr("配置校验未通过，已跳过热重载（保留当前运行配置）"));
@@ -756,7 +787,10 @@ void CoreController::reloadConfig()
 
     QJsonObject payload;
     payload.insert("path", m_fullConfigPath);
-    QNetworkRequest request(QUrl(QString("http://%1:%2/configs").arg(m_config.host).arg(m_config.uiPort)));
+    QNetworkRequest request(QUrl(QString("http://%1:%2/configs%3")
+                                     .arg(m_config.host)
+                                     .arg(m_config.uiPort)
+                                     .arg(force ? QStringLiteral("?force=true") : QString())));
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
     // external-controller 设了 secret 后，本 PUT 也必须带 Bearer，否则热重载 401（与 ClashService 同）
     if (!m_config.secret.isEmpty()) {

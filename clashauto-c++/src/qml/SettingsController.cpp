@@ -392,6 +392,23 @@ void SettingsController::apply(const QString &host, int uiPort, int mixedPort, b
 {
     // 整表写 config.yaml —— 字段/顺序严格对齐 Widgets buildSettingsPage() 的保存 lambda。
     const QString path = userConfigPath();
+    // ★ 整表重写会抹掉不属于本表单的键。这些键分别由 DevicesController（coastcore*）与
+    //   AppConfigLoader（secret，首启随机生成）落盘：丢了 secret 下次启动会重新生成一个，而正在
+    //   跑的核心还认旧的 → REST 全部 401；丢了 coastcore_inbound 会把「全部切换到进程内」悄悄
+    //   关掉（用户没碰它，点了一次「应用」它就没了）。先把现值捞出来，写完表单原样补回。
+    QStringList preserved;
+    {
+        QFile in(path);
+        if (in.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            static const QRegularExpression keep(
+                QStringLiteral("^(secret|coastcore|coastcore_strict|coastcore_inbound)\\s*:"));
+            const QStringList lines = QString::fromUtf8(in.readAll()).split('\n');
+            for (const QString &l : lines)
+                if (keep.match(l).hasMatch())
+                    preserved << l;
+            in.close();
+        }
+    }
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         setMessage(QStringLiteral("保存失败: %1").arg(file.errorString()));
@@ -422,6 +439,9 @@ void SettingsController::apply(const QString &host, int uiPort, int mixedPort, b
         out << "  noallow: " << noAllowRule << "\n";
         out << "  allowUse: " << (allowUse ? "true" : "false") << "\n";
         out << "  noallowUse: " << (noAllowUse ? "true" : "false") << "\n";
+        // 不属于本表单、但住在同一个文件里的键（secret / coastcore*），原样补回（见上方说明）。
+        for (const QString &l : preserved)
+            out << l << "\n";
     }
     file.close();
 

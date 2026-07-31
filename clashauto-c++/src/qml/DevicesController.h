@@ -63,9 +63,15 @@ class DevicesController final : public QObject
     // 灰度：进程内出站（实验）。默认关 = 零行为变化（网关全走 mihomo）。设置页开关绑定它。
     Q_PROPERTY(bool coastCoreEnabled READ coastCoreEnabled WRITE setCoastCoreEnabled NOTIFY coastCoreEnabledChanged)
     Q_PROPERTY(bool coastCoreStrict READ coastCoreStrict WRITE setCoastCoreStrict NOTIFY coastCoreStrictChanged)
-    // 本机 HTTP/SOCKS 入站（CoastCore 的第二个入口）。开=监听 kLocalInboundPort，关=不监听。
+    // 本机 HTTP/SOCKS 入站（CoastCore 的第二个入口）。开=监听 mixedPort（端口换位，核心挪去
+    // mixedPort+1 只作回退出口），关=不监听、mixedPort 归还核心。
     Q_PROPERTY(bool localInboundEnabled READ localInboundEnabled WRITE setLocalInboundEnabled NOTIFY localInboundEnabledChanged)
     Q_PROPERTY(int localInboundPort READ localInboundPort CONSTANT)
+    // 「全部切换到进程内」——设置页的总开关：coastcore（网关数据面）+ 本机入站（含端口换位）一次切换。
+    // 读的是**真实状态**（入站确实在听）而不是意图：切换失败时它保持 false，QML 的开关会弹回去。
+    Q_PROPERTY(bool allInProcess READ allInProcess NOTIFY allInProcessChanged)
+    // 上一次切换失败的原因（成功/复位时为空串）。设置页在开关下方显示，别让失败无声无息。
+    Q_PROPERTY(QString allInProcessError READ allInProcessError NOTIFY allInProcessChanged)
     // 一行可读状态（「12 连接 · ↑1.2 MB ↓8.4 MB」）。见 localInboundStatus() 上方的理由。
     Q_PROPERTY(QString localInboundStatus READ localInboundStatus NOTIFY localInboundStatusChanged)
 
@@ -130,7 +136,11 @@ public:
     void noteUserMode(const QString &mode);
     bool coastCoreStrict() const { return m_coastStrict; }
     bool localInboundEnabled() const { return m_inboundPort > 0; }
-    int localInboundPort() const { return kLocalInboundPort; }
+    // 本机入站的端口 = mixedPort（系统代理指向的那个口）。不再有写死的 7891，
+    // 用户改 config.yaml 的 `port:` 后两边（我们=port、核心回退口=port+1）都跟着走。
+    int localInboundPort() const { return m_mixedPort; }
+    bool allInProcess() const;
+    QString allInProcessError() const { return m_switchError; }
     // ★ 本机入站的流量在别处**一点都看不到**：连接列表和流量图都来自 mihomo 的 REST，
     //   而这条路压根不经过核心。不给个读数的话，用户开了开关只能盲信。这就是那个最小可见性。
     QString localInboundStatus() const;
@@ -139,6 +149,9 @@ public:
     // 严格模式：判不了的连接拒绝回退核心、直接失败。只有 coastCoreEnabled 开着时才有意义。
     Q_INVOKABLE void setCoastCoreStrict(bool on);
     Q_INVOKABLE void setLocalInboundEnabled(bool on);
+    // 设置页总开关：开 = coastcore + 本机入站一起开（strict 不动，回退是安全网）；
+    // 关 = 全部回落 mihomo，端口还原（核心回到 mixedPort）。失败自动回弹并给出原因。
+    Q_INVOKABLE void setAllInProcess(bool on);
 
 signals:
     void scanningChanged();
@@ -155,6 +168,7 @@ signals:
     void localInboundEnabledChanged();         // 本机入站开关变化 → 设置页开关刷新
     void localInboundStatusChanged();          // 本机入站读数刷新（1s 一跳，仅在它开着时）
     void coastCoreStrictChanged();
+    void allInProcessChanged();                // 总开关真实状态/失败原因变化 → 设置页刷新（含失败回弹）
 
 private:
     void onDiscovered(const QVector<class DeviceRecord> &devices);
@@ -184,7 +198,18 @@ private:
     void saveGroupMapCache(const QHash<QString, QString> &map) const;
     QHash<QString, QString> loadGroupMapCache() const;
     void startLocalInbound();
-    void stopLocalInbound();
+    // restoreCore=true（默认）：把核心的 mixed-port 换回 mixedPort 并**确认它真的起来了**，
+    // 起不来就把入站抢回来继续服务（绝不留一个「系统代理指着空端口」的终态）。
+    // 析构/退出路径传 false：核心马上要整个停掉，还原动作只会白等。
+    //
+    // 返回 false = **拒绝停止**，入站仍在服务（核心不可用，端口交出去就没人接了）。
+    // 调用方必须据此**放弃整个关闭动作**，否则就会出现「开关显示关、端口其实还在我们手里」
+    // 这种半截状态 —— 真机上第一版就是这么错的。
+    bool stopLocalInbound(bool restoreCore = true);
+    // 等 127.0.0.1:port 能接受 TCP 连接（核心换绑端口后的确认）。期间用
+    // ExcludeUserInputEvents 泵事件循环——热重载的 PUT /configs 要靠它发出去，
+    // 而用户输入被排除，切换过程不可重入（另有 m_switching 双保险）。
+    static bool waitTcpPortOpen(quint16 port, int timeoutMs);
     // rebuildCoastCoreConfig + 重新把开关意图推给网关（保持热更新）。仅在灰度开着时才动作。
     void refreshCoastCore();
     void persistCoastCore(bool on); // 只改 config.yaml 的 coastcore 键，保留其余内容
@@ -274,14 +299,15 @@ private:
     // —— 灰度：进程内出站 ——
     QString m_configDir;                          // config.yaml / full.yaml 所在（构造时从 AppConfig 取）
     bool m_coastCore = false;                     // 灰度开关（默认关 = 零行为变化）
-    // 本机入站的默认端口。**不与 mihomo 的混合端口（7890）冲突**，两者并存，
-    // 这样同一台机器上可以 A/B 对比两个引擎。
-    static constexpr int kLocalInboundPort = 7891;
-    int m_inboundPort = 0;                        // 本机混合入站端口（0=关，默认）
+    // 本机入站端口不再写死（kLocalInboundPort=7891 已退休）：开着时恒等于 m_mixedPort（端口换位，
+    // 核心挪到 m_mixedPort+1 作回退出口），由 config.yaml 的 `port:` 推导。
+    int m_inboundPort = 0;                        // 本机混合入站端口（0=关，默认；开=m_mixedPort）
     int m_mixedPort = 7890;                       // mihomo 混合端口：本机入站的回退目标
     class MixedInbound *m_localInbound = nullptr; // 本机 HTTP/SOCKS 入站（CoastCore 第二个入口）
     class CoreDialerFactory *m_localInboundFactory = nullptr; // 入站不持有工厂，由本类管生命周期
     QTimer *m_inboundStatTimer = nullptr;         // 本机入站读数刷新（只在它开着时跑）
+    bool m_switching = false;                     // 端口换位进行中（等端口时会泵事件循环，防重入）
+    QString m_switchError;                        // 上次切换失败的原因（空=无）——设置页显示用
     bool m_coastStrict = false;                   // 严格模式（默认关）
     std::shared_ptr<ProxyConfigStore> m_pcfgStore; // 出站配置快照持有者（app 生命周期常驻，与网关 worker 共享）
     std::shared_ptr<RuleEngine> m_ruleEngine;   // 分流规则引擎（本单元备用；Rule 模式回退核心）

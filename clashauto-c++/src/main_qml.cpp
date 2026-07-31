@@ -790,6 +790,30 @@ int main(int argc, char *argv[])
         QTimer::singleShot(600, &bridge, &QmlBridge::autoStartCore);
     }
 
+    // 「全部切换到进程内」的无头驱动钩子。设置页那个开关在无桌面环境点不了，这个钩子在给定时刻
+    // 调用与开关**完全相同**的入口 setAllInProcess()，并把前后状态打到 stderr —— 真机（Pi）上
+    // 验证端口换位 / 失败回滚 / 切回全靠它。
+    //   COAST_ALLINPROC_TOGGLE=on[:延时ms][,off[:延时ms]…]   （延时自进程启动算起，默认 8000）
+    // 默认 8s：给 autoStartCore(600ms) + 核心加载订阅/规则留足时间，好让「核心正占着 mixedPort」
+    // 这条最难的路径真的被走到（太早切核心还没绑上端口，就退化成冷启动那条容易的路了）。
+    for (const QByteArray &step : qgetenv("COAST_ALLINPROC_TOGGLE").split(',')) {
+        if (step.trimmed().isEmpty())
+            continue;
+        const QList<QByteArray> parts = step.trimmed().split(':');
+        const bool wantOn = parts.value(0) == "on";
+        const int delayMs = parts.value(1).isEmpty() ? 8000 : parts.value(1).toInt();
+        QTimer::singleShot(delayMs, devicesCtrl, [devicesCtrl, wantOn] {
+            std::fprintf(stderr, "[ALLINPROC] toggle -> %s (before: allInProcess=%d)\n",
+                         wantOn ? "on" : "off", devicesCtrl->allInProcess() ? 1 : 0);
+            std::fflush(stderr);
+            devicesCtrl->setAllInProcess(wantOn);
+            std::fprintf(stderr, "[ALLINPROC] done: allInProcess=%d err=\"%s\"\n",
+                         devicesCtrl->allInProcess() ? 1 : 0,
+                         devicesCtrl->allInProcessError().toUtf8().constData());
+            std::fflush(stderr);
+        });
+    }
+
 #if defined(Q_OS_UNIX)
     // 优雅退出：systemctl stop / kill / Ctrl+C 都发 SIGTERM/SIGINT。Qt 默认**不**把它们转成
     // aboutToQuit —— 于是进程被直接杀掉，上面挂在 aboutToQuit 上的清理链（LanGateway::disableAll

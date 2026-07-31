@@ -38,7 +38,9 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     const QString plugin = readText(QFile::exists(pluginPath) ? pluginPath : bundledPlugin);
 
     yaml = mergePlugin(yaml, plugin);
-    yaml = setScalar(yaml, "mixed-port", QString::number(m_config.mixedPort));
+    // 端口换位（见 setCoreMixedPort）：进程内入站占走 mixedPort 时，核心挪到 mixedPort+1 只作回退出口，
+    // 系统代理指向的端口（mixedPort）不用变。平时 m_coreMixedPort=0，照写 m_config.mixedPort，行为不变。
+    yaml = setScalar(yaml, "mixed-port", QString::number(coreMixedPort()));
     yaml = setScalar(yaml, "external-controller", QString("'%1:%2'").arg(m_config.host).arg(m_config.uiPort));
     // 安全加固：给 REST API 设访问密钥（secret 键 default.yaml 通常没有，setScalar 缺失时会追加/前置）
     if (!m_config.secret.isEmpty()) {
