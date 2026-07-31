@@ -60,30 +60,30 @@ struct ConnectionsView: View {
     }
 
     /// 分段按钮组：离线段左端**塞到在线段底下 3px**，中间无缝、只外侧圆角。
-    /// 两段各自是独立开关（都可以同时开），不是二选一。
+    /// 两段各自是独立开关（可以同时开），不是二选一。
+    ///
+    /// ★ 用 `HStack(spacing: -3)` 让两段**自己量自己**，不要去算文字宽度。
+    ///   先前的写法是用 `NSString.size(withAttributes:)` 量一遍再把和式写死给 `ZStack`，
+    ///   结果量出来比 SwiftUI 实际排版**偏窄** —— 截图上「Offline (0)」的计数被裁掉了，
+    ///   只剩「Offline」。负间距 + `zIndex` 就能同时拿到「重叠 3px」和「在线段盖在上面」，
+    ///   一个数都不用量。
     private var segmentedToggles: some View {
-        ZStack(alignment: .leading) {
-            segment(title: "Offline (\(state.connectionLedger.offlineCount))",
-                    on: showOffline,
-                    extraWidth: 27)
-                .offset(x: onlineWidth - 3)
-                .onTapGesture { showOffline.toggle() }
-
+        HStack(spacing: -3) {
             segment(title: "Online (\(state.connectionLedger.onlineCount))",
-                    on: showOnline,
-                    extraWidth: 24)
+                    on: showOnline, extraWidth: 24)
+                .zIndex(1)                       // 在上：盖住离线段的左端圆角
                 .onTapGesture { showOnline.toggle() }
+
+            segment(title: "Offline (\(state.connectionLedger.offlineCount))",
+                    on: showOffline, extraWidth: 27)
+                .zIndex(0)
+                .onTapGesture { showOffline.toggle() }
         }
-        .frame(height: toolbarHeight)
         .fixedSize()
     }
 
-    /// 在线段的宽度 —— 离线段要按它偏移。文字宽用 `NSString.size(withAttributes:)` 量，
-    /// 与 QML 的 `implicitWidth` 同义（那边是排版引擎直接给的）。
-    private var onlineWidth: CGFloat {
-        Self.textWidth("Online (\(state.connectionLedger.onlineCount))", size: 12) + 24
-    }
-
+    /// 一段的样子。开 = 品牌蓝，关 = 灰；两个颜色都是 QML 里的字面量，不走主题令牌
+    /// （那边也是写死的）。
     private func segment(title: String, on: Bool, extraWidth: CGFloat) -> some View {
         Text(title)
             .font(.system(size: 12))
@@ -91,7 +91,6 @@ struct ConnectionsView: View {
             .fixedSize()
             .padding(.horizontal, extraWidth / 2)
             .frame(height: toolbarHeight)
-            // 两个字面量颜色照抄 QML：开 = 品牌蓝，关 = 灰。不走主题令牌，那边也是写死的。
             .background {
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .fill(on ? Color(hex: 0x48_98_F8) : Color(hex: 0x90_93_99))
@@ -201,12 +200,6 @@ struct ConnectionsView: View {
         return String(format: "%.2f%@", n, units[index])
     }
 
-    static func textWidth(_ text: String, size: CGFloat) -> CGFloat {
-        (text as NSString)
-            .size(withAttributes: [.font: NSFont.systemFont(ofSize: size)])
-            .width
-            .rounded(.up)
-    }
 }
 
 /// 连接行上的徽标：22 高、半径 5、宽 = 内容 + 12、图标与文字间距 4、字号 12。
