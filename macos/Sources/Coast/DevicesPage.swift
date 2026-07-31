@@ -211,6 +211,16 @@ struct DevicesPage: View {
         .padding(.top, 10)
     }
 
+    /// 这台设备最近新建的那条连接的目标。没开代理的设备流量不经核心，这里永远是空 ——
+    /// 行里那一行也就整条收起来，不占位。
+    private func lastHost(for row: Row) -> String {
+        guard !row.discovered.ip.isEmpty else { return "" }
+        return state.connections
+            .filter { $0.sourceIP == row.discovered.ip && !$0.host.isEmpty }
+            .max { $0.start < $1.start }?
+            .host ?? ""
+    }
+
     /// 今日全网上/下行。几条 SUM 聚合，不必每帧算 —— 跟着扫描那一拍刷新即可。
     @State private var todayTotals: (up: Int64, down: Int64) = (0, 0)
 
@@ -254,6 +264,8 @@ struct DevicesPage: View {
             VStack(spacing: 0) {
                 DeviceRow(row: row,
                           rejection: rejection(for: row),
+                          sample: state.deviceTraffic.sample(ip: row.discovered.ip),
+                          lastHost: lastHost(for: row),
                           onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
                           onOpenDetail: { detail = row })
             }
@@ -341,84 +353,241 @@ private struct DeviceRow: View {
     /// 这台设备不可接管的原因（nil = 可以）。由页面算好传进来 ——
     /// 每行自己去查网关和本机 MAC 的话，一次渲染会重复读几十次系统表。
     var rejection: RedirectTargets.Rejection?
+    /// 实时速率与最近若干拍的历史（背景那张流量图的数据源）。
+    var sample: DeviceTraffic.Sample = .empty
+    /// 最后访问的地址（域名，没嗅探到就是目标 IP）。
+    var lastHost = ""
     let onToggleProxy: (Bool) -> Void
     let onOpenDetail: () -> Void
 
+    @State private var hovering = false
+
+    /// 已经开着的一律可关（离线/跨网段也得能撤销）；关着的只有「可代理且在线」才点得动。
+    private var canToggle: Bool { row.proxyEnabled || (rejection == nil && row.online) }
+
     var body: some View {
-        HStack(spacing: 10) {
-            // 类型头像 + 在线角标。尺寸取自 Qt DeviceRow：34×34、圆角 8、图标 18、
-            // 角标 11。头像是这一行里**最先被看到**的东西 —— 一屏十几台设备时，
-            // 先认出的是色块，名字要看第二眼，所以它的尺寸不能随手改小。
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(theme.deviceColor(row.discovered.typeKey))
-                    .frame(width: 34, height: 34)
-                    .overlay {
-                        Image(systemName: theme.deviceSymbol(row.discovered.typeKey))
-                            .font(.system(size: 18)).foregroundStyle(.white)
-                    }
-                    .opacity(row.online ? 1 : 0.45)
+        HStack(spacing: 8) {
+            avatar
 
-                // 在线角标：压在头像右下角，带一圈与背景同色的描边把它和色块分开，
-                // 不描边的话绿点会和绿色的手机底色糊在一起。
-                Circle()
-                    .fill(row.online ? theme.deviceColor("phone") : theme.textMuted)
-                    .frame(width: 11, height: 11)
-                    .overlay(Circle().stroke(theme.metricBg, lineWidth: 2))
-                    .offset(x: 3, y: 3)
-            }
+            // 名称 + 副标题 + 最后访问：**吃掉右侧剩下的全部宽度**，放不下就省略号。
+            // 右侧那几列都是刚性定宽的，所以「该被挤的是名字」——不这样的话，
+            // 副标题长的行会把右侧几列压窄，同一列在不同行落在不同的 x 上。
+            VStack(alignment: .leading, spacing: 1) {
+                Text(row.discovered.displayName)
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textPrimary)
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 5) {
-                    Text(row.discovered.displayName)
-                        .font(.system(size: 13)).foregroundStyle(theme.textPrimary).lineLimit(1)
-                    if row.discovered.isGateway { tag("网关".t, theme.accent) }
-                    if !row.online { tag("离线".t, theme.textMuted) }
-                }
+                // 副标题是 **IP · 厂商**，不含 MAC（Qt 同）——MAC 是详情页的内容，
+                // 放进这一行只会把厂商挤没，而厂商才是「这是台什么设备」的线索。
                 Text(subtitle)
-                    .font(.system(size: 10).monospacedDigit())
-                    .foregroundStyle(theme.textMuted).lineLimit(1)
-            }
+                    .font(.system(size: 10))
+                    .foregroundStyle(theme.textMuted)
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-            Spacer(minLength: 8)
-
-            if row.proxyEnabled {
-                Button(action: onOpenDetail) {
-                    Image(systemName: "chevron.right")
+                // 最后访问：没有就整行收起（不占位）—— 大多数设备没开代理，
+                // 流量不经核心，这里永远没有值。
+                if !lastHost.isEmpty {
+                    Text("→ " + lastHost)
                         .font(.system(size: 10))
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1).truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .buttonStyle(.borderless)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
-            Toggle("", isOn: Binding(get: { row.proxyEnabled }, set: onToggleProxy))
-                .labelsHidden().toggleStyle(.switch).controlSize(.mini)
-                .disabled(rejection != nil)
-                .help(rejection?.reason.t ?? "代理网络".t)
+            speedColumn
+
+            // 最右一列：**开关和徽章共用同一个 38 宽的槽位**（一台设备要么能开代理、
+            // 要么有一个「为什么不能开」的理由，两者互斥）。槽位宽度写死 = 开关宽度，
+            // 所以整列的左右边缘在每一行都一样齐。
+            ZStack {
+                if rejection == nil || row.proxyEnabled {
+                    proxySwitch
+                } else {
+                    reasonBadge
+                }
+            }
+            .frame(width: 38, height: 20)
         }
-        .padding(.horizontal, 10)
-        .frame(height: 46)
-        .background(theme.nodeRowBg)
-        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .padding(.horizontal, 8)
+        .frame(height: 60)                     // Qt: 60（多了「最后访问」一行；**所有行等高**）
+        .background {
+            ZStack {
+                (row.proxyEnabled ? theme.nodeRowBg : (hovering ? theme.hover : theme.nodeRowBg))
+                // 背景实时流量图：**只有被代理的设备才画**。其余设备的流量不经核心，
+                // 画出来永远是一条贴底的 0 线。速率是 0 也照画 —— 那正是
+                // 「已接管、此刻闲着」的样子，不是「没数据」。
+                if row.proxyEnabled {
+                    DeviceTrafficBg(up: sample.upHistory, down: sample.downHistory)
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .opacity(row.online ? 1 : 0.5)         // 离线行整体淡化
+        .contentShape(Rectangle())
+        .onHover { hovering = $0 }
+        .onTapGesture(perform: onOpenDetail)
+    }
+
+    /// 类型头像 34×34 圆角 8 + 图标 18 + 右下角 11 的在线小圆点（带 2px 描边）。
+    /// 头像是这一行里**最先被看到**的东西 —— 一屏十几台设备时，先认出的是色块。
+    private var avatar: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(theme.deviceColor(row.discovered.typeKey))
+            .frame(width: 34, height: 34)
+            .overlay {
+                Image(systemName: theme.deviceSymbol(row.discovered.typeKey))
+                    .font(.system(size: 18)).foregroundStyle(.white)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Circle()
+                    .fill(row.online ? Color(hex: 0x4D_A1_3E) : Color(hex: 0x88_88_88))
+                    .frame(width: 11, height: 11)
+                    // 描边与卡底同色，把小圆点和色块分开 —— 不描边的话绿点会和
+                    // 绿色的手机底色糊在一起。
+                    .overlay(Circle().stroke(theme.card, lineWidth: 2))
+                    .offset(x: 2, y: 2)
+            }
+    }
+
+    /// 实时速率：**常驻显示，0 也显示**（`↓ 0 B/s`）。宽度写死 76 ——
+    /// 速率文字每一拍都在变宽变窄（`↓ 9.77 KB/s` ↔ `↓ 1.20 MB/s`），
+    /// 列宽跟着变整行就在抖。闲着时只是淡下去，位置和占位都不变。
+    private var speedColumn: some View {
+        VStack(alignment: .trailing, spacing: 0) {
+            Text("↓ " + Formatting.rate(sample.rateDown))
+                .foregroundStyle(Color(hex: 0x5B_B4_4B))
+            Text("↑ " + Formatting.rate(sample.rateUp))
+                .foregroundStyle(Color(hex: 0xB1_4A_4A))
+        }
+        .font(.system(size: 10))
+        .lineLimit(1)
+        .frame(width: 76, alignment: .trailing)
+        .opacity(sample.rateDown > 0 || sample.rateUp > 0 ? 1 : 0.45)
+        .animation(.easeInOut(duration: 0.12), value: sample.rateDown > 0 || sample.rateUp > 0)
+    }
+
+    /// 手画的代理开关：38×20、半径 10、滑块 16、120ms 过渡。
+    private var proxySwitch: some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(row.proxyEnabled ? theme.accent : theme.switchTrackOff)
+                .frame(width: 38, height: 20)
+            Circle()
+                .fill(.white)
+                .frame(width: 16, height: 16)
+                .offset(x: row.proxyEnabled ? 38 - 16 - 2 : 2)
+        }
+        .frame(width: 38, height: 20)
+        .opacity(canToggle ? 1 : 0.4)
+        .animation(.easeInOut(duration: 0.12), value: row.proxyEnabled)
+        .contentShape(Rectangle())
+        .onTapGesture { if canToggle { onToggleProxy(!row.proxyEnabled) } }
+        .help(rejection?.reason.t ?? "代理网络".t)
+    }
+
+    /// 不可代理的原因徽章，**占开关的位置**（同一个 38 宽的槽）。
+    /// 槽位是死的 38 宽而文案有 12 种语言，塞不下就缩到最小可读字号再省略，
+    /// 完整文案挂在悬停提示上（详情窗里另有一整句解释）。
+    private var reasonBadge: some View {
+        Text(reasonLabel)
+            .font(.system(size: 9))
+            .foregroundStyle(theme.textSecondary)
+            .lineLimit(1).truncationMode(.tail)
+            .minimumScaleFactor(7.0 / 9.0)
+            .padding(.horizontal, 2)
+            .frame(width: 38, height: 20)
+            .background {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color.black.opacity(0.25))
+            }
+            .help(reasonLabel)
+    }
+
+    private var reasonLabel: String {
+        switch rejection {
+        case .isLocalMachine: return "本机".t
+        case .isGateway: return "网关".t
+        // `noAddress` 是「拿不到 IP/ARP」。Qt 那颗徽章在这一档写的是「其它网络」，
+        // 完整解释挂在悬停提示和详情窗里。
+        default: return "其它网络".t
+        }
     }
 
     private var subtitle: String {
         var parts: [String] = []
         if !row.discovered.ip.isEmpty { parts.append(row.discovered.ip) }
-        parts.append(row.discovered.mac)
         if !row.discovered.vendor.isEmpty { parts.append(row.discovered.vendor) }
-        return parts.joined(separator: " · ")
-    }
-
-    private func tag(_ text: String, _ color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 9)).foregroundStyle(.white)
-            .padding(.horizontal, 4).padding(.vertical, 1)
-            .background(Capsule().fill(color))
+        return parts.joined(separator: "  ·  ")
     }
 }
 
-/// 展开后只有策略选择。**没有凭据、没有地址** —— 设备端零配置是这个功能的全部意义，
-/// 让用户去抄任何东西都等于没做。
+/// 设备行的**背景**实时流量图：下行(绿) / 上行(红) 两条面积曲线叠在一起，共用同一量程。
+/// 对齐 `qml/DeviceTrafficBg.qml`：曲线最高只占行高的 0.75，量程下限 128KB/s ——
+/// 闲着时几百字节的抖动不会被放大成满屏山峰。
+struct DeviceTrafficBg: View {
+    let up: [Double]
+    let down: [Double]
+
+    /// 量程下限 128 KB/s。
+    private static let floorScale = 131_072.0
+    private static let headroom = 0.75
+
+    private var scale: Double {
+        max(Self.floorScale, (up + down).max() ?? 0)
+    }
+
+    var body: some View {
+        ZStack {
+            area(down, color: Color(hex: 0x5B_B4_4B))
+            area(up, color: Color(hex: 0xB1_4A_4A))
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func area(_ samples: [Double], color: Color) -> some View {
+        GeometryReader { geo in
+            let path = areaPath(samples, in: geo.size)
+            ZStack {
+                path.fill(LinearGradient(colors: [color.opacity(0.22), color.opacity(0.02)],
+                                         startPoint: .top, endPoint: .bottom))
+                strokePath(samples, in: geo.size).stroke(color.opacity(0.55), lineWidth: 1)
+            }
+        }
+    }
+
+    private func points(_ samples: [Double], in size: CGSize) -> [CGPoint] {
+        guard samples.count > 1 else { return [] }
+        let usable = size.height * Self.headroom
+        let dx = size.width / CGFloat(samples.count - 1)
+        return samples.enumerated().map { index, value in
+            CGPoint(x: CGFloat(index) * dx,
+                    y: size.height - usable * CGFloat(min(1, value / scale)))
+        }
+    }
+
+    private func strokePath(_ samples: [Double], in size: CGSize) -> Path {
+        var path = Path()
+        let pts = points(samples, in: size)
+        guard let first = pts.first else { return path }
+        path.move(to: first)
+        for point in pts.dropFirst() { path.addLine(to: point) }
+        return path
+    }
+
+    private func areaPath(_ samples: [Double], in size: CGSize) -> Path {
+        var path = strokePath(samples, in: size)
+        guard !path.isEmpty else { return path }
+        path.addLine(to: CGPoint(x: size.width, y: size.height))
+        path.addLine(to: CGPoint(x: 0, y: size.height))
+        path.closeSubpath()
+        return path
+    }
+}
 
 /// 概览条上那颗 34×18 的小开关（比设置页那颗 46×24 小一圈 —— Qt 这里就是两套尺寸）。
 struct SmallSwitch: View {

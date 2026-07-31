@@ -77,3 +77,27 @@ struct DeviceTrafficTests {
         #expect(traffic.byIP.isEmpty)
     }
 }
+
+extension DeviceTrafficTests {
+    /// 历史**每拍给每台已知设备都推一个点**（没流量的推 0）。只给有流量的推的话，
+    /// 曲线的横轴就不是时间了 —— 一台间歇跑量的设备会画出一条时间被压缩的假曲线。
+    @Test func historyGetsAPointEveryTickEvenWhenIdle() {
+        var traffic = DeviceTraffic()
+        traffic.observe([row("a", ip: "10.0.0.2", up: 0, down: 100)])
+        traffic.observe([])
+        traffic.observe([])
+
+        let sample = traffic.sample(ip: "10.0.0.2")
+        #expect(sample.downHistory == [100, 0, 0])
+        #expect(sample.upHistory.count == 3)
+    }
+
+    /// 历史**必须有上限** —— 一台设备挂一晚上就是几万个点，而行里只画得下几十个。
+    @Test func historyIsCappedAtHistoryLength() {
+        var traffic = DeviceTraffic()
+        for _ in 0..<(DeviceTraffic.historyLength + 25) {
+            traffic.observe([row("a", ip: "10.0.0.2", up: 0, down: 1)])
+        }
+        #expect(traffic.sample(ip: "10.0.0.2").downHistory.count == DeviceTraffic.historyLength)
+    }
+}

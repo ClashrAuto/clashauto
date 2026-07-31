@@ -16,7 +16,19 @@ public struct DeviceTraffic: Sendable {
         /// 本次会话累计（app 启动至今）。
         public var sessionUp: Int64 = 0
         public var sessionDown: Int64 = 0
+        /// 最近若干拍的速率，越靠后越新 —— 设备行背景那张流量图的数据源。
+        public var upHistory: [Double] = []
+        public var downHistory: [Double] = []
+
+        public init() {}
+
+        /// 「这台设备还没有任何采样」的零值。视图默认参数用它，免得每处各写一遍。
+        public static let empty = Sample()
     }
+
+    /// 历史保留多少拍。40 拍 ≈ 40 秒，与状态页那张带宽图同量级；
+    /// **必须有上限** —— 一台设备挂一晚上就是几万个点，而行里只画得下几十个。
+    public static let historyLength = 40
 
     /// sourceIP → 采样。
     public private(set) var byIP: [String: Sample] = [:]
@@ -68,6 +80,19 @@ public struct DeviceTraffic: Sendable {
             sample.rateDown = delta.down
             sample.sessionUp += delta.up
             sample.sessionDown += delta.down
+            byIP[ip] = sample
+        }
+
+        // 每拍给**每台已知设备**都推一个点（没流量的推 0）—— 只给有流量的推的话，
+        // 曲线的横轴就不是时间了，一台间歇跑量的设备会画出一条时间被压缩的假曲线。
+        for ip in Array(byIP.keys) {
+            guard var sample = byIP[ip] else { continue }
+            sample.upHistory.append(Double(sample.rateUp))
+            sample.downHistory.append(Double(sample.rateDown))
+            if sample.upHistory.count > Self.historyLength {
+                sample.upHistory.removeFirst()
+                sample.downHistory.removeFirst()
+            }
             byIP[ip] = sample
         }
     }
