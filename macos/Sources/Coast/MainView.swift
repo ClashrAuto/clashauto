@@ -6,6 +6,8 @@ import SwiftUI
 struct MainView: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
+    /// 模式按钮组是否展开。
+    @State private var modeExpanded = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -119,31 +121,61 @@ struct MainView: View {
     ///
     /// 当前模式直接作为按钮标题，省掉那行冗余的箭头指示：按钮上写着「规则」，
     /// 点开就是三个模式，没有第二种解释。
+    /// 模式切换：收起时是一颗按钮，点一下**就地展开成一排按钮**，选完自动收回。
+    ///
+    /// 不用弹出菜单，有两个理由：
+    /// 一是 `.buttonStyle(.glass)` 对 SwiftUI 的 `Menu` **不生效** —— 菜单自带一套外观，
+    /// 和旁边的玻璃胶囊摆在一起一眼两样（这个 SDK 也没有 `.glassEffect()` 能把玻璃
+    /// 单独贴到标签上）；
+    /// 二是只有三个选项，展开成一排比「点开→移到菜单→再点」少一次移动，
+    /// 而且切换前后当前项一直可见。
     private var modePicker: some View {
-        Menu {
-            ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
-                Button {
-                    state.setMode(title)
-                } label: {
-                    // 勾出当前项 —— 菜单收起后按钮上虽然写着当前模式，
-                    // 但展开时若不标出来，用户得先记住按钮上写的是什么再对照。
-                    if index == state.modeIndex {
-                        Label(title, systemImage: "checkmark")
-                    } else {
-                        Text(title)
+        Group {
+            if modeExpanded {
+                // 展开后是**一个按钮组**（分段控件），不是三颗各自独立的胶囊 ——
+                // 三颗独立按钮看不出「同一组、三选一」的语义，用户得靠高亮去猜哪个是当前项；
+                // 分段控件把「这几个是一组、只能选一个」画在了形状里。
+                // 用系统的 segmented：macOS 26 下它自己就是 Liquid Glass 外观，
+                // 不必手拼一个（这个 SDK 也没有 .glassEffect() 能贴玻璃）。
+                Picker("", selection: Binding(
+                    get: { state.modeIndex },
+                    set: { index in
+                        state.setMode(AppState.modeTitles[index])
+                        withAnimation(.snappy(duration: 0.22)) { modeExpanded = false }
+                    })) {
+                    ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
+                        Text(title).tag(index)
                     }
                 }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .controlSize(.small)
+                .fixedSize()
+            } else {
+                Button {
+                    withAnimation(.snappy(duration: 0.22)) { modeExpanded = true }
+                } label: {
+                    modeLabel(AppState.modeTitles[state.modeIndex], active: true)
+                }
+                .glassButton()
+                .fixedSize()
             }
-        } label: {
-            Text(AppState.modeTitles[state.modeIndex])
-                .font(.system(size: 12))
-                .frame(height: 24)
-                .padding(.horizontal, 4)
         }
-        .menuStyle(.button)
-        .glassButton()
-        .menuIndicator(.hidden)
-        .fixedSize()
+    }
+
+    /// 与 `FooterSwitch` 逐项对齐的内部排版：spacing 6 / 圆点 8 / 字号 12 /
+    /// 横向内距 10 / 高度 24。少一项就会比旁边矮一圈或窄一截。
+    private func modeLabel(_ title: String, active: Bool) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(active ? theme.accent : theme.switchTrackOff)
+                .frame(width: 8, height: 8)
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(active ? theme.textPrimary : theme.textMuted)
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 24)
     }
 }
 
