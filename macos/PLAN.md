@@ -713,3 +713,22 @@
   「真核心愿意加载」。测试在 `COAST_TEST_MIHOMO` 未设时**自动跳过**(不做硬依赖,别人机器
   和 CI 上未必有核心),`scripts/regression.sh` 会明确报告启用与否。
   核心存到 `~/.local/share/coast-devtools/mihomo` 供以后回归复用。
+- 2026-07-31：**★ 端到端:ClashService / CoreProcess 对真实运行的核心跑通**(204 用例)。
+
+  此前 `ClashService` 只对**假数据**验过(ProxyTree/排序/模式归一那些纯函数),
+  `CoreProcess` 只验过「核心不存在」的路径。这轮让它们对**真跑着的 mihomo** 说话,5 条:
+  - `ClashService` 轮询真核心:解析出策略组与节点、模式从核心读回;
+  - **模式切换真的落到核心**并读回;
+  - **选节点真的生效**(核心的 `now` 变了);
+  - **secret 鉴权真的在起作用**(错 secret 拿不到数据 —— 证明我们发的 Bearer 头被校验);
+  - **`CoreProcess` 起停真核心**:能起来、REST 通、能干净停掉。
+
+  隔离做得很小心:非常规端口(193xx/178xx)、`allow-lan:false`、临时目录;
+  `CoreProcess` 那条要把核心放到 `AppPaths` 期望的位置,**用户已装核心时直接跳过**(不覆盖他的),
+  用完即删。跑完核对过:`command/` 空、无遗留 mihomo 进程、系统代理 `HTTPEnable:0` 未被动过。
+
+  代价与取舍:带真核心跑全套约 87 秒(7 条测试真的在起进程),不带时 0.14 秒。
+  所以维持 `COAST_TEST_MIHOMO` 开关 —— 日常与 CI 不受影响,要深验时才开。
+
+  **至此除「helper 以 root 起核心 + ARP 接管/复原」外,所有链路都对真实核心验过了。**
+  那一段仍卡在正式证书签名。
