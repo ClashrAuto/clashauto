@@ -518,10 +518,18 @@ private struct DeviceRow: View {
         }
     }
 
+    /// 副标题：`IP · 厂商`。
+    ///
+    /// ★ **名字就是厂商时不再重复一遍**。`displayName` 的回退链是
+    /// 主机名 → 厂商 → MAC，所以查不到主机名的设备（局域网里很常见）名字本身就是厂商，
+    /// 原样拼的话整行会变成「Beijing Xiaomi Mobile Software Co. / 192.168.31.1 ·
+    /// Beijing Xiaomi Mobile Software Co.」—— 同一串字占掉两行，而副标题本该补充信息。
+    /// 截图看出来的。
     private var subtitle: String {
         var parts: [String] = []
         if !row.discovered.ip.isEmpty { parts.append(row.discovered.ip) }
-        if !row.discovered.vendor.isEmpty { parts.append(row.discovered.vendor) }
+        let vendor = row.discovered.vendor
+        if !vendor.isEmpty, vendor != row.discovered.displayName { parts.append(vendor) }
         return parts.joined(separator: "  ·  ")
     }
 }

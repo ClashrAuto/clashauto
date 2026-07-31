@@ -253,6 +253,12 @@ struct NodeRow: View {
 
     @State private var hovering = false
 
+    /// 一行显示的文案。与 Qt `NodeListModel` 的 `DisplayRole` 拼法完全一致。
+    private var displayText: String {
+        guard !node.now.isEmpty, node.now != node.name else { return node.name }
+        return "\(node.name) → \(node.now)"
+    }
+
     /// 药丸文案：优先显示实测速度，没有则显示延迟。
     private var badgeText: String {
         if node.speed > 0 { return Formatting.rate(node.speed) }
@@ -267,22 +273,17 @@ struct NodeRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(node.name)
-                    .font(.system(size: 12))
-                    .foregroundStyle(node.active ? theme.textPrimary : theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if !node.now.isEmpty {
-                    // 组行：显示它此刻实际走到的叶子。禁用时禁的也是这个叶子。
-                    Text("→ \(node.now)")
-                        .font(.system(size: 10))
-                        .foregroundStyle(theme.textMuted)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            Spacer(minLength: 8)
+            // **一行**，不是两行 —— Qt 的 `DisplayRole` 就是把两段拼成
+            // `名字 → 它此刻走到的叶子` 一个字符串（组行才有后半段）。
+            //
+            // 拆成两行会让「有叶子」和「没叶子」的行**高度不一样**：一屏里行高参差，
+            // 而且切换节点导致某一行多出/少掉一行时，它下面所有行的位置都会跳一格。
+            Text(displayText)
+                .font(.system(size: 12))
+                .foregroundStyle(theme.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             // 药丸：半径 5、宽 = 文字 + 10、高 = 文字 + 6、**深色字压在实色底上**
             // （Qt 写死 `#222222`）—— 底色本身就是延迟档位的颜色，字再用同色就看不清了。
