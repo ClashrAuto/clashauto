@@ -15,7 +15,7 @@ The git repo root tracks:
 
 ### Two UI layers — QML is shipped, Widgets is dead code
 
-- **Shipped:** the **QML** app — `src/main_qml.cpp` + `qml/*.qml` + the `src/qml/*` C++ glue (`QmlBridge`, the `*Controller`s, the `*Model`s, `I18n`). CMake target `clashauto-qml`.
+- **Shipped:** the **QML** app — `src/main_qml.cpp` + `qml/*.qml` + the `src/qml/*` C++ glue (`QmlBridge`, the `*Controller`s, the `*Model`s, `I18n`). CMake target `coast`.
 - **Dead/legacy:** the older **Qt Widgets** version — `src/MainWindow.cpp`, `src/main.cpp`, `src/TrafficChart.*`. **Not compiled** (not in the target). `MainWindow.h` is still `#include`d by `TrayController.cpp` for QWidget base methods, but `MainWindow.cpp`/`main.cpp` don't build; they're **stale** (old "Clash Auto" names, old paths). The CLI test subcommands (`--build-config`, …) lived in the dead `main.cpp` — they are **not** in the shipped build.
 
 ## Build & run
@@ -88,7 +88,8 @@ Product is **Coast**; names follow each platform's convention:
 - **Windows** — `Coast.exe`; installs to `%LOCALAPPDATA%\Coast`; portable zip is **flat** (exe + Qt runtime at the root, no `clashauto-c++`/`Clashr-Auto` subdirs).
 - **macOS** — `Coast.app`; bundle id `com.yuehongsun.coast`; privileged root helper `com.yuehongsun.coast.helper` (**launchd Label = mach service = plist filename = codesign `-i` must all match**, see `helper/HelperProtocol.h`). **Signing/notarization is done by an EXTERNAL repo** `integemjack/schat.build` (branch `clashauto-mac`, `.github/workflows/clashauto-mac.yml`): clashauto's CI `trigger-mac` job pushes an empty commit there; it builds+signs+notarizes and clobbers the DMG onto the **same** release. clashauto's own macos job only uploads an Actions artifact. `Ireoo` can't push to `integemjack/schat.build` — needs an `integemjack` PAT.
 - **Linux** — binary `coast` (lowercase, command convention); `.deb` installs flat to `/opt/coast/coast` + `/usr/bin/coast` symlink + `coast.desktop`; Debian `Package: coast`. **The `.deb` must `Depends` on `libopengl0`** — Qt6::Gui hard-links `libOpenGL.so.0` (an ELF NEEDED entry) even under the software backend; without it a clean system fails to launch.
-- **Kept as "Clash Auto" / `ClashAuto` on purpose** (do not "fix"): the GitHub Release **name** + download **filenames** (`ClashAuto-<ver>-…`) — the in-app updater matches them and the external mac signer targets the same release tag; also the QML module URI `ClashAuto`, the CMake target/dir names, and the Windows `%AppData%` registry org.
+- **Kept as "Clash Auto" / `ClashAuto` on purpose** (do not "fix"): the GitHub Release **name** + download **filenames** (`ClashAuto-<ver>-…`) — the in-app updater matches them and the external mac signer targets the same release tag; also the QML module URI `ClashAuto`, the source **directory** name `clashauto-c++`, and the Windows `%AppData%` registry org.
+  (The CMake **target** used to be on this list; it is now `coast`. It turned out CI never referenced it — every job runs `cmake --build <dir>` with no `--target` — so the "renaming churns CI paths" worry didn't apply. The build-tree dir `CMakeFiles/coast.dir` moved accordingly; the only place that spelled it out was `tools/gwbench/tunstack.cpp`'s build recipe.)
 
 ## Releases & CI (`.github/workflows/release.yml`)
 

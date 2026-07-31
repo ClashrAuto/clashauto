@@ -229,7 +229,7 @@ set(QML_GLUE_SOURCES
     src/qml/DeviceConnectionsModel.cpp   src/qml/DeviceConnectionsModel.h
 )
 
-qt_add_executable(clashauto-qml
+qt_add_executable(coast
     src/main_qml.cpp
     ${BACKEND_SOURCES}
     ${QML_GLUE_SOURCES}
@@ -239,7 +239,7 @@ qt_add_executable(clashauto-qml
 # Theme.qml 注册为单例（供 `import ClashAuto` 后以 Theme.xxx 访问）——必须在 qt_add_qml_module 前设置。
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
-qt_add_qml_module(clashauto-qml
+qt_add_qml_module(coast
     URI ClashAuto
     VERSION 1.0
     RESOURCE_PREFIX "/qt/qml"   # 模块落到 :/qt/qml/ClashAuto/，正是引擎默认搜索的 import path
@@ -281,28 +281,28 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     set(LWIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lwip/src")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
         # 网关 headless 自测钩子：Linux 用 TAP、mac 用 feth+真实 BPF 端点（Windows Npcap 暂不做 CI 自测）。
-        target_sources(clashauto-qml PRIVATE
+        target_sources(coast PRIVATE
             src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
     endif()
     # 「进程内增强」会话：把设备层+激活层+NetStack+出站串成一个可开关的整体，供「增强」按钮用。
-    target_sources(clashauto-qml PRIVATE src/net/LocalTunService.cpp src/net/LocalTunService.h)
+    target_sources(coast PRIVATE src/net/LocalTunService.cpp src/net/LocalTunService.h)
     # TUN 激活层（跨平台）：配地址/接管默认路由/Linux 策略路由，以及**原样还原**。
     # 与设备层分开：设备层失败只是 TUN 起不来，这一层失败会改变整机路由。
-    target_sources(clashauto-qml PRIVATE src/net/TunSession.cpp src/net/TunSession.h)
+    target_sources(coast PRIVATE src/net/TunSession.cpp src/net/TunSession.h)
     # 本机 TUN 入口（进程内「增强」）：把裸 IP 包合成以太帧后喂给同一套 NetStack/lwIP，
     # 上层一行不用改。共享的合成 MAC/以太头常量与设计总纲在 TunEndpoint.h。
     # macOS(utun) 待做。现在还没有调用方——先编进来，免得它悄悄腐烂。
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_linux.cpp src/net/TunEndpoint.h)
+        target_sources(coast PRIVATE src/net/TunEndpoint_linux.cpp src/net/TunEndpoint.h)
     elseif(WIN32)
         # wintun.dll 运行期动态加载（仓库没有它的 .lib/.h），所以这里不需要额外 link 什么；
         # 用到的 ConvertInterfaceLuidToIndex 来自已链接的 iphlpapi。
-        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_win.cpp src/net/TunEndpoint.h)
+        target_sources(coast PRIVATE src/net/TunEndpoint_win.cpp src/net/TunEndpoint.h)
     elseif(APPLE)
         # utun：系统自带（PF_SYSTEM/kern_control），无需额外库。
-        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_mac.cpp src/net/TunEndpoint.h)
+        target_sources(coast PRIVATE src/net/TunEndpoint_mac.cpp src/net/TunEndpoint.h)
     endif()
-    target_sources(clashauto-qml PRIVATE
+    target_sources(coast PRIVATE
         src/net/NetStack.cpp src/net/NetStack.h
         src/net/NdpSpoofer.cpp src/net/NdpSpoofer.h  # IPv6 的 ICMPv6/NDP 投毒器（ArpSpoofer 的 v6 对应物）
         src/net/LanGateway_linux.cpp
@@ -326,7 +326,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         ${LWIP_DIR}/core/ipv6/mld6.c   ${LWIP_DIR}/core/ipv6/inet6.c
         ${LWIP_DIR}/netif/ethernet.c
     )
-    target_include_directories(clashauto-qml PRIVATE
+    target_include_directories(coast PRIVATE
         "${LWIP_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/net/lwip_port")
     # Windows：只要 Npcap SDK 的**头文件**（env NPCAP_SDK 指向解压目录）——wpcap 不进链接行。
@@ -336,11 +336,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     # 直接 0xC0000135 起不来。改成运行时绑定后两种工具链行为一致，也不再需要 delayimp。
     if(WIN32)
         set(NPCAP_SDK "$ENV{NPCAP_SDK}")
-        target_include_directories(clashauto-qml PRIVATE "${NPCAP_SDK}/Include")
-        target_link_libraries(clashauto-qml PRIVATE iphlpapi ws2_32)
+        target_include_directories(coast PRIVATE "${NPCAP_SDK}/Include")
+        target_link_libraries(coast PRIVATE iphlpapi ws2_32)
     endif()
 else()
-    target_sources(clashauto-qml PRIVATE src/net/LanGateway_stub.cpp)
+    target_sources(coast PRIVATE src/net/LanGateway_stub.cpp)
 endif()
 
 # Windows：把 assets/icon.ico 作为 exe 图标嵌入。
@@ -350,14 +350,14 @@ if(WIN32)
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/app.rc.in"
         "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
         @ONLY)
-    target_sources(clashauto-qml PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+    target_sources(coast PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
     # Windows 原生标题栏染色（DWM）——仅 Windows 编译，链接的 dwmapi 已在下方 target_link_libraries。
-    target_sources(clashauto-qml PRIVATE src/WinWindow.cpp src/WinWindow.h)
+    target_sources(coast PRIVATE src/WinWindow.cpp src/WinWindow.h)
     # wintun.dll(按架构) 仅 Windows 构建内嵌（qrc），运行时释放到核心旁供 TUN 使用；mac/Linux 不含。
-    target_sources(clashauto-qml PRIVATE resources_win.qrc)
+    target_sources(coast PRIVATE resources_win.qrc)
 endif()
 
-target_link_libraries(clashauto-qml PRIVATE
+target_link_libraries(coast PRIVATE
     Qt6::Widgets
     Qt6::Network
     Qt6::Qml
@@ -376,15 +376,15 @@ target_link_libraries(clashauto-qml PRIVATE
 
 # Linux：有 QtDBus 才编入 logind 那条睡眠通道（见 src/PowerWatcher.cpp 的 COAST_HAVE_DBUS 分支）。
 if(Qt6DBus_FOUND)
-    target_link_libraries(clashauto-qml PRIVATE Qt6::DBus)
-    target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_DBUS)
+    target_link_libraries(coast PRIVATE Qt6::DBus)
+    target_compile_definitions(coast PRIVATE COAST_HAVE_DBUS)
 endif()
 
 # CoastCore 需要裸 AEAD / X25519 的部分（ss / vmess / reality + 加密 KAT 自测）：仅在 OpenSSL 可用时
 # 编入 + 定义 COAST_HAVE_OPENSSL（见 OutboundRegistry.cpp / main_qml.cpp 的 #ifdef）。
 # 不可用时这三个协议不注册 → 拨号侧回退 mihomo；direct/trojan/vless 不受影响（只用 QSslSocket + Qt 哈希）。
 if(COAST_HAVE_OPENSSL)
-    target_sources(clashauto-qml PRIVATE
+    target_sources(coast PRIVATE
         src/net/core/crypto/Aead.cpp               src/net/core/crypto/Aead.h
         src/net/core/crypto/CryptoSelfTest.cpp     src/net/core/crypto/CryptoSelfTest.h
         # uTLS 指纹 + 自建最小 TLS1.3 客户端（REALITY 用；QSslSocket 无法控制 ClientHello 指纹）
@@ -393,18 +393,18 @@ if(COAST_HAVE_OPENSSL)
         src/net/core/proto/VmessOutbound.cpp       src/net/core/proto/VmessOutbound.h
         src/net/core/proto/RealityOutbound.cpp     src/net/core/proto/RealityOutbound.h)
     # 只链 libcrypto，不链 libssl（TLS 由 Qt 的 QSslSocket 负责）。
-    target_link_libraries(clashauto-qml PRIVATE OpenSSL::Crypto)
-    target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_OPENSSL)
+    target_link_libraries(coast PRIVATE OpenSSL::Crypto)
+    target_compile_definitions(coast PRIVATE COAST_HAVE_OPENSSL)
 endif()
 
 # CoastCore QUIC 系（Hysteria2 / TUIC）：仅在找到 msquic 时编入 + 定义 COAST_HAVE_QUIC（见
 # src/net/core/proto/OutboundRegistry.cpp 的 #ifdef）。找不到则整块不编，hysteria2/tuic 未注册、回退 mihomo。
 if(COAST_HAVE_QUIC)
-    target_sources(clashauto-qml PRIVATE
+    target_sources(coast PRIVATE
         src/net/core/transport/QuicTransport.cpp  src/net/core/transport/QuicTransport.h
         src/net/core/proto/Hysteria2Outbound.cpp  src/net/core/proto/Hysteria2Outbound.h
         src/net/core/proto/TuicOutbound.cpp       src/net/core/proto/TuicOutbound.h)
-    target_link_libraries(clashauto-qml PRIVATE ${COAST_MSQUIC_LINK})
+    target_link_libraries(coast PRIVATE ${COAST_MSQUIC_LINK})
     # Windows 还得链 ntdll：msquic 的 msquic_winuser.h 里 QuicAddrFromString 是**头文件内联**实现，
     # 内部调用 RtlIpv4StringToAddressExA / RtlIpv6StringToAddressExA —— 这俩符号只在 ntdll.lib 里。
     # QuicTransport.cpp 用了 QuicAddrFromString（openConnection 把 IP 字面量钉成
@@ -412,12 +412,12 @@ if(COAST_HAVE_QUIC)
     # 就 LNK2019（CI 两个架构实测都挂）。注意这是**链接期**问题：MinGW 本地 -fsyntax-only
     # 语法检查复现不出来 —— 不是我们直接调的 API，别删。
     if(WIN32)
-        target_link_libraries(clashauto-qml PRIVATE ntdll)
+        target_link_libraries(coast PRIVATE ntdll)
     endif()
     if(COAST_MSQUIC_INCLUDE_DIR)
-        target_include_directories(clashauto-qml PRIVATE ${COAST_MSQUIC_INCLUDE_DIR})
+        target_include_directories(coast PRIVATE ${COAST_MSQUIC_INCLUDE_DIR})
     endif()
-    target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_QUIC QUIC_API_ENABLE_PREVIEW_FEATURES)
+    target_compile_definitions(coast PRIVATE COAST_HAVE_QUIC QUIC_API_ENABLE_PREVIEW_FEATURES)
 
     # TUIC 的 token 要 msquic 的 keying-material exporter。**别只靠 QUIC_API_ENABLE_PREVIEW_FEATURES
     # 判断**——那个宏只表示「请求打开 preview 分支」，被定义 ≠ 这套 API 真的存在：拿最新发布版
@@ -443,32 +443,32 @@ if(COAST_HAVE_QUIC)
     " COAST_QUIC_KEYING_OK)
     cmake_pop_check_state()
     if(COAST_QUIC_KEYING_OK)
-        target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_QUIC_KEYING)
+        target_compile_definitions(coast PRIVATE COAST_HAVE_QUIC_KEYING)
         message(STATUS "msquic keying-material exporter 可用 → TUIC token 可导出")
     else()
         message(STATUS "msquic 无 keying-material exporter → TUIC 认证不可用(Hysteria2 不受影响)")
     endif()
 endif()
 
-target_compile_options(clashauto-qml PRIVATE
+target_compile_options(coast PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
 )
 
 # GUI 子系统：Windows 上不弹控制台窗口
-set_target_properties(clashauto-qml PROPERTIES WIN32_EXECUTABLE ON)
+set_target_properties(coast PROPERTIES WIN32_EXECUTABLE ON)
 
 # 产物文件名统一为 clashauto（去掉历史上的 -qml/-cpp 后缀）：Windows→clashauto.exe，
-# Linux→clashauto。CMake 目标名仍叫 clashauto-qml（内部标识，不影响产物名）。
+# Linux→clashauto。CMake 目标名仍叫 coast（内部标识，不影响产物名）。
 # macOS 例外——见下方 if(APPLE)，输出「Coast.app」bundle。
 if(WIN32)
-    set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME "Coast")   # Windows 产物 Coast.exe（扁平自包含）
+    set_target_properties(coast PROPERTIES OUTPUT_NAME "Coast")   # Windows 产物 Coast.exe（扁平自包含）
 elseif(NOT APPLE)
-    set_target_properties(clashauto-qml PROPERTIES OUTPUT_NAME "coast")   # Linux 命令惯例小写 coast（Win=Coast.exe / mac=Coast.app）
+    set_target_properties(coast PROPERTIES OUTPUT_NAME "coast")   # Linux 命令惯例小写 coast（Win=Coast.exe / mac=Coast.app）
 endif()
 
 # macOS：打成「Coast.app」bundle；Clashr-Auto 运行时资源由 CI 放进 Contents/Clashr-Auto。
 if(APPLE)
-    set_target_properties(clashauto-qml PROPERTIES
+    set_target_properties(coast PROPERTIES
         OUTPUT_NAME "Coast"
         MACOSX_BUNDLE ON
         MACOSX_BUNDLE_BUNDLE_NAME "Coast"
@@ -477,8 +477,8 @@ if(APPLE)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${APP_VERSION}")
     set(APP_ICNS "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.icns")
     if(EXISTS "${APP_ICNS}")
-        set_target_properties(clashauto-qml PROPERTIES MACOSX_BUNDLE_ICON_FILE "icon.icns")
-        target_sources(clashauto-qml PRIVATE "${APP_ICNS}")
+        set_target_properties(coast PROPERTIES MACOSX_BUNDLE_ICON_FILE "icon.icns")
+        target_sources(coast PRIVATE "${APP_ICNS}")
         set_source_files_properties("${APP_ICNS}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
     endif()
 
@@ -489,7 +489,7 @@ if(APPLE)
     find_library(SERVICEMANAGEMENT_FRAMEWORK ServiceManagement REQUIRED)
     find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
 
-    target_sources(clashauto-qml PRIVATE
+    target_sources(coast PRIVATE
         src/MacHelperClient.mm src/MacHelperClient.h
         src/MacWindow.mm src/MacWindow.h
         src/MacSpeedItem.mm src/MacSpeedItem.h
@@ -500,7 +500,7 @@ if(APPLE)
     set_source_files_properties(src/MacSpeedItem.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     set_source_files_properties(src/PowerWatcher_mac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 
-    target_link_libraries(clashauto-qml PRIVATE
+    target_link_libraries(coast PRIVATE
         ${SECURITY_FRAMEWORK}
         ${SYSTEMCONFIGURATION_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK}
@@ -520,15 +520,15 @@ if(APPLE)
         ${SYSTEMCONFIGURATION_FRAMEWORK}
         ${COREFOUNDATION_FRAMEWORK})
 
-    add_dependencies(clashauto-qml clashauto-helper)
-    add_custom_command(TARGET clashauto-qml POST_BUILD
+    add_dependencies(coast clashauto-helper)
+    add_custom_command(TARGET coast POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory
-            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-qml>/Library/LaunchDaemons"
+            "$<TARGET_BUNDLE_CONTENT_DIR:coast>/Library/LaunchDaemons"
         COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:clashauto-helper>"
-            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-qml>/MacOS/com.yuehongsun.coast.helper"
+            "$<TARGET_BUNDLE_CONTENT_DIR:coast>/MacOS/com.yuehongsun.coast.helper"
         COMMAND ${CMAKE_COMMAND} -E copy
             "${CMAKE_CURRENT_SOURCE_DIR}/helper/com.yuehongsun.coast.helper.plist"
-            "$<TARGET_BUNDLE_CONTENT_DIR:clashauto-qml>/Library/LaunchDaemons/com.yuehongsun.coast.helper.plist"
+            "$<TARGET_BUNDLE_CONTENT_DIR:coast>/Library/LaunchDaemons/com.yuehongsun.coast.helper.plist"
         VERBATIM)
 endif()
 
@@ -538,6 +538,6 @@ configure_file(
     "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.h"
     @ONLY
 )
-target_include_directories(clashauto-qml PRIVATE
+target_include_directories(coast PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
     "${CMAKE_CURRENT_SOURCE_DIR}/src")   # 让 src/qml/*.cpp 既可 "AppConfig.h" 也可 "../AppConfig.h"

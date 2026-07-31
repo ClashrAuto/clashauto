@@ -27,7 +27,7 @@
 // 放进 netns 而不是本机地址，是因为**本机地址会被内核本地直投短路**，那样测的就不是这条路。
 //
 // ── 编译（无 CMake 目标；拿主构建的 .o 拼即可）─────────────────────────
-//   cd <repo>/clashauto-c++ && D=build/CMakeFiles/clashauto-qml.dir
+//   cd <repo>/clashauto-c++ && D=build/CMakeFiles/coast.dir
 //   OBJS=$(find $D/src/net $D/third_party -name "*.o" | grep -v LanGateway | tr "\n" " ")
 //   OBJS="$OBJS $D/src/DeviceStore.cpp.o $D/src/Sqlite.cpp.o"
 //   g++ -std=c++17 -fPIC -o /tmp/tunstack tools/gwbench/tunstack.cpp <手工 moc 出来的 moc_*.cpp> \
