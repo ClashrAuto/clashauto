@@ -16,9 +16,16 @@
 //   · HTTP CONNECT（`CONNECT host:port HTTP/1.1`）—— 覆盖全部 HTTPS 流量；
 //   · HTTP 绝对形式请求（`GET http://host/path HTTP/1.1`）—— 改写成源形式后转发。
 //
+// SOCKS5 **UDP ASSOCIATE** 也支持（CMD=0x03）。
+//   ★ 为什么后来补上：系统代理改指本机入站之后，macOS / Linux 的系统代理设置里是**含 SOCKS 的**，
+//     而 mihomo 的混合端口支持 UDP ASSOCIATE。若这里只回「命令不支持」，切过去就等于让所有
+//     靠 SOCKS 走 UDP 的东西（部分 DNS 工具、游戏、WebRTC）坏掉 —— 那是引入系统代理切换时
+//     自己制造的功能倒退。
+//   局限（已知并有意）：转发头里 ATYP=域名 的数据报**丢弃**——IOutboundUdp::sendTo 要的是
+//     具体地址，这里不做解析。实际用 SOCKS UDP 的场景（DNS 查询、游戏）目的地几乎都是 IP 字面量。
+//
 // **明确不做**（有意为之，不是遗漏）：
 //   · SOCKS4/4a：早已绝迹，加了只是扩大攻击面；首字节 0x04 直接断开。
-//   · SOCKS5 UDP ASSOCIATE：本机 UDP 代理留给 TUN 那条路，见 gap 文档的优先级 ④。
 //   · 入站认证：只监听回环地址时没有意义；将来要对局域网开放再加。
 #include <QByteArray>
 #include <QHostAddress>
@@ -76,6 +83,8 @@ private:
     void handleHandshake(Session *s);  // 嗅探 + 解析，够了就拨号
     void startDial(Session *s, const QString &host, quint16 port, const QByteArray &initialUpstream);
     void pumpClientToOut(Session *s);
+    void startUdpAssociate(Session *s); // SOCKS5 CMD=0x03
+    void onUdpReadable(Session *s);
     void closeSession(Session *s, const char *why);
 
     QTcpServer *m_server = nullptr;

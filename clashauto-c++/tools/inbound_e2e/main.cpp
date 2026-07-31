@@ -22,6 +22,8 @@
 #include <QHostAddress>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QUdpSocket>
+#include <QtEndian>
 #include <QElapsedTimer>
 #include <QTimer>
 #include <algorithm>
@@ -369,6 +371,101 @@ int main(int argc, char **argv)
                      N, pct(raw, 0.5), pct(raw, 0.9), pct(raw, 0.99), raw.size(),
                      pct(viaDialer, 0.5), pct(viaDialer, 0.9), pct(viaDialer, 0.99),
                      viaDialer.size(), pct(viaDialer, 0.5) - pct(raw, 0.5));
+    }
+
+    // ---- SOCKS5 UDP ASSOCIATE：真的把数据报送出去并收回来 ----
+    //      系统代理改指本机入站后，macOS/Linux 的系统代理**含 SOCKS**，而 mihomo 支持 UDP。
+    //      这条不通就等于切过去之后所有走 SOCKS 的 UDP 全坏 —— 必须端到端验，不能只看握手应答。
+    {
+        QUdpSocket echo; // UDP 回显靶机
+        bool echoOk = echo.bind(QHostAddress::LocalHost, 0);
+        QObject::connect(&echo, &QUdpSocket::readyRead, &echo, [&echo] {
+            while (echo.hasPendingDatagrams()) {
+                QByteArray d(int(echo.pendingDatagramSize()), Qt::Uninitialized);
+                QHostAddress from;
+                quint16 fp = 0;
+                const qint64 n = echo.readDatagram(d.data(), d.size(), &from, &fp);
+                if (n > 0)
+                    echo.writeDatagram(QByteArray("ECHO:") + d.left(int(n)), from, fp);
+            }
+        });
+        const quint16 eport = echo.localPort();
+
+        // ★ 必须用事件循环，**不能**用 waitForReadyRead：入站服务端就在同一个线程里，
+        //   阻塞式 waitFor* 期间事件循环不转，服务端压根没机会 accept/应答（第一版就栽在这，
+        //   看起来像"UDP 没实现"，其实是测试自己把服务端饿死了）。
+        QTcpSocket ctl;
+        QByteArray ctlBuf;
+        auto pump = [&](int wantBytes, int ms) {
+            QEventLoop l;
+            QTimer t;
+            t.setSingleShot(true);
+            QObject::connect(&t, &QTimer::timeout, &l, &QEventLoop::quit);
+            auto c = QObject::connect(&ctl, &QTcpSocket::readyRead, &l, [&] {
+                ctlBuf.append(ctl.readAll());
+                if (ctlBuf.size() >= wantBytes)
+                    l.quit();
+            });
+            if (ctlBuf.size() < wantBytes) {
+                t.start(ms);
+                l.exec();
+            }
+            QObject::disconnect(c);
+            return ctlBuf.size() >= wantBytes;
+        };
+        ctl.connectToHost(QHostAddress::LocalHost, iport);
+        bool good = echoOk && ctl.waitForConnected(2000);
+        if (good) {
+            ctl.write(QByteArray::fromRawData("\x05\x01\x00", 3)); // greeting
+            good = pump(2, 2000) && ctlBuf.startsWith(QByteArray("\x05\x00", 2));
+            ctlBuf.remove(0, 2);
+        }
+        quint16 relay = 0;
+        if (good) { // UDP ASSOCIATE，DST 填 0.0.0.0:0（客户端惯例）
+            ctl.write(QByteArray::fromRawData("\x05\x03\x00\x01\x00\x00\x00\x00\x00\x00", 10));
+            good = pump(10, 2000);
+            if (good) {
+                good = ctlBuf.at(1) == '\0';
+                if (good)
+                    relay = qFromBigEndian<quint16>(
+                        reinterpret_cast<const uchar *>(ctlBuf.constData() + 8));
+            }
+        }
+        QByteArray got;
+        if (good && relay) {
+            QUdpSocket cli;
+            cli.bind(QHostAddress::LocalHost, 0);
+            QByteArray dg;
+            dg.append('\0'); dg.append('\0'); dg.append('\0'); // RSV RSV FRAG
+            dg.append('\x01');
+            const quint32 v4 = qToBigEndian<quint32>(QHostAddress(QStringLiteral("127.0.0.1")).toIPv4Address());
+            dg.append(reinterpret_cast<const char *>(&v4), 4);
+            const quint16 be = qToBigEndian<quint16>(eport);
+            dg.append(reinterpret_cast<const char *>(&be), 2);
+            dg.append("PING-UDP");
+            cli.writeDatagram(dg, QHostAddress::LocalHost, relay);
+            QEventLoop l;
+            QTimer t;
+            t.setSingleShot(true);
+            QObject::connect(&t, &QTimer::timeout, &l, &QEventLoop::quit);
+            QObject::connect(&cli, &QUdpSocket::readyRead, &l, [&] {
+                QByteArray d(int(cli.pendingDatagramSize()), Qt::Uninitialized);
+                cli.readDatagram(d.data(), d.size());
+                got = d;
+                l.quit();
+            });
+            t.start(4000);
+            l.exec();
+        }
+        // 回程也带 SOCKS UDP 头（RSV/FRAG/ATYP/ADDR/PORT），载荷从第 10 字节起
+        std::fprintf(stderr, "        [dbg] echoOk=%d relay=%u got=%d bytes\n", int(echoOk),
+                     unsigned(relay), got.size());
+        const bool ok3 = got.size() > 10 && got.mid(10).startsWith("ECHO:PING-UDP");
+        std::fprintf(stderr, "  [%s] SOCKS5 UDP ASSOCIATE 端到端回显\n", ok3 ? "PASS" : "FAIL");
+        if (!ok3)
+            std::fprintf(stderr, "        收到 %d 字节: %s\n", got.size(),
+                         got.mid(10).left(40).constData());
+        ok &= ok3;
     }
 
     // ---- 流量计数：UI 上那行读数的数据源。必须**真的在数**，否则读数恒零、比没有还误导。

@@ -6,11 +6,14 @@
 #include <QHostAddress>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QUdpSocket>
 #include <QTimer>
 #include <QUrl>
 #include <QtEndian>
 
 #include <cstdio>
+#include <tuple>
+#include <utility>
 
 namespace {
 
@@ -28,6 +31,22 @@ bool isHopByHopHeader(const QByteArray &lowerName)
         || lowerName == "trailer" || lowerName == "transfer-encoding" || lowerName == "upgrade";
 }
 
+// 往 SOCKS5 报文里追加 ATYP + 地址 + 端口（应答的 BND 和 UDP 头共用同一个编码）。
+void appendSocksAddr(QByteArray &out, const QHostAddress &addr, quint16 port)
+{
+    if (addr.protocol() == QAbstractSocket::IPv6Protocol) {
+        out.append('\x04');
+        const Q_IPV6ADDR raw = addr.toIPv6Address();
+        out.append(reinterpret_cast<const char *>(raw.c), 16);
+    } else {
+        out.append('\x01');
+        const quint32 v4 = qToBigEndian<quint32>(addr.toIPv4Address());
+        out.append(reinterpret_cast<const char *>(&v4), 4);
+    }
+    const quint16 p = qToBigEndian<quint16>(port);
+    out.append(reinterpret_cast<const char *>(&p), 2);
+}
+
 } // namespace
 
 struct MixedInbound::Session {
@@ -42,6 +61,16 @@ struct MixedInbound::Session {
     int socksPhase = 0;  // 0=等 greeting，1=等 request
     bool upThrottled = false; // 已卡住客户端读（等出站排空）
     bool downPaused = false;  // 已暂停从出站读（等客户端排空）
+    // —— SOCKS5 UDP ASSOCIATE ——（TCP 连接只用来维持关联生命周期）
+    QUdpSocket *udp = nullptr;      // 收客户端数据报的中继口（只绑回环）
+    IOutboundUdp *udpOut = nullptr; // 对应的出站 UDP 会话
+    QHostAddress udpPeer;           // 客户端的源地址（第一份数据报里学到）
+    quint16 udpPeerPort = 0;
+    bool udpReady = false;
+    // ★ associate() 之后 ready() 是**异步**才发的（DirectOutboundUdp.h 明写：NetStack 依赖这个时序）。
+    //   就绪前直接 sendTo 会把数据报丢掉 —— DNS 查询这种「一来就发一个包」的场景 100% 命中。
+    //   所以先排队，ready 到了再一次性发出去。
+    QVector<std::tuple<QHostAddress, quint16, QByteArray>> udpPending;
 };
 
 MixedInbound::MixedInbound(OutboundFactory *factory, QObject *parent)
@@ -214,7 +243,12 @@ void MixedInbound::handleHandshake(Session *s)
             closeSession(s, "bad atyp");
             return;
         }
-        if (cmd != 0x01) { // 只支持 CONNECT
+        if (cmd == 0x03) { // UDP ASSOCIATE
+            s->inBuf.remove(0, consumed);
+            startUdpAssociate(s);
+            return;
+        }
+        if (cmd != 0x01) { // 其余命令（BIND 等）不支持
             s->client->write(QByteArray::fromRawData("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00", 10));
             closeSession(s, "socks5 cmd not supported");
             return;
@@ -376,6 +410,118 @@ void MixedInbound::startDial(Session *s, const QString &host, quint16 port,
     }
 }
 
+// —————————————— SOCKS5 UDP ASSOCIATE ——————————————
+//
+// 语义（RFC 1928 §7）：控制用的 TCP 连接**保持打开**代表关联存活，断开即结束；
+// 客户端把数据报发到我们回给它的 BND 端口，每个报文前带
+//   RSV(2) FRAG(1) ATYP(1) DST.ADDR DST.PORT
+// 我们剥掉这个头把载荷交给出站，回程再原样套回去。FRAG≠0（分片）按 RFC 可以丢，这里就丢。
+void MixedInbound::startUdpAssociate(Session *s)
+{
+    if (!m_factory) {
+        closeSession(s, "no factory");
+        return;
+    }
+    s->udp = new QUdpSocket(this);
+    // 只在回环上收：客户端就是本机应用；绑 0.0.0.0 会把这个中继暴露给整个局域网。
+    if (!s->udp->bind(QHostAddress::LocalHost, 0)) {
+        s->client->write(QByteArray::fromRawData("\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00", 10));
+        closeSession(s, "udp bind failed");
+        return;
+    }
+    const quint16 relayPort = s->udp->localPort();
+
+    s->udpOut = m_factory->createUdp(this);
+    if (!s->udpOut) { // 出站不支持 UDP（严格模式 / 协议没实现）→ 老实说不支持，别假装成功
+        s->client->write(QByteArray::fromRawData("\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00", 10));
+        closeSession(s, "outbound has no udp");
+        return;
+    }
+
+    connect(s->udpOut, &IOutboundUdp::datagramReceived, this,
+            [this, s](const QHostAddress &srcIp, quint16 srcPort, const QByteArray &payload) {
+                if (s->gone || !s->udp || s->udpPeerPort == 0)
+                    return; // 还没见过客户端的源地址，回不去
+                QByteArray out;
+                out.append('\0');
+                out.append('\0');
+                out.append('\0'); // RSV RSV FRAG
+                appendSocksAddr(out, srcIp, srcPort);
+                out.append(payload);
+                m_bytesDown += quint64(payload.size());
+                s->udp->writeDatagram(out, s->udpPeer, s->udpPeerPort);
+            });
+    connect(s->udpOut, &IOutboundUdp::failed, this,
+            [this, s](const QString &why) { closeSession(s, qPrintable(why)); });
+    connect(s->udpOut, &IOutboundUdp::closed, this, [this, s] { closeSession(s, "udp out closed"); });
+
+    connect(s->udpOut, &IOutboundUdp::ready, this, [this, s] {
+        s->udpReady = true;
+        for (const auto &d : std::as_const(s->udpPending))
+            s->udpOut->sendTo(std::get<0>(d), std::get<1>(d), std::get<2>(d));
+        s->udpPending.clear();
+    });
+    connect(s->udp, &QUdpSocket::readyRead, this, [this, s] { onUdpReadable(s); });
+    s->udpOut->associate(m_user);
+
+    // 应答里的 BND 必须是**客户端够得着**的地址：回环 + 我们刚绑的端口。
+    QByteArray reply;
+    reply.append('\x05');
+    reply.append('\0');
+    reply.append('\0');
+    appendSocksAddr(reply, QHostAddress(QHostAddress::LocalHost), relayPort);
+    s->client->write(reply);
+    s->dialed = true; // 之后 TCP 上不再有请求；它只用来维持关联的生命周期
+    ++m_totalSessions;
+    emit connectionOpened(QStringLiteral("udp:%1").arg(relayPort));
+}
+
+void MixedInbound::onUdpReadable(Session *s)
+{
+    while (s->udp && s->udp->hasPendingDatagrams()) {
+        QByteArray buf(int(s->udp->pendingDatagramSize()), Qt::Uninitialized);
+        QHostAddress from;
+        quint16 fromPort = 0;
+        const qint64 n = s->udp->readDatagram(buf.data(), buf.size(), &from, &fromPort);
+        if (n <= 0)
+            continue;
+        buf.truncate(int(n));
+        // 记住客户端的源地址：回程要往这里送。只认第一个（一个关联对应一个客户端 socket）。
+        if (s->udpPeerPort == 0) {
+            s->udpPeer = from;
+            s->udpPeerPort = fromPort;
+        }
+        if (buf.size() < 5 || buf.at(2) != '\0')
+            continue; // 太短，或 FRAG≠0（分片）——按 RFC 可以直接丢
+        const auto atyp = static_cast<unsigned char>(buf.at(3));
+        QHostAddress dst;
+        quint16 dport = 0;
+        int off = 0;
+        if (atyp == 0x01 && buf.size() >= 10) {
+            dst = QHostAddress(qFromBigEndian<quint32>(
+                reinterpret_cast<const uchar *>(buf.constData() + 4)));
+            dport = qFromBigEndian<quint16>(reinterpret_cast<const uchar *>(buf.constData() + 8));
+            off = 10;
+        } else if (atyp == 0x04 && buf.size() >= 22) {
+            Q_IPV6ADDR raw;
+            memcpy(raw.c, buf.constData() + 4, 16);
+            dst = QHostAddress(raw);
+            dport = qFromBigEndian<quint16>(reinterpret_cast<const uchar *>(buf.constData() + 20));
+            off = 22;
+        } else {
+            continue; // ATYP=域名：见头文件里写明的局限，丢弃
+        }
+        const QByteArray payload = buf.mid(off);
+        if (payload.isEmpty() || !s->udpOut)
+            continue;
+        m_bytesUp += quint64(payload.size());
+        if (s->udpReady)
+            s->udpOut->sendTo(dst, dport, payload);
+        else
+            s->udpPending.append({dst, dport, payload}); // 见 Session::udpPending 上方的时序说明
+    }
+}
+
 void MixedInbound::closeSession(Session *s, const char *why)
 {
     if (!s || s->gone)
@@ -388,6 +534,19 @@ void MixedInbound::closeSession(Session *s, const char *why)
         s->out->closeTunnel();
         s->out->deleteLater();
         s->out = nullptr;
+    }
+    // UDP 关联的两件东西也要收：TCP 控制连接一断，关联即结束（RFC 1928 §7）。
+    if (s->udpOut) {
+        s->udpOut->disconnect(this);
+        s->udpOut->closeSession();
+        s->udpOut->deleteLater();
+        s->udpOut = nullptr;
+    }
+    if (s->udp) {
+        s->udp->disconnect(this);
+        s->udp->close();
+        s->udp->deleteLater();
+        s->udp = nullptr;
     }
     if (s->client) {
         s->client->disconnect(this);
