@@ -79,9 +79,11 @@ CoastHelperProtocol   —— app 与 helper 共享的 XPC 契约 + ARP 报文构
    Qt 版那 13 万行用户态 TCP/IP 栈,在 macOS 上被内核转发 + PF 省掉了。详见
    [`docs/gateway-evaluation.md`](docs/gateway-evaluation.md)。
 
-5. **复原优先**。被 ARP 欺骗的设备把本机当网关,一旦停止转发就断网(ARP 缓存十几分钟才过期)。
-   所以整个欺骗循环跑在 helper 里,XPC 连接一断(app 崩/被杀)就自动复原;复原发真网关 MAC、
-   发三遍加冗余;`ARPPacket` 的复原字节有单测逐字节钉住。这是全项目最危险的一处。
+5. **复原优先 + 单播**。被 ARP 欺骗的设备把本机当网关,一旦停止转发就断网(ARP 缓存十几分钟
+   才过期)。所以整个欺骗循环跑在 helper 里,XPC 连接一断(app 崩/被杀)就自动复原;复原发真网关
+   MAC、发三遍加冗余。**欺骗与复原都单播到目标设备本人,绝不广播** —— 广播会污染全网 ARP,
+   把没被选中的设备也引过来。`ARPPacket` 的报文字节(含单播目的地、复原 sender)有单测逐字节钉住。
+   这是全项目最危险的一处。
 
 ## helper(特权 daemon)
 

@@ -65,8 +65,13 @@ public enum HelperConstants {
     ///   XPC 连接一断它就自己收尾（见 helper 里的 invalidationHandler）。
     ///   fd 传给 app 的话，app 被 SIGKILL 时没有任何人来发那几个复原包。
     ///
-    /// `deviceIPsCommaSep`：逗号分隔的设备 IP（避免 NSXPC 的容器类白名单样板）。
+    /// `deviceIPsCommaSep` / `deviceMACsCommaSep`：逗号分隔、**一一对应**的设备 IP 与 MAC
+    /// （用两个字符串而不是数组，避免 NSXPC 的容器类白名单样板）。
+    ///
+    /// ★ **MAC 必须传，且欺骗必须单播到它**。发广播 ARP 会被整个局域网上缓存里有网关条目的
+    ///   设备处理 —— 用户只选了一台，却把全网流量都引过来了。单播只影响目标那一台。
     func startRedirect(deviceIPsCommaSep: String,
+                       deviceMACsCommaSep: String,
                        interface: String,
                        gatewayIP: String,
                        gatewayMAC: String,

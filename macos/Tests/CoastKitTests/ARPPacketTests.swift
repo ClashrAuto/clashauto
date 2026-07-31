@@ -41,6 +41,20 @@ struct ARPPacketTests {
         #expect(Array(frame[38..<42]) == [192, 168, 1, 50])
     }
 
+    @Test("★ 单播：目的 MAC 必须是目标设备本人，绝不是广播")
+    func mustUnicastNotBroadcast() {
+        // 这是安全命门。发广播 ARP 会被整个局域网上缓存里有网关条目的设备处理 ——
+        // 用户只选了一台，却把全网流量都引过来。目的 MAC(以太头 0..6) 必须是目标设备。
+        let self_ = ARPPacket.MAC("aa:aa:aa:aa:aa:aa")!
+        let device = ARPPacket.MAC("dd:dd:dd:dd:dd:dd")!
+        let frame = ARPPacket.reply(senderMAC: self_, senderIP: [192, 168, 1, 1],
+                                    targetMAC: device, targetIP: [192, 168, 1, 50])
+        #expect(Array(frame[0..<6]) == device.bytes)                 // 目的 = 设备本人
+        #expect(Array(frame[0..<6]) != ARPPacket.MAC.broadcast.bytes) // 不是广播
+        // ARP 载荷里的 target hardware address(偏移 32..38) 也是设备本人
+        #expect(Array(frame[32..<38]) == device.bytes)
+    }
+
     @Test("★ 复原帧：sender = 真网关 MAC，把设备的 ARP 缓存改回去")
     func restoreFrameUsesRealGateway() {
         // 这是整个功能的命门：复原发的是「网关 IP → 真网关 MAC」，

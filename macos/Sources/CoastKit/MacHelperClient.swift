@@ -151,12 +151,15 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
 
     // MARK: - 透明代理接管
 
-    public func startRedirect(deviceIPs: [String], interface: String,
+    public func startRedirect(devices: [(ip: String, mac: String)], interface: String,
                               gatewayIP: String, gatewayMAC: String,
                               redirPort: Int, dnsPort: Int) async throws {
-        let joined = deviceIPs.joined(separator: ",")
+        // IP 与 MAC 用两个逗号串平行传，下标一一对应（helper 侧 zip 回去）
+        let ips = devices.map(\.ip).joined(separator: ",")
+        let macs = devices.map(\.mac).joined(separator: ",")
         let _: Bool = try await withProxy { helper, done in
-            helper.startRedirect(deviceIPsCommaSep: joined, interface: interface,
+            helper.startRedirect(deviceIPsCommaSep: ips, deviceMACsCommaSep: macs,
+                                 interface: interface,
                                  gatewayIP: gatewayIP, gatewayMAC: gatewayMAC,
                                  redirPort: redirPort, dnsPort: dnsPort) { ok, error in
                 done(ok ? .success(true) : .failure(HelperError.remote(error)))

@@ -147,12 +147,13 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
         }
     }
 
-    func startRedirect(deviceIPsCommaSep: String, interface: String,
-                       gatewayIP: String, gatewayMAC: String,
+    func startRedirect(deviceIPsCommaSep: String, deviceMACsCommaSep: String,
+                       interface: String, gatewayIP: String, gatewayMAC: String,
                        redirPort: Int, dnsPort: Int,
                        withReply reply: @escaping (Bool, String) -> Void) {
-        let ips = deviceIPsCommaSep.split(separator: ",").map(String.init)
-        if let error = redirector.start(deviceIPs: ips, interface: interface,
+        let ips = deviceIPsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        let macs = deviceMACsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        if let error = redirector.start(deviceIPs: ips, deviceMACs: macs, interface: interface,
                                         gatewayIP: gatewayIP, gatewayMAC: gatewayMAC,
                                         redirPort: redirPort, dnsPort: dnsPort) {
             reply(false, error)

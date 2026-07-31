@@ -178,8 +178,10 @@ public final class CoastController {
     /// 但仍然比对一下集合，没变就不打扰 —— 避免每次热重载都触发一轮 ARP 重置。
     private func syncRedirect() async {
         guard let store = deviceStore else { return }
-        let devices = store.proxiedDevices()
-        let ips = Set(devices.map(\.lastIP))
+        // 每台设备的 (IP, MAC)。MAC 是接管的硬前提 —— 单播欺骗要它、复原要它。
+        // proxiedDevices 已保证 lastIP 非空；mac 是主键，恒有值。
+        let targets = store.proxiedDevices().map { (ip: $0.lastIP, mac: $0.mac) }
+        let ips = Set(targets.map(\.ip))
 
         guard ips != activeRedirectIPs else { return }
 
@@ -190,7 +192,7 @@ public final class CoastController {
             return
         }
 
-        if ips.isEmpty {
+        if targets.isEmpty {
             try? await helper.stopRedirect()
             activeRedirectIPs = []
             log("已停止接管所有设备并复原")
@@ -202,14 +204,14 @@ public final class CoastController {
             return
         }
         do {
-            try await helper.startRedirect(deviceIPs: Array(ips),
+            try await helper.startRedirect(devices: targets,
                                            interface: gateway.interface,
                                            gatewayIP: gateway.ip,
                                            gatewayMAC: gateway.mac,
                                            redirPort: DeviceStore.redirPort,
                                            dnsPort: DeviceStore.dnsPort)
             activeRedirectIPs = ips
-            log("正在接管 \(ips.count) 台设备的流量")
+            log("正在接管 \(targets.count) 台设备的流量")
         } catch {
             log("接管设备失败：\(error)")
         }

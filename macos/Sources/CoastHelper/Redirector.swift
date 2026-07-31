@@ -34,7 +34,11 @@ final class Redirector: @unchecked Sendable {
     // MARK: - 开始
 
     /// 返回 nil = 成功，否则是失败原因。**失败时保证已回滚**（不会留下半装的状态）。
-    func start(deviceIPs deviceIPStrings: [String], interface: String,
+    ///
+    /// `deviceMACStrings` 与 `deviceIPStrings` **一一对应**。MAC 解析不了的那一台**直接跳过**，
+    /// 不代理它 —— 宁可漏一台，也绝不退回广播欺骗（那会污染全网 ARP，见协议注释）。
+    func start(deviceIPs deviceIPStrings: [String], deviceMACs deviceMACStrings: [String],
+               interface: String,
                gatewayIP gatewayIPString: String, gatewayMAC gatewayMACString: String,
                redirPort: Int, dnsPort: Int) -> String? {
         queue.sync {
@@ -45,17 +49,24 @@ final class Redirector: @unchecked Sendable {
             guard let localMAC = Self.hardwareAddress(of: interface) else {
                 return "取不到 \(interface) 的 MAC"
             }
-            let ips = deviceIPStrings.compactMap { ARPPacket.ipv4Bytes($0) }
-            guard !ips.isEmpty else { return "没有有效的设备 IP" }
+            // IP 与 MAC 必须同时解析成功，且下标对齐 —— 任一解析失败就丢掉这一台，
+            // 保证 deviceIPs[i] 与 deviceMACs[i] 始终指同一台设备。
+            var ips: [[UInt8]] = []
+            var macs: [ARPPacket.MAC] = []
+            for (ipString, macString) in zip(deviceIPStrings, deviceMACStrings) {
+                guard let ip = ARPPacket.ipv4Bytes(ipString),
+                      let mac = ARPPacket.MAC(macString) else { continue }
+                ips.append(ip)
+                macs.append(mac)
+            }
+            guard !ips.isEmpty else { return "没有有效的设备（IP/MAC 都要能解析）" }
 
             self.interface = interface
             self.gatewayIP = gwIP
             self.gatewayMAC = gwMAC
             self.selfMAC = localMAC
             self.deviceIPs = ips
-            // 设备的真实 MAC 现在还不知道 —— 用广播发欺骗包一样能到，复原时再定向。
-            // 广播复原也有效（所有设备都会更新缓存），所以这里全部先按广播处理。
-            self.deviceMACs = ips.map { _ in .broadcast }
+            self.deviceMACs = macs   // 真实 MAC，欺骗与复原都**单播**到它，不碰其它设备
 
             // 1) 开内核转发。记下原值，复原时**只在原本是关的时候才关回去** ——
             //    用户可能自己开着 forwarding 干别的，我们不该擅自关掉。
@@ -64,8 +75,10 @@ final class Redirector: @unchecked Sendable {
                 return "开启 ip.forwarding 失败"
             }
 
-            // 2) 装 PF anchor。失败要把 forwarding 回滚。
-            if let error = installPF(deviceIPs: deviceIPStrings, redirPort: redirPort, dnsPort: dnsPort) {
+            // 2) 装 PF anchor。**用实际接管的这批 IP**（ips，已过滤掉 MAC 解析失败的），
+            //    不是原始入参 —— 否则会给一台我们并不欺骗、流量根本不会到本机的设备装 rdr 规则。
+            let ipStringsForPF = ips.map { $0.map(String.init).joined(separator: ".") }
+            if let error = installPF(deviceIPs: ipStringsForPF, redirPort: redirPort, dnsPort: dnsPort) {
                 if !forwardingWasOn { _ = Self.setIPForwarding(false) }
                 return error
             }
@@ -108,10 +121,10 @@ final class Redirector: @unchecked Sendable {
         //   丢一个包就意味着一台设备断网十几分钟，这里的重发绝对值得。
         if bpfFD >= 0 {
             for _ in 0..<3 {
-                for (index, ip) in deviceIPs.enumerated() {
-                    let target = index < deviceMACs.count ? deviceMACs[index] : .broadcast
+                // deviceIPs 与 deviceMACs 下标对齐（start 里保证），直接 zip 单播给每台设备本人
+                for (ip, mac) in zip(deviceIPs, deviceMACs) {
                     let frame = ARPPacket.reply(senderMAC: gatewayMAC, senderIP: gatewayIP,
-                                                targetMAC: target, targetIP: ip)
+                                                targetMAC: mac, targetIP: ip)
                     _ = frame.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
                 }
                 usleep(50_000)
@@ -131,11 +144,11 @@ final class Redirector: @unchecked Sendable {
 
     private func sendSpoof() {
         guard bpfFD >= 0 else { return }
-        for (index, ip) in deviceIPs.enumerated() {
-            let target = index < deviceMACs.count ? deviceMACs[index] : .broadcast
-            // 告诉设备：网关 IP 的 MAC 是本机 → 它把上行流量发给我们
+        // **单播**给每台被选中的设备本人：告诉它「网关 IP 的 MAC 是本机」，它把上行发给我们。
+        // 绝不广播 —— 那会让全网设备都把流量引过来，远超用户只选了这几台的意图。
+        for (ip, mac) in zip(deviceIPs, deviceMACs) {
             let frame = ARPPacket.reply(senderMAC: selfMAC, senderIP: gatewayIP,
-                                        targetMAC: target, targetIP: ip)
+                                        targetMAC: mac, targetIP: ip)
             _ = frame.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
         }
     }
