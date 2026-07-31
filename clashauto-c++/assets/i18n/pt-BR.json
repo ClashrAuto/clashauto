@@ -366,7 +366,7 @@
   "订阅自动更新周期": "Intervalo de atualização automática da assinatura",
   "订阅节点": "Nós da assinatura",
   "订阅链接": "URL da assinatura",
-  "设备": "Dispositivos",
+  "设备": "Dispositivo",
   "设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。": "Dispositivo offline: não é possível obter o IP/ARP, então o roteamento não pode ser ativado. Tente novamente quando ele voltar.",
   "设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。（已经开着的代理随时可以关掉。）": "O dispositivo está offline: sem o IP/ARP dele não dá para ativar o proxy; espere ele voltar. (Um proxy já ativo pode ser desligado a qualquer momento.)",
   "设备被争抢": "Disputa por dispositivo",

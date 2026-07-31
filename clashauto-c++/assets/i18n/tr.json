@@ -366,7 +366,7 @@
   "订阅自动更新周期": "Abonelik otomatik güncelleme aralığı",
   "订阅节点": "Abonelik düğümleri",
   "订阅链接": "Abonelik URL'si",
-  "设备": "Cihazlar",
+  "设备": "Cihaz",
   "设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。": "Cihaz çevrimdışı: IP/ARP alınamadığı için yönlendirme açılamaz. Çevrimiçi olunca tekrar deneyin.",
   "设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。（已经开着的代理随时可以关掉。）": "Aygıt çevrimdışı: IP/ARP bilgisi alınamadığı için vekil açılamıyor; tekrar çevrimiçi olunca açın. (Zaten açık olan bir vekil istendiği zaman kapatılabilir.)",
   "设备被争抢": "Cihaz için çekişme",

@@ -366,7 +366,7 @@
   "订阅自动更新周期": "Intervalo de actualización automática de suscripciones",
   "订阅节点": "Nodos de suscripción",
   "订阅链接": "URL de la suscripción",
-  "设备": "Dispositivos",
+  "设备": "Dispositivo",
   "设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。": "El dispositivo está desconectado: no se puede obtener su IP/ARP, así que no es posible activar el enrutado. Inténtalo cuando vuelva a estar en línea.",
   "设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。（已经开着的代理随时可以关掉。）": "El dispositivo está desconectado: sin su IP/ARP no se puede activar el proxy; espera a que vuelva a estar en línea. (Un proxy ya activo se puede desactivar en cualquier momento.)",
   "设备被争抢": "Dispositivo en disputa",

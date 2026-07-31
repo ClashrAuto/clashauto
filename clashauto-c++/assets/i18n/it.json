@@ -366,7 +366,7 @@
   "订阅自动更新周期": "Intervallo di aggiornamento automatico dell'abbonamento",
   "订阅节点": "Nodi dell'abbonamento",
   "订阅链接": "URL dell'abbonamento",
-  "设备": "Dispositivi",
+  "设备": "Dispositivo",
   "设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。": "Dispositivo offline: IP/ARP non disponibili, impossibile attivare l'instradamento. Riprova quando torna online.",
   "设备当前离线：拿不到它的 IP/ARP，无法开启代理；等它上线后再开。（已经开着的代理随时可以关掉。）": "Il dispositivo è offline: senza il suo IP/ARP non è possibile attivare il proxy, attendi che torni online. (Un proxy già attivo si può disattivare in qualsiasi momento.)",
   "设备被争抢": "Dispositivo conteso",

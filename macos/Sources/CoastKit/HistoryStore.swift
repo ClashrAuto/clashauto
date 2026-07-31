@@ -36,7 +36,11 @@ public final class HistoryStore: @unchecked Sendable {
     /// 统计口径：全部流量，还是只算走了代理的（chain 既不是 DIRECT 也不是 REJECT）。
     public enum Scope: Sendable { case all, proxyOnly }
     /// 分组维度。
-    public enum Dimension: Sendable { case process, host }
+    /// 「今日流量」的聚合维度。
+    ///
+    /// `device` 用的是 `conn.mac` —— 这一列建表时就在写，却一直没有任何查询用它，
+    /// 于是「这些流量是哪台设备跑的」这个问题在界面上无从回答（Qt 那边有这个 tab）。
+    public enum Dimension: Sendable { case process, host, device }
 
     /// 保留天数。超过就删 —— 无限增长的库迟早会让「今日流量」查询慢到几秒。
     public static let retentionDays = 30
@@ -208,7 +212,12 @@ public final class HistoryStore: @unchecked Sendable {
     /// 今日 Top N（按进程或域名）。
     public func todayTop(dimension: Dimension, scope: Scope = .proxyOnly, limit: Int = 5) -> [GroupTotal] {
         guard let database else { return [] }
-        let column = dimension == .process ? "process" : "host"
+        let column: String
+        switch dimension {
+        case .process: column = "process"
+        case .host: column = "host"
+        case .device: column = "mac"
+        }
         let (start, end) = Self.todayRange()
         var result: [GroupTotal] = []
         database.query("""

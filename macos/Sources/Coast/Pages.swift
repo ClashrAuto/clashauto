@@ -417,21 +417,37 @@ struct TodayTrafficCard: View {
     var body: some View {
         @Bindable var bindable = state
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Text("今日流量".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
-                Text(Formatting.bytes(state.todayTotal))
-                    .font(.system(size: 13)).foregroundStyle(theme.textPrimary)
-                Spacer()
-                Toggle("只算代理".t, isOn: $bindable.trafficProxyOnly)
-                    .toggleStyle(.checkbox).font(.system(size: 11))
-                Picker("", selection: $bindable.trafficDimension) {
-                    Text("进程".t).tag(HistoryStore.Dimension.process)
-                    Text("域名".t).tag(HistoryStore.Dimension.host)
+            // 头部照 Qt：图标 + 标题 + 大数 | 右侧「全部 / 仅代理」分段。
+            // 口径用分段而不是勾选框 —— 「全部」和「仅代理」是两个并列的视角，
+            // 勾选框把「全部」变成了「没勾上的那个」，读起来是另一回事。
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "chart.bar")
+                    .font(.system(size: 16)).foregroundStyle(theme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("今日流量".t).font(.system(size: 13)).foregroundStyle(theme.accent)
+                    Text(Formatting.bytes(state.todayTotal))
+                        .font(.system(size: 22, weight: .medium)).foregroundStyle(theme.accent)
                 }
-                .labelsHidden().pickerStyle(.segmented).frame(width: 120)
+                Spacer()
+                Picker("", selection: Binding(
+                    get: { state.trafficProxyOnly },
+                    set: { state.trafficProxyOnly = $0 })) {
+                    Text("全部".t).tag(false)
+                    Text("仅代理".t).tag(true)
+                }
+                .labelsHidden().pickerStyle(.segmented).frame(width: 130)
             }
 
             hourlyBars
+
+            // 维度 tab：进程 / 设备 / 域名。「设备」这一维的数据(conn.mac)一直在写，
+            // 却从来没有查询用它 —— 于是「这些流量是哪台设备跑的」在界面上无从回答。
+            Picker("", selection: $bindable.trafficDimension) {
+                Text("进程".t).tag(HistoryStore.Dimension.process)
+                Text("设备".t).tag(HistoryStore.Dimension.device)
+                Text("域名".t).tag(HistoryStore.Dimension.host)
+            }
+            .labelsHidden().pickerStyle(.segmented).frame(maxWidth: 220)
 
             if state.todayTop.isEmpty {
                 Text(state.history.isOpen ? "今天还没有已结束的连接".t : "历史库不可用".t)
