@@ -66,7 +66,7 @@ struct LatencyCard: View {
             row("代理".t, reading.proxyMs, sub: reading.proxyName)
         }
         .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
         .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
     }

@@ -23,49 +23,51 @@ struct StatusPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
+                // ★ 双列网格,与 Qt 的 `GridLayout { columns: 2; rowSpacing/columnSpacing: 10 }`
+                //   一致;卡高也照搬(上传/下载 170,其余 268)。
+                //
+                //   之前是单列竖排 + 上传/下载做成小卡再配一张独立的带宽图 —— 那是照着 QML
+                //   的元素清单猜的。真跑起来截图才看清:曲线是**画在上传/下载卡背景里**的,
+                //   Qt 注释也讲了理由:同一个数字的「此刻」和「最近 40 秒」挨在一起看,
+                //   还省下整整一屏的竖向空间。
+                // 双列布局。**不用 `Grid`** —— 它按行等分可用高度，一旦某行内容更高，
+                // 其余行之间就会被撑出不均匀的空隙（实测第二、三行之间空了近 100pt）。
+                // 两个 HStack 各自定高，间距完全可控，也更贴近 Qt 的 GridLayout 行为
+                // （那边每张卡都写死 Layout.preferredHeight）。
                 HStack(spacing: 10) {
-                    MetricCard(symbol: "arrow.up", title: "上传".t, value: state.upText)
-                    MetricCard(symbol: "arrow.down", title: "下载".t, value: state.downText)
-                    MetricCard(symbol: "tray.and.arrow.down", title: "累计下载".t, value: state.totalDownText)
+                    TrafficCard(symbol: "arrow.up.square", title: "上传".t,
+                                value: Formatting.bytes(state.clash.up),
+                                accent: theme.uploadAccent,
+                                samples: state.bandwidthSamples.map(\.up))
+                    TrafficCard(symbol: "arrow.down.square", title: "下载".t,
+                                value: Formatting.bytes(state.clash.down),
+                                accent: theme.downloadAccent,
+                                samples: state.bandwidthSamples.map(\.down))
+                }
+                HStack(spacing: 10) {
+                    ConnectionsCard(recent: recentRows,
+                                    onOpenAll: { showingConnections = true },
+                                    onClearAll: { state.closeAllConnections() },
+                                    deviceName: deviceName(for:))
+                        .frame(height: 230)
+                    LatencyCard(monitor: state.latency)
+                        .frame(height: 230)
+                }
+                HStack(spacing: 10) {
+                    CompositionCard().frame(height: 230)
+                    TodayTrafficCard().frame(height: 230)
                 }
 
-                // 「连接」卡：计数 + 右上角两个动作 + 最近建立的 5 条。
-                // 对齐 Qt `StatusPage.qml` 的同名卡 —— 那边把「最近连接」直接摊在状态页上，
-                // 而不是只给一个计数、点开才看得到：状态页的用处就是**不点任何东西**也能
-                // 看出现在在跑什么。
-                ConnectionsCard(recent: recentRows,
-                                onOpenAll: { showingConnections = true },
-                                onClearAll: { state.closeAllConnections() },
-                                deviceName: deviceName(for:))
-
-                BandwidthChart(samples: state.bandwidthSamples)
-                    .frame(height: 160)
-                    .background(theme.metricBg)
-                    .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
-
-                LatencyCard(monitor: state.latency)
-                CompositionCard()
-                TodayTrafficCard()
-
-                HStack(spacing: 8) {
-                    StatusDot(label: "核心".t, on: state.controller.isCoreRunning)
-                    StatusDot(label: "网页代理".t, on: state.controller.isProxyEnabled)
-                    StatusDot(label: "增强(TUN)".t, on: state.controller.isTunEnabled)
-                    if state.controller.isCoreRunning, state.clash.coreUnresponsive {
-                        // 「进程活着但核心没响应」—— 灯是亮的、一切却都不通。不点破的话
-                        // 用户只会看到一个显示正常、实际全废的界面。
-                        Label("核心无响应(进程在,但 API 不通)".t, systemImage: "exclamationmark.triangle")
-                            .font(.system(size: 11))
-                            .foregroundStyle(theme.danger)
-                    }
-                    if state.controller.isTunEnabled, !state.controller.isPrivileged {
-                        // 这个组合是「增强灯亮着却不全局」的根因，必须当场说清楚，
-                        // 否则用户完全无从查起。
-                        Label("核心非 root 启动，TUN 不会生效".t, systemImage: "exclamationmark.triangle")
-                            .font(.system(size: 11))
-                            .foregroundStyle(theme.danger)
-                    }
-                    Spacer()
+                // 三盏状态灯已移除:页脚本来就有「核心 / 网页 / 增强」三个开关，
+                // 状态页再放一排只读的灯是重复,Qt 那边也没有。
+                // 两条警示保留 —— 它们是别处看不到的信息。
+                if state.controller.isCoreRunning, state.clash.coreUnresponsive {
+                    Label("核心无响应(进程在,但 API 不通)".t, systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 11)).foregroundStyle(theme.danger)
+                }
+                if state.controller.isTunEnabled, !state.controller.isPrivileged {
+                    Label("核心非 root 启动，TUN 不会生效".t, systemImage: "exclamationmark.triangle")
+                        .font(.system(size: 11)).foregroundStyle(theme.danger)
                 }
             }
             .padding(14)
@@ -97,7 +99,7 @@ struct MetricCard: View {
                 .minimumScaleFactor(0.6)
         }
         .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
         .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
     }
@@ -449,7 +451,7 @@ struct TodayTrafficCard: View {
             }
         }
         .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
         .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
     }
@@ -486,9 +488,15 @@ struct CompositionCard: View {
         let comp = state.composition
         let total = max(comp.totalBytes, 1)
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("本次会话".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
-                Text(Formatting.bytes(comp.totalBytes)).font(.system(size: 12)).foregroundStyle(theme.textPrimary)
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "arrow.left.arrow.right.circle")
+                    .font(.system(size: 16)).foregroundStyle(theme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("总流量".t).font(.system(size: 13)).foregroundStyle(theme.accent)
+                    Text(Formatting.bytes(comp.totalBytes))
+                        .font(.system(size: 22, weight: .medium)).foregroundStyle(theme.accent)
+                }
+                Spacer()
                 Spacer()
             }
             // 占比条:代理(品牌色)+ 直连(灰)
@@ -525,7 +533,7 @@ struct CompositionCard: View {
             }
         }
         .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(theme.metricBg)
         .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
     }

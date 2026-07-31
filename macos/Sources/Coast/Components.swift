@@ -35,10 +35,13 @@ struct NavButton: View {
             }
             .padding(.horizontal, 12)
             .frame(height: 34)
-            .foregroundStyle(isCurrent ? Color.white : theme.textSecondary)
+            // 选中态是**深色块 + 白字**，不是主题色高亮 —— 对齐 Qt 侧栏。
+            // 用 accent 填充的话，侧栏会冒出一整块饱和的蓝，和右侧内容区的深灰打架；
+            // Qt 那边选中项只比背景更深一档，靠白字区分。
+            .foregroundStyle(isCurrent ? theme.textPrimary : theme.textSecondary)
             .background {
                 RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
-                    .fill(isCurrent ? theme.accent : (hovering ? theme.hover : .clear))
+                    .fill(isCurrent ? theme.navSelected : (hovering ? theme.hover : .clear))
             }
             .contentShape(Rectangle())
         }

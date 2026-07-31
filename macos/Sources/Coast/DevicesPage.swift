@@ -65,8 +65,17 @@ struct DevicesPage: View {
 
     private let browser = LanBrowser()
 
-    /// 当前网络的网关 IP（概览头显示）。
-    private var gatewayIP: String { LanTopology.defaultGateway()?.ip ?? "" }
+    /// 当前网络的网关（概览头显示 + 判定哪些设备不可接管）。
+    /// 只在 `rows` 变化时重算，不在每行里各查一次。
+    @State private var gateway: LanTopology.Gateway?
+    @State private var localMACs: Set<String> = []
+    private var gatewayIP: String { gateway?.ip ?? "" }
+
+    private func rejection(for row: Row) -> RedirectTargets.Rejection? {
+        RedirectTargets.rejection(ip: row.discovered.ip, mac: row.discovered.mac,
+                                  gatewayIP: gateway?.ip ?? "", gatewayMAC: gateway?.mac ?? "",
+                                  localMACs: localMACs)
+    }
     /// 代理中的台数。
     /// 代理中的台数。
     ///
@@ -197,12 +206,17 @@ struct DevicesPage: View {
         List(rows) { row in
             VStack(spacing: 0) {
                 DeviceRow(row: row,
+                          rejection: rejection(for: row),
                           expanded: expanded == row.id,
                           onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
                           onToggleExpand: { expanded = expanded == row.id ? nil : row.id })
-                if expanded == row.id, let record = row.record, record.proxyEnabled {
+                // 展开区不再只在「已代理」时出现 —— 备注名与「为什么不能代理」这两件事,
+                // 恰恰是在还没开代理时最需要看到的。
+                if expanded == row.id, let record = row.record {
                     PolicyBox(record: record,
                               targets: state.clash.groups,
+                              rejection: rejection(for: row),
+                              onRename: { state.devices.setAlias(mac: row.id, $0); reloadLedger() },
                               onPolicyChange: { mode, target in
                                   setPolicy(row: row, mode: mode, target: target)
                               })
@@ -256,6 +270,8 @@ struct DevicesPage: View {
     private func scan() async {
         scanning = true
         defer { scanning = false }
+        gateway = LanTopology.defaultGateway()
+        localMACs = LanTopology.localMACs()
         discovered = await browser.scan()
         // 每轮扫描后交给 AppState 判断有没有没见过的设备（首轮只记基线、不提醒）
         state.noticeDevices(discovered.map(\.mac))
@@ -286,6 +302,9 @@ struct DevicesPage: View {
 private struct DeviceRow: View {
     @Environment(Theme.self) private var theme
     let row: DevicesPage.Row
+    /// 这台设备不可接管的原因（nil = 可以）。由页面算好传进来 ——
+    /// 每行自己去查网关和本机 MAC 的话，一次渲染会重复读几十次系统表。
+    var rejection: RedirectTargets.Rejection?
     let expanded: Bool
     let onToggleProxy: (Bool) -> Void
     let onToggleExpand: () -> Void
@@ -325,7 +344,8 @@ private struct DeviceRow: View {
 
             Toggle("", isOn: Binding(get: { row.proxyEnabled }, set: onToggleProxy))
                 .labelsHidden().toggleStyle(.switch).controlSize(.mini)
-                .help("代理".t)
+                .disabled(rejection != nil)
+                .help(rejection?.reason.t ?? "代理网络".t)
         }
         .padding(.horizontal, 10)
         .frame(height: 46)
@@ -355,9 +375,28 @@ private struct PolicyBox: View {
     @Environment(Theme.self) private var theme
     let record: DeviceStore.Device
     let targets: [String]
+    var rejection: RedirectTargets.Rejection?
+    let onRename: (String) -> Void
     let onPolicyChange: (DeviceStore.PolicyMode, String) -> Void
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+        if let rejection {
+            // 三种不可代理的情形各自说清楚 —— 只把开关变灰的话，用户只会觉得「点不动」，
+            // 不知道是自己点错了对象还是程序坏了。
+            Label(rejection.reason.t, systemImage: "info.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textMuted)
+        }
+        HStack(spacing: 8) {
+            Text("备注名".t).font(.system(size: 11)).foregroundStyle(theme.textMuted)
+            TextField("为该设备起个名字".t, text: Binding(
+                get: { record.alias },
+                set: { onRename($0) }))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 200)
+            Spacer()
+        }
         HStack(spacing: 8) {
             Text("策略".t).font(.system(size: 11)).foregroundStyle(theme.textMuted)
             Picker("", selection: Binding(
@@ -380,6 +419,7 @@ private struct PolicyBox: View {
                 .labelsHidden().frame(maxWidth: 200)
             }
             Spacer()
+        }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -92,10 +92,15 @@ public final class CoastController {
         isCoreRunning = false
         isPrivileged = false
         log("核心意外退出：正在撤销系统代理与设备接管，避免断网")
+        // ★ 先通知，再收拾。
+        //
+        //   收拾这一步里 `stopRedirect` 要走 XPC —— 没装 helper 时它会**等满 15 秒超时**。
+        //   把通知排在后面的话，用户要在「网突然坏了」的状态里干等十几秒才收到解释。
+        //   通知本身不依赖收拾的结果，没有理由排队等它。
+        onCoreUnexpectedlyExited?()
         try? await helper.stopRedirect()
         activeRedirectIPs = []
         await stopProxy()
-        onCoreUnexpectedlyExited?()
     }
 
     /// 核心意外退出后通知上层（弹通知 / 提示用户）。
@@ -215,7 +220,23 @@ public final class CoastController {
         guard let store = deviceStore else { return }
         // 每台设备的 (IP, MAC)。MAC 是接管的硬前提 —— 单播欺骗要它、复原要它。
         // proxiedDevices 已保证 lastIP 非空；mac 是主键，恒有值。
-        let targets = store.proxiedDevices().map { (ip: $0.lastIP, mac: $0.mac) }
+        let requested = store.proxiedDevices().map { (ip: $0.lastIP, mac: $0.mac) }
+
+        // ★ 安全闸门:下发前把网关与本机剔掉。
+        //
+        //   界面上禁用开关是不够的 —— 台账按 MAC 存、开关会一直留着,而网络是会变的:
+        //   在 A 网把 192.168.1.50 设成代理,换到 B 网时那个地址可能正是路由器。
+        //   真给路由器发「你自己的地址在我这儿」,污染的是它对自身地址的 ARP,
+        //   整个局域网都可能被打瘫。这一道必须在这里、在下发之前。
+        let gatewayNow = LanTopology.defaultGateway()
+        let targets = RedirectTargets.allowed(requested,
+                                              gatewayIP: gatewayNow?.ip ?? "",
+                                              gatewayMAC: gatewayNow?.mac ?? "",
+                                              localMACs: LanTopology.localMACs())
+        if targets.count != requested.count {
+            let dropped = requested.count - targets.count
+            log("已跳过 \(dropped) 台不可接管的设备(网关/本机/离线)")
+        }
         let ips = Set(targets.map(\.ip))
 
         guard ips != activeRedirectIPs else { return }
@@ -234,7 +255,7 @@ public final class CoastController {
             return
         }
 
-        guard let gateway = LanTopology.defaultGateway() else {
+        guard let gateway = gatewayNow else {
             log("取不到默认网关，无法接管设备")
             return
         }

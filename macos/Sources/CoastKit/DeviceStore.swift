@@ -149,6 +149,17 @@ public final class DeviceStore: @unchecked Sendable {
         database?.run("DELETE FROM device WHERE mac = ?", [.text(mac)]) ?? false
     }
 
+    /// 给设备起个名字（备注名）。空串表示清除，回落到自动识别出的名字。
+    ///
+    /// `alias` 这一列建库时就有，却一直没有写入口 —— 台账里认得出这台设备，
+    /// 用户却只能对着 `a4:83:e7:…` 或厂商名猜是哪一台。
+    @discardableResult
+    public func setAlias(mac: String, _ alias: String) -> Device? {
+        guard var record = device(mac: mac) else { return nil }
+        record.alias = alias.trimmingCharacters(in: .whitespacesAndNewlines)
+        return save(record) ? record : nil
+    }
+
     /// 开/关某台设备的代理。`ip` 是这一刻看到的地址，用来生成 `SRC-IP-CIDR` 规则。
     @discardableResult
     public func setProxyEnabled(mac: String, _ enabled: Bool, ip: String = "") -> Device? {

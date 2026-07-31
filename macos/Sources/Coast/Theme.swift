@@ -34,6 +34,14 @@ public final class Theme {
         return Color(hex: 0xA84343)
     }
 
+    /// 上传红 / 下载绿。取自 Qt 状态页两张卡的配色 —— 上下行用固定的红绿区分，
+    /// 换成主题色的话两张卡会长得一模一样，一眼看不出哪张是哪张。
+    public var uploadAccent: Color { Color(hex: 0xE05A5A) }
+    public var downloadAccent: Color { Color(hex: 0x4DA13E) }
+
+    /// 侧栏选中项的底色：比侧栏背景更深一档。对齐 Qt —— 靠明暗而不是彩色区分选中。
+    public var navSelected: Color { dark ? Color(hex: 0x1A1A1A) : Color(hex: 0xDCDCDC) }
+
     public var directDot: Color { Color(hex: 0x48A5A7) }
 
     public var accentStrong: Color { dark ? Color(hex: 0x83BDFF) : Color(hex: 0x1F6FD2) }

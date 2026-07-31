@@ -147,6 +147,12 @@ struct CoreCrashE2ETests {
 
         #expect(controller.isCoreRunning == false,
                 "核心已死,controller 仍认为在跑 —— startCore 的 guard 会让它永远起不起来")
+        // 通知与状态翻转不是同一拍:`isCoreRunning` 是同步置的,而收尾是异步链。
+        // 直接断言会偶发地抓空 —— 这条测试第一版就是这么挂的。
+        let notifyDeadline = Date().addingTimeInterval(5)
+        while !notified, Date() < notifyDeadline {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         #expect(notified, "没有通知上层 —— 用户看不到任何提示,只会觉得网突然坏了")
 
         // 修复的实质检验:此刻必须**能重新启动**。
