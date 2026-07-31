@@ -322,14 +322,27 @@ private struct DeviceRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(theme.deviceColor(row.discovered.typeKey))
-                .frame(width: 30, height: 30)
-                .overlay {
-                    Image(systemName: theme.deviceSymbol(row.discovered.typeKey))
-                        .font(.system(size: 14)).foregroundStyle(.white)
-                }
-                .opacity(row.online ? 1 : 0.45)
+            // 类型头像 + 在线角标。尺寸取自 Qt DeviceRow：34×34、圆角 8、图标 18、
+            // 角标 11。头像是这一行里**最先被看到**的东西 —— 一屏十几台设备时，
+            // 先认出的是色块，名字要看第二眼，所以它的尺寸不能随手改小。
+            ZStack(alignment: .bottomTrailing) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.deviceColor(row.discovered.typeKey))
+                    .frame(width: 34, height: 34)
+                    .overlay {
+                        Image(systemName: theme.deviceSymbol(row.discovered.typeKey))
+                            .font(.system(size: 18)).foregroundStyle(.white)
+                    }
+                    .opacity(row.online ? 1 : 0.45)
+
+                // 在线角标：压在头像右下角，带一圈与背景同色的描边把它和色块分开，
+                // 不描边的话绿点会和绿色的手机底色糊在一起。
+                Circle()
+                    .fill(row.online ? theme.deviceColor("phone") : theme.textMuted)
+                    .frame(width: 11, height: 11)
+                    .overlay(Circle().stroke(theme.metricBg, lineWidth: 2))
+                    .offset(x: 3, y: 3)
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
