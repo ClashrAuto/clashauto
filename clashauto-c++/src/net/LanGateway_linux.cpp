@@ -673,6 +673,7 @@ void GatewayWorker::applyCoastCoreLocal()
         // 回退工厂 = 照旧拨每设备 SOCKS(7899) → mihomo 靠 IN-USER 分流。CoreDialerFactory 取得其所有权。
         auto *factory = new CoreDialerFactory(m_pcfgStore.get(), new Socks5OutboundFactory(m_socksPort));
         factory->setStrict(m_coastStrict); // 严格模式：拒绝回退，让差距暴露出来（见 setStrict 的说明）
+        factory->setInboundTag(QStringLiteral("Coast-Gateway")); // 连接列表「类型」列：网关来的进程内连接
         // router 捕获 store 的 shared_ptr（保活），据当前快照的模式选出站；判据见 setCoastCore 的注释。
         const std::shared_ptr<ProxyConfigStore> store = m_pcfgStore;
         const std::shared_ptr<RuleEngine> rules = m_ruleEngine; // Rule 模式要用它做首命中匹配

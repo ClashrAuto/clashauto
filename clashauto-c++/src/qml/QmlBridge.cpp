@@ -1,6 +1,7 @@
 #include "QmlBridge.h"
 
 #include "DevicesController.h"      // coastCoreEnabled / 共享的 store+rules
+#include "../net/InprocTelemetry.h" // 进程内引擎的控制面出口：连接快照/流量合计/日志（与 REST 合并）
 #include "../net/LocalTunService.h" // 进程内 TUN（coastcore 打开时由它建 TUN）
 #include "../net/core/ProxyConfig.h" // 核心缺席时从进程内配置喂节点列表
 
@@ -13,6 +14,7 @@
 #include "Version.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QGuiApplication>
@@ -77,20 +79,60 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
 #endif
 
     // —— 流量卡 ——
+    // ★ 与进程内引擎的合并口径（三处 handler + 下面的 1s 定时器共同遵守，别在任何一处打破）：
+    //   进程内出站的连接 mihomo 完全看不见（InprocTelemetry 只登记**没有**回退核心的连接，
+    //   见其头注释），所以「REST 值 + 进程内值」两个集合不相交，相加即全量、绝无重复计数。
+    //   核心在时节拍照旧由 REST 驱动（行为不变）；REST 静默（核心不在）时由定时器接管发布。
     connect(m_clash, &ClashService::trafficUpdated, this, [this](qint64 up, qint64 down) {
-        m_upBytes = up;
-        m_downBytes = down;
-        m_upText = speedText(up);
-        m_downText = speedText(down);
-        emit trafficChanged();
+        m_restUp = up;
+        m_restDown = down;
+        m_lastRestTrafficMs = QDateTime::currentMSecsSinceEpoch();
+        applyTrafficDisplay();
     });
     connect(m_clash, &ClashService::connectionsUpdated, this, [this](int count, qint64 total) {
-        m_connectionsCount = count;
-        m_totalDownText = speedText(total);
-        emit connectionsChanged();
+        m_restConnCount = count;
+        m_restDownTotal = total;
+        m_lastRestConnMs = QDateTime::currentMSecsSinceEpoch();
+        applyConnStats();
     });
-    // 状态页的「流量构成 + 连接速览」：蹭历史库那次 /connections（2s 一发），不额外发包。
-    connect(m_clash, &ClashService::connectionsSnapshot, this, &QmlBridge::observeConnections);
+    // 状态页的「流量构成 + 连接速览」+ 历史库：蹭同一次 /connections（2s 一发），不额外发包。
+    // 喂之前先与进程内快照**合成一份**（原因见 feedMergedSnapshot 的声明注释）。
+    connect(m_clash, &ClashService::connectionsSnapshot, this, [this](const QJsonArray &conns) {
+        m_lastRestSnapshotMs = QDateTime::currentMSecsSinceEpoch();
+        feedMergedSnapshot(conns);
+    });
+    // 进程内份额的节拍器：每秒差分一次累计字节得速率；REST 各通道静默超阈值时接管发布，
+    // 让「核心不在但流量走进程内」时流量卡/带宽图/连接数/历史库照常有数。
+    m_inprocTimer = new QTimer(this);
+    m_inprocTimer->setInterval(1000);
+    connect(m_inprocTimer, &QTimer::timeout, this, [this] {
+        auto &tele = InprocTelemetry::instance();
+        const quint64 tu = tele.totalUp();
+        const quint64 td = tele.totalDown();
+        m_inprocUpRate = qMax<qint64>(0, qint64(tu - m_inprocPrevUp));
+        m_inprocDownRate = qMax<qint64>(0, qint64(td - m_inprocPrevDown));
+        m_inprocPrevUp = tu;
+        m_inprocPrevDown = td;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        // REST 的 /traffic 流每秒来一拍；1.5s 没来 = 断了，由本定时器发布（速率里 REST 份额清零，
+        // 免得把核心死前最后一秒的速率永远挂在卡上）。
+        if (now - m_lastRestTrafficMs > 1500) {
+            m_restUp = 0;
+            m_restDown = 0;
+            applyTrafficDisplay();
+        }
+        // /connections 轮询 2s 一拍（核心拒连时也会发 0）；3s 没来才轮到这里补。
+        if (now - m_lastRestConnMs > 3000) {
+            m_restConnCount = 0; // 核心不在，它那部分连接已不存在
+            applyConnStats();
+        }
+        // 快照消费者（流量构成 + 历史库）同理，且保持 2s 节奏（每 2 拍一次）。
+        if ((++m_inprocTick % 2) == 0 && now - m_lastRestSnapshotMs > 3000)
+            feedMergedSnapshot(QJsonArray());
+    });
+    m_inprocTimer->start();
+    // 进程内引擎的日志 → 页脚（LogsPage 那份由 LogModel 自己订阅）。
+    connect(&InprocTelemetry::instance(), &InprocTelemetry::logged, this, &QmlBridge::pushLog);
 
     // 切换加载态：转圈帧推进（120ms）与 6s 兜底（严格对齐旧项目 m_spinnerTimer + beginNodeSwitch 内的兜底）
     m_spinnerTimer = new QTimer(this);
@@ -171,6 +213,38 @@ void QmlBridge::pushLog(const QString &message)
 {
     m_lastLog = message;
     emit logAppended(message);
+}
+
+// —— 进程内控制面与 REST 的合并发布（口径见构造函数「流量卡」注释）——
+
+void QmlBridge::applyTrafficDisplay()
+{
+    m_upBytes = m_restUp + m_inprocUpRate;
+    m_downBytes = m_restDown + m_inprocDownRate;
+    m_upText = speedText(m_upBytes);
+    m_downText = speedText(m_downBytes);
+    emit trafficChanged();
+}
+
+void QmlBridge::applyConnStats()
+{
+    auto &tele = InprocTelemetry::instance();
+    m_connectionsCount = m_restConnCount + tele.activeCount();
+    m_totalDownText = speedText(m_restDownTotal + qint64(tele.totalDown()));
+    emit connectionsChanged();
+}
+
+void QmlBridge::feedMergedSnapshot(const QJsonArray &restConns)
+{
+    // 两个来源合成**一份**再喂：observeConnections 与 HistoryStore::observe 都把「本拍缺席」
+    // 当「已断开」，分两次喂会让每一拍都误判另一半全断了（声明处注释有展开）。
+    QJsonArray merged = restConns;
+    const QJsonArray mine = InprocTelemetry::instance().snapshot();
+    for (const QJsonValue &v : mine)
+        merged.append(v);
+    if (m_history)
+        m_history->observe(merged); // 进程内连接也进浏览历史/今日流量（此前只有核心报的那部分）
+    observeConnections(merged);
 }
 
 QString QmlBridge::version() const { return QString::fromUtf8(APP_VERSION); }
@@ -593,6 +667,10 @@ void QmlBridge::clearConnections()
 {
     if (m_clash)
         m_clash->clearConnections();
+    // 进程内那部分连接核心管不着，得自己关（跨线程排队到各连接的归属线程，见 InprocTelemetry）。
+    const int n = InprocTelemetry::instance().closeAll();
+    if (n > 0)
+        pushLog(tr("已请求关闭 %1 条进程内连接").arg(n));
 }
 
 void QmlBridge::refreshConnections()
@@ -605,7 +683,13 @@ void QmlBridge::refreshConnections()
     //   3) poll 里没有的：保留且保持 offline=true——连接断了不丢弃，Offline 过滤才有内容。
     // 合并后整表交给 m_connModel.setRaw()，其 recompute 再按 id 增量增删改（保 ListView 滚动位置）。
     // 注意：Clash /connections 只返回活动连接、且无 offline 字段，故 offline 必须由本层维护。
+    // ★ 进程内连接的合并：把 InprocTelemetry 的快照**追加**进同一个数组走同一套增量逻辑 ——
+    //   它只含没回退核心的连接（id 一律 coast- 前缀），与 REST 的集合不相交，不会重复；
+    //   invokeOnError=true 让核心不在时也回调（空数组），列表里进程内连接照常刷新。
     m_clash->fetchConnections([this](QJsonArray arr) {
+        const QJsonArray mine = InprocTelemetry::instance().snapshot();
+        for (const QJsonValue &v : mine)
+            arr.append(v);
         QHash<QString, int> idx;
         idx.reserve(m_seenConns.size());
         for (int i = 0; i < m_seenConns.size(); ++i)
@@ -666,7 +750,7 @@ void QmlBridge::refreshConnections()
         for (const QVariantMap &m : m_seenConns)
             list.append(m);
         m_connModel.setRaw(list);
-    });
+    }, /*invokeOnError=*/true); // 核心不在也回调（空数组）：进程内连接仍要刷新
 }
 
 // sourceIP / inboundUser → 设备显示名。归属口径与 DevicesController::aggregate 一致：
@@ -895,6 +979,14 @@ void QmlBridge::resetConnections()
 
 void QmlBridge::closeConnectionById(const QString &id)
 {
+    // coast- 前缀 = 进程内连接（InprocTelemetry 登记的），核心的 DELETE /connections 对它无效，
+    // 走 telemetry 的跨线程关闭；其余照旧发给核心。id 前缀由快照生成端保证永不冲突。
+    if (id.startsWith(QLatin1String("coast-"))) {
+        if (InprocTelemetry::instance().requestClose(id))
+            pushLog(tr("已请求关闭进程内连接 %1").arg(id));
+        refreshConnections();
+        return;
+    }
     if (!m_clash)
         return;
     m_clash->closeConnection(id);

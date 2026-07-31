@@ -34,6 +34,7 @@
 #include "net/core/DnsMessage.h"            // COAST_DNS_SELFTEST：DNS 报文层 KAT
 #include "net/core/SelfRouteGuard.h"        // COAST_SELFROUTE_SELFTEST：自身流量排除（接 TUN 的前置）
 #include "net/LocalTunService.h"            // COAST_TUNSERVICE_SELFTEST：进程内 TUN 整体自检
+#include "net/InprocTelemetry.h"            // COAST_TELEMETRY_SELFTEST：进程内控制面（连接快照/计数/日志）
 #include "net/inbound/MixedInbound.h"       // COAST_INBOUND_SELFTEST：本机 HTTP/SOCKS5 入站自测
 #ifdef COAST_HAVE_QUIC
 #include "net/core/proto/Hysteria2Outbound.h"   // COAST_QUIC_SELFTEST：Hy2 的 QPACK/Huffman KAT
@@ -56,6 +57,7 @@
 #include <QElapsedTimer>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
 #include <QTimer>
 
 #include <cstdio>
@@ -250,6 +252,82 @@ int main(int argc, char *argv[])
     // 全在进程内（自带靶服务器和直连出站桩），不需要任何节点/订阅/网络。
     if (qEnvironmentVariableIsSet("COAST_INBOUND_SELFTEST"))
         return MixedInbound::selfTest() ? 0 : 1;
+
+    // 进程内控制面自检（COAST_TELEMETRY_SELFTEST=1）：登记/计数/快照形状/跨线程关闭/日志节流
+    // 全走一遍。纯进程内、零网络。每步带断言 —— 登记逻辑若根本没执行，这里会 FAIL 而不是照样 PASS。
+    if (qEnvironmentVariableIsSet("COAST_TELEMETRY_SELFTEST")) {
+        auto &tele = InprocTelemetry::instance();
+        int fails = 0;
+        auto check = [&fails](bool cond, const char *what) {
+            fprintf(stderr, "  [%s] %s\n", cond ? "ok" : "FAIL", what);
+            if (!cond)
+                ++fails;
+        };
+        // ① 登记 + 计数
+        bool closed1 = false;
+        QObject owner; // 本线程对象：closer 经 queued invoke 回本线程事件循环
+        const quint64 id1 = tele.registerConn(QStringLiteral("example.com"), 443,
+                                              QStringLiteral("tcp"), QStringLiteral("NODE-A"),
+                                              QStringLiteral("local"), QStringLiteral("Coast-Mixed"),
+                                              &owner, [&closed1] { closed1 = true; });
+        const quint64 id2 = tele.registerConn(QString(), 0, QStringLiteral("udp"),
+                                              QStringLiteral("DIRECT"), QStringLiteral("dev-abc"),
+                                              QStringLiteral("Coast-Gateway"), &owner, [] {});
+        tele.addUp(id1, 100);
+        tele.addDown(id1, 4096);
+        tele.noteUdpDst(id2, QStringLiteral("1.2.3.4"), 53);
+        tele.addUp(id2, 60);
+        check(tele.activeCount() == 2, "登记后活跃连接 = 2");
+        check(tele.totalConns() == 2, "累计连接 = 2");
+        check(tele.totalUp() == 160 && tele.totalDown() == 4096, "累计字节 = 160/4096");
+        // ② 快照形状（对齐 mihomo /connections 元素：QmlBridge/HistoryStore 不需要任何特判）
+        const QJsonArray snap = tele.snapshot();
+        check(snap.size() == 2, "快照条数 = 2");
+        bool sawTcp = false, sawUdp = false;
+        for (const QJsonValue &v : snap) {
+            const QJsonObject c = v.toObject();
+            const QJsonObject meta = c.value("metadata").toObject();
+            if (c.value("id").toString() == QStringLiteral("coast-%1").arg(id1))
+                sawTcp = meta.value("host").toString() == QLatin1String("example.com")
+                        && c.value("chains").toArray().first().toString() == QLatin1String("NODE-A")
+                        && c.value("download").toInteger() == 4096
+                        && meta.value("type").toString() == QLatin1String("Coast-Mixed");
+            if (c.value("id").toString() == QStringLiteral("coast-%1").arg(id2))
+                sawUdp = meta.value("host").toString() == QLatin1String("1.2.3.4")
+                        && meta.value("network").toString() == QLatin1String("udp")
+                        && meta.value("inboundUser").toString() == QLatin1String("dev-abc");
+        }
+        check(sawTcp, "TCP 条目字段齐全（host/chains/download/type）");
+        check(sawUdp, "UDP 条目目的地由 noteUdpDst 补上、设备身份在 inboundUser");
+        // ③ 跨线程关闭：requestClose 排队 → 事件循环递送 → closer 真的跑了
+        check(tele.requestClose(QStringLiteral("coast-%1").arg(id1)), "requestClose 找到连接");
+        QCoreApplication::processEvents();
+        check(closed1, "closer 经事件循环真的执行了");
+        check(!tele.requestClose(QStringLiteral("coast-999999")), "关不存在的连接返回 false");
+        // ④ 注销幂等 + 活跃归零、累计保留
+        tele.unregisterConn(id1);
+        tele.unregisterConn(id1);
+        tele.unregisterConn(id2);
+        check(tele.activeCount() == 0, "注销（含重复注销）后活跃 = 0");
+        check(tele.totalDown() == 4096, "注销不回退累计字节");
+        // ⑤ 日志节流：同 key 3 秒窗口只发第一条；无 key 直发
+        int got = 0;
+        QString lastMsg;
+        QObject::connect(&tele, &InprocTelemetry::logged, &owner,
+                         [&got, &lastMsg](const QString &m) {
+                             ++got;
+                             lastMsg = m;
+                         },
+                         Qt::DirectConnection);
+        tele.log(QStringLiteral("k1"), QStringLiteral("第一条"));
+        tele.log(QStringLiteral("k1"), QStringLiteral("第二条（应被吞）"));
+        tele.log(QStringLiteral("k1"), QStringLiteral("第三条（应被吞）"));
+        tele.log(QString(), QStringLiteral("无 key 不节流"));
+        check(got == 2 && lastMsg == QStringLiteral("无 key 不节流"),
+              "节流：同 key 3 条只发 1 条；无 key 直发");
+        fprintf(stderr, "=== InprocTelemetry 自检 %s ===\n", fails == 0 ? "PASS" : "FAIL");
+        return fails == 0 ? 0 : 1;
+    }
 
     // DNS 报文层自检（COAST_DNS_SELFTEST=1）：解析设备查询 / 合成 fake-ip 应答两个方向逐字节比对。
     // 网关自己出 DNS 应答之后，报文写错的后果是「上网时好时坏」这种最难查的形态 —— 必须有向量钉住。
@@ -610,10 +688,11 @@ int main(int argc, char *argv[])
     // 状态页的连接速览要显示「这条连接是哪台设备发起的」——把只读台账交给 bridge
     // （它先于 DeviceStore 构造，只能后置注入）。
     bridge.setDeviceStore(deviceStore);
-    // 上网历史库（SQLite）：订阅 ClashService 每 2s 的连接快照，连接断开时落一条记录。
-    // 复用同一次 /connections 请求，不额外发包；设备详情的「常用域名」也从它查。
+    // 上网历史库（SQLite）：吃每 2s 的连接快照，连接断开时落一条记录。
+    // ★ 快照改经 QmlBridge::feedMergedSnapshot 转喂（REST + 进程内 InprocTelemetry 合成一份），
+    //   不再直连 ClashService —— observe 把「本拍缺席」当「已断开」，两个来源分开喂会互相
+    //   误判对方全断了。核心在时 REST 部分一字不差，行为不变；进程内连接从此也进历史。
     auto *history = new HistoryStore(config.configDir, deviceStore, &app);
-    QObject::connect(clash, &ClashService::connectionsSnapshot, history, &HistoryStore::observe);
     // 退出前把待写缓冲 + 仍在途的长连接都落盘（aboutToQuit 时对象还活着；析构里也有一道保险）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, history, [history] { history->flush(true); });
     // 网关数据面诊断日志：<userDir>/logs/gateway-diag.log，10s 一行、空窗口不写、4 MiB 轮转。

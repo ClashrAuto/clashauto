@@ -283,7 +283,7 @@ Pi 上还多验到一点容器测不出的：它有**两条默认路由**（eth0
 
 ---
 
-## 二、控制面：谁在提供状态（**这是现在的主要缺口**）
+## 二、控制面：谁在提供状态（2026-07-31 晚：连接/流量/日志三行已接进程内出口）
 
 `ClashService` 是唯一的 mihomo REST 客户端。全仓库对它的调用：
 
@@ -293,12 +293,39 @@ Pi 上还多验到一点容器测不出的：它有**两条默认路由**（eth0
 | `selectNode` / `setSelectedGroup` | `/proxies/<group>` | ❌ 选择状态由核心持有（`cache.db` 的 `store-selected`） |
 | `testDelays` | `/proxies/<n>/delay` | **部分**：`LatencyProbe` 自己 `connectToHost` 探测，但节点来源仍是核心 |
 | `setMode` | `/configs` | **部分**：`RuleEngine` 有完整规则匹配，缺 global/direct 模式切换的落地 |
-| `fetchConnections` / `closeConnection` | `/connections` | **部分**：网关侧 `NetStack` 自己持有连接表；**本机入站的连接目前谁都看不见** |
-| 流量 | `/traffic` | **部分**：`GatewayDiag` 有 rx/tx；同样不含本机入站 |
-| 日志 | 核心 stdout | ❌ |
+| `fetchConnections` / `closeConnection` | `/connections` | ✅ **已接**：`InprocTelemetry`（进程内连接快照，三条路共用，见下） |
+| 流量 | `/traffic` | ✅ **已接**：同上（累计字节 → QmlBridge 差分成速率并与 REST 相加） |
+| 日志 | 核心 stdout | ✅ **已接**：回退原因/出站建立与失败/严格拒绝 → LogsPage + 页脚 |
 
-**"部分"的含义**：这些等价物只覆盖**网关那条路**的数据。本机入站的连接/流量/日志目前
-在 UI 上完全不可见——这是接了本机入站之后新出现的缺口。
+### 进程内控制面出口：`InprocTelemetry`（`src/net/InprocTelemetry.h`）
+
+一个进程级单例，把「连接快照 / 流量合计 / 日志」三样一起从进程内引擎里引出来。
+接线点只有一个：**`CoreDialerFactory` 的路由包装器**（`RoutingOutboundTcp/Udp`）——
+网关、本机入站、进程内 TUN 三条路都从它拨号，所以 NetStack/MixedInbound **内部零改动**
+就覆盖了全部进程内路径（含 UDP 会话）。
+
+**与 REST 的合并策略（防止两个来源打架的关键约定）**：
+- **只登记「真走进程内出站」的连接**。回退核心的连接 mihomo 自己的 `/connections`、
+  `/traffic` 会报——两个集合天然不相交，`REST + telemetry` 直接相加/拼接就是全量，
+  **不存在重复计数**。id 一律 `coast-<n>` 前缀，与 mihomo 的 UUID 永不冲突。
+- **核心在时行为不变**：REST 仍是它那部分的唯一权威，UI 节拍照旧由 REST 驱动；
+  REST 静默（核心不在）时由 QmlBridge 的 1s 定时器接管发布节拍。
+- 快照条目形状**对齐 mihomo `/connections` 元素**，于是连接窗合并循环、
+  `HistoryStore::observe`（进程内连接现在也进浏览历史/今日流量）、状态页流量构成
+  都不需要特判。合并必须**合成一份再喂**（两个消费者都把「本拍缺席」当「已断开」）。
+- `closeConnection`：`coast-` 前缀走 telemetry 的跨线程关闭（持锁排队到连接归属线程，
+  包装器析构先注销保证无竞态），其余照旧 DELETE 给核心。「关闭全部」两边都发。
+- 日志按「事件:节点」3s 节流（数据面每秒可达数千连接，不节流会把日志页刷成瀑布），
+  被合并的条数会缀在下一条上。**回退原因**（协议/传输/插件未实现、节点缺失、无路由）
+  从此前只有 `gateway-diag.log` 里的匿名计数 `cc=…` 变成 UI 里带节点名的人话。
+
+**验证**（各自独立，能证伪）：
+- `COAST_TELEMETRY_SELFTEST=1`：登记/计数/快照形状/跨线程关闭/日志节流 12 项断言，
+  纯进程内零网络。Windows 真机 PASS（12/12）。
+- `COAST_OUTBOUND_PROBE` 末尾新增**控制面反向对照**：curl 成功但 telemetry 没登记到
+  连接/字节 ⇒ 探针 FAIL（并打印与 MixedInbound 自有计数器的量级对照）——
+  「登记点没接上」不会再伪装成 PASS。
+- **UI 那一段（连接窗/流量卡/日志页真实渲染）无桌面会话验不了**，如实标注。
 
 ---
 
@@ -307,7 +334,8 @@ Pi 上还多验到一点容器测不出的：它有**两条默认路由**（eth0
 1. ~~**本机系统代理端到端验证**~~ —— **端口换位之后这条基本消解了**（见上节）：入站直接占走系统
    代理本来就指着的 7890，不再需要「改指向」这个动作。剩下的只是**在真实桌面会话里点一次开关**
    确认系统代理本身照常工作（Windows/macOS/Linux 各一次），而不再是一个架构缺口。
-2. **本机入站的连接/流量可见性** —— 现在开了它，UI 反而看不到这部分流量，是个体验倒退。
+2. ~~**本机入站的连接/流量可见性**~~ —— ✅ 已解决（`InprocTelemetry`，见「二、控制面」）：
+   三条进程内路径的连接/流量/日志都进 UI 与历史库了；剩 UI 真实渲染那一段没有桌面会话可验。
 3. **选择状态搬进程内** —— 控制面脱离 REST 的第一步（组结构已经能自己解析了，缺的是"用户选了哪个"）。
 4. **TUN 接「增强」按钮** —— 前置条件**已全部满足**：数据面验通、环路三平台验过、
    `LocalTunService` 整体自检在 x86_64 容器与 aarch64 真机两处 PASS（见上节）。

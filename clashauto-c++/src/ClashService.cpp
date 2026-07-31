@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory> // fetchConnections 的 delivered 共享标志（invokeOnError 语义要求恰好一次回调）
 
 namespace {
 // 下载测速目标：Cloudflare 全球 CDN，稳定且各地区节点都能就近命中；请求经混合端口走选中节点。
@@ -158,12 +159,21 @@ void ClashService::clearConnections()
                });
 }
 
-void ClashService::fetchConnections(std::function<void(QJsonArray)> callback)
+void ClashService::fetchConnections(std::function<void(QJsonArray)> callback, bool invokeOnError)
 {
+    // sendGet 的 onJson 只在成功时跑；onFinished 成功/失败都跑。用一个共享标志区分「已经回调过」，
+    // 才能做到 invokeOnError 语义 = 失败时**恰好一次**空数组回调、成功时不重复回调。
+    auto delivered = std::make_shared<bool>(false);
     sendGet(QUrl(QString("http://%1:%2/connections").arg(m_host).arg(m_port)),
-            [callback](const QJsonDocument &doc) {
+            [callback, delivered](const QJsonDocument &doc) {
+                *delivered = true;
                 callback(doc.object().value("connections").toArray());
-            });
+            },
+            invokeOnError ? std::function<void()>([callback, delivered] {
+                if (!*delivered)
+                    callback(QJsonArray());
+            })
+                          : std::function<void()>());
 }
 
 void ClashService::closeConnection(const QString &id)

@@ -1,6 +1,7 @@
 #include "LocalTunService.h"
 
 #include "IL2Endpoint.h"
+#include "InprocTelemetry.h" // 出站探针的控制面对照：数据面通了它却没看见 = 控制面接线断了
 #include "NetStack.h"
 #include "TunEndpoint.h"
 #include "TunSession.h"
@@ -248,6 +249,7 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
     // 我们只留一个裸指针用于 setStrict/setRouter，teardown 里置空即可，千万别自己再删一遍。
     m_factory = new CoreDialerFactory(m_store.get(), nullptr);
     m_factory->setStrict(socksFallbackPort <= 0); // 无回退口 = 严格：判不了就失败，不静默改道
+    m_factory->setInboundTag(QStringLiteral("Coast-TUN")); // 连接列表「类型」列：进程内 TUN 的连接
     m_factory->setRouter(coastcore::makeRouter(m_store, std::move(rules), false));
     m_net->setOutboundFactory(m_factory);
 
@@ -370,10 +372,29 @@ int LocalTunService::outboundProbe()
     const bool ok = !code.isEmpty() && code != QStringLiteral("000");
     std::fprintf(stderr, "经该节点 curl=%s  %s\n", qUtf8Printable(code),
                  ok ? "✓ 出站本身没问题" : "✗ 出站就不通 —— 与 TUN 无关");
+
+    // —— 控制面对照（InprocTelemetry = UI 连接列表/流量卡/日志的数据源）——
+    // 反向对照的意义：若登记点根本没接上（本探针的连接走的正是三条路共用的拨号包装器），
+    // conns/down 会是 0，本探针会 FAIL 而不是照样 PASS —— 「跑了」≠「测到了」。
+    // 入站自己的 bytesUp/bytesDown 是**独立实现**的计数器，两边量级必须对得上。
+    auto &tele = InprocTelemetry::instance();
+    std::fprintf(stderr,
+                 "[telemetry] 累计连接=%llu 活跃=%d up=%llu down=%llu ｜ 入站侧独立计数 up=%llu down=%llu\n",
+                 static_cast<unsigned long long>(tele.totalConns()), tele.activeCount(),
+                 static_cast<unsigned long long>(tele.totalUp()),
+                 static_cast<unsigned long long>(tele.totalDown()),
+                 static_cast<unsigned long long>(inbound.bytesUp()),
+                 static_cast<unsigned long long>(inbound.bytesDown()));
+    bool teleOk = true;
+    if (ok && (tele.totalConns() == 0 || tele.totalDown() == 0)) {
+        teleOk = false;
+        std::fprintf(stderr, "✗ 控制面失明：curl 成功但 telemetry 没登记到连接/字节\n");
+    }
+
     inbound.stop();
     delete factory;
-    std::fprintf(stderr, "=== 出站探针 %s ===\n", ok ? "PASS" : "FAIL");
-    return ok ? 0 : 1;
+    std::fprintf(stderr, "=== 出站探针 %s ===\n", (ok && teleOk) ? "PASS" : "FAIL");
+    return (ok && teleOk) ? 0 : 1;
 }
 
 int LocalTunService::selfTest()
@@ -459,6 +480,11 @@ int LocalTunService::selfTest()
     });
 
     QString err;
+    // 控制面基线：起服务**之前**先抄一份，最后按差值判定 —— 只看绝对值的话，任何历史残留
+    // 都会让「一条都没登记」看起来像通过。
+    auto &tele = InprocTelemetry::instance();
+    const quint64 teleConns0 = tele.totalConns();
+    const quint64 teleDown0 = tele.totalDown();
     if (!svc.start(store, nullptr, 0, &err)) { // fallback=0 → 严格：想回退核心就当场失败
         std::fprintf(stderr, "✗ 起服务失败：%s\n", qUtf8Printable(err));
         return 1;
@@ -469,12 +495,24 @@ int LocalTunService::selfTest()
     std::fprintf(stderr, "接管中： curl=%s %s\n", qUtf8Printable(during),
                  ok ? "✓ 经 TUN→NetStack→进程内出站 绕回来了" : "✗ 不通（或返回码变了）");
 
+    // —— 控制面对照（TUN 这条路的连接/流量能不能进 UI）——
+    // 数据面通了、控制面却是 0，说明登记点没接到这条路上；那种情况下本自检必须 FAIL，
+    // 而不是像从前一样只看 curl 就宣布通过。
+    const quint64 dConns = tele.totalConns() - teleConns0;
+    const quint64 dDown = tele.totalDown() - teleDown0;
+    std::fprintf(stderr, "控制面： 本次新增连接=%llu 下行字节=%llu %s\n",
+                 static_cast<unsigned long long>(dConns),
+                 static_cast<unsigned long long>(dDown),
+                 (dConns > 0 && dDown > 0) ? "✓ TUN 的连接/流量对 UI 可见"
+                                           : "✗ 控制面失明（连接没被登记）");
+    const bool teleOk = !ok || (dConns > 0 && dDown > 0);
+
     svc.stop();
     const QString after = httpCode(target, 8);
     std::fprintf(stderr, "停服务后： curl=%s %s\n", qUtf8Printable(after),
                  after == before ? "✓ 路由已还原" : "✗ 没还原干净");
 
-    const bool pass = ok && after == before;
+    const bool pass = ok && after == before && teleOk;
     std::fprintf(stderr, "=== LocalTunService 自检 %s ===\n", pass ? "PASS" : "FAIL");
     return pass ? 0 : 1;
 }

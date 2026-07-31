@@ -233,6 +233,15 @@ private:
     static QString speedText(qint64 value);
     // sourceIP / inboundUser → 设备显示名（台账没注入或归不到设备时返回来源 IP）。
     QString deviceNameFor(const QString &sourceIp, const QString &inboundUser) const;
+    // —— 进程内控制面（InprocTelemetry）与 mihomo REST 的合并（见 .cpp 各调用点的注释）——
+    // 发布流量卡/带宽图：显示值 = REST 速率 + 进程内速率（两个集合不相交，相加即全量）。
+    void applyTrafficDisplay();
+    // 发布连接数/累计下载：同上口径合并。
+    void applyConnStats();
+    // 把 REST 快照与进程内快照**合成一份**后喂给 observeConnections + HistoryStore::observe。
+    // 两个消费者都把「本拍缺席」当「连接已断开」，所以绝不能把两个来源分两次喂 ——
+    // 那会让每一拍都误判另一半已断开（历史库狂写、增量记账清底）。
+    void feedMergedSnapshot(const QJsonArray &restConns);
     // 重算今日流量卡（小时柱 + 当前维度的 Top5）。切口径/切 tab 时立刻调，平时 10s 一次。
     void refreshTodayTraffic();
     void refreshStatusFromCore(); // 以 CoreController 为准刷新三盏灯
@@ -264,6 +273,24 @@ private:
     qint64 m_downBytes = 0;
     int m_connectionsCount = 0;
     QString m_totalDownText = QStringLiteral("0.00 B");
+    // —— 进程内控制面与 REST 的合并痕迹 ——
+    // REST 侧最近一拍的原始值（合并显示时的加数之一；进程内份额是另一个加数）。
+    qint64 m_restUp = 0;
+    qint64 m_restDown = 0;
+    int m_restConnCount = 0;
+    qint64 m_restDownTotal = 0;
+    // REST 各通道最近一次来数据的时刻（毫秒时间戳）：静默超阈值 = 核心不在/接口断，
+    // 由 m_inprocTimer 接管发布节拍（核心在时定时器不发布，行为与从前一致）。
+    qint64 m_lastRestTrafficMs = 0;
+    qint64 m_lastRestConnMs = 0;
+    qint64 m_lastRestSnapshotMs = 0;
+    // 进程内累计字节的上一秒读数与差分出的速率（B/s）。
+    quint64 m_inprocPrevUp = 0;
+    quint64 m_inprocPrevDown = 0;
+    qint64 m_inprocUpRate = 0;
+    qint64 m_inprocDownRate = 0;
+    QTimer *m_inprocTimer = nullptr; // 1s：差分进程内速率；REST 静默时接管发布
+    int m_inprocTick = 0;            // 快照兜底每 2 拍一次（对齐 REST 的 2s 周期）
     ConnectionsModel m_connModel;
     // 连接管理页：累积「见过的连接」（按 id）。每次 poll 里没出现的不丢弃，而是标 offline 保留，
     // 这样 Offline 过滤才有内容（对齐旧项目 connections.vue 的 loadConnections）。连接窗打开时清空。

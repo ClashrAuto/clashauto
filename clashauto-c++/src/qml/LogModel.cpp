@@ -2,6 +2,7 @@
 
 #include "../ClashService.h"
 #include "../CoreController.h"
+#include "../net/InprocTelemetry.h" // 进程内引擎的日志（出站建立/失败/回退原因/路由判定）
 
 #include <QDateTime>
 
@@ -92,4 +93,9 @@ LogModel::LogModel(CoreController *core, ClashService *clash, QObject *parent)
             m_core.append(message);
         });
     }
+    // 进程内引擎的日志（InprocTelemetry：回退原因/出站建立与失败/严格拒绝）→ 仅主日志。
+    // 此前进程内引擎一条日志都进不了 UI —— 用户排查「为什么这个节点没走进程内」没有任何线索。
+    // 信号可能从数据面线程发出，Qt 自动排队投递到本对象（GUI）线程，append 天然安全。
+    connect(&InprocTelemetry::instance(), &InprocTelemetry::logged, this,
+            [this](const QString &message) { m_main.append(message); });
 }

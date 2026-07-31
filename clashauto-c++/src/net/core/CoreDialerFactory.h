@@ -42,6 +42,11 @@ public:
     // 差距藏起来，开着它差距就变成明确的失败 + GatewayDiag 里 cc=… 的原因分布。
     void setStrict(bool on) { m_strict = on; }
 
+    // 入口标签：本工厂的连接在 UI 连接列表「类型」列显示什么（进 InprocTelemetry 快照的
+    // metadata.type）。三条路各自设：网关 "Coast-Gateway"、进程内 TUN "Coast-TUN"；
+    // 默认 "Coast-Mixed"（本机混合入站，创建点在 DevicesController，用默认值即可不必改它）。
+    void setInboundTag(const QString &tag) { m_tag = tag; }
+
     IOutboundTcp *createTcp(QObject *parent) override;
     IOutboundUdp *createUdp(QObject *parent) override;
 
@@ -50,4 +55,5 @@ private:
     OutboundFactory *m_fallback = nullptr; // 持有，dtor delete
     bool m_strict = false;
     Router m_router;                       // 空 = 全部回退
+    QString m_tag = QStringLiteral("Coast-Mixed"); // 入口标签，见 setInboundTag
 };

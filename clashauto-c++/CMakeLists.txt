@@ -208,6 +208,9 @@ set(BACKEND_SOURCES
     # 数据面诊断日志（<userDir>/logs/gateway-diag.log）。跨平台编译：main_qml.cpp 要调 setLogDir，
     # 而计数器只有 POSIX 上的网关才真的往里写。
     src/net/GatewayDiag.cpp  src/net/GatewayDiag.h
+    # 进程内引擎的控制面出口（跨平台，纯 Qt Core）：连接快照 / 流量合计 / 回退原因日志，
+    # UI 侧与 mihomo REST 合并（只登记进程内出站的连接，与 REST 集合不相交 → 不重复计数）。
+    src/net/InprocTelemetry.cpp src/net/InprocTelemetry.h
 )
 
 # QML 绑定胶水（新增的薄适配层）
