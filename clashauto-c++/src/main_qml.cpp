@@ -32,6 +32,7 @@
 #include "net/core/RuleEngine.h"             // COAST_RULE_SELFTEST：分流规则匹配自测
 #include "net/core/ProxyConfigBuilder.h"     // COAST_PROXYCFG_SELFTEST：proxies YAML → ProxyNode 解析自测
 #include "net/core/DnsMessage.h"            // COAST_DNS_SELFTEST：DNS 报文层 KAT
+#include "net/core/SelfRouteGuard.h"        // COAST_SELFROUTE_SELFTEST：自身流量排除（接 TUN 的前置）
 #include "net/inbound/MixedInbound.h"       // COAST_INBOUND_SELFTEST：本机 HTTP/SOCKS5 入站自测
 #ifdef COAST_HAVE_QUIC
 #include "net/core/proto/Hysteria2Outbound.h"   // COAST_QUIC_SELFTEST：Hy2 的 QPACK/Huffman KAT
@@ -219,6 +220,17 @@ int main(int argc, char *argv[])
     // 的后果是本机上不了网 —— 让用户拿 GUI 去试代价太大，所以给一条几秒钟就有答案的命令。
     if (qEnvironmentVariableIsSet("COAST_SYSPROXY_SELFTEST"))
         return CoreController::systemProxySelfTest() ? 0 : 1;
+
+    // 自身流量排除自检（COAST_SELFROUTE_SELFTEST=1）：探物理出口 → 钉住 → **读回核对** →
+    // 真连一次 → **反向对照**（钉到回环口必须连不通）。
+    // 反向对照是这条自检的重点：读回一致只证明选项被存下了，不证明它在导流；少了它，
+    // 「绑定完全没生效」也会显示 PASS。
+    if (qEnvironmentVariableIsSet("COAST_SELFROUTE_SELFTEST")) {
+        QString report;
+        const bool ok = SelfRouteGuard::selfTest(&report);
+        fprintf(stderr, "%s\n", qUtf8Printable(report));
+        return ok ? 0 : 1;
+    }
 
     // 本机混合入站自检（COAST_INBOUND_SELFTEST=1）：SOCKS5 CONNECT / HTTP CONNECT / HTTP 绝对形式
     // 三种客户端各打一遍，验协议解析 + 双向转发 + 绝对形式被正确改写成源形式。
