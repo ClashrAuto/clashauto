@@ -68,6 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 打包成 .app 后 Info.plist 接管，但开发期 `swift run` 必须显式提一次。
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        // 窗口这时候可能还没建出来（WindowGroup 是在第一轮 runloop 之后才铺的）。
+        DispatchQueue.main.async { WindowRestore.adopt() }
     }
 
     /// 点 ✕ **不退出程序**，只隐藏窗口。

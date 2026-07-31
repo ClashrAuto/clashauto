@@ -1726,3 +1726,52 @@ Qt 的顶栏只有四样：**节点 (N) | 可展开搜索 | 测速 | 帮助**。
 自己的 `SparkLine` 里。连同 `Theme.navSelected` 一并删除。
 
 `swift test` 308 全绿；`i18n_check.py` 236/236；persist check 7/7。**未做截图验证**。
+
+
+## 2026-08-01(续十二) · ★ 前面十一条的「未做截图验证」全是我自己造成的
+
+前面每一条都写着「本页未做截图验证 —— 开发机上 `Coast.app` 起来后取不到窗口」。
+**那个结论是错的，原因是我的启动方式。**
+
+- 直接 exec 包内的可执行文件（`./Coast.app/Contents/MacOS/Coast`）→ **窗口数 0**；
+- 用 `open -n ./Coast.app --env …` 走 LaunchServices → **窗口正常开出来**。
+
+`.build/debug/Coast` 一直是好的（我用一个临时钩子打了 `NSApplication.shared.windows`：
+debug 二进制 1 个窗口，同一份代码打成包再 exec 就是 0 个）。SwiftUI 的 `WindowGroup`
+场景要经 LaunchServices 建立的会话才连得上，绕过它 exec 内层二进制不行。
+
+**验证方法固定下来**（写在这里，别再踩）：
+
+```bash
+open -n ./Coast.app --env COAST_NO_AUTOSTART=1 --env COAST_INITIAL_PAGE=<0..6>
+```
+
+已据此补验三页，都与前面各条描述一致：
+- **日志页**：两个标签（主日志选中态是卡底 + 2px 下划线）、彩色圆点（"Delay test finished."
+  是绿点、其余蓝点）、时间戳在正文上方、最新置顶 —— 续一条那次重做是对的；
+- **状态页**：★ 上传/下载卡显示的是 **`0 B/s`** —— 续七条修的那个「速率被显示成总量」的 bug，
+  这下是眼见为实了；六张卡的 2 列布局、连接卡的眼睛/垃圾桶按钮组、延迟卡的四项都在位；
+- **设置页**：4 个标签 + 右上「应用」、分组卡（图标 + 标题都是 accentStrong）、
+  40 高的行 + 分隔线、手画开关、带 ＋/− 的数字框 —— 续三条那次重做是对的。
+
+### 顺带修掉一个真 bug：窗口位置从来没有被恢复过
+
+排查时 `defaults read com.yuehongsun.coast` 里有 **57 个** 这样的键：
+
+```
+NSWindow Frame SwiftUI.ModifiedContent<Coast.(unknown context at $10028f608).RootView, …>-1-AppWindow-1
+```
+
+`$10028f608` 是运行时地址，**ASLR 保证它每次启动都不一样**。于是：
+1. 上次存的窗口位置**永远读不回来**（每次都是个全新的键）—— 而 Qt 版专门做了这件事
+   （`Main.qml` 的 `restoreWindowPos`）；
+2. 偏好文件**无限膨胀**，每启动一次多一个永远不会被读的键。
+
+新增 `WindowRestore`：给主窗挂一个**固定**的 autosave 名（`CoastMainWindow`）、
+启动时按它恢复位置，并把历史垃圾键清掉（只删前缀完全匹配的，不碰别的偏好）。
+实测清理生效：57 → 0，且新的一次启动不再产生新的垃圾键。
+
+（另外确认 `com.coast.Coast` 那个域里的 `window.posX/posY` 与 `geoip.lastPublished` 是
+**Qt 版**写的，不是 Swift 侧写错了域。）
+
+`swift test` 308 全绿。临时诊断钩子（`COAST_WINDOW_DEBUG`）用完即删。
