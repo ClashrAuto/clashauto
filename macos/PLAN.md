@@ -2272,3 +2272,32 @@ macOS 上的对应物是 `NSWindow.contentMinSize`。新增 `.windowMinSize(widt
 点一下放大镜，「节点 (13)」后面确实展开出带占位符「搜索节点」的输入框。
 
 `swift test` 308 全绿；`i18n_check.py` 248/248；persist check 7/7。
+
+
+## 2026-08-01(续三十) · 上一条的写法有个副作用；另有一个**没查出来**的窗口高度问题
+
+### 1. `WindowMinSize` 改成只设一次
+
+上一条把 `contentMinSize` 写在了 `updateNSView` 里，每次布局都设一遍并顺手「顶回下限」。
+这有副作用：`updateNSView` 一秒能跑很多次，只要**任何一拍**量到的高度偏小
+（SwiftUI 布局过程中很常见），就会把窗口按下去。**下限只是下限，不该在窗口活着的时候
+反复去动它**。改成挂上去那一刻设一次、顶一次，之后 `updateNSView` 什么都不做。
+
+最小尺寸仍然生效：`set size to {300, 200}` 之后主窗仍是 640×462（430 内容 + 32 标题栏）。
+
+### 2. ⚠️ 主窗**长不高**，原因没查出来
+
+主窗的宽度能拖大（1000 没问题），**高度却卡在 430 内容高**，`set size` 和真的拖右下角
+都涨不上去。已经排除的：
+
+- **不是** `WindowMinSize` 引入的 —— 把它从主窗上摘掉，高度照样涨不上去；
+- **不是**「反复设 min」造成的 —— 改成只设一次之后依旧；
+- 显式放开 `contentMaxSize`、给根视图补 `maxWidth/maxHeight: .infinity`，**两样都无效**
+  （试过即撤，没留在代码里）。
+
+看起来是 SwiftUI 按根视图推断窗口尺寸约束时的某种行为，我这一轮没定位到。
+**如实记下来**：Qt 的主窗是能自由拉高的，这一条目前对不上。
+下一步可以试的方向：把 `WindowGroup` 换成 `Window` scene、或者用 `NSHostingView` 自建窗口，
+再逐个排除 `.windowStyle(.hiddenTitleBar)` / `.windowGlass` / `.background(.ultraThinMaterial)`。
+
+`swift test` 308 全绿；`i18n_check.py` 248/248。

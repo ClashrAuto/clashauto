@@ -13,20 +13,38 @@ struct WindowMinSize: NSViewRepresentable {
     let width: CGFloat
     let height: CGFloat
 
+    final class Coordinator {
+        /// 「顶回下限」只做一次。
+        ///
+        /// ★ 第一版是每次 `updateNSView` 都查一遍并 `setContentSize`，结果**把窗口的高度
+        ///   钉死在了下限上**：拖到 1000×700，`set size` 之后量出来仍是高 430 的内容。
+        ///   原因是 `updateNSView` 一秒能跑很多次，只要有**任何一拍**量到的高度偏小
+        ///   （SwiftUI 布局过程中很常见），就会把窗口按下去；之后每一拍都等于下限、
+        ///   再也涨不回来。下限只是**下限**，不该在窗口活着的时候反复去动它。
+        var didClamp = false
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         // 窗口在下一轮 runloop 才挂上来，这里当场取是 nil。
-        DispatchQueue.main.async { apply(to: view) }
+        DispatchQueue.main.async { apply(to: view, context.coordinator) }
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) { apply(to: nsView) }
+    // **不在 `updateNSView` 里动窗口**。窗口的尺寸约束只该设一次；
+    // 每次布局都去写它，等于和 SwiftUI 自己的窗口尺寸推断来回打架。
+    func updateNSView(_ nsView: NSView, context: Context) {}
 
-    private func apply(to view: NSView) {
+    private func apply(to view: NSView, _ coordinator: Coordinator) {
         guard let window = view.window else { return }
+        guard !coordinator.didClamp else { return }
         window.contentMinSize = NSSize(width: width, height: height)
-        // 已经比下限还小的窗（例如上次退出时存下来的），当场顶回去。
-        let size = window.contentLayoutRect.size
+        coordinator.didClamp = true
+        // 上次退出时存下来的尺寸可能比下限还小（我自己的 `WindowRestore` 就恢复过一个
+        // 460 宽的主窗帧），开窗那一刻顶回去 —— 只这一次。
+        let size = window.contentRect(forFrameRect: window.frame).size
         if size.width < width || size.height < height {
             window.setContentSize(NSSize(width: max(size.width, width),
                                          height: max(size.height, height)))
