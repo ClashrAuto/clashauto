@@ -189,6 +189,8 @@ enum YAMLScalar {
     /// 单引号包裹，内部 `'` 翻倍。用单引号是因为节点名里反斜杠很常见，
     /// 单引号 YAML 标量不做转义处理，写进去是什么就是什么。
     static func quote(_ raw: String) -> String {
-        "'" + raw.replacingOccurrences(of: "'", with: "''") + "'"
+        // 剥控制字符再引用(同 YAMLSurgery.quote 的注入防线)。
+        let clean = String(raw.unicodeScalars.map { $0.properties.generalCategory == .control ? " " : Character($0) })
+        return "'" + clean.replacingOccurrences(of: "'", with: "''") + "'"
     }
 }

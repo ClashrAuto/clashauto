@@ -369,7 +369,10 @@ extension SubParser {
 
     /// YAML 双引号标量。字符串值一律加引号最安全 —— 节点名里的 `#`、`:`、前导 `*`
     /// 都会让不加引号的写法变成语法错误或被解析成别的类型。
-    static func yq(_ raw: String) -> String {
+    static func yq(_ input: String) -> String {
+        // 剥控制字符(换行等)再引用 —— 同 YAMLSurgery.quote 的注入防线:节点名里的换行
+        // 会让引用标量跨行,下游正则提取被骗。节点名无合法换行,折叠成空格。
+        let raw = String(input.unicodeScalars.map { $0.properties.generalCategory == .control ? " " : Character($0) })
         var escaped = raw.replacingOccurrences(of: "\\", with: "\\\\")
         escaped = escaped.replacingOccurrences(of: "\"", with: "\\\"")
         escaped = escaped.replacingOccurrences(of: "\n", with: "\\n")

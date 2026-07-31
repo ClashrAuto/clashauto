@@ -140,7 +140,13 @@ enum YAMLSurgery {
     ///
     /// 带 `\u`/`\U` 的值改用**双引号**并保留那个转义序列 —— 有些机场的节点名里是
     /// 字面量 `\uXXXX`，单引号 YAML 不解转义，写出去核心读到的会是那六个字符本身。
-    static func quote(_ value: String) -> String {
+    static func quote(_ raw: String) -> String {
+        // ★ 先剥控制字符(换行/回车/制表等),再引用。这是注入防线:一个含真实换行的节点名
+        //   会让下面单引号包出的标量跨行,而 ConfigBuilder 自己的正则提取(proxyNames)会把
+        //   续行当成新的 `- name:` 条目 —— 攻击者(机场)由此能凭空注入 proxy/组引用。
+        //   节点名/规则值里的换行没有任何合法用途,统一折叠成空格,整类问题一次堵死。
+        let value = raw.unicodeScalars.map { $0.properties.generalCategory == .control ? " " : Character($0) }
+            .reduce(into: "") { $0.append($1) }
         if value.isEmpty { return "''" }
         if value.contains("\\U") || value.contains("\\u") {
             var escaped = value.replacingOccurrences(of: "\\", with: "\\\\")

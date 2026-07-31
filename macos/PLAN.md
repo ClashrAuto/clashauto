@@ -584,3 +584,20 @@
   app 一旦被注入,这些就是直通 root 的路。加 `InputValidation`(网卡名白名单 + 路径卫生),
   放**共享层** CoastHelperProtocol 而非 helper 内部:可单测(executableTarget 不能 @testable
   import),且 app 侧下发前也能用同一套 fail-fast。新增 4 条用例把「什么该拒」钉死。
+- 2026-07-31：**实证审查 ConfigBuilder 的 YAML 注入面,抓到并修掉一个真注入**(176 用例全绿)。
+
+  不靠推理 quote 是否正确,而是**构造含恶意字符的节点名**(换行/引号/冒号/井号/逗号/YAML
+  锚点等 11 种),跑完整 ConfigBuilder,验证有没有越权。**抓到真漏洞**:含真实换行的节点名
+  (机场可控),经 subscribe.yaml 往返后重新拼进 full.yaml 时,`YAMLSurgery.quote` 用单引号
+  包裹但**没处理真实换行**,于是标量跨行,ConfigBuilder 自己的正则提取(`proxyNames`)把续行
+  当成新的 `- name:` 条目 —— 机场由此能凭空注入 proxy/组引用。
+
+  修在**唯一咽喉点**:三个 quote 函数(`YAMLSurgery.quote` / `SubParser.yq` /
+  `YAMLScalar.quote`)在引用前统一**剥控制字符**(折叠成空格)。节点名/规则值里的换行没有任何
+  合法用途,一处堵死整类问题。dump 验证:恶意名折叠成单行、proxies 数量精确等于输入数、
+  EVIL 只作为某个合法节点名的子串存在,不再是独立条目。
+
+  ★ 过程中我的**测试断言一度写错**(把「名字含 EVIL 子串」当成注入),dump 出实际 YAML 才
+  看清:一个字面叫 `...EVIL...` 的节点是无害的,危险的是它变成**独立的一行 `- name:`**。
+  修正为「proxy 数量 == 输入数」这个正确的不变式。**先 dump 看真相、再改断言**,没有为了
+  让测试变绿而放松它。
