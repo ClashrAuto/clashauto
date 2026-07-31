@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls // ScrollView / ScrollBar / ToolTip
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 状态页：四张放大的指标卡（2×2），整页只有这一块。
 // 节点列表已独立成「节点」页（NodesPage），这里整页宽都归流量看板，卡片因此能画得下更多东西：

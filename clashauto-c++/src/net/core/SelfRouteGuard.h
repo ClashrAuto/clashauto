@@ -8,9 +8,13 @@
 //
 // ★ 办法：把本进程的出站 socket 钉死在**物理默认路由网卡**上，让它的路由查表根本命中不到 TUN。
 //   三个平台的机制不同，但形状一样，都必须在 **connect() 之前**作用在 fd 上：
-//     · Linux  —— SO_MARK 打标 + 策略路由（`ip rule add fwmark <mark> lookup main pref 100`，
-//                 TUN 的默认路由放进优先级更低的独立表）。也可以用 SO_BINDTODEVICE，但那要
-//                 CAP_NET_RAW 且会绕过策略路由，这里用 mark。
+//     · Linux  —— SO_MARK 打标 + 策略路由。**两条 rule 缺一不可**（见 TunSession.cpp）：
+//                   ip rule add fwmark <mark> lookup main    pref 100   ← 我们的包，查 main
+//                   ip rule add                lookup 989    pref 200   ← 其它包，查 TUN 专用表
+//                 关键在于 TUN 的 /1 路由必须放进**独立表**。曾经写成「路由进 main + rule 查
+//                 main」，那是自相矛盾的：打了标的包查 main，而 main 里就有指向 TUN 的路由 ——
+//                 SO_MARK 等于没打。也可以用 SO_BINDTODEVICE，但那要 CAP_NET_RAW 且会绕过
+//                 策略路由，这里用 mark。
 //     · Windows —— IP_UNICAST_IF / IPV6_UNICAST_IF（无 SO_MARK）。**v4 的 ifindex 要网络序、
 //                 v6 的要主机序**，这是微软文档里的既定坑，写反了不会报错、只是不生效。
 //     · macOS  —— IP_BOUND_IF / IPV6_BOUND_IF。

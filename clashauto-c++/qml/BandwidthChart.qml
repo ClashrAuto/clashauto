@@ -1,5 +1,5 @@
 import QtQuick
-import ClashAuto
+import Coast
 
 // 实时带宽折线 —— 严格复刻 Widgets 版 TrafficChart（plugins/tubiao.js）：
 //  · 固定 42 个点（可见 40 + 两端各 1 富余，滚动全程无缝、右侧不留缺口），初始填 1.0；

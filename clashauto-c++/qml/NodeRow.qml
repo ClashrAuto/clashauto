@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 节点列表行：名称（省略号）+ 延迟/速度药丸 + 应用按钮。活动行整行高亮（无左竖条）。
 Rectangle {

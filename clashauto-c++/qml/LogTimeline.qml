@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 日志时间线：不透明卡内一个滚动 ListView，复刻 Widgets 版 appendTimeline 的观感——
 // 左侧竖轴 + 彩色圆点（红=失败/错误、橙=警告、绿=成功/完成、蓝=信息），右侧时间戳 + 正文。

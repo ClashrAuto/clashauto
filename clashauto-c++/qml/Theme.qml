@@ -3,7 +3,7 @@ import QtQuick
 
 // 全局设计令牌（单例）。颜色随 `dark` 布尔在深/浅两套之间切换——所有 readonly 属性都是
 // 依赖 dark 的绑定，故翻转 Theme.dark 即整窗换肤。取值对齐 Widgets 版 appStyle()/lightStyle()。
-// 页面/组件通过 `import ClashAuto` 后以 `Theme.xxx` 访问。
+// 页面/组件通过 `import Coast` 后以 `Theme.xxx` 访问。
 QtObject {
     id: theme
 

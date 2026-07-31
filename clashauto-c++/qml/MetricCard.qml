@@ -1,5 +1,5 @@
 import QtQuick
-import ClashAuto
+import Coast
 
 // 流量指标卡：左侧 iconfont 图标 + 右侧标题/数值。accentColor 对齐 Widgets 版各卡配色。
 // 角标（如进程卡的「清空连接」）由调用方在外层叠加，保持本组件简单。

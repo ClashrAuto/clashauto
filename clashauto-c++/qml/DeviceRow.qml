@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls // ToolTip：徽章文字被 elide 时把完整文案挂在悬停提示上
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 设备列表行：类型头像 + 名称/副标题（IP·厂商）/最后访问的地址 + 实时速率 + 最右一列（代理开关，
 // 或者「本机/网关/其它网络」这类不可代理的原因徽章——两者互斥，共用同一个 38px 槽位）。

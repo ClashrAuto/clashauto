@@ -3,7 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import QtQuick.Window
 import QtCore
-import ClashAuto
+import Coast
 
 // 应用主窗（shell）：左侧栏(logo/导航/版本) + 中间页面区(StackLayout) + 底部页脚(开关/模式)。
 // macOS：保留系统窗（透明标题栏 + 整窗毛玻璃，见 bridge.applyMacGlass），内容为浮在玻璃上的

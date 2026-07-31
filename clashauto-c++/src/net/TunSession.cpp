@@ -5,6 +5,12 @@
 #include <QProcess>
 #include <QTimer>
 
+namespace {
+// Linux：TUN 默认路由专用的路由表号。取一个不太可能撞的值；main=254 / default=253 / local=255
+// 都是保留的，别用。989 只是个好记的空位。
+constexpr int kTunTable = 989;
+} // namespace
+
 TunSession::~TunSession()
 {
     stop();
@@ -78,17 +84,34 @@ bool TunSession::start(const Config &cfg, QString *err)
         return bail(*err);
 
     if (cfg.takeDefault) {
-        // 策略路由：给本进程打了 fwmark 的包走 main 表（物理默认路由还在那儿），
-        // 优先级要**高于**（数字小于）下面这两条 /1 所在的表。这一条是自身流量排除在 Linux
-        // 上真正起作用的地方 —— SO_MARK 只是打标，导流靠它。
+        // ★★ Linux 的接管**不能**把 /1 路由加进 main 表 —— 那样 SO_MARK 会彻底失效。
+        //   一开始就是这么写的（rule "fwmark X lookup main" + 路由进 main），逻辑上自相矛盾：
+        //   打了标的包查 main，而 main 里正躺着那两条指向 TUN 的 /1，于是我们自己的出站
+        //   照样进 TUN → 环路，SO_MARK 一点用没有。
+        //   正确形状（wireguard / mihomo 同款）是**两张表**：
+        //     · TUN 的 /1 放进独立表 kTable，配一条 pref 200 的 "from all lookup kTable"；
+        //     · pref 100 的 "fwmark X lookup main" 排在它**前面** —— 打了标的包先查 main，
+        //       main 里只有物理默认路由，于是走物理口出去。
+        //   两条 rule 的**先后（pref 数值小者先）就是全部的机制**，写反了同样是环路。
         const QString mark = QStringLiteral("0x%1").arg(SelfRouteGuard::fwmark(), 0, 16);
+        const QString table = QString::number(kTunTable);
+
+        // 本进程的包：pref 100，查 main（只有物理默认路由）
         pushUndo(ip, {"rule", "del", "fwmark", mark, "lookup", "main", "pref", "100"});
         if (!run(ip, {"rule", "add", "fwmark", mark, "lookup", "main", "pref", "100"}, err))
             return bail(*err);
 
+        // 其它所有包：pref 200，查 TUN 专用表
+        pushUndo(ip, {"rule", "del", "lookup", table, "pref", "200"});
+        if (!run(ip, {"rule", "add", "lookup", table, "pref", "200"}, err))
+            return bail(*err);
+
         for (const char *half : {"0.0.0.0/1", "128.0.0.0/1"}) {
-            pushUndo(ip, {"route", "del", QString::fromLatin1(half), "dev", cfg.ifname});
-            if (!run(ip, {"route", "add", QString::fromLatin1(half), "dev", cfg.ifname}, err))
+            pushUndo(ip, {"route", "del", QString::fromLatin1(half), "dev", cfg.ifname, "table",
+                          table});
+            if (!run(ip, {"route", "add", QString::fromLatin1(half), "dev", cfg.ifname, "table",
+                          table},
+                     err))
                 return bail(*err);
         }
     }

@@ -44,8 +44,8 @@ int main(int argc, char *argv[])
     }
 #endif
     QApplication app(argc, argv);
-    QApplication::setApplicationName("Clash Auto");
-    QApplication::setOrganizationName("ClashAuto");
+    QApplication::setApplicationName("Coast");
+    QApplication::setOrganizationName("Coast");
     QApplication::setWindowIcon(QIcon(":/assets/icon.ico")); // 窗口/任务栏图标（exe 图标另见 assets/app.rc）
     // 载入旧项目 iconfont（family "iconfont"），供 logo / 流量卡 / 页脚等图标复用
     QFontDatabase::addApplicationFont(":/assets/iconfont.ttf");
@@ -60,7 +60,7 @@ int main(int argc, char *argv[])
 
 #if defined(Q_OS_MACOS)
     // 特权 helper 的 CLI 验证入口（真机上从已签名 bundle 内运行才有效）：
-    //   .../Clash Auto.app/Contents/MacOS/Clash Auto --mac-helper-register|status|ping|unregister
+    //   .../Coast.app/Contents/MacOS/Coast --mac-helper-register|status|ping|unregister
     {
         const QStringList args = app.arguments();
         auto statusName = [](MacHelper::RegStatus s) -> QString {

@@ -16,7 +16,7 @@ permissions:
   contents: write
 
 env:
-  APP_NAME: ClashAuto
+  APP_NAME: Coast
   QT_VERSION: 6.8.3
   QT_ARCH: win64_msvc2022_64
   BUILD_DIR: build-release
@@ -25,7 +25,7 @@ env:
   # 按同一个 tag 从 GitHub 取 —— 两边同号，避免「头与库版本不一致」这种最难查的问题。
   # 注：TUIC 要的 keying-material exporter 得等 msquic 2.6（尚未发布），届时升这里即可。
   MSQUIC_VERSION: 2.5.9
-  STAGE_DIR: dist/package/ClashAuto
+  STAGE_DIR: dist/package/Coast
 
 jobs:
   windows:
@@ -64,7 +64,7 @@ jobs:
           $build = "$(git rev-list --count HEAD)".Trim()
           $version = "$major.$minor.$build"
           # 主分支 = 正式版，其余分支 = prerelease。
-          # APP_VERSION 保持纯数字 major.minor.build —— 资源文件名(ClashAuto-<ver>-…)和 app 内的
+          # APP_VERSION 保持纯数字 major.minor.build —— 资源文件名(Coast-<ver>-…)和 app 内的
           # 版本比较都靠它，掺字母会一起坏掉。分支上 build 天然大于主分支（= 主分支提交数 + 本分支
           # 的提交），版本序自然正确；tag 再加个短 sha，防「两个分支各 +N 撞到同一个号」。
           $isPre = if ("${{ github.ref }}" -eq "refs/heads/master" -or "${{ github.ref }}" -eq "refs/heads/main") { "false" } else { "true" }
@@ -316,7 +316,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path "$env:STAGE_DIR\*" -DestinationPath "dist\ClashAuto-$env:APP_VERSION-windows-${{ matrix.arch }}-portable.zip" -Force
+          Compress-Archive -Path "$env:STAGE_DIR\*" -DestinationPath "dist\Coast-$env:APP_VERSION-windows-${{ matrix.arch }}-portable.zip" -Force
 
       - name: Create installer
         shell: pwsh
@@ -325,7 +325,7 @@ jobs:
           $nsi = @'
           Unicode true
           Name "Coast"
-          OutFile "dist\ClashAuto-$%APP_VERSION%-windows-$%APP_ARCH%-setup.exe"
+          OutFile "dist\Coast-$%APP_VERSION%-windows-$%APP_ARCH%-setup.exe"
           InstallDir "$LOCALAPPDATA\Coast"
           RequestExecutionLevel user
           AutoCloseWindow true
@@ -337,7 +337,7 @@ jobs:
 
           Section "Install"
             SetOutPath "$INSTDIR"
-            File /r "dist\package\ClashAuto\*"
+            File /r "dist\package\Coast\*"
             CreateDirectory "$SMPROGRAMS\Coast"
             CreateShortcut "$SMPROGRAMS\Coast\Coast.lnk" "$INSTDIR\Coast.exe"
             CreateShortcut "$DESKTOP\Coast.lnk" "$INSTDIR\Coast.exe"
@@ -366,18 +366,18 @@ jobs:
         run: |
           # 为每个发布物生成 <文件>.sha256（仅十六进制摘要）。应用更新时直连 GitHub
           # 取该边车校验安装包完整性——即使经 ghfast.top 镜像下载正文，摘要仍来自官方源，
-          # 镜像无法在不被发现的情况下投递木马。边车随 dist/ClashAuto-* 一并上传。
-          Get-ChildItem dist -Filter 'ClashAuto-*' -File | Where-Object { $_.Extension -ne '.sha256' } | ForEach-Object {
+          # 镜像无法在不被发现的情况下投递木马。边车随 dist/Coast-* 一并上传。
+          Get-ChildItem dist -Filter 'Coast-*' -File | Where-Object { $_.Extension -ne '.sha256' } | ForEach-Object {
             (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower() | Out-File -FilePath "$($_.FullName).sha256" -Encoding ascii -NoNewline
           }
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ClashAuto-windows-${{ matrix.arch }}
+          name: Coast-windows-${{ matrix.arch }}
           path: |
-            dist/ClashAuto-*-windows-${{ matrix.arch }}-portable.zip
-            dist/ClashAuto-*-windows-${{ matrix.arch }}-setup.exe
+            dist/Coast-*-windows-${{ matrix.arch }}-portable.zip
+            dist/Coast-*-windows-${{ matrix.arch }}-setup.exe
 
       - name: Write release notes
         if: github.event_name == 'push'
@@ -392,9 +392,9 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           # 名字带上分支，便于在 Release 列表里一眼分辨这是哪条分支的测试版。
-          # ★ 资源**文件名**仍是 ClashAuto-<ver>-<平台>-<架构>-… 一个字没动 —— app 的一键更新
+          # ★ 资源**文件名**仍是 Coast-<ver>-<平台>-<架构>-… 一个字没动 —— app 的一键更新
           #   是按文件名里的平台/架构挑资源的（UpdateController::recommendedIndex）。
-          name: ${{ env.IS_PRERELEASE == 'true' && format('Clash Auto {0} (beta · {1})', env.APP_VERSION, github.ref_name) || format('Clash Auto {0}', env.APP_VERSION) }}
+          name: ${{ env.IS_PRERELEASE == 'true' && format('Coast {0} (beta · {1})', env.APP_VERSION, github.ref_name) || format('Coast {0}', env.APP_VERSION) }}
           prerelease: ${{ env.IS_PRERELEASE == 'true' }}
           target_commitish: ${{ github.sha }}
           # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示），经上一步写盘的
@@ -407,7 +407,7 @@ jobs:
           make_latest: ${{ env.IS_PRERELEASE == 'true' && 'false' || 'true' }}
           overwrite_files: true
           files: |
-            dist/ClashAuto-*
+            dist/Coast-*
 
   macos:
     name: macOS universal (x86_64 + arm64)
@@ -714,7 +714,7 @@ jobs:
           方法二：终端执行 xattr -cr "/Applications/Coast.app" 后正常双击。
           EOF
           fi
-          DMG="dist/ClashAuto-${APP_VERSION}-macos-universal.dmg"
+          DMG="dist/Coast-${APP_VERSION}-macos-universal.dmg"
           hdiutil create -volname "Coast" -srcfolder dist/dmgroot -ov -format UDZO "$DMG"
           # 公证 + staple：仅在真签名 + 有 notary 凭据时（Apple 拒绝 ad-hoc 提交）。
           # 用 App Store Connect API Key(.p8)；失败则本步失败 → 不上传未公证的 dmg。
@@ -735,7 +735,7 @@ jobs:
         run: |
           set -euo pipefail
           # 每个发布物生成 <文件>.sha256（仅摘要），供应用更新时直连 GitHub 校验完整性
-          for f in dist/ClashAuto-*; do
+          for f in dist/Coast-*; do
             case "$f" in *.sha256) continue;; esac
             [ -f "$f" ] || continue
             shasum -a 256 "$f" | awk '{print $1}' > "$f.sha256"
@@ -744,13 +744,13 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ClashAuto-macos-universal
+          name: Coast-macos-universal
           path: |
-            dist/ClashAuto-*-macos-universal.dmg
+            dist/Coast-*-macos-universal.dmg
 
       # 不再从本 CI 往 GitHub Release 上传 mac DMG：签名+公证的 mac 包由独立仓库
       # integemjack/schat.build 的 "clashauto macOS (signed)" workflow 构建并 --clobber
-      # 到同一个 "Clash Auto <ver>" latest release。此前本 job 用 overwrite_files:true 传
+      # 到同一个 "Coast <ver>" latest release。此前本 job 用 overwrite_files:true 传
       # 同名 dmg，会把 schat.build 的签名包覆盖回未签名版本（mac 客户端 GET /releases/latest
       # 就会下到未签名包）。故这里只保留上面的 workflow artifact（供该 run 内下载/排查），
       # 不碰 Release。Windows/Linux 两个 job 仍会创建并维护该 release。
@@ -1018,14 +1018,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          tar -C dist/package -czf "dist/ClashAuto-${APP_VERSION}-linux-${{ matrix.arch }}-portable.tar.gz" ClashAuto
-          (cd dist/package && zip -r "../ClashAuto-${APP_VERSION}-linux-${{ matrix.arch }}-portable.zip" ClashAuto)
+          tar -C dist/package -czf "dist/Coast-${APP_VERSION}-linux-${{ matrix.arch }}-portable.tar.gz" Coast
+          (cd dist/package && zip -r "../Coast-${APP_VERSION}-linux-${{ matrix.arch }}-portable.zip" Coast)
 
       - name: Create deb package
         shell: bash
         run: |
           set -euo pipefail
-          pkg_root="dist/deb/ClashAuto"
+          pkg_root="dist/deb/Coast"
           install_root="$pkg_root/opt/coast"
           mkdir -p "$install_root" "$pkg_root/usr/share/applications" "$pkg_root/usr/bin" "$pkg_root/DEBIAN"
 
@@ -1056,14 +1056,14 @@ jobs:
            Coast desktop client built with Qt Quick (QML).
           EOF
 
-          fakeroot dpkg-deb --build "$pkg_root" "dist/ClashAuto-${APP_VERSION}-linux-${{ matrix.arch }}.deb"
+          fakeroot dpkg-deb --build "$pkg_root" "dist/Coast-${APP_VERSION}-linux-${{ matrix.arch }}.deb"
 
       - name: Generate SHA256 sidecars
         shell: bash
         run: |
           set -euo pipefail
           # 每个发布物生成 <文件>.sha256（仅摘要），供应用更新时直连 GitHub 校验完整性
-          for f in dist/ClashAuto-*; do
+          for f in dist/Coast-*; do
             case "$f" in *.sha256) continue;; esac
             [ -f "$f" ] || continue
             sha256sum "$f" | awk '{print $1}' > "$f.sha256"
@@ -1072,11 +1072,11 @@ jobs:
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ClashAuto-linux-${{ matrix.arch }}
+          name: Coast-linux-${{ matrix.arch }}
           path: |
-            dist/ClashAuto-*-linux-${{ matrix.arch }}-portable.tar.gz
-            dist/ClashAuto-*-linux-${{ matrix.arch }}-portable.zip
-            dist/ClashAuto-*-linux-${{ matrix.arch }}.deb
+            dist/Coast-*-linux-${{ matrix.arch }}-portable.tar.gz
+            dist/Coast-*-linux-${{ matrix.arch }}-portable.zip
+            dist/Coast-*-linux-${{ matrix.arch }}.deb
 
       - name: Write release notes
         if: github.event_name == 'push'
@@ -1091,9 +1091,9 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           # 名字带上分支，便于在 Release 列表里一眼分辨这是哪条分支的测试版。
-          # ★ 资源**文件名**仍是 ClashAuto-<ver>-<平台>-<架构>-… 一个字没动 —— app 的一键更新
+          # ★ 资源**文件名**仍是 Coast-<ver>-<平台>-<架构>-… 一个字没动 —— app 的一键更新
           #   是按文件名里的平台/架构挑资源的（UpdateController::recommendedIndex）。
-          name: ${{ env.IS_PRERELEASE == 'true' && format('Clash Auto {0} (beta · {1})', env.APP_VERSION, github.ref_name) || format('Clash Auto {0}', env.APP_VERSION) }}
+          name: ${{ env.IS_PRERELEASE == 'true' && format('Coast {0} (beta · {1})', env.APP_VERSION, github.ref_name) || format('Coast {0}', env.APP_VERSION) }}
           prerelease: ${{ env.IS_PRERELEASE == 'true' }}
           target_commitish: ${{ github.sha }}
           # 更新说明 = 触发本次构建的提交说明（app 内更新弹窗直接展示），经上一步写盘的
@@ -1106,7 +1106,7 @@ jobs:
           make_latest: ${{ env.IS_PRERELEASE == 'true' && 'false' || 'true' }}
           overwrite_files: true
           files: |
-            dist/ClashAuto-*-linux-*
+            dist/Coast-*-linux-*
 
   # 透明网关 headless 自测：下载打好的 linux-x64 包（自带 Qt，offscreen 可独立跑），用 TAP 把真实
   # 内核 TCP 当被劫持设备，经 NetStack 拨内置假 SOCKS，验证「用户态栈转发 + 每设备身份」——不需真机/真实 ARP。
@@ -1122,7 +1122,7 @@ jobs:
       - name: Download linux x64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: ClashAuto-linux-x64
+          name: Coast-linux-x64
           path: dl
       - name: Install runtime deps
         shell: bash
@@ -1138,7 +1138,7 @@ jobs:
           set -euo pipefail
           sudo modprobe tun 2>/dev/null || true
           mkdir -p app
-          tar -C app -xzf dl/ClashAuto-*-linux-x64-portable.tar.gz
+          tar -C app -xzf dl/Coast-*-linux-x64-portable.tar.gz
           BIN="$(find app -type f -name coast | head -1)"
           test -n "$BIN" || { echo "找不到 coast 二进制"; exit 1; }
           chmod +x "$BIN"

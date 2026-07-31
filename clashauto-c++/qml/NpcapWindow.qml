@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // Npcap 安装窗 —— 独立顶层窗口，从设备页的「未安装 Npcap」提示条打开。
 // 流程全自动：下载（进度条 + 速度 + ✕ 取消）→ 验数字签名 → 提权静默安装 → 复检。

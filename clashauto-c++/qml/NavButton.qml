@@ -1,5 +1,5 @@
 import QtQuick
-import ClashAuto
+import Coast
 
 // 侧栏导航项：前置 Remix 图标 + 文字，hover / 选中高亮。无左侧强调竖条。
 Item {

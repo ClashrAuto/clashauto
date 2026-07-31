@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 日志页：两个标签「主日志 / Clash 内核」，各一个滚动时间线（LogTimeline）。
 // 数据来自 context property `logModel`（LogModel）：`logModel.mainModel` = 全部日志，

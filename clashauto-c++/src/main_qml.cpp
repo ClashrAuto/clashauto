@@ -734,7 +734,7 @@ int main(int argc, char *argv[])
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,
         [] { QCoreApplication::exit(-1); }, Qt::QueuedConnection);
-    engine.loadFromModule("ClashAuto", "Main");
+    engine.loadFromModule("Coast", "Main");
     if (engine.rootObjects().isEmpty())
         return -1;
 

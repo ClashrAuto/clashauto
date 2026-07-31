@@ -472,7 +472,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent)
         }
     });
 
-    setWindowTitle("Clash Auto");
+    setWindowTitle("Coast");
     setWindowIcon(QIcon(":/assets/icon.ico"));
     // 使用系统原生标题栏（不再无边框）；标题栏配色由 applyTitleBarColor() 通过 DWM 设置
     resize(MainWidth, MainHeight);
@@ -801,7 +801,7 @@ QWidget *MainWindow::buildTitleBar()
     layout->setContentsMargins(10, 0, 0, 0);
     layout->setSpacing(0);
 
-    auto *title = new QLabel("Clash Auto", bar);
+    auto *title = new QLabel("Coast", bar);
     title->setObjectName("windowTitle");
     layout->addWidget(title, 1);
 
@@ -2319,7 +2319,7 @@ QWidget *MainWindow::buildAboutPage()
     auto *verLabel = new QLabel(page);
     verLabel->setFixedHeight(40);
     verLabel->setTextFormat(Qt::RichText);
-    verLabel->setText(QString("Clash Auto: <a href='update' style='color:green;font-weight:bold;text-decoration:none;'>%1</a>").arg(version));
+    verLabel->setText(QString("Coast: <a href='update' style='color:green;font-weight:bold;text-decoration:none;'>%1</a>").arg(version));
     verLabel->setToolTip(QString::fromUtf8("点击检查更新"));
     connect(verLabel, &QLabel::linkActivated, this, [this](const QString &) { checkForUpdate(false); });
     m_versionLabel = verLabel; // 供发现新版本时改红提示
@@ -3035,14 +3035,14 @@ void MainWindow::showUpdateDialog()
 {
     auto *dialog = new QDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(QString::fromUtf8("Clash Auto 更新"));
+    dialog->setWindowTitle(QString::fromUtf8("Coast 更新"));
     dialog->setStyleSheet(styleSheet());
     dialog->resize(600, 560); // 对齐旧项目 update 窗 600x540
     auto *root = new QVBoxLayout(dialog);
     root->setContentsMargins(10, 10, 10, 10);
     root->setSpacing(8);
 
-    auto *title = new QLabel(QString::fromUtf8("Clash Auto 更新"), dialog);
+    auto *title = new QLabel(QString::fromUtf8("Coast 更新"), dialog);
     title->setObjectName("sectionTitle");
     root->addWidget(title);
 
@@ -3607,7 +3607,7 @@ void MainWindow::checkForUpdate(bool silent, int retriesLeft)
         if (versionNewer(tag, local)) {
             appendLog(QString::fromUtf8("发现新版本 %1（当前 %2）").arg(tag, local));
             if (m_versionLabel) {
-                m_versionLabel->setText(QString("Clash Auto: <a href='update' style='color:red;font-weight:bold;text-decoration:none;'>%1 → %2 有新版本</a>").arg(local, tag));
+                m_versionLabel->setText(QString("Coast: <a href='update' style='color:red;font-weight:bold;text-decoration:none;'>%1 → %2 有新版本</a>").arg(local, tag));
                 m_versionLabel->setToolTip(QString::fromUtf8("发现新版本 %1，点击查看/下载").arg(tag));
             }
             if (m_sidebarVersionLabel) { // 侧栏版本行变红并加上 ⬆，点击走同一检查/更新流程
@@ -3759,7 +3759,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
         hide();
         event->ignore();
         if (!m_trayHintShown && m_tray) {
-            m_tray->notify(QString::fromUtf8("Clash Auto"),
+            m_tray->notify(QString::fromUtf8("Coast"),
                            QString::fromUtf8("已最小化到托盘，右键托盘图标可退出"));
             m_trayHintShown = true;
         }
@@ -3867,9 +3867,9 @@ void MainWindow::applyAutoStart(bool enabled)
                   QSettings::NativeFormat);
     if (enabled) {
         const QString path = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
-        reg.setValue("ClashAuto", QString("\"%1\"").arg(path));
+        reg.setValue("Coast", QString("\"%1\"").arg(path));
     } else {
-        reg.remove("ClashAuto");
+        reg.remove("Coast");
     }
     appendLog(enabled ? QString::fromUtf8("已设置开机自启") : QString::fromUtf8("已取消开机自启"));
 #else
@@ -3897,7 +3897,7 @@ void MainWindow::registerUrlScheme()
     // 阻塞明显，且提权实例里以管理员跑同目录可能被劫持的 reg.exe 是提权面（与 applyAutoStart 同风格）。
     const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
     QSettings root("HKEY_CURRENT_USER\\Software\\Classes\\clash-auto", QSettings::NativeFormat);
-    root.setValue(".", "URL:Clash Auto Protocol"); // 默认值(@)
+    root.setValue(".", "URL:Coast Protocol"); // 默认值(@)
     root.setValue("URL Protocol", "");
     QSettings cmd("HKEY_CURRENT_USER\\Software\\Classes\\clash-auto\\shell\\open\\command",
                   QSettings::NativeFormat);
@@ -4225,7 +4225,7 @@ void MainWindow::handleProtocolUrl(const QString &raw)
         const QString label = name.isEmpty() ? subUrl : name;
         appendLog(QString::fromUtf8("已从链接添加订阅: %1，正在获取节点...").arg(label));
         if (m_tray) {
-            m_tray->notify(QString::fromUtf8("Clash Auto"),
+            m_tray->notify(QString::fromUtf8("Coast"),
                            QString::fromUtf8("已导入订阅 %1").arg(label));
         }
         if (index >= 0) {
@@ -4863,7 +4863,7 @@ void MainWindow::onToggleTunRequested()
             st = MacHelper::registerDaemon(&err);
             if (st == MacHelper::RegStatus::RequiresApproval) {
                 MacHelper::openLoginItemsSettings();
-                appendLog(QString::fromUtf8("增强模式需在「系统设置 → 登录项」允许 Clash Auto 的后台项，允许后再开启"));
+                appendLog(QString::fromUtf8("增强模式需在「系统设置 → 登录项」允许 Coast 的后台项，允许后再开启"));
                 if (m_tray) {
                     m_tray->notify(QString::fromUtf8("增强模式"),
                                    QString::fromUtf8("请在系统设置里允许后台项后重试"));
@@ -4938,7 +4938,7 @@ void MainWindow::installMacHelper()
         }
     } else if (st == MacHelper::RegStatus::RequiresApproval) {
         MacHelper::openLoginItemsSettings();
-        appendLog(QString::fromUtf8("免密助手需在「系统设置 → 登录项」允许 Clash Auto 的后台项，批准后自动生效"));
+        appendLog(QString::fromUtf8("免密助手需在「系统设置 → 登录项」允许 Coast 的后台项，批准后自动生效"));
         startMacHelperApprovalWatch();
     } else {
         appendLog(QString::fromUtf8("免密助手安装失败：%1").arg(err));
@@ -5051,7 +5051,7 @@ void MainWindow::launchSilentUpdateAndRestart(const QString &installerPath)
         installRoot = root.absolutePath(); // 标准布局（<root>/clashauto-c++/exe）：原地升级
     } else {
         // 非常规布局（如开发目录）：装到安装包默认位置
-        installRoot = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath(QStringLiteral("ClashAuto"));
+        installRoot = QDir(qEnvironmentVariable("LOCALAPPDATA")).filePath(QStringLiteral("Coast"));
     }
     const QString newExe = QDir(installRoot).filePath(QStringLiteral("clashauto-c++/clashauto-cpp.exe"));
     const auto psq = [](const QString &s) { // PowerShell 单引号串：内嵌单引号翻倍即可，无其他转义

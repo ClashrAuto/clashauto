@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 添加/编辑规则 —— 独立顶层窗口（任务栏可切换）。后端经 context 属性 `settings`
 // （saveRule / proxyGroupNames / processChoices）。两处使用同一实例语义：

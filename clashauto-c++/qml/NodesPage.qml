@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 节点页：顶栏（节点+数量 | 可展开搜索 | 测速 | 帮助）+ 节点列表（点击选择 / 右键禁用）。
 // 原本是状态页右半边那一栏，独立成页后整页宽都归它——节点名普遍很长（地区+倍率+机场名），

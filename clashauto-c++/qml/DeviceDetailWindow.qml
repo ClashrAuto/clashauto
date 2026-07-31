@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 设备详情 —— 独立顶层窗口（原来是设备页右半边那一栏；页面现在只留列表）。
 // 显示的永远是「当前选中的设备」(devices.selectedDevice)：窗口开着时点列表里另一台设备，

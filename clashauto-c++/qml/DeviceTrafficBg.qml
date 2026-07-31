@@ -1,5 +1,5 @@
 import QtQuick
-import ClashAuto
+import Coast
 
 // 设备行的**背景**实时流量图：下行(绿) / 上行(红) 两条面积曲线叠在一起，共用同一量程。
 // 数据是 DeviceListModel 里每设备一条的定长速率历史（模型侧采样，见 DeviceListModel::sampleHistory

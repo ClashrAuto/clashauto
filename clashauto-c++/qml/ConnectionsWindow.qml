@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 全部连接 —— 独立窗口，复刻旧项目 showConnectionsDialog / connections.vue：
 // 标题「连接」720×480；顶部 Online(N)/Offline(N) 切换 + Search；卡片列表：

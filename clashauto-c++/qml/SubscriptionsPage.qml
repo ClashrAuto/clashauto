@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 订阅页：可滚动的订阅卡列表（名称/类型/URL/节点数/启用态/更新周期）+ 动作
 // （添加/编辑/删除/启用停用/更新单个/更新全部/查看节点）。行为对齐 Widgets 版

@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 设备页：概览条 + 设备列表（发现/热更新）。**只有列表**——单台设备的详细信息（信息网格、
 // 备注名/类型、历史用量、策略、常用域名、连接列表）在独立窗口 DeviceDetailWindow 里，点行打开。

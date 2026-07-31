@@ -1,5 +1,5 @@
 import QtQuick
-import ClashAuto
+import Coast
 
 // 页脚开关（增强/网页/核心）：左侧呼吸圆点 + 文字。on 决定圆点点亮。
 // 宽度随标签自适应（原固定 66 只够 2 个汉字），但封顶到 maxLabelWidth，超长译文省略号，

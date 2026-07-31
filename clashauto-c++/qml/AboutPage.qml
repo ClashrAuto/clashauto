@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 关于页：居中 logo + 「Coast」标题 + 版本行(点击查更新，发现新版本转红) + 简介 + 链接行。
 // 版本来自 bridge.version；检查更新走 about 适配器（src/qml/AboutController）。

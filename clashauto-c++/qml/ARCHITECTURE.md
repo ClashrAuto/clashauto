@@ -16,7 +16,7 @@ Phase 0 shipped the **shell + StatusPage**; the other four pages are stubs to be
 
 ## File layout
 ```
-src/main_qml.cpp          # QApplication + QQmlApplicationEngine; builds backend + bridge; loadFromModule("ClashAuto","Main")
+src/main_qml.cpp          # QApplication + QQmlApplicationEngine; builds backend + bridge; loadFromModule("Coast","Main")
 src/qml/QmlBridge.{h,cpp} # THE facade: backend signals -> Q_PROPERTY, UI actions -> Q_INVOKABLE
 src/qml/NodeListModel.{h,cpp} # QAbstractListModel of ClashService nodes (roles below)
 qml/Main.qml              # shell: sidebar + StackLayout(pages) + footer
@@ -27,11 +27,11 @@ qml/{Subscriptions,Settings,Logs,About}Page.qml   # STUBS to fill
 qml/{Card,NavButton,FooterSwitch,MetricCard,NodeRow,BandwidthChart}.qml   # reusable components
 ```
 All QML lives **flat in `qml/`** (single-module layout) — the canonical Qt6 pattern that keeps type
-resolution simple. The QML module URI is **`ClashAuto`**; every file just does `import ClashAuto` to
+resolution simple. The QML module URI is **`Coast`**; every file just does `import Coast` to
 reach `Theme` (singleton) **and** all component/page types by name (`Card {}`, `NavButton {}`, …).
 No directory imports. New components: drop a `.qml` in `qml/` and add it to `qt_add_qml_module`'s
 `QML_FILES`. (If the file count grows unwieldy later, split into a nested module with its own
-`qt_add_qml_module` + dotted URI, e.g. `ClashAuto.Components` — but not needed now.)
+`qt_add_qml_module` + dotted URI, e.g. `Coast.Components` — but not needed now.)
 
 ## How the backend is exposed (the contract)
 Two context properties are set on the root context (globally visible in every QML file):
@@ -73,7 +73,7 @@ Two context properties are set on the root context (globally visible in every QM
 > as new adapter classes or new members on `QmlBridge`, expose via context property or a bridge
 > property, and document them here. Keep backend classes untouched.
 
-## Theme tokens (`Theme.` after `import ClashAuto`)
+## Theme tokens (`Theme.` after `import Coast`)
 Colors (all re-evaluate when `Theme.dark` flips): `accent`, `accentStrong`, `danger`, `shell`,
 `card`, `metricBg`, `nodeRowBg`, `nodeRowActive`, `textPrimary`, `textSecondary`, `textMuted`,
 `versionColor`, `inputBg`, `inputBorder`, `footerComboBg`, `switchTrackOff`, `scrollHandle`,
@@ -83,7 +83,7 @@ Metrics: `radius` (5), `sidebarWidth` (120), `footerHeight` (38), `inset` (5, ma
 `Theme.dark` is the single source of truth for light/dark; toggle it to reskin the whole app
 (SettingsPage already does). Initialize once from `bridge.initialDark` (done in Main.qml).
 
-## Common components (all in module `ClashAuto`, use via `import ClashAuto`)
+## Common components (all in module `Coast`, use via `import Coast`)
 - **Card** — opaque rounded content surface (the only solid面 over the mac glass). Children go inside.
 - **NavButton** — sidebar item: `label`, `current`, `clicked()`.
 - **FooterSwitch** — footer toggle pill: `label`, `on`, `clicked()`.

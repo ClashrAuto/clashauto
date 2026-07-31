@@ -27,7 +27,7 @@ echo "release: $NAME  tag: $TAG"
 [ -n "$TAG" ] || { echo "没解析到 tag_name"; exit 2; }
 VER="${TAG#v}"
 # 缓存卷可能残留上一次 release 的产物；清掉非本版本的，避免 glob 抓到旧文件。
-for f in ClashAuto-*; do case "$f" in *"$VER"*) ;; *) rm -f "$f";; esac; done
+for f in Coast-*; do case "$f" in *"$VER"*) ;; *) rm -f "$f";; esac; done
 
 echo "$J" | jq -r '.assets[] | [.name, .browser_download_url] | @tsv' > assets.tsv
 echo "资产 $(wc -l < assets.tsv) 个，下载中…"
@@ -46,7 +46,7 @@ for s in *.sha256; do
 done
 
 sec "Windows 便携包 — 扁平 / 瘦身(-GL DLL) / 自包含"
-WZ=$(pick 'ClashAuto-*-windows-x64-portable.zip')
+WZ=$(pick 'Coast-*-windows-x64-portable.zip')
 if [ -n "$WZ" ]; then
   echo "  包大小: $(du -h "$WZ" | cut -f1)"
   rm -rf win; mkdir win; unzip -q "$WZ" -d win
@@ -60,7 +60,7 @@ if [ -n "$WZ" ]; then
 else bad "没找到 windows x64 便携 zip"; fi
 
 sec "macOS DMG — Coast.app + com.yuehongsun.coast（best-effort，7z 解 DMG）"
-DMG=$(pick 'ClashAuto-*-macos-universal.dmg')
+DMG=$(pick 'Coast-*-macos-universal.dmg')
 if [ -n "$DMG" ]; then
   echo "  DMG 大小: $(du -h "$DMG" | cut -f1)"
   rm -rf macx; mkdir macx
@@ -86,7 +86,7 @@ if [ -n "$DMG" ]; then
 else bad "没找到 macos universal dmg"; fi
 
 sec "Linux .deb — 扁平安装布局"
-DEB=$(pick 'ClashAuto-*-linux-x64.deb')
+DEB=$(pick 'Coast-*-linux-x64.deb')
 if [ -n "$DEB" ]; then
   dpkg-deb -c "$DEB" > deb-contents.txt 2>/dev/null
   grep -q '/opt/coast/coast'                    deb-contents.txt && ok "装到 /opt/coast/coast（扁平）"        || bad "deb 布局不是 /opt/coast/coast"
@@ -149,10 +149,10 @@ if [ -n "$DEB" ]; then
 fi
 
 sec "Linux 便携 tar.gz — 扁平"
-TG=$(pick 'ClashAuto-*-linux-x64-portable.tar.gz')
+TG=$(pick 'Coast-*-linux-x64-portable.tar.gz')
 if [ -n "$TG" ]; then
   tar tzf "$TG" > tar-list.txt 2>/dev/null
-  grep -q '^ClashAuto/coast$' tar-list.txt && ok "tar 内 ClashAuto/coast（扁平，二进制在包根）" || bad "tar 布局不对（期望 ClashAuto/coast）"
+  grep -q '^Coast/coast$' tar-list.txt && ok "tar 内 Coast/coast（扁平，二进制在包根）" || bad "tar 布局不对（期望 Coast/coast）"
   grep -q 'clashauto-c++' tar-list.txt && bad "tar 仍含 clashauto-c++" || ok "tar 无 clashauto-c++ 子目录"
 else skip "没找到 linux x86_64 便携 tar.gz"; fi
 

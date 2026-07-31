@@ -1,6 +1,6 @@
 import QtQuick
 import QtQuick.Controls
-import ClashAuto
+import Coast
 
 // 全 UI 统一的「下拉选择」(select)。**新增下拉一律用这个**，不要再各页面内联一份 —— 设备页
 // 以前直接用裸 ComboBox（Basic 样式的白底方框），和设置页/规则编辑器的主题化下拉长得完全不一样。

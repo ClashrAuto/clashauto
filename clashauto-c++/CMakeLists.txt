@@ -129,7 +129,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 # QML 模块资源默认前缀 :/qt/qml/（引擎的 qrc import path）。不设 NEW 时用旧前缀，
-# 运行时 loadFromModule("ClashAuto","Main") 找不到模块 → "contains no type named Main"。
+# 运行时 loadFromModule("Coast","Main") 找不到模块 → "contains no type named Main"。
 if(POLICY QTP0001)
     qt_policy(SET QTP0001 NEW)
 endif()
@@ -236,13 +236,13 @@ qt_add_executable(coast
     resources.qrc
 )
 
-# Theme.qml 注册为单例（供 `import ClashAuto` 后以 Theme.xxx 访问）——必须在 qt_add_qml_module 前设置。
+# Theme.qml 注册为单例（供 `import Coast` 后以 Theme.xxx 访问）——必须在 qt_add_qml_module 前设置。
 set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 qt_add_qml_module(coast
-    URI ClashAuto
+    URI Coast
     VERSION 1.0
-    RESOURCE_PREFIX "/qt/qml"   # 模块落到 :/qt/qml/ClashAuto/，正是引擎默认搜索的 import path
+    RESOURCE_PREFIX "/qt/qml"   # 模块落到 :/qt/qml/Coast/，正是引擎默认搜索的 import path
     QML_FILES
         qml/Main.qml
         qml/Theme.qml

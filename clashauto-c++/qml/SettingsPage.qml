@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 设置页：TabBar(系统/过滤/区域/规则) + 表单，复刻 Widgets buildSettingsPage()。
 // 后端经 context 属性 `settings`（SettingsController）。系统/过滤 tab 由右上「应用」按钮整表落盘；

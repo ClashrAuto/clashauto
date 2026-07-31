@@ -1,7 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
-import ClashAuto
+import Coast
 
 // 更新窗 —— 独立窗口。改造后只「展示更新内容 + 一键更新」，不再让用户挑资源：
 //   [程序] 当前版→最新版 + 更新说明 → 更新
