@@ -82,10 +82,10 @@ struct ConnectionsCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
                 Image(systemName: "link")
-                    .font(.system(size: 26))
-                    .foregroundStyle(theme.textMuted)
+                    .font(.system(size: 28))
+                    .foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 2) {
                     // 按钮组**紧贴标题右侧**，不是甩到卡片最右 —— 对齐 Qt。
                     // 甩到最右的话，标题和它之间隔着一整片空白，读起来像两件不相干的东西。

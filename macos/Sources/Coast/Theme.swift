@@ -53,6 +53,11 @@ public final class Theme {
 
     public var directDot: Color { Color(hex: 0x48A5A7) }
 
+    /// 状态页四张卡左侧那个大图标的颜色。**中性灰，不是卡片的主色，也不是 `textMuted`**
+    /// —— Qt 四张卡统一 `dark ? "#aaaaaa" : "#888888"`。图标只是个提示符号，
+    /// 跟着主色走会和标题/大数字抢注意力，而那两样才是这张卡要说的话。
+    public var cardIcon: Color { dark ? Color(hex: 0xAA_AA_AA) : Color(hex: 0x88_88_88) }
+
     public var accentStrong: Color { dark ? Color(hex: 0x83BDFF) : Color(hex: 0x1F6FD2) }
     public let danger = Color(hex: 0xFF4D4F)
 

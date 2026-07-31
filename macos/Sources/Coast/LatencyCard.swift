@@ -23,10 +23,10 @@ struct LatencyCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
                 Image(systemName: "timer")
-                    .font(.system(size: 26))
-                    .foregroundStyle(theme.textMuted)
+                    .font(.system(size: 28))
+                    .foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
                         // 标题是白色、不是主题色 —— 主题色留给数值旁边那些「可点」的东西。

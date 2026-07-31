@@ -480,7 +480,7 @@ struct TodayTrafficCard: View {
             // 勾选框把「全部」变成了「没勾上的那个」，读起来是另一回事。
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "chart.bar")
-                    .font(.system(size: 16)).foregroundStyle(theme.todayAccent)
+                    .font(.system(size: 28)).foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("今日流量".t).font(.system(size: 13)).foregroundStyle(theme.todayAccent)
                         .lineLimit(1)
@@ -562,7 +562,7 @@ struct CompositionCard: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "arrow.left.arrow.right.circle")
-                    .font(.system(size: 16)).foregroundStyle(theme.directDot)
+                    .font(.system(size: 28)).foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("总流量".t).font(.system(size: 13)).foregroundStyle(theme.directDot)
                         .lineLimit(1)
@@ -572,12 +572,22 @@ struct CompositionCard: View {
                 Spacer()
                 Spacer()
             }
-            // 占比条:代理(品牌色)+ 直连(灰)
+            // 直连 / 代理对比条：一根槽里两段，宽度即占比。**顺序与 Qt 一致**：
+            // 直连（青）在左、代理（蓝）在右。
+            //
+            // ★ 一个字节都没跑时画一根**空槽** —— 原来的写法在 total == 0 时把整条填成
+            //   一色（截图里是满条青），看起来像「全都走了直连」，而真相是「什么都没跑」。
+            //   Qt 那边 `directRatio` 在 total == 0 时取 0，代理段则整段 `visible: false`。
             GeometryReader { geo in
-                HStack(spacing: 0) {
-                    Rectangle().fill(theme.accent)
-                        .frame(width: geo.size.width * CGFloat(comp.proxyBytes) / CGFloat(total))
-                    Rectangle().fill(theme.directDot)
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(theme.dark ? Color(hex: 0x1C_1C_1C) : Color(hex: 0xDD_DD_DD))
+                    HStack(spacing: 0) {
+                        Rectangle().fill(theme.directDot)
+                            .frame(width: total > 0
+                                   ? geo.size.width * CGFloat(comp.directBytes) / CGFloat(total)
+                                   : 0)
+                        if total > 0 { Rectangle().fill(theme.accent) }
+                    }
                 }
             }
             .frame(height: 8)
