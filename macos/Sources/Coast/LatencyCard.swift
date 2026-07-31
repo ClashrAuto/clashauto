@@ -31,6 +31,7 @@ struct LatencyCard: View {
                     HStack(spacing: 6) {
                         // 标题是白色、不是主题色 —— 主题色留给数值旁边那些「可点」的东西。
                         Text("延迟".t)
+                            .lineLimit(1)
                             .font(.system(size: 13))
                             .foregroundStyle(theme.textPrimary)
                         Text("直连".t)

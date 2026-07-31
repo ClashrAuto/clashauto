@@ -90,7 +90,13 @@ struct ConnectionsCard: View {
                     // 按钮组**紧贴标题右侧**，不是甩到卡片最右 —— 对齐 Qt。
                     // 甩到最右的话，标题和它之间隔着一整片空白，读起来像两件不相干的东西。
                     HStack(spacing: 6) {
+                        // ★ **必须 `lineLimit(1)`**。SwiftUI 的 `Text` 默认会换行，而
+                        //   QML 的 `Text` 默认**不换行**（没写 `wrapMode` 就是单行）。
+                        //   德文的「Verbindungen」在 640 宽下被折成了「Verbindun / gen」，
+                        //   把下面那个大号数字整体顶下去，与右边的延迟卡错开一行 ——
+                        //   截图才看得出来。其余几张卡的标题同理。
                         Text("连接".t)
+                            .lineLimit(1)
                             .font(.system(size: 13))
                             .foregroundStyle(theme.accent)
                         // 两个动作是一组，用融合玻璃：形状上连成一片，

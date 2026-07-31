@@ -480,6 +480,7 @@ struct TodayTrafficCard: View {
                     .font(.system(size: 16)).foregroundStyle(theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("今日流量".t).font(.system(size: 13)).foregroundStyle(theme.accent)
+                        .lineLimit(1)
                     Text(Formatting.bytes(state.todayTotal))
                         .font(.system(size: 22, weight: .medium)).foregroundStyle(theme.accent)
                 }
@@ -561,6 +562,7 @@ struct CompositionCard: View {
                     .font(.system(size: 16)).foregroundStyle(theme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("总流量".t).font(.system(size: 13)).foregroundStyle(theme.accent)
+                        .lineLimit(1)
                     Text(Formatting.bytes(comp.totalBytes))
                         .font(.system(size: 22, weight: .medium)).foregroundStyle(theme.accent)
                 }
