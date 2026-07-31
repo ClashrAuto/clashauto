@@ -617,3 +617,19 @@
   结论:三个外部数据入口(用户输入的订阅/规则、局域网 helper 输入、核心 REST JSON)都已
   实证审过。**连续五轮对抗性审查发现并修掉 3 个真安全 bug**(ARP 广播、helper 注入面、
   YAML 换行注入),另确认 2 处(SQL、代理图)本就安全但补齐了实证防线。
+- 2026-07-31：**并发安全审查:用 Swift 6 模式当权威检查器,结论=无活的数据竞争**。
+  见 [`docs/concurrency-audit.md`](docs/concurrency-audit.md)。
+
+  ★ 一次**方法上的自我纠错**:先试「摘掉 `@unchecked Sendable` 看还编不编得过」,但意识到
+  本项目用 Swift **5** 语言模式、对 Sendable 检查宽松,「编过」根本不证明安全 —— 那个试验
+  没有说服力。改用真正权威的手段:把 CoastKit 切到 Swift **6** 模式跑一遍,那是真正的
+  数据竞争检查器。(试完即还原,不留改动。)
+
+  v6 报了 14 处,全部集中在两个边界、都不是活 bug:
+  - `ClashAPI`(actor)→ MainActor 传 `[String: Any]`(12 处):JSON 全是值类型、actor 不保留
+    引用,当前可证安全,只是类型没表达;
+  - `MacHelperClient.withProxy` 的 sending 闭包(2 处):`OnceFlag` 保证只跑一次。
+
+  决定**维持 v5**:彻底迁 v6(把 ClashAPI 返回类型结构体化)是中等 refactor,为「今天已安全」
+  的东西冒引入 bug 的风险不划算。文档把「v6 会标记什么、正解是什么」记清,将来照此迁。
+  11 个 `@unchecked Sendable` 类型的安全依据逐个核对入表。**承诺逐个兑现,无活竞争。**
