@@ -65,13 +65,38 @@ struct MainView: View {
         .frame(width: 74, height: 74)
     }
 
+    /// 侧栏底部的版本行。对齐 `qml/Main.qml` 的 `verRow`：
+    /// 平时灰；程序有新版 → 右上角 "new" 角标，内核有新版 → "core" 角标；
+    /// **任一有更新，版本文字本身转红**（全 UI 不加粗，靠颜色说话）。
+    ///
+    /// Qt 点它打开独立的更新窗；Swift 版没有那个窗（更新内容并入关于页，
+    /// 见 PLAN 的「不做自动下载安装」决定），所以点它跳到关于页。
     private var versionRow: some View {
-        HStack(alignment: .top, spacing: 3) {
-            Text("Ver: \(AppInfo.version)")
-                .font(.system(size: 12))
-                .foregroundStyle(theme.versionColor)
+        Button {
+            state.currentPage = .about
+        } label: {
+            // 角标贴在版本文字的**右上角**：QML 里 badgeRow 的
+            // `verticalCenter` 对的是 `verText.top`，也就是整组有一半浮在文字上方。
+            HStack(alignment: .top, spacing: 3) {
+                Text("Ver: \(AppInfo.version)")
+                    .font(.system(size: 12))
+                    .foregroundStyle(anyUpdate ? theme.danger : theme.versionColor)
+
+                if anyUpdate {
+                    HStack(spacing: 3) {
+                        if state.appUpdateAvailable { UpdateBadge(text: "new") }
+                        if state.coreUpdateAvailable { UpdateBadge(text: "core") }
+                    }
+                    .alignmentGuide(.top) { $0[VerticalAlignment.center] }
+                }
+            }
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .pointingHandCursor()
     }
+
+    private var anyUpdate: Bool { state.appUpdateAvailable || state.coreUpdateAvailable }
 
     // MARK: 内容
 

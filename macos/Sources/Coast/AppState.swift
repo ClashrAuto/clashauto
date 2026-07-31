@@ -130,6 +130,62 @@ public final class AppState {
         return f
     }()
 
+    // MARK: 更新检查
+    //
+    // 放在 AppState 而不是关于页的 `@State` 里，是因为**两处**要读它：关于页的版本行，
+    // 以及侧栏版本行右上角那两颗角标（"new" / "core"）。Qt 那边同样是一个共享的
+    // `about` 控制器同时喂这两处 —— 各自查一遍的话，两处会显示不一致的结论。
+
+    public private(set) var appRelease: UpdateChecker.Release?
+    public private(set) var checkingUpdate = false
+    /// 一次性提示：已最新 / 检查失败。对齐 `qml/AboutPage.qml` 的 `page.hint`。
+    public private(set) var updateHint = ""
+    public private(set) var updateHintIsError = false
+    /// 内核有新版。**查不到本地内核版本时恒为 false** —— 宁可漏报也不误报一颗常亮的角标。
+    public private(set) var coreUpdateAvailable = false
+
+    public var appUpdateAvailable: Bool {
+        guard let appRelease else { return false }
+        return UpdateChecker.isNewer(remote: appRelease.tag, than: AppInfo.version)
+    }
+
+    /// 查程序 + 内核两条。核心在跑时经本机代理出网 —— 直连 api.github.com 在部分网络下必然 403/超时。
+    public func checkUpdates() async {
+        checkingUpdate = true
+        updateHint = ""
+        defer { checkingUpdate = false }
+
+        let checker = UpdateChecker(includePrerelease: config.receiveBeta,
+                                    proxyPort: controller.isCoreRunning ? config.mixedPort : nil)
+        do {
+            appRelease = try await checker.latestAppRelease()
+            updateHintIsError = false
+            updateHint = appUpdateAvailable ? "" : "已是最新版本".t
+        } catch {
+            updateHintIsError = true
+            updateHint = "检查失败：".t + error.localizedDescription
+        }
+
+        // 内核那条**单独失败、单独静默**：程序更新查成功而内核查失败时，不该把
+        // 关于页那行提示改写成「检查失败」—— 用户关心的主要是程序自身那条。
+        // 注意 `try?` 作用在返回 `String?` 的抛出函数上会**压平**成一层 `String?` ——
+        // 「网络失败」和「上游没给 tag」在这里合并成同一个 nil，两者的处置本来就一样。
+        if let localCore = CoreVersion.local(), let remote = try? await checker.latestCoreTag() {
+            coreUpdateAvailable = UpdateChecker.isNewer(remote: remote, than: localCore)
+        } else {
+            coreUpdateAvailable = false
+        }
+    }
+
+    /// 打开发布页让用户自己下，**不做自动下载安装**。
+    /// 自动替换 .app 要处理签名、公证与「正在运行的自己」，风险远大于省下那两步点击。
+    public func openReleasePage() {
+        guard let appRelease,
+              let url = URL(string: "https://github.com/ClashrAuto/clashauto/releases/tag/\(appRelease.tag)")
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     // MARK: 派生显示值
 
     public var upText: String { Formatting.rate(clash.up) }
@@ -187,6 +243,13 @@ public final class AppState {
         startSubscriptionAutoUpdate()     // 定时自动更新订阅
         startArpWatch()                   // 盯着有没有别人在做 ARP 欺骗
         startLatencyMonitor()             // 直连 / 到路由 / DNS / 代理 四个延迟
+        // 启动就查一次更新 —— 侧栏的 "new" / "core" 角标是**不进关于页也要看得见**的，
+        // 那正是它存在的意义。Qt 同样在启动路径上调 `AboutController::check()`。
+        // 延后 3 秒:核心刚起来时经它出网的成功率高得多(直连 api.github.com 常年 403)。
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            await self?.checkUpdates()
+        }
         // .app 被替换过(应用内更新/从 DMG 拖覆盖)就重注册 helper —— 否则 status() 照报
         // enabled，XPC 却永远无人应答。详见 MacHelperClient.ensureRegisteredForCurrentBuild。
         // 放进 Task：自愈可能要注销 + 退避重试，最坏几秒钟，不能卡在启动路径上。
