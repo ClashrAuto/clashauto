@@ -97,6 +97,7 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QSocketNotifier>
+#include <QtGlobal>   // qEnvironmentVariableIntValue：COAST_L2_NO_RING 逃生开关
 #include <QVector>
 
 // SOL_PACKET 正常由 glibc 的 <sys/socket.h>(bits/socket.h) 提供；个别精简 libc 没有，兜一个。
@@ -825,6 +826,30 @@ private:
     // 建 TPACKET_v3 RX 环。任何一步失败都返回 false ⇒ 调用方保持 m_ring == nullptr ⇒ 走 drainSocket。
     bool setupRxRing()
     {
+        // ★★ TPACKET_v3 环**默认关闭**（要用得显式 COAST_L2_RING=1）。真机实测推翻了它的收益假设。
+        //
+        //   本文件 tp_retire_blk_tov 那段注释早就预言了风险：V3 只有「块填满」或「块开启超过 tov」
+        //   才把块交给用户态，而 tov 取 1ms 会被内核 msecs_to_jiffies **向上取整到 1 个 jiffy**——
+        //   树莓派 OS / Debian 的 CONFIG_HZ=250 ⇒ **4 ms**。设备的每个帧（SYN / ACK / 请求 / FIN）
+        //   都要等这一下，一次 HTTP 请求要跨好几个来回，于是延迟被放大好几倍。
+        //   当时把它判为「相对整条链路可接受」，**实测不是**：
+        //
+        //     树莓派网关 → netns 靶机，只换这一个变量（各 12 次请求 / 3×10s 压测）
+        //     ┌────────────────┬──────────┬──────────┬───────────────┬─────────┐
+        //     │                │ 连上     │ 单请求总计│ 饱和吞吐      │ rxdrop  │
+        //     ├────────────────┼──────────┼──────────┼───────────────┼─────────┤
+        //     │ 开环 (V3)      │ 2.53 ms  │ 11.00 ms │ 2537 /s       │ 0       │
+        //     │ 关环 (recvmmsg)│ 0.28 ms  │  0.70 ms │ 2883 /s (+14%)│ 149     │
+        //     └────────────────┴──────────┴──────────┴───────────────┴─────────┘
+        //   延迟 **15.7 倍**改善，而且吞吐**也更高**——环换来的批处理收益抵不过它自己的唤醒延迟。
+        //   参照：同一条路内核转发全程 0.5 ms，关环后基本与之持平。
+        //
+        //   代价说清楚：关环后突发吸收变差（rxdrop 0 → 149；两种配置失败率都是 0%，TCP 重传兜住了）。
+        //   环那 1 MiB 缓冲只有在「用户态排空跟不上」时才有价值，而实测我们跟得上（pumpLag 几乎全零）。
+        //   **真正的最优解是 TPACKET_V2**：逐帧就绪、没有 tov，同时保留 mmap 零拷贝和环缓冲——
+        //   本文件顶部那段注释也是这么写的。等有人做，之前先用 recvmmsg（它已经是批量收包）。
+        if (qEnvironmentVariableIntValue("COAST_L2_RING") != 1)
+            return false;
         int ver = TPACKET_V3;
         if (::setsockopt(m_fd, SOL_PACKET, PACKET_VERSION, &ver, sizeof(ver)) < 0)
             return false; // 内核 < 3.2 / 不支持 V3 → 回退
