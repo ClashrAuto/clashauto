@@ -184,12 +184,13 @@ struct NodesPage: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                // Qt: 标题 18pt + 计数 9pt,整行固定 30 高(搜索框展开时不撑高)
                 Text("节点".t)
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 18, weight: .medium))
                     .foregroundStyle(theme.textPrimary)
                 Text("(\(visibleNodes.count))")
-                    .font(.system(size: 12))
+                    .font(.system(size: 9))
                     .foregroundStyle(theme.textMuted)
 
                 if !state.clash.groups.isEmpty {
@@ -257,7 +258,9 @@ struct NodesPage: View {
                 .disabled(state.clash.speedTesting)
                 .help(state.clash.speedTesting ? "测速中…".t : "测速".t)
             }
-            .padding(10)
+            .frame(height: 30)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
 
             Divider().overlay(theme.divider)
 
@@ -279,6 +282,7 @@ struct NodesPage: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                // Qt: ListView spacing 1 —— 行距紧凑,行占满列表宽
                 List(visibleNodes) { node in
                     NodeRow(node: node,
                             switching: state.clash.switchingTo != nil,
@@ -287,6 +291,7 @@ struct NodesPage: View {
                             onDisable: { state.disableCurrentNode(node) })
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0.5, leading: 0, bottom: 0.5, trailing: 0))
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
@@ -358,20 +363,23 @@ struct NodeRow: View {
                     if isTarget {
                         ProgressView().controlSize(.small)
                     } else {
+                        // 长译文（某些语言的「禁用/应用」）在按钮内省略,不撑破固定宽
                         Text(node.active ? "禁用".t : "应用".t)
-                            .font(.system(size: 11))
+                            .font(.system(size: 12))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                 }
-                .frame(width: 44)
+                .frame(width: 74)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
             .disabled(switching)
         }
-        .padding(.vertical, 4)
         .padding(.horizontal, 8)
-        .background(node.active ? theme.accent.opacity(0.12) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .frame(height: 40)                       // Qt: NodeRow height: 40
+        .background(node.active ? theme.accent.opacity(0.12) : theme.metricBg.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))   // Qt: radius 4
     }
 }
 
