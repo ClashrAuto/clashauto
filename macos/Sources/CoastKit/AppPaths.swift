@@ -9,15 +9,24 @@ import Foundation
 public enum AppPaths {
     /// 核心的家目录（mihomo `-d`）：`~/Library/Application Support/Coast`
     /// 内含 `logs/`、`Country.mmdb`、`cache`、`command/`（下载的核心）。
-    public static let userDir: URL = {
+    /// `COAST_DATA_DIR` 可整体改写数据根。测试靠它保持无副作用 —— 否则任何摸到
+    /// `ConfigBuilder`/`CoastController` 的测试都会往用户**真实**的 config 目录里写
+    /// `full.yaml`。顺带也让本地联调能用独立 profile，不污染日常使用的那份。
+    ///
+    /// 写成计算属性而非 `static let`：`let` 只求值一次，测试进程里谁先碰到它谁定终身，
+    /// 结果就是「单跑通过、全量跑失败」这类最难查的顺序依赖。
+    public static var userDir: URL {
+        if let override = ProcessInfo.processInfo.environment["COAST_DATA_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
         return base.appendingPathComponent("Coast")
-    }()
+    }
 
     /// 配置目录：`<userDir>/config`。config.yaml / full.yaml / default.yaml /
     /// plugin.yaml / subscribe.yaml / rules.json / coast.db 都在这里。
-    public static let configDir: URL = userDir.appendingPathComponent("config")
+    public static var configDir: URL { userDir.appendingPathComponent("config") }
 
     /// 下载到的 mihomo 核心。优先扁平的 `command/core`，回退早期版本的
     /// `command/clash/clash-darwin-<arch>`（兼容已经下过核心的老用户）。
@@ -25,6 +34,11 @@ public enum AppPaths {
     /// 必须在 .app **之外** —— 签名+公证的 .app 只读封存，往包内写核心会破坏封存，
     /// 使 SMAppService 特权 helper 被 Launch Constraint Violation SIGKILL（TUN 失效）。
     public static var coreExecutable: URL {
+        // `COAST_CORE_PATH` 指定核心可执行文件。给测试与本地联调用 —— 否则任何摸到真核心的
+        // 测试都得先把 mihomo 装进用户数据目录，等于让测试去改用户的真实数据。
+        if let override = ProcessInfo.processInfo.environment["COAST_CORE_PATH"], !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
         let flat = userDir.appendingPathComponent("command/core")
         if FileManager.default.fileExists(atPath: flat.path) { return flat }
         return userDir.appendingPathComponent("command/clash/clash-darwin-\(cpuArch)")

@@ -43,9 +43,15 @@ public final class CoastController {
         core.privilegedLauncher = helper
         core.onLog = { [weak self] message in self?.log(message) }
         core.onCoreMissing = { [weak self] path in self?.onCoreMissing?(path) }
+        core.onUnexpectedExit = { [weak self] in
+            Task { await self?.handleUnexpectedCoreExit() }
+        }
     }
 
     public var isCoreInstalled: Bool { core.isCoreInstalled }
+
+    /// 正在运行的核心 PID。日志里对得上系统进程时排查快得多。
+    public var coreProcessIdentifierForDiagnostics: Int32? { core.coreProcessIdentifier }
 
     // MARK: - 核心
 
@@ -65,6 +71,30 @@ public final class CoastController {
             await startProxy()
         }
     }
+
+    /// 核心自己死了（崩溃 / 被 kill / 配置热重载踩到 panic）时的收尾。
+    ///
+    /// **必须主动把系统恢复原状**，光把状态置回去是不够的：
+    /// - 系统代理还指着一个已经没人监听的端口 —— 那不是「代理失效」，是**彻底断网**，
+    ///   而界面还显示「运行中」，用户完全无从下手。
+    /// - 被接管的设备还在把流量发给一个不再转发的网关 —— 那几台设备同样直接断网。
+    ///
+    /// 另外 `isCoreRunning` 是本类的存储属性，只在 startCore/stopCore 里更新；不在这里
+    /// 置回去的话它会一直是 `true`，于是 `startCore()` 的 `guard !isCoreRunning` 永远
+    /// 提前返回 —— 核心**再也起不起来**，只能靠用户先点一次「停止」。
+    private func handleUnexpectedCoreExit() async {
+        guard isCoreRunning else { return }   // stopCore 已经处理过就别重复来一遍
+        isCoreRunning = false
+        isPrivileged = false
+        log("核心意外退出：正在撤销系统代理与设备接管，避免断网")
+        try? await helper.stopRedirect()
+        activeRedirectIPs = []
+        await stopProxy()
+        onCoreUnexpectedlyExited?()
+    }
+
+    /// 核心意外退出后通知上层（弹通知 / 提示用户）。
+    public var onCoreUnexpectedlyExited: (() -> Void)?
 
     public func stopCore() async {
         // 退出/停核心前先复原被接管的设备。放在最前面：哪怕后面出错，设备也已经被放回去了。

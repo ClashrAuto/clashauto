@@ -114,6 +114,11 @@ public final class AppState {
 
         controller.deviceStore = devices
         controller.onLog = { [weak self] message in self?.append(log: message) }
+        // 核心意外死亡是必须打扰用户的少数几件事之一：系统代理刚被撤掉，网络行为会突变,
+        // 不说一声的话用户只会觉得「网怎么突然不走代理了」。
+        controller.onCoreUnexpectedlyExited = {
+            Notifier.post(title: "核心意外退出".t, body: "已自动关闭系统代理以避免断网".t)
+        }
         clash.onLog = { [weak self] message in self?.append(log: message) }
         // 切节点成功 → 按「切换节点时弹出通知」决定弹不弹(nodeSwitchNote 之前是死开关)
         clash.onNodeSelected = { [weak self] name in

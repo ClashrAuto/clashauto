@@ -24,6 +24,22 @@ public final class CoreProcess {
 
     private var config: AppConfig
     private var process: Process?
+
+    /// 核心**非我方要求**地退出了（崩溃、被 kill、panic）。
+    ///
+    /// 必须和「我们主动停它」分开：后者是正常流程，前者意味着系统此刻处在一个危险状态 ——
+    /// 系统代理还指着一个没人监听的端口，被接管的设备还在把流量发给一个不再转发的网关。
+    /// 界面却毫不知情。没有这个回调，那个状态会一直挂着。
+    public var onUnexpectedExit: (() -> Void)?
+
+    /// 是否是我方主动要求停止。`stop()` 置位，`start()` 复位。
+    private var stopRequested = false
+
+    /// 正在运行的核心 PID。诊断用（日志里对得上系统里的进程），测试里也靠它模拟意外死亡。
+    public var coreProcessIdentifier: Int32? {
+        guard let task = process, task.isRunning else { return nil }
+        return task.processIdentifier
+    }
     private var logTask: Task<Void, Never>?
 
     /// 以 root 启动核心的通道（阶段 3 由 helper 客户端注入）。为 nil 时走普通非特权 `Process`，
@@ -47,6 +63,7 @@ public final class CoreProcess {
     @discardableResult
     public func start(tunEnabled: Bool, fullConfigPath: URL) async -> Result<Void, StartFailure> {
         guard !isRunning else { return .success(()) }
+        stopRequested = false
 
         let exe = AppPaths.coreExecutable
         guard FileManager.default.fileExists(atPath: exe.path) else {
@@ -96,9 +113,15 @@ public final class CoreProcess {
 
         task.terminationHandler = { [weak self] _ in
             Task { @MainActor in
-                self?.isRunning = false
-                self?.isPrivileged = false
-                self?.log("核心已退出")
+                guard let self else { return }
+                self.isRunning = false
+                self.isPrivileged = false
+                if self.stopRequested {
+                    self.log("核心已退出")
+                } else {
+                    self.log("核心意外退出")
+                    self.onUnexpectedExit?()
+                }
             }
         }
 
@@ -118,6 +141,7 @@ public final class CoreProcess {
     }
 
     public func stop() async {
+        stopRequested = true
         logTask?.cancel(); logTask = nil
 
         if isPrivileged, let launcher = privilegedLauncher {

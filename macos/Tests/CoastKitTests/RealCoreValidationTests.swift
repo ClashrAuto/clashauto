@@ -68,6 +68,17 @@ struct RealCoreValidationTests {
             _ = store.save(d)
         }
 
+        // ★ 把内置的 Country.mmdb 放进 `-d` 目录 —— 正是 app 首次运行时 `seedGeoIP()` 做的事。
+        //
+        //   不放的话 mihomo 会**联网下载** MMDB(生成的规则里有 GEOIP,CN),于是这个测试:
+        //   一、依赖外网,二、下不动时要等满 90 秒超时才报错,三、报的错跟被测的配置毫无关系。
+        //   实测就踩到过一次 “can't download MMDB: context deadline exceeded”,看起来像是
+        //   我们生成的配置有问题,其实只是当时下不动。
+        if let mmdb = Resources.seed("Country.mmdb") {
+            try? FileManager.default.copyItem(
+                at: mmdb, to: dir.appendingPathComponent("Country.mmdb"))
+        }
+
         var config = AppConfig()
         config.secret = "testsecret"
         let builder = ConfigBuilder(config: config, directory: dir)

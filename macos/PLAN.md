@@ -804,3 +804,45 @@ SMAppService 状态: enabled → helper 版本: 0.8.0 → ✅ XPC 通道可用
   （附带确认：本机 `ip.forwarding` 现为 1，但不是我们设的 —— `Redirector.stop()` 在
   `!active` 时提前返回，根本不碰它。）
 - 11 种机翻语言仍待母语者校对。
+
+
+## 2026-07-31(续) · 核心意外死亡:一个会让用户彻底断网的空洞
+
+`CoreProcess.terminationHandler` 只把 `isRunning` 置 false 并打一行日志，**没有任何人监听**。
+后果是复合的：
+
+- `CoastController.isCoreRunning` 是本类的存储属性，只在 `startCore`/`stopCore` 里更新 ——
+  核心自己死掉后它**一直是 true**。于是 `startCore()` 的 `guard !isCoreRunning` 永远提前
+  返回，**核心再也起不起来**；`toggleCore()` 也会走成 `stopCore()`，用户第一次点击像没反应。
+- 系统代理仍指向一个没人监听的端口 —— 那不是「代理失效」，是**彻底断网**，
+  而界面还显示「运行中」。
+- 被接管的设备仍在把流量发给一个不再转发的网关，同样直接断网。
+
+修法：`CoreProcess` 区分「我方要求停止」与「它自己死了」（`stopRequested` 标志），
+后者触发 `onUnexpectedExit`；`CoastController` 收到后撤销设备接管、关掉系统代理、
+置回状态，并通知 UI 弹一条系统通知。
+
+**回归测试证明非空转**：摘掉修复后精确地在两条断言上失败
+（`isCoreRunning → true` / `notified`），恢复后通过。
+
+### 连带修掉的两个测试基础设施问题
+
+1. **测试在往用户真实的 config 目录里写 `full.yaml`。** 加了 `COAST_DATA_DIR` 数据根覆盖，
+   由 `scripts/regression.sh` 在进程启动时设一次。
+   ★ 第一版是让测试自己 `setenv` —— 结果 `RealCoreE2ETests` 单跑全过、全量跑必挂：
+   环境变量是进程级共享可变状态，而 swift-testing 默认**并行**跑套件。
+   这正是我在同一个提交的注释里刚警告过的顺序依赖，转头就自己踩了。
+
+2. **`RealCoreValidationTests` 一直依赖外网。** 它在临时 `-d` 目录里跑 `mihomo -t`，
+   而生成的规则含 `GEOIP,CN` —— 目录里没有 `Country.mmdb`，mihomo 就去**联网下载**。
+   之前能过纯粹是当时下得动；这次下不动，等满 90 秒超时后报
+   `can't download MMDB: context deadline exceeded`，看起来像是我们生成的配置有问题。
+   改成把内置 mmdb 拷进去（正是 app 的 `seedGeoIP()` 做的事）：90 秒联网失败 → 0.16 秒本地通过。
+
+裸跑 `swift test` 与隔离跑现在都是 212 全绿；缺运行器配置时**显式打印跳过原因**，
+不静默、也不误判为失败。
+
+### 顺带记下
+
+- 把 `static let` 改成计算属性后，若该符号被用作 public 默认参数，增量构建会残留旧的
+  默认参数生成器符号 → `ld: symbol(s) not found`。必须 `rm -rf .build` 整清。

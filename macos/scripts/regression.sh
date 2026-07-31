@@ -31,6 +31,20 @@ else
 fi
 
 # —— 1. 单元测试 ——
+#
+# 在**隔离的数据根**里跑。不这么做的话，任何摸到 ConfigBuilder / CoastController 的测试
+# 都会往用户真实的 ~/Library/Application Support/Coast/config/ 里写 full.yaml —— 测试
+# 改用户的真实数据，既不干净也可能踩到他正在用的配置。
+#
+# 由**运行器**在进程启动时设一次，而不是让各个测试自己 setenv：环境变量是进程级共享可变
+# 状态，而 swift-testing 默认并行跑套件，测试内部改它必然造成随机失败（实测踩过）。
+export COAST_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/coast-test-XXXXXX")"
+trap 'rm -rf "$COAST_DATA_DIR"' EXIT
+mkdir -p "$COAST_DATA_DIR/config"
+# 核心也指到测试用的那份，否则隔离根里找不到核心，真核心测试会整片跳过。
+if [[ -n "${COAST_TEST_MIHOMO:-}" ]]; then export COAST_CORE_PATH="$COAST_TEST_MIHOMO"; fi
+echo "== 隔离数据根:$COAST_DATA_DIR =="
+
 echo "== 单元测试 =="
 if swift test 2>&1 | grep -q "Test run with .* passed"; then
     n=$(swift test 2>&1 | grep -oE "Test run with [0-9]+ tests" | grep -oE "[0-9]+" | head -1)
