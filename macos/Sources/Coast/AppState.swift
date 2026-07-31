@@ -74,6 +74,11 @@ public final class AppState {
 
     /// 实时连接列表(连接查看器用)。每拍 /connections 快照解析而来,不额外发请求。
     public private(set) var connections: [ConnectionRow] = []
+
+    /// 连接账本：在上面那份**活的**快照之外，还记住已经断掉的连接（标为离线）。
+    /// 连接窗要的是「刚才那条连到哪去了」，只看活快照答不了 —— 断掉的下一拍就没了。
+    /// 与 Qt 的 `ConnectionsModel` 同语义，打开窗口时 reset 一次。
+    public private(set) var connectionLedger = ConnectionLedger()
     /// 本次会话的流量构成(直连 vs 代理)。同一份快照攒出来,不额外发请求。
     public private(set) var composition = TrafficComposition()
     /// 口径：只算走代理的流量。与 Qt 版的默认一致。
@@ -177,6 +182,9 @@ public final class AppState {
         }
     }
 
+    /// 连接窗每次打开时清空账本 —— 否则上次会话的离线连接会一直挂在列表里。
+    public func resetConnectionLedger() { connectionLedger.reset() }
+
     /// 打开发布页让用户自己下，**不做自动下载安装**。
     /// 自动替换 .app 要处理签名、公证与「正在运行的自己」，风险远大于省下那两步点击。
     public func openReleasePage() {
@@ -225,7 +233,9 @@ public final class AppState {
         // 历史库消费**同一份** /connections 快照，不为此多发一次请求。
         clash.onConnectionsSnapshot = { [weak self] connections in
             self?.history.observe(connections)
-            self?.connections = ConnectionRow.parse(connections)
+            let rows = ConnectionRow.parse(connections)
+            self?.connections = rows
+            self?.connectionLedger.merge(rows)
             self?.composition.observe(connections)
         }
     }

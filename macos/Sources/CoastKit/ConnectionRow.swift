@@ -6,7 +6,15 @@ public struct ConnectionRow: Sendable, Equatable, Identifiable {
     public let id: String
     public let host: String        // 域名(sniffer 之后多有值),否则目标 IP
     public let network: String     // tcp/udp
-    public let process: String     // 发起进程(仅本机连接查得到)
+    /// 连接类型：核心的 `metadata.type`（HTTP / Socks5 / Redir …），空则退回 `network`。
+    /// 连接窗行首那个 `[type]` 就是它 —— 与 Qt `QmlBridge::refreshConnections` 同一套回退。
+    public let type: String
+    /// 发起进程（核心的 find-process-mode 填的，仅本机连接查得到）。
+    ///
+    /// ★ **`inboundUser` 以 `dev-` 开头时强制留空**：那是局域网设备经透明网关进来的连接，
+    /// 从 127.0.0.1 发起，查到的进程必然是 Coast 自己 —— 把「某台手机在访问 X」标成
+    /// 「Coast 在访问 X」比留空更糟。宁可空着也不误标（与 Qt 同）。
+    public let process: String
     public let chain: String       // 出口链首段(chains[0]),如 "🚀 节点选择"
     public let upload: Int64
     public let download: Int64
@@ -34,6 +42,11 @@ public struct ConnectionRow: Sendable, Equatable, Identifiable {
                 return h.isEmpty ? (meta["destinationIP"] as? String ?? "") : h
             }()
             let chains = c["chains"] as? [String] ?? []
+            let inboundUser = meta["inboundUser"] as? String ?? ""
+            let type: String = {
+                let t = meta["type"] as? String ?? ""
+                return t.isEmpty ? (meta["network"] as? String ?? "") : t
+            }()
             // 核心给的是 RFC3339（常带小数秒）。解不出来时退回 `.distantPast` 而不是 now：
             // 用 now 的话解析失败的连接会永远排在「最近」榜首，把真正新建的挤掉。
             let start = Self.parseTimestamp(c["start"] as? String ?? "")
@@ -41,8 +54,10 @@ public struct ConnectionRow: Sendable, Equatable, Identifiable {
                 id: id,
                 host: host,
                 network: meta["network"] as? String ?? "",
-                process: meta["process"] as? String ?? "",
-                chain: chains.first ?? "",
+                type: type,
+                process: inboundUser.hasPrefix("dev-") ? "" : (meta["process"] as? String ?? ""),
+                // 出口链为空时显示 "-" 而不是空白 —— 徽标空着会让人以为渲染坏了（与 Qt 同）。
+                chain: chains.first ?? "-",
                 upload: (c["upload"] as? NSNumber)?.int64Value ?? 0,
                 download: (c["download"] as? NSNumber)?.int64Value ?? 0,
                 start: start,
