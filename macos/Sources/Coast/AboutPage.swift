@@ -111,7 +111,8 @@ struct AboutPage: View {
     private func check() async {
         checking = true
         defer { checking = false }
-        let checker = UpdateChecker(includePrerelease: state.config.receiveBeta)
+        let checker = UpdateChecker(includePrerelease: state.config.receiveBeta,
+                                    proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
         do {
             appRelease = try await checker.latestAppRelease()
             coreTag = try await checker.latestCoreTag()

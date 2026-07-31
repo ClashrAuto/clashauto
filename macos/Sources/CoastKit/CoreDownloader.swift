@@ -23,9 +23,42 @@ public struct CoreDownloader: Sendable {
     }
 
     /// 国内加速：下载走 ghfast.top 镜像。
+    ///
+    /// ⚠️ 注意它**只镜像下载，不镜像 GitHub API**（实测 ghfast.top 不代理 api.github.com）。
+    /// 也就是说「连不上 GitHub」的用户光靠这个开关仍然装不上内核 —— 版本查询那一步就断了。
+    /// 这一点与 Qt 版相同，不是本次移植引入的。缓解手段见下面的 `proxyPort`。
     public var useMirror: Bool
 
-    public init(useMirror: Bool = false) { self.useMirror = useMirror }
+    /// 版本查询与下载走本机代理的端口（通常是核心的混合端口）。nil = 直连。
+    ///
+    /// 对齐 C++ `SettingsController::applyDownloadProxy`：**核心已经在跑**时，把这些请求
+    /// 丢给它自己去出网。这解决的是「更新内核」这个常见场景 —— 首次安装时核心还没有，
+    /// 帮不上忙，那种情况只能靠用户自己有办法访问 GitHub。
+    public var proxyPort: Int?
+
+    public init(useMirror: Bool = false, proxyPort: Int? = nil) {
+        self.useMirror = useMirror
+        self.proxyPort = proxyPort
+    }
+
+    /// 按 `proxyPort` 造 session 配置。
+    private func sessionConfiguration(bypassProxy: Bool) -> URLSessionConfiguration {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 30
+        if bypassProxy {
+            config.connectionProxyDictionary = [:]
+        } else if let proxyPort {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as String: 1,
+                kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
+                kCFNetworkProxiesHTTPPort as String: proxyPort,
+                "HTTPSEnable": 1,
+                "HTTPSProxy": "127.0.0.1",
+                "HTTPSPort": proxyPort,
+            ]
+        }
+        return config
+    }
 
     /// 查最新版 → 下载 → 解压 → 装到 `AppPaths.coreExecutable`。返回安装的版本号。
     ///
@@ -109,8 +142,12 @@ public struct CoreDownloader: Sendable {
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 20
+        // 核心在跑就让它代出去 —— 这一步直连 api.github.com 在部分网络下是必然失败的，
+        // 而镜像帮不上忙（它不代理 API）。
+        let session = URLSession(configuration: sessionConfiguration(bypassProxy: false))
+        defer { session.finishTasksAndInvalidate() }
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, _) = try await session.data(for: request)
             guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw DownloadError.releaseQueryFailed("返回不是 JSON")
             }
@@ -130,7 +167,9 @@ public struct CoreDownloader: Sendable {
         request.timeoutInterval = 30
 
         let downloader = FileDownloader { percent in onProgress(.downloading(percent: percent)) }
-        switch await downloader.download(request: request, bypassProxy: useMirror) {
+        // 走镜像时**不套代理**：镜像本来就是给「连不上 GitHub」的场景用的，再绕回代理没意义。
+        switch await downloader.download(request: request,
+                                         configuration: sessionConfiguration(bypassProxy: useMirror)) {
         case .success(let data):
             guard !data.isEmpty else { throw DownloadError.downloadFailed("下载内容为空") }
             return data

@@ -238,7 +238,9 @@ struct SettingsPage: View {
         // 正在跑的核心文件替换不掉，先停。
         if wasRunning { await state.controller.stopCore() }
 
-        let downloader = CoreDownloader(useMirror: draft.mirror)
+        // 核心在跑就让它代出去（版本查询直连 GitHub 在部分网络下必然失败，而镜像不代理 API）
+        let downloader = CoreDownloader(useMirror: draft.mirror,
+                                        proxyPort: wasRunning ? draft.mixedPort : nil)
         do {
             let tag = try await downloader.install { progress in
                 Task { @MainActor in

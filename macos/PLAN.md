@@ -93,8 +93,8 @@
 - [~] `LanScanner`（ARP/邻居表扫描）— **同上，阻塞于网关决策**
 
 ### 阶段 7 — 本地化与资源
-- [x] `I18n`（复用 `assets/i18n/*.json`，12 语言）
-- [~] 字体（MiSans / remixicon）随包 — **刻意不做**，改用系统字体 + SF Symbols，理由见变更日志
+- [x] `I18n`（复用 `assets/i18n/*.json`，12 语言）—— **全部 125/125 已对齐**
+- [x] 字体 —— **确认不用 MiSans**（已拍板），用系统字体 + SF Symbols
 - [x] 应用图标
 
 ### 阶段 8 — 打包与 CI
@@ -104,10 +104,11 @@
 
 ### 阶段 9 — 可选：局域网网关
 - [x] **评估完成**，结论见 [`docs/gateway-evaluation.md`](docs/gateway-evaluation.md)。
-      一句话：推荐**去 Qt 化后复用现有 C/C++**（不是用 Swift 重写、也不是原样链 Qt 版），
-      但**等拍板「macOS 要不要代理局域网设备」之后再动手**。
-- [~] （待拍板）按评估的四步落地：lwIP 立 C target → 剥 Qt → helper 补 openBpfForInterface
-      → 再做 DeviceStore/LanScanner/DevicesPage
+- [ ] **已拍板要做**。按评估的四步落地：
+  - [ ] 1. lwIP 单独立成 SPM 的 C target，跑通 `swift build`（零风险，纯配置）
+  - [ ] 2. 给 `src/net/**` 剥 Qt，每剥一个文件跑一次 `COAST_GATEWAY_SELFTEST`
+  - [ ] 3. Swift helper 补 `openBpfForInterface`（`/dev/bpf*` 需 root）
+  - [ ] 4. 然后才做 `DeviceStore` / `LanScanner` 台账版 / DevicesPage 的代理开关
 
 ## 变更日志
 
@@ -458,3 +459,19 @@
   - 用子进程读 `arp -an` 而不是自己 `sysctl(NET_RT_FLAGS)`：后者要手工走
     `rt_msghdr` + `sockaddr_dl` 变长结构，是在不同 macOS 版本上出过变动的地方，
     而这个调用几秒才一次，短命子进程的代价完全可接受。
+- 2026-07-31：**四项决定已拍板**，逐条落实：
+  1. **要**做局域网设备代理 → 阶段 9 转为待办四步，见上。
+  2. **Release 只发 Swift 版** → `macos-swift` job 补上 Release 上传，`trigger-mac` 停用
+     （`if: false`，整个 job 保留并在注释里写明恢复所需的原条件）。二者必须二选一的理由：
+     app 内一键更新按扩展名挑第一个 `.dmg`，同一 Release 上两个 macOS 包会让老版本挑到哪个
+     纯看运气。
+  3. **不用 MiSans** → 维持系统字体 + SF Symbols，PLAN 里那项从「主动搁置」改为已确认。
+  4. **其余语言对齐** → 12 种语言全部 **125/125**。日语已截图验过真的渲染出来。
+     机器翻译质量，欢迎母语者复核；`scripts/i18n_check.py` 可持续把关。
+
+  另外修了一个查证出来的差距：**`useMirror` 只镜像下载、不镜像 GitHub API**
+  （实测 ghfast.top 对 `api.github.com` 同样返回 403，它不代理 API）。这一点与 Qt 版相同、
+  不是本次移植引入的；但我的版本原先比 C++ 差一截 —— C++ 的 `applyDownloadProxy` 会在
+  **核心已在跑**时把版本查询也丢给它出网，我一直是直连。现已补上
+  （`CoreDownloader.proxyPort` / `UpdateChecker.proxyPort`），解决的是「更新内核 / 查程序更新」
+  这个常见场景；首次安装时核心还没有，那种情况仍需用户自己能访问 GitHub。

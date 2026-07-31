@@ -21,10 +21,32 @@ public struct UpdateChecker: Sendable {
     /// 必须拉完整的 `/releases` 列表自己筛。C++ 版踩过这个坑。
     public var includePrerelease: Bool
 
+    /// 走本机代理的端口（核心的混合端口）。nil = 直连。
+    /// 与 `CoreDownloader.proxyPort` 同理：直连 api.github.com 在部分网络下必然失败，
+    /// 核心在跑时让它代出去。
+    public var proxyPort: Int?
+
     private let repository = "ClashrAuto/clashauto"
 
-    public init(includePrerelease: Bool = false) {
+    public init(includePrerelease: Bool = false, proxyPort: Int? = nil) {
         self.includePrerelease = includePrerelease
+        self.proxyPort = proxyPort
+    }
+
+    private var session: URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 20
+        if let proxyPort {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as String: 1,
+                kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
+                kCFNetworkProxiesHTTPPort as String: proxyPort,
+                "HTTPSEnable": 1,
+                "HTTPSProxy": "127.0.0.1",
+                "HTTPSPort": proxyPort,
+            ]
+        }
+        return URLSession(configuration: config)
     }
 
     public enum CheckError: Error, Sendable, LocalizedError {
@@ -47,7 +69,7 @@ public struct UpdateChecker: Sendable {
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 20
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         return try Self.parseReleases(data: data,
                                       status: (response as? HTTPURLResponse)?.statusCode ?? -1,
                                       includePrerelease: includePrerelease)
@@ -91,7 +113,7 @@ public struct UpdateChecker: Sendable {
         var request = URLRequest(url: url)
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 20
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, _) = try await session.data(for: request)
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         return object?["tag_name"] as? String
     }

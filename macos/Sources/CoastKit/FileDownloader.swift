@@ -19,15 +19,11 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sen
 
     /// 下载完成后把内容读进内存返回。内核包只有十几 MB，读进来比在多处传临时文件路径省事；
     /// 真要下几百 MB 的东西时应该改成返回 URL。
-    func download(request: URLRequest, bypassProxy: Bool) async -> Result<Data, Error> {
+    func download(request: URLRequest, configuration: URLSessionConfiguration) async -> Result<Data, Error> {
         await withCheckedContinuation { continuation in
             let queue = OperationQueue()
             queue.maxConcurrentOperationCount = 1
-            let config = URLSessionConfiguration.ephemeral
-            config.timeoutIntervalForRequest = 30
-            // 走镜像时不套系统代理：镜像本来就是给「连不上 GitHub」的场景用的，再绕回代理没意义。
-            if bypassProxy { config.connectionProxyDictionary = [:] }
-            let session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
+            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
             queue.addOperation {
                 self.continuation = continuation
                 self.session = session
