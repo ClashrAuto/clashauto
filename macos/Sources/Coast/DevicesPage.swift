@@ -134,44 +134,21 @@ struct DevicesPage: View {
     /// —— 原来是「大号数值 + 小标签」，那是另一种读法（像仪表盘），Qt 是一行紧凑的状语。
     private var header: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 16) {
-                Text("设备".t)
-                    .font(.system(size: 18))
-                    .foregroundStyle(theme.textPrimary)
-                stat("在线".t, "\(allRows.filter(\.online).count)/\(allRows.count)")
-                stat("代理中".t, "\(enabledCount)", valueColor: theme.accent)
-
-                // 全部设备**今日**累计上/下行。实时总速率状态页已经有一份（而且更完整 ——
-                // 那是核心的全局速率，不受「能不能归属到某台设备」影响）；这里该回答的是
-                // 「今天这个网络一共用了多少」。
-                HStack(spacing: 8) {
-                    Text("今日".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
-                    Text("↓ " + Formatting.bytes(todayTotals.down))
-                        .font(.system(size: 12)).foregroundStyle(Color(hex: 0x5B_B4_4B))
-                    Text("↑ " + Formatting.bytes(todayTotals.up))
-                        .font(.system(size: 12)).foregroundStyle(Color(hex: 0xB1_4A_4A))
-                }
-
-                Spacer(minLength: 0)
-
-                HStack(spacing: 5) {
-                    Text("新设备提醒".t).font(.system(size: 11)).foregroundStyle(theme.textMuted)
-                    // 34×18 的小开关（比设置页那颗 46×24 小一圈）—— Qt 这里就是两套尺寸。
-                    SmallSwitch(isOn: state.config.newDeviceAlert) {
-                        state.setNewDeviceAlert(!state.config.newDeviceAlert)
-                    }
-                }
-
-                // 「导出」在 Qt 里是一段**品牌色文字**，不是按钮 —— 它是个低频动作，
-                // 做成按钮会和旁边的开关抢注意力。
-                Button { exportCSV() } label: {
-                    Text("导出".t).font(.system(size: 11)).foregroundStyle(theme.accent)
-                }
-                .buttonStyle(.plain)
-
-                Text("网关 ".t + (gatewayIP.isEmpty ? "-" : gatewayIP))
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textMuted)
+            // 窄了就按优先级把次要项收起来（收起顺序：今日 → 网关 → 提醒文字 → 导出）。
+            //
+            // ★ 断点**不写死像素**，用 `ViewThatFits` 让它按真实排版挑第一个装得下的变体。
+            //   Qt 那边同样不写死，是拿各项自己的 `implicitWidth` 现算的，注释里讲了理由：
+            //   同一句话在 12 种语言里宽度能差一倍（德语的「新设备提醒」比中文长一大截），
+            //   写死的数字必然在某个语言上翻车。
+            //
+            //   不做自适应的后果是实测出来的：窗口拖到最小（640）时，「今日 ↓42.52 KB」
+            //   被压成三行竖排的碎字，「新设备提醒」更是**一个字一行**竖着排下来。
+            ViewThatFits(in: .horizontal) {
+                overviewBar(today: true, gateway: true, alertLabel: true, export: true)
+                overviewBar(today: false, gateway: true, alertLabel: true, export: true)
+                overviewBar(today: false, gateway: false, alertLabel: true, export: true)
+                overviewBar(today: false, gateway: false, alertLabel: false, export: true)
+                overviewBar(today: false, gateway: false, alertLabel: false, export: false)
             }
             .padding(.trailing, 10)
 
@@ -228,6 +205,67 @@ struct DevicesPage: View {
             .filter { $0.sourceIP == row.discovered.ip && !$0.host.isEmpty }
             .max { $0.start < $1.start }?
             .host ?? ""
+    }
+
+    /// 概览条的一个变体。**逐元素对齐** `qml/DevicesPage.qml` 顶部那一行：
+    /// 设备(18) | 在线 N/M | 代理中 N | 今日 ↓x ↑y | ——— | 新设备提醒 + 34×18 开关 | 导出 | 网关 X，
+    /// 项间距 16；「在线 / 代理中 / 今日」都是**标签在前、数值在后**，两者都是 12px。
+    ///
+    /// 中间那个 `Spacer` 要给 `minLength` —— `ViewThatFits` 比的是各变体的**理想宽**，
+    /// 而 `Spacer()` 的理想宽是 0、怎么都「装得下」，第一个变体就会被无脑选中。
+    private func overviewBar(today: Bool, gateway: Bool,
+                             alertLabel: Bool, export: Bool) -> some View {
+        HStack(spacing: 16) {
+            Text("设备".t)
+                .font(.system(size: 18))
+                .foregroundStyle(theme.textPrimary)
+            stat("在线".t, "\(allRows.filter(\.online).count)/\(allRows.count)")
+            stat("代理中".t, "\(enabledCount)", valueColor: theme.accent)
+
+            // 全部设备**今日**累计上/下行。实时总速率状态页已经有一份（而且更完整 ——
+            // 那是核心的全局速率，不受「能不能归属到某台设备」影响）；这里该回答的是
+            // 「今天这个网络一共用了多少」。
+            if today {
+                HStack(spacing: 8) {
+                    Text("今日".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                    Text("↓ " + Formatting.bytes(todayTotals.down))
+                        .font(.system(size: 12)).foregroundStyle(Color(hex: 0x5B_B4_4B))
+                    Text("↑ " + Formatting.bytes(todayTotals.up))
+                        .font(.system(size: 12)).foregroundStyle(Color(hex: 0xB1_4A_4A))
+                }
+                .fixedSize()
+            }
+
+            Spacer(minLength: 16)
+
+            HStack(spacing: 5) {
+                if alertLabel {
+                    Text("新设备提醒".t).font(.system(size: 11))
+                        .foregroundStyle(theme.textMuted).fixedSize()
+                }
+                // 34×18 的小开关（比设置页那颗 46×24 小一圈）—— Qt 这里就是两套尺寸。
+                SmallSwitch(isOn: state.config.newDeviceAlert) {
+                    state.setNewDeviceAlert(!state.config.newDeviceAlert)
+                }
+            }
+
+            // 「导出」在 Qt 里是一段**品牌色文字**，不是按钮 —— 它是个低频动作，
+            // 做成按钮会和旁边的开关抢注意力。
+            if export {
+                Button { exportCSV() } label: {
+                    Text("导出".t).font(.system(size: 11)).foregroundStyle(theme.accent)
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+            }
+
+            if gateway {
+                Text("网关 ".t + (gatewayIP.isEmpty ? "-" : gatewayIP))
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textMuted)
+                    .fixedSize()
+            }
+        }
     }
 
     /// 今日全网上/下行。几条 SUM 聚合，不必每帧算 —— 跟着扫描那一拍刷新即可。
@@ -373,6 +411,9 @@ private struct DeviceRow: View {
     /// 已经开着的一律可关（离线/跨网段也得能撤销）；关着的只有「可代理且在线」才点得动。
     private var canToggle: Bool { row.proxyEnabled || (rejection == nil && row.online) }
 
+    /// 本行的实际宽度。用来决定要不要收起速率列（Qt 的 `compact`）。
+    @State private var width: CGFloat = 999
+
     private var rowContent: some View {
         HStack(spacing: 8) {
             avatar
@@ -407,7 +448,9 @@ private struct DeviceRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            speedColumn
+            // 行窄到放不下速率两列时（窗口拖到很小），把它收起来只留头像/名字/开关 ——
+            // 右侧那几列是定宽的，不收就只能溢出到行外面去。判据与 Qt 相同：行宽 < 250。
+            if width >= 250 { speedColumn }
 
             // 最右一列：**开关和徽章共用同一个 38 宽的槽位**（一台设备要么能开代理、
             // 要么有一个「为什么不能开」的理由，两者互斥）。槽位宽度写死 = 开关宽度，
@@ -423,6 +466,8 @@ private struct DeviceRow: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 60)                     // Qt: 60（多了「最后访问」一行；**所有行等高**）
+        .background { GeometryReader { geo in Color.clear.onAppear { width = geo.size.width }
+            .onChange(of: geo.size.width) { _, new in width = new } } }
         .background {
             ZStack {
                 (row.proxyEnabled ? theme.nodeRowBg : (hovering ? theme.hover : theme.nodeRowBg))
