@@ -33,12 +33,14 @@ public final class AppState {
         /// SF Symbol。顺序与 Qt 版侧栏一致：状态/节点/设备/订阅/设置/日志/关于。
         var symbol: String {
             switch self {
-            case .status: return "gauge.with.dots.needle.33percent"
+            // 对齐 Qt 的 Remix 图标：dashboard / global / device / rss /
+            // settings-3 / file-list-3 / information。
+            case .status: return "square.grid.2x2"
             case .nodes: return "globe"
-            case .devices: return "laptopcomputer.and.iphone"
-            case .subscriptions: return "dot.radiowaves.up.forward"
-            case .settings: return "gearshape"
-            case .logs: return "list.bullet.rectangle"
+            case .devices: return "desktopcomputer"
+            case .subscriptions: return "dot.radiowaves.left.and.right"
+            case .settings: return "gearshape.fill"
+            case .logs: return "doc.text"
             case .about: return "info.circle"
             }
         }
