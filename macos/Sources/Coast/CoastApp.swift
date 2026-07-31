@@ -14,6 +14,9 @@ struct CoastApp: App {
         WindowGroup("Coast") {
             RootView()
                 .frame(minWidth: 640, minHeight: 430)
+                // 整窗毛玻璃。用 NSVisualEffectView 而不是 `.ultraThinMaterial` ——
+                // 后者采样不到窗口后面的桌面，深色主题下就是一块灰底。
+                .windowGlass(.sidebar)
         }
         .defaultSize(width: 900, height: 510)
         .windowStyle(.hiddenTitleBar)

@@ -71,13 +71,12 @@ struct FooterSwitch: View {
             }
             .padding(.horizontal, 10)
             .frame(height: 24)
-            .background {
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(hovering ? theme.hover : theme.card)
-            }
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        // 液态玻璃：macOS 26 起的系统控件外观，比自己画一个圆角底更贴系统。
+        // 开着的用 prominent（更实、更亮）、关着的用普通玻璃 —— 状态差别一眼可见，
+        // 不必只靠那颗小圆点承担。旧系统由 glassButton 自动回落到 .bordered。
+        .glassButton(prominent: isOn)
         .onHover { hovering = $0 }
         .help(label)
     }
