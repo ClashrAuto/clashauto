@@ -36,7 +36,11 @@ struct AppConfig {
     // 设备的 :53 由我们自己答（fake-ip 当场合成，见 NetStack::answerDnsLocally）。
     // 判不了的情形（协议没编进来、规则要先解析 IP、fake-ip 没反查到）仍**回退** mihomo，
     // 回退按原因记账，见 GatewayDiag 的 cc=… 那几栏。（config.yaml 键 `coastcore`）
-    bool coastcore = false;
+    // 默认 **true**：数据面已经过真机验证（0.70 ms / 2883 conn/s / 0% 失败，且杀掉 mihomo
+    // 后网关照常服务）。这里改默认值而不是只改种子 config.yaml —— 只改种子的话，**已经装过
+    // 的用户**其 config.yaml 里没有这个键，会一直停在旧默认上，等于只覆盖了一半人。
+    // 出问题时用户仍可在 config.yaml 里写 `coastcore: false` 全部回落 mihomo。
+    bool coastcore = true;
     // 严格模式：上面那些「判不了」的情形**拒绝回退**，直接让该连接失败。默认关。
     // 用途是把「离完全替换 mihomo 还差多少」暴露出来 —— 静默回退会把差距藏起来。
     // 代价是这些连接会断，所以单独一个开关。（config.yaml 键 `coastcore_strict`）

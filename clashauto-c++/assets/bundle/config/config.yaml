@@ -1,4 +1,12 @@
 port: 7890
+# 进程内数据面（CoastCore）：局域网被代理设备 / 本机 TUN 的字节由本进程搬运，不再经 mihomo。
+# 真机实测单请求 0.70 ms（同路内核转发 0.5 ms）、饱和 2883 conn/s、失败率 0%。
+# 关掉即全部回落 mihomo（零行为变化）。
+coastcore: true
+# 严格模式：判不了的连接直接失败、不回退 mihomo。默认关 —— 回退是安全网，别默认拆掉。
+coastcore_strict: false
+# 本机 HTTP/SOCKS 混合入站端口（0=关）。系统代理会指向它。默认关。
+coastcore_inbound: 0
 sys: true
 use: false
 root: true
