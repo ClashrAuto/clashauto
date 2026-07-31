@@ -431,5 +431,7 @@
   "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。": "Lưu lượng của thiết bị này được máy Mac này chuyển tiếp. Thoát, tắt máy hoặc ngủ sẽ tự động trả nó về router (khôi phục trong khoảng một giây); nhưng khi mất điện hoặc bị buộc thoát, nó có thể mất mạng tới khoảng 30 giây.",
   "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Hãy bật “Khởi động khi đăng nhập” trong Cài đặt để proxy tự tiếp tục sau khi khởi động lại.",
   "正在应用…": "Đang áp dụng…",
-  "检测到局域网内有异常代理行为": "Phát hiện hoạt động proxy bất thường trong mạng nội bộ"
+  "检测到局域网内有异常代理行为": "Phát hiện hoạt động proxy bất thường trong mạng nội bộ",
+  "被争抢": "Đang bị tranh chấp",
+  "另一台设备也在把这台设备的流量劫走": "Một máy khác cũng đang chiếm lưu lượng của thiết bị này"
 }

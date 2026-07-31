@@ -432,5 +432,7 @@
   "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。": "This device's traffic is forwarded by this Mac. Quitting, shutting down or sleeping hands it back to the router automatically (restored within about a second); on a power cut or a force-quit it may lose network for up to about 30 seconds.",
   "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Turn on “Launch at login” in Settings so proxying resumes automatically after a restart.",
   "正在应用…": "Applying…",
-  "检测到局域网内有异常代理行为": "Suspicious proxy activity detected on the local network"
+  "检测到局域网内有异常代理行为": "Suspicious proxy activity detected on the local network",
+  "被争抢": "Contended",
+  "另一台设备也在把这台设备的流量劫走": "Another machine is also hijacking this device's traffic"
 }

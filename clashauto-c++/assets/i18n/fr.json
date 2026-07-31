@@ -431,5 +431,7 @@
   "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。": "Le trafic de cet appareil est relayé par ce Mac. Quitter, éteindre ou mettre en veille le rend automatiquement au routeur (rétabli en une seconde environ) ; en cas de coupure de courant ou d'arrêt forcé, il peut perdre le réseau pendant environ 30 secondes.",
   "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Activez « Lancer à l'ouverture de session » dans les réglages pour que le proxy reprenne automatiquement après un redémarrage.",
   "正在应用…": "Application…",
-  "检测到局域网内有异常代理行为": "Activité proxy suspecte détectée sur le réseau local"
+  "检测到局域网内有异常代理行为": "Activité proxy suspecte détectée sur le réseau local",
+  "被争抢": "Disputé",
+  "另一台设备也在把这台设备的流量劫走": "Une autre machine détourne aussi le trafic de cet appareil"
 }

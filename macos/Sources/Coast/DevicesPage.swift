@@ -200,6 +200,12 @@ struct DevicesPage: View {
         openWindow(id: DeviceDetailWindowID.value)
     }
 
+    /// 正被别的机器争抢的设备 IP。取自 ArpWatch 的告警（`deviceContended` 那一类）——
+    /// 横幅说「有这回事」，行上的红标说「是哪一台」，两处缺一不可。
+    private var contendedIPs: Set<String> {
+        Set(state.securityAlerts.filter { $0.kind == .deviceContended }.map(\.subjectIP))
+    }
+
     /// 这台设备最近新建的那条连接的目标。没开代理的设备流量不经核心，这里永远是空 ——
     /// 行里那一行也就整条收起来，不占位。
     private func lastHost(for row: Row) -> String {
@@ -318,6 +324,7 @@ struct DevicesPage: View {
                           sample: state.deviceTraffic.sample(ip: row.discovered.ip),
                           lastHost: lastHost(for: row),
                           tick: state.pollTick,
+                          contended: contendedIPs.contains(row.discovered.ip),
                           onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
                           onOpenDetail: { openDetail(row) })
             }
@@ -439,6 +446,9 @@ private struct DeviceRow: View {
     var lastHost = ""
     /// 采样节拍，透传给背景那张流量图做连续左滑。
     var tick: UInt64 = 0
+    /// 这台设备正被**别的机器**也投毒争抢（ArpWatch 检测到）。
+    /// 名字旁打红标 + 整行描一圈红框 —— 与 Qt 一致，一眼看出是哪一台。
+    var contended = false
     let onToggleProxy: (Bool) -> Void
     let onOpenDetail: () -> Void
 
@@ -458,11 +468,28 @@ private struct DeviceRow: View {
             // 右侧那几列都是刚性定宽的，所以「该被挤的是名字」——不这样的话，
             // 副标题长的行会把右侧几列压窄，同一列在不同行落在不同的 x 上。
             VStack(alignment: .leading, spacing: 1) {
-                Text(row.discovered.displayName)
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.textPrimary)
-                    .lineLimit(1).truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack(spacing: 6) {
+                    Text(row.discovered.displayName)
+                        .font(.system(size: 13))
+                        .foregroundStyle(theme.textPrimary)
+                        .lineLimit(1).truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if contended {
+                        // 半径 3、淡红底、9px 红字；**靠右不挤名字**（与 Qt 一致）。
+                        Text("被争抢".t)
+                            .font(.system(size: 9))
+                            .foregroundStyle(Color(hex: 0xE0_53_3D))
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background {
+                                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                    .fill(Color(red: 224 / 255, green: 83 / 255,
+                                                blue: 61 / 255, opacity: 0.18))
+                            }
+                            .help("另一台设备也在把这台设备的流量劫走".t)
+                    }
+                }
 
                 // 副标题是 **IP · 厂商**，不含 MAC（Qt 同）——MAC 是详情页的内容，
                 // 放进这一行只会把厂商挤没，而厂商才是「这是台什么设备」的线索。
@@ -516,6 +543,13 @@ private struct DeviceRow: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        // 被争抢的设备：整行描一圈红框，配合名字旁的红标（一眼看出是哪一台）。
+        .overlay {
+            if contended {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(Color(hex: 0xE0_53_3D), lineWidth: 1)
+            }
+        }
         .opacity(row.online ? 1 : 0.5)         // 离线行整体淡化
         .onHover { hovering = $0 }
     }
