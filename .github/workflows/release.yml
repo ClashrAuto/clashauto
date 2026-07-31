@@ -1020,16 +1020,14 @@ jobs:
         working-directory: macos
         run: |
           set -euo pipefail
-          # 这三条自检只有在**打包后的真实 .app** 里才有意义，单测一行都验不了：
-          #   · 种子资源要从 Contents/Resources 解析到，而不是回退到仓库相对路径
-          #     （那条路径在用户机器上根本不存在）；
-          #   · helper 的 daemon plist 与可执行文件要在位。
-          COAST_PATHS_SELFTEST=1 ./Coast.app/Contents/MacOS/Coast
-          COAST_HELPER_SELFTEST=1 ./Coast.app/Contents/MacOS/Coast || true
-          # 通用二进制两个架构都要在
+          # 通用二进制两个架构都要在（regression.sh 不查这个，单独验）
           lipo -info Coast.app/Contents/MacOS/Coast
           lipo -info Coast.app/Contents/MacOS/com.yuehongsun.coast.helper
           codesign --verify --deep --strict Coast.app
+          # 打包产物的全套自检钩子（paths/topo/helper/sysproxy）。--no-build 复用上一步
+          # 刚打好的包，与本地 `bash scripts/regression.sh` 同一套逻辑，不让 CI 和本地漂移。
+          # 脚本把「环境验不了」（如 ad-hoc 装不了 helper）判为 SKIP，只有真失败才退非 0。
+          bash scripts/regression.sh --no-build
 
       - name: Package .zip / .dmg + notarize
         working-directory: macos
