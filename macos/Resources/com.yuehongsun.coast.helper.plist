@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Label = mach service 名 = helper bundle id = codesign -i，四者必须完全一致。
+         见 Sources/CoastHelperProtocol/HelperProtocol.swift 的 HelperConstants。 -->
+    <key>Label</key>
+    <string>com.yuehongsun.coast.helper</string>
+
+    <!-- 可执行路径，相对 .app bundle 根（SMAppService 的 daemon 用 BundleProgram）。
+         SPM 把可执行产物命名为 product 名，所以这里正好对得上。 -->
+    <key>BundleProgram</key>
+    <string>Contents/MacOS/com.yuehongsun.coast.helper</string>
+
+    <!-- launchd 广告这个 mach service；应用用同名 NSXPCConnection 连接 -->
+    <key>MachServices</key>
+    <dict>
+        <key>com.yuehongsun.coast.helper</key>
+        <true/>
+    </dict>
+
+    <!-- 让「系统设置 → 登录项」把这个后台项归到主应用名下，显示更友好 -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.yuehongsun.coast</string>
+    </array>
+</dict>
+</plist>

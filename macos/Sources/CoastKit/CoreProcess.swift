@@ -1,0 +1,217 @@
+import Foundation
+import Observation
+
+/// mihomo 核心进程的启停与日志转发。对齐 C++ `CoreController` 里与进程相关的那一半
+/// （系统代理 / TUN / helper 在阶段 3 单独做，见下方 `privilegedLauncher` 这个接缝）。
+@MainActor
+@Observable
+public final class CoreProcess {
+
+    public enum StartFailure: Error, Sendable, Equatable {
+        /// 核心二进制不在。**不预装内核**是刻意的：引导用户去「设置 → 系统」下载。
+        case coreMissing(path: String)
+        case configMissing(path: String)
+        case launchFailed(String)
+    }
+
+    public private(set) var isRunning = false
+    /// 核心是否由特权 helper 以 root 启动。TUN 依赖它 —— 非 root 起的核心建不了 utun。
+    public private(set) var isPrivileged = false
+
+    public var onLog: ((String) -> Void)?
+    /// 核心二进制缺失时触发，UI 据此引导下载。
+    public var onCoreMissing: ((String) -> Void)?
+
+    private var config: AppConfig
+    private var process: Process?
+    private var logTask: Task<Void, Never>?
+
+    /// 以 root 启动核心的通道（阶段 3 由 helper 客户端注入）。为 nil 时走普通非特权 `Process`，
+    /// 此时 TUN 不会生效 —— 开着 TUN 却没有 helper 是要**明确记一条日志**的，
+    /// 因为用户那边的表象只是「增强灯亮着却不全局」，无从查起。
+    public var privilegedLauncher: PrivilegedCoreLauncher?
+
+    public init(config: AppConfig) {
+        self.config = config
+    }
+
+    public func updateConfig(_ config: AppConfig) { self.config = config }
+
+    /// 核心二进制是否已就位。
+    public var isCoreInstalled: Bool {
+        FileManager.default.isExecutableFile(atPath: AppPaths.coreExecutable.path)
+    }
+
+    // MARK: - 启停
+
+    @discardableResult
+    public func start(tunEnabled: Bool, fullConfigPath: URL) async -> Result<Void, StartFailure> {
+        guard !isRunning else { return .success(()) }
+
+        let exe = AppPaths.coreExecutable
+        guard FileManager.default.fileExists(atPath: exe.path) else {
+            log("未检测到 mihomo 内核，请在「设置 → 系统」中下载: \(exe.path)")
+            onCoreMissing?(exe.path)
+            return .failure(.coreMissing(path: exe.path))
+        }
+        guard FileManager.default.fileExists(atPath: fullConfigPath.path) else {
+            log("找不到 Clash 配置: \(fullConfigPath.path)")
+            return .failure(.configMissing(path: fullConfigPath.path))
+        }
+
+        seedGeoIP()
+
+        // 有 helper 就以 root 起（TUN/增强才能建 utun、改路由）。失败**不静默回退** ——
+        // 把原因讲清楚再降级，否则「装了 helper、开了增强、核心却不是 root」无从排查。
+        if let launcher = privilegedLauncher, await launcher.isEnabled {
+            do {
+                try await launcher.startCore(executable: exe, config: fullConfigPath, userDir: AppPaths.userDir)
+                isPrivileged = true
+                isRunning = true
+                startLogTail()
+                log("核心已由特权 helper 以 root 启动（支持 TUN）")
+                return .success(())
+            } catch {
+                log("经特权 helper 以 root 启动核心失败：\(error)；回退为非 root 启动，TUN 将不生效")
+            }
+        } else if tunEnabled {
+            log("增强(TUN) 已开启，但免密 helper 未启用——核心将以非 root 启动、TUN 不会生效。"
+                + "请在「设置 → 系统」安装并批准免密助手后重开增强。")
+        }
+
+        return launchPlain(executable: exe, config: fullConfigPath)
+    }
+
+    private func launchPlain(executable: URL, config configPath: URL) -> Result<Void, StartFailure> {
+        let task = Process()
+        task.executableURL = executable
+        // **只传 -d/-f**：stock mihomo 没有 -token（那是 Clashr 定制核心才有的），
+        // 传了会「flag provided but not defined」→ 打印用法并以退出码 2 结束，核心根本起不来。
+        task.arguments = ["-d", AppPaths.userDir.path, "-f", configPath.path]
+        task.currentDirectoryURL = executable.deletingLastPathComponent()
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = pipe
+
+        task.terminationHandler = { [weak self] _ in
+            Task { @MainActor in
+                self?.isRunning = false
+                self?.isPrivileged = false
+                self?.log("核心已退出")
+            }
+        }
+
+        do {
+            try task.run()
+        } catch {
+            log("启动 Clash 核心失败: \(error.localizedDescription)")
+            return .failure(.launchFailed(error.localizedDescription))
+        }
+
+        process = task
+        isRunning = true
+        isPrivileged = false
+        streamOutput(from: pipe)
+        log("Start clash is OK!")
+        return .success(())
+    }
+
+    public func stop() async {
+        logTask?.cancel(); logTask = nil
+
+        if isPrivileged, let launcher = privilegedLauncher {
+            try? await launcher.stopCore()
+            isPrivileged = false
+            isRunning = false
+            log("核心已停止（helper）")
+            return
+        }
+
+        guard let task = process, task.isRunning else {
+            isRunning = false
+            return
+        }
+        // SIGTERM 先礼后兵：mihomo 收到会优雅退出（关 utun、还原路由）。宽限 2.5s，
+        // 到点还在就 SIGKILL —— 不能让「退出应用」卡在这里干等。
+        task.terminate()
+        let deadline = Date().addingTimeInterval(2.5)
+        while task.isRunning, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        if task.isRunning { kill(task.processIdentifier, SIGKILL) }
+        process = nil
+        isRunning = false
+    }
+
+    // MARK: - 日志
+
+    /// 非特权路径：直接读子进程的 stdout/stderr。
+    private func streamOutput(from pipe: Pipe) {
+        logTask = Task { [weak self] in
+            do {
+                for try await line in pipe.fileHandleForReading.bytes.lines {
+                    guard let self, !Task.isCancelled else { return }
+                    self.log(line)
+                }
+            } catch {
+                // 管道断开 = 核心退出，交给 terminationHandler 记账，这里不必再报
+            }
+        }
+    }
+
+    /// helper 路径：核心是 root 起的，拿不到它的管道，改为 tail `logs/core.log`。
+    /// helper 每次 startCore 会把该文件截断到 0，所以从头读即可。
+    private func startLogTail() {
+        let path = AppPaths.userDir.appendingPathComponent("logs/core.log")
+        logTask = Task { [weak self] in
+            var offset: UInt64 = 0
+            while !Task.isCancelled {
+                if let handle = try? FileHandle(forReadingFrom: path) {
+                    defer { try? handle.close() }
+                    try? handle.seek(toOffset: offset)
+                    if let data = try? handle.readToEnd(), !data.isEmpty {
+                        offset += UInt64(data.count)
+                        let text = String(data: data, encoding: .utf8) ?? ""
+                        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                            guard let self else { return }
+                            await MainActor.run { self.log(String(line)) }
+                        }
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    // MARK: - GeoIP 种子
+
+    /// 首次运行把内置 `Country.mmdb` 放到 userDir。
+    ///
+    /// 位置必须是 userDir 根 —— 核心以 `-d userDir` 起，GeoIP 就从这里读；放别处会让老核心
+    /// 回退到 `~/.config/clash`，与设置页「更新 GeoIP」的落盘路径对不上。
+    ///
+    /// C++ 版在这里还做了「暂存库换上 + 线上库体检」两件事（`MmdbFile::applyStaged` /
+    /// `validateFile`）。那部分随「更新 GeoIP」功能一起在阶段 5 补 —— 现在还没有下载入口，
+    /// 也就不会有暂存文件。**不要忘**：坏掉的 GeoIP 库核心能正常 Load、只是查什么都返回空，
+    /// 表现为 `GEOIP,CN` 静默失配、国内流量集体出海，非常难查。
+    private func seedGeoIP() {
+        let target = AppPaths.userDir.appendingPathComponent("Country.mmdb")
+        guard !FileManager.default.fileExists(atPath: target.path),
+              let seed = Resources.seed("Country.mmdb") else { return }
+        try? FileManager.default.copyItem(at: seed, to: target)
+        AppPaths.makeWritable(target)
+        log("Country.mmdb 已就位: \(target.path)")
+    }
+
+    private func log(_ message: String) { onLog?(message) }
+}
+
+/// 以 root 启动核心的通道。阶段 3 由特权 helper 的 XPC 客户端实现。
+public protocol PrivilegedCoreLauncher: Sendable {
+    /// helper 是否已注册并被用户批准。用「已启用」而不是「ping 得通」做判据：
+    /// 冷启动的 daemon 首个 XPC 偶发慢/超时，用 ping 当门槛会让 helper 明明装了却被判为不可用。
+    var isEnabled: Bool { get async }
+    func startCore(executable: URL, config: URL, userDir: URL) async throws
+    func stopCore() async throws
+}
