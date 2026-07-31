@@ -162,6 +162,11 @@ private:
     void rebuildCoastCoreConfig();
     // 本机混合入站的起/停。端口 0（默认）时 start 是 no-op ⇒ 零行为变化。
     void persistLocalInbound(int port);
+    // 「策略组 → 叶子」的落盘缓存：核心缺席时重放**含用户手选**的那张表，
+    // 而不是退回 full.yaml 的默认结构（那会静默换掉用户选的节点）。见 .cpp 上方的说明。
+    QString groupMapCachePath() const;
+    void saveGroupMapCache(const QHash<QString, QString> &map) const;
+    QHash<QString, QString> loadGroupMapCache() const;
     void startLocalInbound();
     void stopLocalInbound();
     // rebuildCoastCoreConfig + 重新把开关意图推给网关（保持热更新）。仅在灰度开着时才动作。

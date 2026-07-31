@@ -24,6 +24,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QSet>
 #include <QSettings>
@@ -194,6 +195,45 @@ void DevicesController::startLocalInbound()
                 [this] { emit localInboundStatusChanged(); });
     }
     m_inboundStatTimer->start();
+}
+
+// 「策略组 → 叶子」的落盘缓存。**这是让用户手选在核心缺席时不丢的唯一办法。**
+//
+// 这张表平时来自核心 REST，是权威的：它含用户在 UI 里手选的节点，并由核心自己的
+// store-selected 持久化在 cache.db 里。核心一停，我们就只剩「从 full.yaml 解析出的默认结构」
+// ——每组取第一个成员——那会把用户选的节点悄悄换成别的，属于**静默误路由**，比连不上更糟。
+// 所以每次拿到权威表就存一份，核心不在时重放。
+QString DevicesController::groupMapCachePath() const
+{
+    return QDir(m_configDir).filePath(QStringLiteral("groupmap.json"));
+}
+
+void DevicesController::saveGroupMapCache(const QHash<QString, QString> &map) const
+{
+    QJsonObject o;
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it)
+        o.insert(it.key(), it.value());
+    QFile f(groupMapCachePath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
+        f.close();
+    }
+}
+
+QHash<QString, QString> DevicesController::loadGroupMapCache() const
+{
+    QHash<QString, QString> map;
+    QFile f(groupMapCachePath());
+    if (!f.open(QIODevice::ReadOnly))
+        return map;
+    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    f.close();
+    for (auto it = o.constBegin(); it != o.constEnd(); ++it) {
+        const QString v = it.value().toString();
+        if (!v.isEmpty())
+            map.insert(it.key(), v);
+    }
+    return map;
 }
 
 // 一行可读状态，给设置页那一行用。没开时返回空串（QML 侧据此隐藏）。
@@ -1114,10 +1154,20 @@ void DevicesController::rebuildCoastCoreConfig()
     //   由 store-selected 持久化），核心一停就空，于是 Rule 模式解析不出目标、整类回退到一个
     //   已经不在的核心。解析出来的是「默认选择」（每组取第一个成员），不含手选，所以**只在
     //   权威表拿不到时才用**：有核心时永远以核心为准，行为不变。
-    if (groupLeaf.isEmpty()) {
-        groupLeaf = coastcore::parseProxyGroupsLeaf(proxiesYaml);
+    if (!groupLeaf.isEmpty()) {
+        // 核心给的是**权威**表（含用户手选）。落盘存一份：核心下次不在时可以重放它，
+        // 而不是退回「每组取第一个」的默认值——那会把用户选的节点悄悄换掉。
+        saveGroupMapCache(groupLeaf);
+    } else {
+        // 顺序有讲究：先用**上次核心给过的**（含手选），再退到从 full.yaml 解析的默认结构。
+        groupLeaf = loadGroupMapCache();
+        const char *src = "缓存(含手选)";
+        if (groupLeaf.isEmpty()) {
+            groupLeaf = coastcore::parseProxyGroupsLeaf(proxiesYaml);
+            src = "full.yaml 解析(默认选择)";
+        }
         if (!groupLeaf.isEmpty() && qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG"))
-            std::fprintf(stderr, "[CCCFG] 核心的组映射为空，改用 full.yaml 解析出的 %d 组\n",
+            std::fprintf(stderr, "[CCCFG] 核心的组映射为空，改用%s：%d 组\n", src,
                          int(groupLeaf.size())), std::fflush(stderr);
     }
     std::shared_ptr<const ProxyConfig> cfg =
