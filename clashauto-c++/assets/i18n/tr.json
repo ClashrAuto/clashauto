@@ -429,5 +429,6 @@
   "节点名正则（匹配到的节点会被收进这个组）": "Düğüm adı regex'i (eşleşen düğümler bu gruba alınır)",
   "接口": "Arayüz",
   "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。": "Bu cihazın trafiği bu Mac üzerinden yönlendiriliyor. Çıkış, kapatma veya uyku onu otomatik olarak yönlendiriciye geri verir (yaklaşık bir saniyede düzelir); elektrik kesintisi ya da zorla kapatmada yaklaşık 30 saniyeye kadar bağlantısı kesilebilir.",
-  "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Yeniden başlatmadan sonra vekil sunucunun otomatik devam etmesi için Ayarlar'da “Oturum açıldığında başlat”ı açın."
+  "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Yeniden başlatmadan sonra vekil sunucunun otomatik devam etmesi için Ayarlar'da “Oturum açıldığında başlat”ı açın.",
+  "正在应用…": "Uygulanıyor…"
 }

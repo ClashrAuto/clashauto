@@ -429,5 +429,6 @@
   "节点名正则（匹配到的节点会被收进这个组）": "Regex del nombre de nodo (los nodos coincidentes entran en este grupo)",
   "接口": "Interfaz",
   "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。": "El tráfico de este dispositivo lo reenvía este Mac. Salir, apagar o suspender lo devuelve automáticamente al router (se restablece en un segundo aproximadamente); ante un corte de luz o un cierre forzado puede quedarse sin red unos 30 segundos.",
-  "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Activa «Abrir al iniciar sesión» en los ajustes para que el proxy continúe automáticamente tras reiniciar."
+  "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "Activa «Abrir al iniciar sesión» en los ajustes para que el proxy continúe automáticamente tras reiniciar.",
+  "正在应用…": "Aplicando…"
 }
