@@ -176,9 +176,12 @@ struct NodesPage: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List(state.clash.nodes) { node in
-                    NodeRow(node: node) { state.selectNode(node.name) }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
+                    NodeRow(node: node,
+                            switching: state.clash.switchingTo == node.name) {
+                        state.selectNode(node.name)
+                    }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
@@ -190,14 +193,20 @@ struct NodesPage: View {
 struct NodeRow: View {
     @Environment(Theme.self) private var theme
     let node: NodeInfo
+    var switching: Bool = false
     let onSelect: () -> Void
 
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 10) {
-                Circle()
-                    .fill(node.active ? theme.accent : theme.textMuted.opacity(0.4))
-                    .frame(width: 8, height: 8)
+                // 切换在途时转圈,给「点到了、正在切」的即时反馈;否则用活动圆点
+                if switching {
+                    ProgressView().controlSize(.small).frame(width: 8, height: 8)
+                } else {
+                    Circle()
+                        .fill(node.active ? theme.accent : theme.textMuted.opacity(0.4))
+                        .frame(width: 8, height: 8)
+                }
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(node.name)

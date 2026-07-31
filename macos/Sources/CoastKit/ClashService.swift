@@ -343,14 +343,22 @@ public final class ClashService {
         Task { await pollNodes() }
     }
 
+    /// 正在切往的节点名;PUT 在途时非空。UI 据此在该节点上转圈、并禁掉重复点。
+    public private(set) var switchingTo: String?
+    /// 切节点成功后回调(名字)。AppState 据此按 `nodeSwitchNote` 决定弹不弹通知。
+    public var onNodeSelected: ((String) -> Void)?
+
     public func selectNode(_ name: String) {
-        guard !name.isEmpty else { return }
+        guard !name.isEmpty, switchingTo == nil else { return }   // 在途时忽略重复点
         let group = selectedGroup.isEmpty ? "GLOBAL" : selectedGroup
+        switchingTo = name   // 立刻给 UI 反馈:点到了、正在切
         Task {
+            defer { switchingTo = nil }
             do {
                 try await api.selectNode(group: group, name: name)
                 selectedNode = name
                 log("Node selected: \(group) -> \(name)")
+                onNodeSelected?(name)
                 if clearOnSwitch { clearConnections() }   // 设置项「切换时清理连接」
                 await pollNodes()
             } catch {

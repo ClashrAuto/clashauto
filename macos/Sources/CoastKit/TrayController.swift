@@ -93,16 +93,7 @@ public final class TrayController {
 
     /// 系统通知。首次调用会请求授权 —— 被拒绝就静默跳过，通知不是关键路径。
     public func notify(title: String, message: String) {
-        Task {
-            let center = UNUserNotificationCenter.current()
-            guard let granted = try? await center.requestAuthorization(options: [.alert]), granted else { return }
-            let content = UNMutableNotificationContent()
-            content.title = title
-            content.body = message
-            let request = UNNotificationRequest(identifier: UUID().uuidString,
-                                                content: content, trigger: nil)
-            try? await center.add(request)
-        }
+        Notifier.post(title: title, body: message)
     }
 
     // MARK: - 动作

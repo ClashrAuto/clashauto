@@ -113,6 +113,11 @@ public final class AppState {
         controller.deviceStore = devices
         controller.onLog = { [weak self] message in self?.append(log: message) }
         clash.onLog = { [weak self] message in self?.append(log: message) }
+        // 切节点成功 → 按「切换节点时弹出通知」决定弹不弹(nodeSwitchNote 之前是死开关)
+        clash.onNodeSelected = { [weak self] name in
+            guard let self, self.config.nodeSwitchNote else { return }
+            Notifier.post(title: "已切换节点".t, body: name)
+        }
         // 历史库消费**同一份** /connections 快照，不为此多发一次请求。
         clash.onConnectionsSnapshot = { [weak self] connections in
             self?.history.observe(connections)

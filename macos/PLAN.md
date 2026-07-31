@@ -669,3 +669,17 @@
   早启动路径读它直接崩。改用恒有效的 `NSApplication.shared` + `AppleInterfaceStyle` 兜底。
   正常流程虽从 `start()` 调(NSApp 已就绪),但依赖这个时序脆弱 —— 自检把它逼出来了。
   临时钩子用完即移除。
+- 2026-07-31：**行为对等审计续:又抓到一个死开关 + 补节点切换反馈**(191 用例全绿)。
+
+  比对 Qt `QmlBridge` 暴露的属性 vs 我的 `AppState`,发现:
+  - **`nodeSwitchNote` 又是个死开关**:配置存了「切换节点时弹出通知」,但**没有任何代码发通知**,
+    而且 `TrayController.notify` 零调用者 —— 整个通知功能没接上。接上:切节点成功 → 按开关弹通知。
+  - **切节点无即时反馈**:`selectNode` 发 PUT 后 UI 没任何变化,用户不知道点没点中(Qt 有转圈)。
+    加 `ClashService.switchingTo`(PUT 在途时非空)+ NodesPage 在该节点转圈 + **在途忽略重复点**。
+
+  顺带把通知样板抽成 `Notifier`(CoastKit):切节点(AppState)和托盘(TrayController)都要发,
+  免得那段 UNUserNotificationCenter 授权+投递抄两遍。
+
+  ★ 连续两轮「行为对等审计」共抓到 **4 个死开关**(autoUpdate/autoTheme/closeToTray/nodeSwitchNote)
+  —— 它们的共性是「config 存了值、UI 有开关、运行时却没接上」,比缺功能更隐蔽(用户以为在工作)。
+  这类只能靠**逐个核对 config 键是否有运行时消费者**才查得出,看功能列表看不出来。
