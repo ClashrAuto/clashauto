@@ -1053,7 +1053,7 @@ void SettingsController::updateCore()
 
     auto *nam = new QNetworkAccessManager(this);
     applyDownloadProxy(nam);
-    QNetworkRequest req(QUrl(CoreRelease::apiUrl()));
+    QNetworkRequest req{QUrl(CoreRelease::apiUrl())}; // 花括号：避免 most vexing parse（MSVC/Clang 会把它当函数声明）
     req.setRawHeader("User-Agent", "clashauto-cpp");
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);

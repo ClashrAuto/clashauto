@@ -335,7 +335,7 @@ void UpdateController::fetchCore()
     m_coreNotes = QString::fromUtf8("正在获取...");
     emit coreChanged();
 
-    QNetworkRequest coreReq(QUrl(CoreRelease::apiUrl()));
+    QNetworkRequest coreReq{QUrl(CoreRelease::apiUrl())}; // 花括号：避免 most vexing parse（MSVC/Clang 会把它当函数声明）
     coreReq.setRawHeader("Accept", "application/vnd.github+json");
     coreReq.setRawHeader("User-Agent", "clashauto-cpp");
     coreReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
