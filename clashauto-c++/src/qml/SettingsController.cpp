@@ -1,6 +1,7 @@
 #include "SettingsController.h"
 
 #include "AppConfig.h"
+#include "CoreRelease.h"
 #include "ClashService.h"
 #include "ConfigBuilder.h"
 #include "CoreController.h"
@@ -1052,7 +1053,7 @@ void SettingsController::updateCore()
 
     auto *nam = new QNetworkAccessManager(this);
     applyDownloadProxy(nam);
-    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")));
+    QNetworkRequest req(QUrl(CoreRelease::apiUrl()));
     req.setRawHeader("User-Agent", "clashauto-cpp");
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -1069,32 +1070,19 @@ void SettingsController::updateCore()
             return;
         }
         const QJsonObject rel = QJsonDocument::fromJson(body).object();
-        const QString tag = rel.value("tag_name").toString();
-
-#if defined(Q_OS_WIN)
-        const QString os = QStringLiteral("windows");
-        const QString ext = QStringLiteral(".zip");
-#elif defined(Q_OS_MACOS)
-        const QString os = QStringLiteral("darwin");
-        const QString ext = QStringLiteral(".gz");
-#else
-        const QString os = QStringLiteral("linux");
-        const QString ext = QStringLiteral(".gz");
-#endif
-        const bool isArm = QSysInfo::currentCpuArchitecture().contains("arm");
-        const QString arch = isArm ? QStringLiteral("arm64") : QStringLiteral("amd64");
         const QJsonArray assets = rel.value("assets").toArray();
-        QStringList candidates;
-        if (!isArm) {
-            candidates << QStringLiteral("mihomo-%1-amd64-compatible-%2%3").arg(os, tag, ext);
-        }
-        candidates << QStringLiteral("mihomo-%1-%2-%3%4").arg(os, arch, tag, ext);
-        QString url, assetName;
-        for (const QString &want : candidates) {
+
+        // 按前缀挑本平台的产物。不能像以前那样用 tag 拼出确切文件名：
+        // 滚动 prerelease 的 tag 恒为 Prerelease-master，而产物名里嵌的是 master-<sha7>。
+        QString url, assetName, tag;
+        for (const QString &prefix : CoreRelease::assetPrefixes()) {
             for (const QJsonValue &av : assets) {
-                if (av.toObject().value("name").toString() == want) {
+                const QString n = av.toObject().value("name").toString();
+                const QString ver = CoreRelease::versionFromAsset(n, prefix);
+                if (!ver.isEmpty()) {
                     url = av.toObject().value("browser_download_url").toString();
-                    assetName = want;
+                    assetName = n;
+                    tag = ver;
                     break;
                 }
             }
@@ -1103,27 +1091,15 @@ void SettingsController::updateCore()
             }
         }
         if (url.isEmpty()) {
-            const QString pat = isArm ? QStringLiteral("^mihomo-%1-arm64-v\\d+\\.\\d").arg(os)
-                                      : QStringLiteral("^mihomo-%1-amd64-compatible-v\\d+\\.\\d").arg(os);
-            const QRegularExpression re(pat);
-            for (const QJsonValue &av : assets) {
-                const QString n = av.toObject().value("name").toString();
-                if (re.match(n).hasMatch() && n.endsWith(ext)) {
-                    url = av.toObject().value("browser_download_url").toString();
-                    assetName = n;
-                    break;
-                }
-            }
-        }
-        if (url.isEmpty()) {
             nam->deleteLater();
             setCoreStatus(QStringLiteral("更新内核"), false);
-            setMessage(QStringLiteral("内核更新失败: 未找到匹配的 mihomo 资源 (%1/%2)").arg(os, arch));
+            setMessage(QStringLiteral("内核更新失败: 未找到匹配的内核资源 (%1/%2)")
+                           .arg(CoreRelease::osName(), QSysInfo::currentCpuArchitecture()));
             return;
         }
 
         setCoreStatus(QStringLiteral("下载中..."), true);
-        setMessage(QStringLiteral("下载 mihomo %1 ...%2").arg(tag, mirror.isEmpty() ? QString() : QStringLiteral("（国内加速）")));
+        setMessage(QStringLiteral("下载内核 %1 ...%2").arg(tag, mirror.isEmpty() ? QString() : QStringLiteral("（国内加速）")));
         QNetworkRequest dreq{QUrl(mirror + url)};
         dreq.setRawHeader("User-Agent", "clashauto-cpp");
         dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -1204,7 +1180,7 @@ void SettingsController::updateCore()
             }
             setCoreStatus(QStringLiteral("更新内核"), false);
             if (replaced) {
-                setMessage(QStringLiteral("内核已更新到 mihomo %1%2").arg(tag, wasRunning ? QStringLiteral("，已重启核心") : QString()));
+                setMessage(QStringLiteral("内核已更新到 %1%2").arg(tag, wasRunning ? QStringLiteral("，已重启核心") : QString()));
             } else {
                 setMessage(QStringLiteral("内核更新失败: 无法替换文件（可能被占用）"));
             }

@@ -8,7 +8,7 @@
 //
 // 端点与 Widgets 版完全一致：
 //   - https://api.github.com/repos/ClashrAuto/clashauto/releases        （正式/测试版列表）
-//   - https://api.github.com/repos/MetaCubeX/mihomo/releases/latest      （内核最新版）
+//   - https://api.github.com/repos/ClashrAuto/clash/releases/tags/Prerelease-master （内核，滚动 prerelease）
 //   - 下载资源 browser_download_url（勾国内代理时前缀 https://ghfast.top/）
 //   - 校验用同名 <资源名>.sha256 边车（永远官方直连，不加镜像）
 #include "AppConfig.h"

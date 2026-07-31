@@ -1,3 +1,4 @@
+#include "CoreRelease.h"
 #include "UpdateController.h"
 
 #include "CoreController.h"
@@ -333,7 +334,7 @@ void UpdateController::fetchCore()
     m_coreNotes = QString::fromUtf8("正在获取...");
     emit coreChanged();
 
-    QNetworkRequest coreReq(QUrl(QStringLiteral("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")));
+    QNetworkRequest coreReq(QUrl(CoreRelease::apiUrl()));
     coreReq.setRawHeader("Accept", "application/vnd.github+json");
     coreReq.setRawHeader("User-Agent", "clashauto-cpp");
     coreReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -353,7 +354,15 @@ void UpdateController::fetchCore()
             return;
         }
         const QJsonObject r = QJsonDocument::fromJson(body).object();
-        const QString tag = r.value(QStringLiteral("tag_name")).toString();
+        // 滚动 prerelease：tag 恒为 Prerelease-master，版本在产物名里
+        QString tag;
+        for (const QString &prefix : CoreRelease::assetPrefixes()) {
+            for (const QJsonValue &av : r.value(QStringLiteral("assets")).toArray()) {
+                const QString v = CoreRelease::versionFromAsset(av.toObject().value("name").toString(), prefix);
+                if (!v.isEmpty()) { tag = v; break; }
+            }
+            if (!tag.isEmpty()) break;
+        }
         if (tag.isEmpty()) {
             const QString apiMsg = r.value(QStringLiteral("message")).toString();
             m_coreVersion = QString::fromUtf8("内核版本: %1（查询最新版失败）").arg(localShown);
@@ -362,7 +371,7 @@ void UpdateController::fetchCore()
             emit coreChanged();
             return;
         }
-        const bool newer = localCoreVer.isEmpty() || versionNewer(tag, localCoreVer);
+        const bool newer = localCoreVer.isEmpty() || CoreRelease::hasUpdate(tag, localCoreVer);
         m_coreVersion = QString::fromUtf8("内核版本: %1 → 最新 %2 %3")
                             .arg(localShown, tag,
                                  newer ? QString::fromUtf8("（可更新）") : QString::fromUtf8("（已是最新）"));

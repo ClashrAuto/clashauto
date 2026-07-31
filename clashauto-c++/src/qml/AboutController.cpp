@@ -1,3 +1,4 @@
+#include "CoreRelease.h"
 #include "AboutController.h"
 
 #include "MmdbFile.h"
@@ -21,6 +22,20 @@
 
 namespace {
 // 与 Widgets 版 MainWindow.cpp 的 versionNewer() 同款：去掉非数字/点，逐段比较。
+// 从 release 的 assets 里剥出本平台产物的版本号（master-<sha7>）。
+QString remoteCoreVersion(const QJsonArray &assets)
+{
+    for (const QString &prefix : CoreRelease::assetPrefixes()) {
+        for (const QJsonValue &av : assets) {
+            const QString v = CoreRelease::versionFromAsset(av.toObject().value("name").toString(), prefix);
+            if (!v.isEmpty()) {
+                return v;
+            }
+        }
+    }
+    return {};
+}
+
 bool versionNewer(const QString &remote, const QString &local)
 {
     auto parse = [](QString s) {
@@ -216,7 +231,7 @@ void AboutController::checkCore()
         return;
     }
 
-    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")));
+    QNetworkRequest req(QUrl(CoreRelease::apiUrl()));
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setRawHeader("User-Agent", "clashauto-cpp");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -230,11 +245,13 @@ void AboutController::checkCore()
             return; // 网络失败：保持原角标状态，不动
         }
         const QJsonObject r = QJsonDocument::fromJson(reply->readAll()).object();
-        const QString tag = r.value(QStringLiteral("tag_name")).toString();
-        if (tag.isEmpty()) {
+        // 滚动 prerelease 的 tag 恒为 Prerelease-master，不含版本信息；
+        // 真正的版本嵌在产物名里（master-<sha7>），得从资产列表里剥。
+        const QString remote = remoteCoreVersion(r.value(QStringLiteral("assets")).toArray());
+        if (remote.isEmpty()) {
             return;
         }
-        setCoreUpdateAvailable(versionNewer(tag, localCoreVer));
+        setCoreUpdateAvailable(CoreRelease::hasUpdate(remote, localCoreVer));
     });
 }
 
