@@ -11,8 +11,8 @@ import SwiftUI
 /// **不为原生控件准备令牌**（输入框底色/描边、滚动条把手、窗口壳层等）：
 /// `MainView` 上设了 `.preferredColorScheme(theme.dark ? .dark : .light)`，
 /// 系统控件与所有 sheet 都会跟着 app 主题走 —— 手写一组硬编码色反而会和系统外观打架。
-/// 早先从 Qt 直译过来的那几个（shell / inputBg / inputBorder / scrollHandle）确认无人引用，已移除；
-/// Qt 那边必须手动画一切，SwiftUI 不必。
+/// （`inputBg` / `inputBorder` 后来又加了回来 —— 设置页按 Qt 重做成手画控件之后，
+/// 它们重新有了消费者。删掉的仍是 `shell` / `scrollHandle` / `navSelected` 这三个。）
 public final class Theme {
     /// 真值来源。启动时按配置/系统外观初始化。
     public var dark: Bool = true
@@ -38,9 +38,6 @@ public final class Theme {
     /// 换成主题色的话两张卡会长得一模一样，一眼看不出哪张是哪张。
     public var uploadAccent: Color { Color(hex: 0xE05A5A) }
     public var downloadAccent: Color { Color(hex: 0x4DA13E) }
-
-    /// 侧栏选中项的底色：比侧栏背景更深一档。对齐 Qt —— 靠明暗而不是彩色区分选中。
-    public var navSelected: Color { dark ? Color(hex: 0x1A1A1A) : Color(hex: 0xDCDCDC) }
 
     public var directDot: Color { Color(hex: 0x48A5A7) }
 

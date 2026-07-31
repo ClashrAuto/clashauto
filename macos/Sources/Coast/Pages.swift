@@ -85,88 +85,8 @@ struct StatusPage: View {
     }
 }
 
-struct MetricCard: View {
-    @Environment(Theme.self) private var theme
-    let symbol: String
-    let title: String
-    let value: String
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 5) {
-                Image(systemName: symbol).font(.system(size: 11))
-                Text(title).font(.system(size: 11))
-            }
-            .foregroundStyle(theme.textMuted)
 
-            Text(value)
-                .font(.system(size: 18))
-                .foregroundStyle(theme.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-        }
-        // Qt 这几张卡：内距 12、`radius: 4`（比 Theme.radius(5) 小一档）。
-        .padding(12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(theme.metricBg)
-        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-    }
-}
-
-struct StatusDot: View {
-    @Environment(Theme.self) private var theme
-    let label: String
-    let on: Bool
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Circle().fill(on ? theme.accent : theme.textMuted).frame(width: 7, height: 7)
-            Text(label).font(.system(size: 11)).foregroundStyle(theme.textSecondary)
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 22)
-        .background(theme.metricBg)
-        .clipShape(Capsule())
-    }
-}
-
-/// 实时带宽折线。对齐 `qml/BandwidthChart.qml`（那边是 Canvas，这边用 `Path`）。
-struct BandwidthChart: View {
-    @Environment(Theme.self) private var theme
-    let samples: [(up: Double, down: Double)]
-
-    var body: some View {
-        GeometryReader { geometry in
-            // 纵轴按窗口内峰值自适应。给个下限，否则空闲时噪声会被放大成满屏抖动。
-            let peak = max(samples.map { max($0.up, $0.down) }.max() ?? 0, 1024)
-            ZStack {
-                line(samples.map(\.down), in: geometry.size, peak: peak)
-                    .stroke(theme.accent, lineWidth: 1.5)
-                line(samples.map(\.up), in: geometry.size, peak: peak)
-                    .stroke(theme.accentStrong.opacity(0.7), lineWidth: 1.5)
-            }
-            .overlay(alignment: .topLeading) {
-                Text(String(format: "峰值 %@".t, Formatting.rate(Int64(peak))))
-                    .font(.system(size: 10))
-                    .foregroundStyle(theme.textMuted)
-                    .padding(6)
-            }
-        }
-    }
-
-    private func line(_ values: [Double], in size: CGSize, peak: Double) -> Path {
-        Path { path in
-            guard values.count > 1 else { return }
-            let step = size.width / CGFloat(values.count - 1)
-            for (index, value) in values.enumerated() {
-                let x = CGFloat(index) * step
-                let y = size.height - CGFloat(value / peak) * size.height
-                if index == 0 { path.move(to: CGPoint(x: x, y: y)) }
-                else { path.addLine(to: CGPoint(x: x, y: y)) }
-            }
-        }
-    }
-}
 
 // MARK: - 节点页
 

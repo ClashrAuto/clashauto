@@ -19,7 +19,12 @@ struct Card<Content: View>: View {
     }
 }
 
-/// 侧栏导航按钮。对齐 `qml/NavButton.qml`：选中态用品牌色底，未选中悬停时给一层浅底。
+/// 侧栏导航项。**逐元素对齐** `qml/NavButton.qml`：高 40、图标 17（左内距 12）、
+/// 文字 14（距图标 9、右留白 8、超长省略号）。
+///
+/// 选中态的底色就是 **`Theme.card`** —— 也就是右侧内容卡的颜色。加上「右侧超出一个圆角」
+/// 的处理（右角落在内容卡里、同色无缝），选中项看起来是从侧栏**长进内容区**的一块，
+/// 而不是一个悬在侧栏上的高亮块。用品牌色填充的话，侧栏会冒出一整块饱和的蓝。
 struct NavButton: View {
     @Environment(Theme.self) private var theme
     let title: String
@@ -31,23 +36,27 @@ struct NavButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 10) {
+            HStack(spacing: 0) {
                 Image(systemName: symbol)
-                    .font(.system(size: 14))
-                    .frame(width: 18)
+                    .font(.system(size: 17))
+                    // 图标：深色主题下浅灰、浅色主题下深灰（与文字不同色，Qt 同）。
+                    .foregroundStyle(theme.dark ? Color(hex: 0xAA_AA_AA) : Color(hex: 0x66_66_66))
+                    .padding(.leading, 12)
                 Text(title)
-                    .font(.system(size: 13))
-                Spacer(minLength: 0)
+                    .font(.system(size: 14))
+                    // Qt：选中用 textSecondary、未选中用 textPrimary —— 选中项底下是
+                    // 内容卡的实色，压一档反而更稳；未选中那些浮在侧栏底色上，要更亮才看得清。
+                    .foregroundStyle(isCurrent ? theme.textSecondary : theme.textPrimary)
+                    .lineLimit(1).truncationMode(.tail)
+                    .padding(.leading, 9)
+                Spacer(minLength: 8)
             }
-            .padding(.horizontal, 12)
-            .frame(height: 34)
-            // 选中态是**深色块 + 白字**，不是主题色高亮 —— 对齐 Qt 侧栏。
-            // 用 accent 填充的话，侧栏会冒出一整块饱和的蓝，和右侧内容区的深灰打架；
-            // Qt 那边选中项只比背景更深一档，靠白字区分。
-            .foregroundStyle(isCurrent ? theme.textPrimary : theme.textSecondary)
+            .frame(height: 40)
             .background {
+                // 右侧多铺一个圆角的宽度并裁掉：可见处的右角是**直角**，紧贴内容卡。
                 RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
-                    .fill(isCurrent ? theme.navSelected : (hovering ? theme.hover : .clear))
+                    .fill(isCurrent ? theme.card : (hovering ? theme.hover : .clear))
+                    .padding(.trailing, -theme.radius)
             }
             .contentShape(Rectangle())
         }
@@ -68,15 +77,20 @@ struct FooterSwitch: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(isOn ? theme.accent : theme.switchTrackOff)
-                    .frame(width: 8, height: 8)
+                // 呼吸圆点：12×12 本体 + 3px 外环。启用时外环在「蓝 → 灰」之间脉动
+                // （Qt 那条 1s 循环的 keyframes），停用时是静态灰。
+                BreathingDot(isOn: isOn)
                 Text(label)
                     .font(.system(size: 12))
                     .foregroundStyle(isOn ? theme.textPrimary : theme.textMuted)
+                    .lineLimit(1).truncationMode(.tail)
+                    // 长译文封顶 80（约 8~9 字符）再省略：既不溢出页脚，
+                    // 也不把左边的日志和右边的模式挤没。
+                    .frame(maxWidth: 80)
             }
-            .padding(.horizontal, 10)
-            .frame(height: 24)
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
+            .frame(height: 28)
             .contentShape(Rectangle())
         }
         // ★ 用 `.glassCapsule()` 而不是 `.glassButton()`。
@@ -135,5 +149,42 @@ struct UpdateBadge: View {
             .padding(.vertical, 1.5)
             .background(Capsule().fill(Color(hex: 0xF56C6C)))
             .overlay(Capsule().stroke(.white, lineWidth: 1))
+    }
+}
+
+/// 页脚开关左侧那颗呼吸圆点。对齐 `qml/FooterSwitch.qml`：12×12 本体 + 3px 外环，
+/// 启用时外环在蓝↔灰之间以 1s 周期脉动，停用时是静态灰。
+///
+/// 圆点是这排按钮里**唯一**表达开关状态的东西（文字色只跟着变一档），
+/// 所以它的动效不是装饰：一眼扫过去，脉动的那颗就是开着的。
+struct BreathingDot: View {
+    @Environment(Theme.self) private var theme
+    let isOn: Bool
+
+    @State private var pulse: Double = 0
+
+    private var ringColor: Color {
+        guard isOn else { return Color(white: 0.4, opacity: 0.15) }
+        return Color(red: (72 + 30 * pulse) / 255,
+                     green: (152 - 50 * pulse) / 255,
+                     blue: (248 - 146 * pulse) / 255,
+                     opacity: 0.5 - 0.35 * pulse)
+    }
+
+    var body: some View {
+        Circle()
+            .fill(isOn ? theme.accent : theme.switchTrackOff)
+            .frame(width: 12, height: 12)
+            .overlay(Circle().stroke(ringColor, lineWidth: 3))
+            .onAppear { start() }
+            .onChange(of: isOn) { _, _ in start() }
+    }
+
+    private func start() {
+        pulse = 0
+        guard isOn else { return }
+        withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
+            pulse = 1
+        }
     }
 }

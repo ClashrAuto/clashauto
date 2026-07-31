@@ -165,9 +165,12 @@ struct MainView: View {
     /// 三段紧挨、没有各自的圆角，整组只有一层玻璃、只有外侧是圆的 ——
     /// 这才是「同一组、三选一」；三颗各自成形的胶囊读起来仍是三个独立按钮。
     ///
-    /// 每段的内部排版与 `FooterSwitch` 完全一致（圆点 8 + 间距 6 + 字号 12 +
-    /// 横向内距 10 + 高度 24），且两者都走 `.glassCapsule()`，所以
+    /// 每段的内部排版与 `FooterSwitch` 完全一致（呼吸圆点 12 + 间距 6 + 字号 12 +
+    /// 左内距 8 / 右 10 + 高度 28），且两者都走 `.glassCapsule()`，所以
     /// 单颗开关与整组分段必然同高，整组正好是单颗的三倍宽。
+    ///
+    /// 尺寸跟着 `FooterSwitch` 一起从 24 抬到 28、圆点从 8 换成 12 —— 那是 Qt
+    /// `qml/FooterSwitch.qml` 的实际度量；**两处必须一起改**，否则这一排就参差不齐。
     private var modePicker: some View {
         Group {
             if modeExpanded {
@@ -204,16 +207,15 @@ struct MainView: View {
     /// 一段的内容。与 `FooterSwitch` 的内部排版逐项一致。
     private func modeSegment(_ title: String, active: Bool) -> some View {
         HStack(spacing: 6) {
-            Circle()
-                .fill(active ? theme.accent : theme.switchTrackOff)
-                .frame(width: 8, height: 8)
+            BreathingDot(isOn: active)
             Text(title)
                 .font(.system(size: 12))
                 .foregroundStyle(active ? theme.textPrimary : theme.textMuted)
                 .fixedSize()
         }
-        .padding(.horizontal, 10)
-        .frame(height: 24)
+        .padding(.leading, 8)
+        .padding(.trailing, 10)
+        .frame(height: 28)
     }
 }
 
