@@ -29,34 +29,88 @@ struct SubscriptionsPage: View {
                 .frame(minWidth: 260)
         }
         .task { reload() }
+        .alert("确定删除订阅？".t, isPresented: Binding(
+            get: { confirmDelete != nil },
+            set: { if !$0 { confirmDelete = nil } })) {
+            Button("取消".t, role: .cancel) { confirmDelete = nil }
+            Button("删除".t, role: .destructive) {
+                if let index = confirmDelete {
+                    _ = state.subscriptions.removeSubscription(at: index)
+                    selectedIndex = nil
+                    reload()
+                    Task { await state.controller.rebuildConfig() }
+                }
+                confirmDelete = nil
+            }
+        } message: {
+            Text("该订阅下的所有节点会一并移除，且无法撤销。".t)
+        }
     }
+
+    /// 订阅行上的一个动作按钮。三个动作长得一样，抽出来免得三处各写一遍内距和字号。
+    private func rowAction(_ symbol: String, _ help: String, danger: Bool = false,
+                           _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11))
+                .foregroundStyle(danger ? theme.danger : theme.textSecondary)
+                .padding(.horizontal, 7)
+                .frame(height: 22)
+        }
+        .buttonStyle(.plain)
+        .glassCapsule()
+        .help(help)
+    }
+
+    /// 待确认删除的订阅下标。
+    ///
+    /// 删除是不可撤销的（连同它下面所有节点的启用状态一起没），而这一行上其余两个动作
+    /// 都是可逆的 —— 三颗按钮长得一样，误点的代价却差一个量级，必须拦一道。
+    @State private var confirmDelete: Int?
 
     // MARK: 订阅列
 
     private var subscriptionList: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
+            // 顶栏对齐 Qt：「订阅」标题(18pt) + 计数 | 右侧「添加订阅 / 更新全部」
+            HStack(spacing: 8) {
+                Text("订阅".t)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(theme.textPrimary)
+                Text("(\(summaries.count))")
+                    .font(.system(size: 9))
+                    .foregroundStyle(theme.textMuted)
+                Spacer()
                 Button {
                     editing = EditingSubscription()
                 } label: {
-                    Label("添加".t, systemImage: "plus")
+                    Label("添加订阅".t, systemImage: "plus")
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 10).frame(height: 24)
                 }
+                .buttonStyle(.plain)
+                .glassCapsule()
                 Button {
                     Task { await updateAll() }
                 } label: {
-                    Label("全部更新".t, systemImage: "arrow.clockwise")
+                    Label("更新全部".t, systemImage: "arrow.clockwise")
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 10).frame(height: 24)
                 }
+                .buttonStyle(.plain)
+                .glassCapsule()
                 .disabled(busy || summaries.isEmpty)
-                Spacer()
             }
-            .padding(10)
+            .frame(height: 30)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
 
             Divider().overlay(theme.divider)
 
             if summaries.isEmpty {
                 VStack(spacing: 6) {
-                    Text("还没有订阅".t).foregroundStyle(theme.textMuted)
-                    Text("点「添加」贴入订阅链接".t)
+                    Text("暂无订阅，点击右上角「添加订阅」".t).foregroundStyle(theme.textMuted)
+                    Text("支持订阅链接或本地文件路径".t)
                         .font(.system(size: 11)).foregroundStyle(theme.textMuted)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -116,24 +170,17 @@ struct SubscriptionsPage: View {
 
             Spacer(minLength: 4)
 
-            Menu {
-                Button("更新".t) { Task { await update(index: index) } }
-                Button("编辑".t) {
+            // 操作**并排摆出来**，不收进「…」菜单 —— 对齐 Qt。
+            //
+            // 折叠成菜单省的是宽度，代价是每个动作都多一次点击、而且看不见有哪些动作。
+            // 这一行本来就有富余空间，没必要拿它换。删除仍然二次确认（见 confirmDelete）。
+            GlassGroup(spacing: 2) {
+                rowAction("arrow.clockwise", "更新".t) { Task { await update(index: index) } }
+                rowAction("square.and.pencil", "编辑".t) {
                     editing = EditingSubscription(index: index, name: summary.name, url: summary.url)
                 }
-                Divider()
-                Button("删除".t, role: .destructive) {
-                    _ = state.subscriptions.removeSubscription(at: index)
-                    selectedIndex = nil
-                    reload()
-                    Task { await state.controller.rebuildConfig() }
-                }
-            } label: {
-                Image(systemName: "ellipsis.circle")
+                rowAction("trash", "删除".t, danger: true) { confirmDelete = index }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 22)
         }
         .padding(.vertical, 3)
     }
