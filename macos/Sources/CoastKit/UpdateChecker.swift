@@ -109,13 +109,21 @@ public struct UpdateChecker: Sendable {
 
     /// 内核最新版号（只查版本，不下载 —— 下载在 `CoreDownloader`）。
     public func latestCoreTag() async throws -> String? {
+        try await latestCoreRelease()?.tag
+    }
+
+    /// 内核最新版的版本号 + 更新说明。更新窗的「内核」页要展示说明正文，
+    /// 而角标只要版本号 —— 两者共用这一次请求，别为了一段说明再打一遍 GitHub
+    /// （匿名调用每小时只有 60 次）。
+    public func latestCoreRelease() async throws -> (tag: String, notes: String)? {
         let url = URL(string: "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")!
         var request = URLRequest(url: url)
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 20
         let (data, _) = try await session.data(for: request)
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        return object?["tag_name"] as? String
+        guard let tag = object?["tag_name"] as? String, !tag.isEmpty else { return nil }
+        return (tag, object?["body"] as? String ?? "")
     }
 
     /// 语义化版本比较：`remote` 是否比 `local` 新。

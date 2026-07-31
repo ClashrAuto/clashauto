@@ -8,6 +8,8 @@ struct MainView: View {
     @Environment(Theme.self) private var theme
     /// 模式按钮组是否展开。
     @State private var modeExpanded = false
+    /// 更新窗（点侧栏版本行打开）。
+    @State private var showingUpdate = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -25,6 +27,9 @@ struct MainView: View {
         // mac 上窗体本身透明、露出毛玻璃（见 CoastApp 的 .background(.ultraThinMaterial)）
         .background(.clear)
         .preferredColorScheme(theme.dark ? .dark : .light)
+        .sheet(isPresented: $showingUpdate) {
+            UpdateView().environment(state).environment(theme)
+        }
     }
 
     // MARK: 侧栏
@@ -69,11 +74,11 @@ struct MainView: View {
     /// 平时灰；程序有新版 → 右上角 "new" 角标，内核有新版 → "core" 角标；
     /// **任一有更新，版本文字本身转红**（全 UI 不加粗，靠颜色说话）。
     ///
-    /// Qt 点它打开独立的更新窗；Swift 版没有那个窗（更新内容并入关于页，
-    /// 见 PLAN 的「不做自动下载安装」决定），所以点它跳到关于页。
+    /// 点它打开更新窗 —— 与 Qt 相同（那边是独立顶层窗，这里是 sheet，
+    /// 沿用本项目对 `ConnectionsWindow` / `RuleEditorWindow` 的既有做法）。
     private var versionRow: some View {
         Button {
-            state.currentPage = .about
+            showingUpdate = true
         } label: {
             // 角标贴在版本文字的**右上角**：QML 里 badgeRow 的
             // `verticalCenter` 对的是 `verText.top`，也就是整组有一半浮在文字上方。

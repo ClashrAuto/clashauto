@@ -421,5 +421,6 @@
   "黑色": "Black",
   "（未选）": "(none selected)",
   "（驱动被限制为仅管理员可访问）": " (driver restricted to administrators only)",
-  "＋ 添加": "＋ Add"
+  "＋ 添加": "＋ Add",
+  "已打开发布页，请手动下载安装": "Release page opened — please download and install manually"
 }

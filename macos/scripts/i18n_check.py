@@ -25,12 +25,29 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 I18N = ROOT.parent / 'clashauto-c++' / 'assets' / 'i18n'
 CJK = re.compile(r'[一-鿿]')
 
+# Swift 源码里的转义序列 → 运行时真正的字符。
+# 查表用的 key 是**运行时**那个串,不是源码里那串字符:源码写 `\n` 是两个字符,
+# 而与 Qt 共用的 JSON 表里存的是一个真换行。不还原的话,任何带转义的文案都会被
+# 报成「缺翻译」,而它其实好好地在表里。
+ESCAPES = {'n': '\n', 't': '\t', 'r': '\r', '"': '"', '\\': '\\', "'": "'", '0': '\0'}
+
+def unescape(raw):
+    out, i = [], 0
+    while i < len(raw):
+        if raw[i] == '\\' and i + 1 < len(raw):
+            out.append(ESCAPES.get(raw[i + 1], raw[i + 1]))
+            i += 2
+        else:
+            out.append(raw[i])
+            i += 1
+    return ''.join(out)
+
 def used_keys():
     keys = set()
     for path in (ROOT / 'Sources' / 'Coast').glob('*.swift'):
         for m in re.finditer(r'"((?:[^"\\]|\\.)*)"\.t', path.read_text(encoding='utf-8')):
             if CJK.search(m.group(1)):
-                keys.add(m.group(1))
+                keys.add(unescape(m.group(1)))
     return keys
 
 PLACEHOLDER = re.compile(r'%[@d]|%%')
