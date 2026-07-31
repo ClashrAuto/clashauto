@@ -95,11 +95,24 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
     //   的证据（CI 三平台的 QUIC self-test），**没有「TUN 开着时 Hy2 真的不环路」的真机证据**
     //   —— 验它需要真 Hy2 服务端 + TUN + 管理员同时到位。
     //   真出问题的表现是整机断网，自救办法：关掉「增强」，或 config.yaml 写 coastcore: false。
+    // ★ 三个平台的**证据强度不同**，所以别用同一句话糊过去 —— 含糊的告警等于没有告警。
+    //   · Linux：真机 tcpdump 证过（修前 QUIC 握手包 coast0:5/eth0:0 → 修后 coast0:0/eth0:6）。
+    //     靠的是 `ip rule from <物理IP> lookup main`，即**按源地址做策略路由**。
+    //   · Windows / macOS：**没有那个等价能力，也从未验证**。那边只设了
+    //     QUIC_PARAM_CONN_LOCAL_ADDRESS（钉源地址），而「绑了源地址」是否足以让路由避开 TUN
+    //     是未知的。详见 docs/upstream-comparison.md 第三节。
     QString why;
-    if (blockedByQuicNode(store, &why))
-        emit logged(tr("提示：配置里有 QUIC 类节点。它们靠 msquic 的本地地址绑定绕开 TUN，"
-                       "该机制已过编译与打包自检、但尚无真机环路验证。若开启后整机断网，"
-                       "请关掉「增强」。"));
+    if (blockedByQuicNode(store, &why)) {
+#if defined(Q_OS_LINUX)
+        emit logged(tr("提示：配置里有 QUIC 类节点。本平台已通过策略路由把它们排除在 TUN 之外"
+                       "（真机抓包验证过）。"));
+#else
+        emit logged(tr("⚠ 配置里有 QUIC 类节点（Hysteria2/TUIC）。它们的连接由 msquic 内部建立，"
+                       "本平台**尚无**「TUN 开启时不会环路」的验证 —— Linux 上靠按源地址做策略路由"
+                       "解决，而本平台没有等价能力。若开启后整机断网，请关掉「增强」，"
+                       "或在 config.yaml 写 coastcore: false。"));
+#endif
+    }
 
     // ① 自身流量排除必须**先于**任何出站建立。顺序反了就会有一段"路由已接管、出站还没钉住"的
     //    窗口，那段时间里新建的连接直接进环路。
