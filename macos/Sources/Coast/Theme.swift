@@ -36,8 +36,20 @@ public final class Theme {
 
     /// 上传红 / 下载绿。取自 Qt 状态页两张卡的配色 —— 上下行用固定的红绿区分，
     /// 换成主题色的话两张卡会长得一模一样，一眼看不出哪张是哪张。
-    public var uploadAccent: Color { Color(hex: 0xE05A5A) }
-    public var downloadAccent: Color { Color(hex: 0x4DA13E) }
+    ///
+    /// ★ Qt 的这两张卡**文字与曲线不同色**：文字 `accentColor`、曲线 `chartColor`
+    /// （上传 `#a84343` / `#b14a4a`，下载 `#4da13e` / `#5bb44b`）—— 曲线比文字亮一档，
+    /// 压在卡底上才不至于糊掉。原来这里只有一个色、还把上传写成了 Qt 里根本没有的
+    /// `#e05a5a`（自己编的），两处一起改。
+    public var uploadAccent: Color { Color(hex: 0xA8_43_43) }
+    public var uploadLine: Color { Color(hex: 0xB1_4A_4A) }
+    public var downloadAccent: Color { Color(hex: 0x4D_A1_3E) }
+    public var downloadLine: Color { Color(hex: 0x5B_B4_4B) }
+
+    /// 今日流量卡的紫色。Qt `StatusPage.qml` 里这张卡通篇是 `#8a72c6` ——
+    /// 标题、大数字、小时柱、Top5 的占比条全用它。原来 Swift 侧整张卡走的是 `accent`(蓝)，
+    /// 于是它和「连接」卡撞色，六张卡里少了一张能一眼认出来的。
+    public var todayAccent: Color { Color(hex: 0x8A_72_C6) }
 
     public var directDot: Color { Color(hex: 0x48A5A7) }
 

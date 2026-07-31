@@ -15,7 +15,10 @@ struct TrafficCard: View {
     let symbol: String
     let title: String
     let value: String
+    /// 标题与数值的颜色（Qt 的 `accentColor`）。
     let accent: Color
+    /// 背景那条曲线的颜色（Qt 的 `chartColor`，比文字亮一档）。
+    let lineColor: Color
     /// 最近若干拍的速率（字节/秒），越靠后越新。
     let samples: [Double]
     /// 采样节拍，透传给曲线做连续左滑（见 `BandwidthChart.tick`）。
@@ -29,7 +32,7 @@ struct TrafficCard: View {
             // 原来这里自己画了一份，还多画了四条带速率标注的网格线 —— 那是 Qt 明确说
             // **不要**的东西；顺带也就没有那条「整条连续左滑」的滚动。现在共用同一个组件。
             BandwidthChart(samples: samples,
-                           lineColor: accent,
+                           lineColor: lineColor,
                            tick: tick,
                            minimal: true,
                            headroom: 0.62)

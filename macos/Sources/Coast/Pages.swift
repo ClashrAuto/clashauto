@@ -42,11 +42,13 @@ struct StatusPage: View {
                     TrafficCard(symbol: "arrow.up.square", title: "上传".t,
                                 value: state.upText,
                                 accent: theme.uploadAccent,
+                                lineColor: theme.uploadLine,
                                 samples: state.bandwidthSamples.map(\.up),
                                 tick: state.pollTick)
                     TrafficCard(symbol: "arrow.down.square", title: "下载".t,
                                 value: state.downText,
                                 accent: theme.downloadAccent,
+                                lineColor: theme.downloadLine,
                                 samples: state.bandwidthSamples.map(\.down),
                                 tick: state.pollTick)
                 }
@@ -478,18 +480,18 @@ struct TodayTrafficCard: View {
             // 勾选框把「全部」变成了「没勾上的那个」，读起来是另一回事。
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "chart.bar")
-                    .font(.system(size: 16)).foregroundStyle(theme.accent)
+                    .font(.system(size: 16)).foregroundStyle(theme.todayAccent)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("今日流量".t).font(.system(size: 13)).foregroundStyle(theme.accent)
+                    Text("今日流量".t).font(.system(size: 13)).foregroundStyle(theme.todayAccent)
                         .lineLimit(1)
                     Text(Formatting.bytes(state.todayTotal))
-                        .font(.system(size: 24)).foregroundStyle(theme.accent)
+                        .font(.system(size: 24)).foregroundStyle(theme.todayAccent)
                 }
                 Spacer()
                 GlassSegmented(items: [(false, "全部".t), (true, "仅代理".t)],
                                selection: Binding(get: { state.trafficProxyOnly },
                                                   set: { state.trafficProxyOnly = $0 }),
-                               tint: theme.accent.opacity(0.45))
+                               tint: theme.todayAccent.opacity(0.45))
             }
 
             hourlyBars
@@ -500,7 +502,7 @@ struct TodayTrafficCard: View {
                                    (HistoryStore.Dimension.device, "设备".t),
                                    (HistoryStore.Dimension.host, "域名".t)],
                            selection: $bindable.trafficDimension,
-                           tint: theme.accent.opacity(0.45))
+                           tint: theme.todayAccent.opacity(0.45))
 
             if state.todayTop.isEmpty {
                 Text(state.history.isOpen ? "今天还没有已结束的连接".t : "历史库不可用".t)
@@ -532,7 +534,7 @@ struct TodayTrafficCard: View {
         return HStack(alignment: .bottom, spacing: 2) {
             ForEach(Array(state.todayHourly.enumerated()), id: \.offset) { hour, bytes in
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(bytes > 0 ? theme.accent : theme.textMuted.opacity(0.15))
+                    .fill(bytes > 0 ? theme.todayAccent : theme.textMuted.opacity(0.15))
                     .frame(height: max(1, CGFloat(bytes) / CGFloat(peak) * 34))
                     .help(String(format: "%d 点：%@".t, hour, Formatting.bytes(bytes)))
             }
@@ -560,12 +562,12 @@ struct CompositionCard: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "arrow.left.arrow.right.circle")
-                    .font(.system(size: 16)).foregroundStyle(theme.accent)
+                    .font(.system(size: 16)).foregroundStyle(theme.directDot)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("总流量".t).font(.system(size: 13)).foregroundStyle(theme.accent)
+                    Text("总流量".t).font(.system(size: 13)).foregroundStyle(theme.directDot)
                         .lineLimit(1)
                     Text(Formatting.bytes(comp.totalBytes))
-                        .font(.system(size: 24)).foregroundStyle(theme.accent)
+                        .font(.system(size: 24)).foregroundStyle(theme.directDot)
                 }
                 Spacer()
                 Spacer()
@@ -575,14 +577,14 @@ struct CompositionCard: View {
                 HStack(spacing: 0) {
                     Rectangle().fill(theme.accent)
                         .frame(width: geo.size.width * CGFloat(comp.proxyBytes) / CGFloat(total))
-                    Rectangle().fill(theme.textMuted.opacity(0.4))
+                    Rectangle().fill(theme.directDot)
                 }
             }
             .frame(height: 8)
             .clipShape(RoundedRectangle(cornerRadius: 4))
             HStack(spacing: 14) {
                 legend(theme.accent, "代理".t, comp.proxyBytes)
-                legend(theme.textMuted.opacity(0.4), "直连".t, comp.directBytes)
+                legend(theme.directDot, "直连".t, comp.directBytes)
                 Spacer()
             }
 
