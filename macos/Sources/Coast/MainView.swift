@@ -110,28 +110,40 @@ struct MainView: View {
         .padding(.horizontal, 8)
     }
 
+    /// 模式切换。**按钮点开菜单**，不是下拉框。
+    ///
+    /// 原来用 `.menuStyle(.borderlessButton)` + 手画一个方角底，点上去像个 combo box：
+    /// 有边框、有固定宽、右侧一个小箭头。改成 `.button` 样式后它就是一颗普通按钮，
+    /// 和旁边三个开关同属一排、同样的玻璃胶囊 —— 视觉上是「四个可点的东西」，
+    /// 而不是「三个开关加一个表单控件」。
+    ///
+    /// 当前模式直接作为按钮标题，省掉那行冗余的箭头指示：按钮上写着「规则」，
+    /// 点开就是三个模式，没有第二种解释。
     private var modePicker: some View {
         Menu {
             ForEach(Array(AppState.modeTitles.enumerated()), id: \.offset) { index, title in
-                Button(title) { state.setMode(title) }
+                Button {
+                    state.setMode(title)
+                } label: {
+                    // 勾出当前项 —— 菜单收起后按钮上虽然写着当前模式，
+                    // 但展开时若不标出来，用户得先记住按钮上写的是什么再对照。
+                    if index == state.modeIndex {
+                        Label(title, systemImage: "checkmark")
+                    } else {
+                        Text(title)
+                    }
+                }
             }
         } label: {
-            HStack(spacing: 4) {
-                Text(AppState.modeTitles[state.modeIndex])
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.textPrimary)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 8))
-                    .foregroundStyle(theme.textMuted)
-            }
-            .padding(.horizontal, 10)
-            .frame(width: 120, height: 28)
-            .background(RoundedRectangle(cornerRadius: 3).fill(theme.footerComboBg))
+            Text(AppState.modeTitles[state.modeIndex])
+                .font(.system(size: 12))
+                .frame(height: 24)
+                .padding(.horizontal, 4)
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .glassButton()
         .menuIndicator(.hidden)
-        .frame(width: 120, height: 28)
+        .fixedSize()
     }
 }
 
