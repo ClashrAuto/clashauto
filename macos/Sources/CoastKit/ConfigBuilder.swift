@@ -64,6 +64,7 @@ public final class ConfigBuilder: @unchecked Sendable {
         yaml = Self.normalizeEmptyProxies(yaml)
         yaml = applySubscriptions(yaml, subscriptions: readSubscriptions())
         yaml = applyCustomRules(yaml)
+        yaml = applyDevicePolicies(yaml)
         // ★ 私网直连必须**最后前插** —— 它和自定义规则都插在 rules: 顶部，后插的在最上面。
         //   私网要压过自定义规则：否则「访问自己家路由器后台 / 内网 NAS」也会被发到代理节点上。
         yaml = Self.applyPrivateNetworkRules(yaml, extraPrefixes: Self.localGlobal6Prefixes())
@@ -371,6 +372,57 @@ public final class ConfigBuilder: @unchecked Sendable {
         var members = YAMLSurgery.groupMembers(yaml, at: firstProxies)
         for name in names where !members.contains(name) { members.append(name) }
         return YAMLSurgery.replaceGroupMembers(yaml, at: firstProxies, with: members)
+    }
+
+    // MARK: - 局域网设备代理
+
+    /// 为「开着代理」的设备生成带认证的入站 listener + 每设备的 `IN-USER` 规则。
+    ///
+    /// ## 与 Qt 版的两处**必须**不同（架构使然，不是口味问题）
+    ///
+    /// 1. **`listen: 0.0.0.0` 而不是 `127.0.0.1`**。Qt 版靠二层投毒把流量劫持到本机再本地拨，
+    ///    所以只监听回环就够；这里设备是**直接连过来**的，绑回环等于谁也连不上。
+    /// 2. **每台设备一个随机密码**，而不是 Qt 版那个固定字面量 `coast`。端口现在暴露在
+    ///    局域网上，固定密码等于开放代理 —— 任何扫到这个口的人都能白嫖、甚至拿它当跳板。
+    ///
+    /// 主混合端口（`mixed-port`）**不受影响**：它仍然 `allow-lan: false` 只监听本机、免认证，
+    /// Coast 自己的下载测速走它。对外的能力全集中在这一个带认证的口上，边界清楚。
+    func applyDevicePolicies(_ yaml: String) -> String {
+        let devices = DeviceStore(configDir: directory).proxiedDevices()
+            .filter { !$0.proxyUser.isEmpty }   // MAC 非法 → 用户名为空，跳过，否则写出坏配置
+        guard !devices.isEmpty else { return yaml }   // 没有设备开代理就什么都不生成
+
+        var block = "listeners:\n"
+        block += "  - name: coast-lan\n"
+        block += "    type: mixed\n"      // mixed = 同一个口同时收 HTTP 与 SOCKS，设备端两种都能填
+        block += "    listen: 0.0.0.0\n"
+        block += "    port: \(DeviceStore.lanProxyPort)\n"
+        block += "    users:\n"
+        for device in devices {
+            block += "      - username: \(device.proxyUser)\n"
+            block += "        password: \(YAMLSurgery.quote(device.password))\n"
+        }
+        var out = YAMLSurgery.replaceOrAppendBlock(yaml, key: "listeners", with: block)
+
+        // 每设备一条 IN-USER 规则，前插到 rules: 顶部。follow 不生成（那就是「跟随全局」的含义）。
+        var ruleLines = ""
+        for device in devices {
+            let target: String
+            switch device.policyMode {
+            case .follow: continue
+            case .rule: continue          // 规则分流 = 不加专属规则，走默认规则表
+            case .direct: target = "DIRECT"
+            case .reject: target = "REJECT"
+            case .global:
+                guard !device.policyTarget.isEmpty else { continue }
+                target = device.policyTarget
+            }
+            ruleLines += "  - \(YAMLSurgery.quote("IN-USER,\(device.proxyUser),\(target)"))\n"
+        }
+        if !ruleLines.isEmpty, let insertion = YAMLSurgery.rulesInsertionPoint(out) {
+            out.insert(contentsOf: ruleLines, at: insertion)
+        }
+        return out
     }
 
     // MARK: - 私网直连

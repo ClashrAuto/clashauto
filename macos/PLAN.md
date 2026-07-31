@@ -104,11 +104,11 @@
 
 ### 阶段 9 — 可选：局域网网关
 - [x] **评估完成**，结论见 [`docs/gateway-evaluation.md`](docs/gateway-evaluation.md)。
-- [ ] **已拍板要做**。按评估的四步落地：
-  - [ ] 1. lwIP 单独立成 SPM 的 C target，跑通 `swift build`（零风险，纯配置）
-  - [ ] 2. 给 `src/net/**` 剥 Qt，每剥一个文件跑一次 `COAST_GATEWAY_SELFTEST`
-  - [ ] 3. Swift helper 补 `openBpfForInterface`（`/dev/bpf*` 需 root）
-  - [ ] 4. 然后才做 `DeviceStore` / `LanScanner` 台账版 / DevicesPage 的代理开关
+- [x] **方案改为 macOS 原生做法**（2026-07-31 拍板：网关按 macOS 特有方式做、能用 Swift 就用
+      Swift）。不移植 C/C++、不做二层投毒、不引 lwIP。详见评估文档末尾的「最终方案」。
+  - [x] `DeviceStore`（`device` 表：别名/代理开关/策略/**每设备随机凭据**）
+  - [x] `ConfigBuilder.applyDevicePolicies`（带认证的 `0.0.0.0` listener + `IN-USER` 规则）
+  - [ ] DevicesPage 接上：代理开关、策略选择、把「本机IP:端口 + 凭据」显示给用户去配设备
 
 ## 变更日志
 
@@ -475,3 +475,24 @@
   **核心已在跑**时把版本查询也丢给它出网，我一直是直连。现已补上
   （`CoreDownloader.proxyPort` / `UpdateChecker.proxyPort`），解决的是「更新内核 / 查程序更新」
   这个常见场景；首次安装时核心还没有，那种情况仍需用户自己能访问 GitHub。
+- 2026-07-31：**网关方案转向 macOS 原生做法**（167 个用例全绿）。
+
+  按「网关按 macOS 特有方式做、能用 Swift 就用 Swift」的指示重新设计。核心判断：
+  **ARP/NDP 投毒 + lwIP 用户态栈，全部只是为了做「设备端零配置」这一件事**；
+  而 macOS 上让设备直接指向 `本机IP:7899` 是条直白得多的路 —— 不投毒、不要 root、
+  不要用户态 TCP/IP 栈、**零行 C++**。
+
+  ★ **关键发现：per-device 策略一点没损失**。`applyDevicePolicies` 生成的
+  「带每用户认证的 listener + `IN-USER` 规则」在两条路上是同一套东西 ——
+  投毒只是把流量*送到*这个口的其中一种方式罢了。所以换方案换掉的只有「设备端零配置」，
+  换来的是少一整个子系统。
+
+  两处**必须**与 Qt 版不同（都有用例钉住）：
+  - listener 绑 `0.0.0.0` 而非 `127.0.0.1` —— 不劫持就得让设备够得着；
+  - **每设备随机密码**而非 Qt 版的固定字面量 `coast` —— 端口现在暴露在局域网上，
+    固定密码等于开放代理。密码首次开启时签发一次并落库，之后复用：每次重建都换的话，
+    已配好的设备会在下一次热重载后集体掉线。
+
+  转向之前我已经把 lwIP 立成 SPM 的 C target 并**成功编过全部 32 个源文件**
+  （符号链接过去、源码一份不复制）。那条路技术上走得通，现在不走了，但已撤掉不留死代码 ——
+  评估文档里记着它「已验证可行」，将来真要做透明代理不必重新趟。
