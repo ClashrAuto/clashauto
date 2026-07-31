@@ -70,6 +70,8 @@ public final class AppState {
 
     /// 实时连接列表(连接查看器用)。每拍 /connections 快照解析而来,不额外发请求。
     public private(set) var connections: [ConnectionRow] = []
+    /// 本次会话的流量构成(直连 vs 代理)。同一份快照攒出来,不额外发请求。
+    public private(set) var composition = TrafficComposition()
     /// 口径：只算走代理的流量。与 Qt 版的默认一致。
     public var trafficProxyOnly = true { didSet { refreshTodayTraffic() } }
     /// 维度：进程 / 域名。（Qt 版还有「设备」，那一维依赖设备台账，见 PLAN 阶段 6/9。）
@@ -122,6 +124,7 @@ public final class AppState {
         clash.onConnectionsSnapshot = { [weak self] connections in
             self?.history.observe(connections)
             self?.connections = ConnectionRow.parse(connections)
+            self?.composition.observe(connections)
         }
     }
 

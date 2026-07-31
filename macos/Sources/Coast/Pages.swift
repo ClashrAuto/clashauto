@@ -30,6 +30,7 @@ struct StatusPage: View {
                     .background(theme.metricBg)
                     .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
 
+                CompositionCard()
                 TodayTrafficCard()
 
                 HStack(spacing: 8) {
@@ -346,5 +347,50 @@ struct TodayTrafficCard: View {
             }
         }
         .frame(height: 44)
+    }
+}
+
+/// 本次会话的流量构成:直连 vs 代理,一根占比条 + 两个数值。对齐 Qt 的 directBytes/proxyBytes。
+struct CompositionCard: View {
+    @Environment(AppState.self) private var state
+    @Environment(Theme.self) private var theme
+
+    var body: some View {
+        let comp = state.composition
+        let total = max(comp.totalBytes, 1)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("本次会话".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                Text(Formatting.bytes(comp.totalBytes)).font(.system(size: 12)).foregroundStyle(theme.textPrimary)
+                Spacer()
+            }
+            // 占比条:代理(品牌色)+ 直连(灰)
+            GeometryReader { geo in
+                HStack(spacing: 0) {
+                    Rectangle().fill(theme.accent)
+                        .frame(width: geo.size.width * CGFloat(comp.proxyBytes) / CGFloat(total))
+                    Rectangle().fill(theme.textMuted.opacity(0.4))
+                }
+            }
+            .frame(height: 8)
+            .clipShape(RoundedRectangle(cornerRadius: 4))
+            HStack(spacing: 14) {
+                legend(theme.accent, "代理".t, comp.proxyBytes)
+                legend(theme.textMuted.opacity(0.4), "直连".t, comp.directBytes)
+                Spacer()
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.metricBg)
+        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+    }
+
+    private func legend(_ color: Color, _ label: String, _ bytes: Int64) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(label).font(.system(size: 10)).foregroundStyle(theme.textMuted)
+            Text(Formatting.bytes(bytes)).font(.system(size: 10)).foregroundStyle(theme.textSecondary)
+        }
     }
 }
