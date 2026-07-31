@@ -392,33 +392,132 @@ struct NodeRow: View {
 
 // MARK: - 日志页
 
+/// 日志页。对齐 `qml/LogsPage.qml`：两个标签「主日志 / Clash 内核」，各一条滚动时间线。
+///
+/// 尺寸逐项照抄 QML：标签栏上/左/右内距 10、标签间距 6、标签高 30、左右内距 16、字号 13；
+/// 标签栏与时间线之间 8；时间线卡**贴到页面左/右/下边缘**（QML 的 `anchors.margins: 0`）。
 struct LogsPage: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
 
+    /// 0 = 主日志，1 = Clash 内核。与 QML 的 `TabBar.currentIndex` 同义。
+    @State private var tab = 0
+
     var body: some View {
-        ScrollViewReader { proxy in
-            List(state.logs) { entry in
-                HStack(alignment: .top, spacing: 8) {
-                    Text(entry.time, format: .dateTime.hour().minute().second())
-                        .font(.system(size: 10).monospacedDigit())
-                        .foregroundStyle(theme.textMuted)
-                    Text(entry.message)
-                        .font(.system(size: 11))
-                        .foregroundStyle(theme.textSecondary)
-                        .textSelection(.enabled)
-                }
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden)
-                .id(entry.id)
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                LogTab(title: "主日志".t, isCurrent: tab == 0) { tab = 0 }
+                LogTab(title: "Clash 内核".t, isCurrent: tab == 1) { tab = 1 }
+                Spacer(minLength: 0)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .onChange(of: state.logs.count) {
-                // 跟到底：日志页多数时候是拿来看最新一条的
-                if let last = state.logs.last { proxy.scrollTo(last.id, anchor: .bottom) }
+            .padding(.top, 10)
+            .padding(.horizontal, 10)
+
+            LogTimeline(entries: tab == 0 ? state.logs : state.coreLogs)
+        }
+    }
+}
+
+/// 日志页的标签按钮。对齐 QML 里那个 `component LogTab: TabButton`：
+/// 选中态是「卡底 + 强调色文字 + 底部一条 2px 强调条」，未选中悬停给一层浅底。
+private struct LogTab: View {
+    @Environment(Theme.self) private var theme
+    let title: String
+    let isCurrent: Bool
+    let action: () -> Void
+
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(isCurrent ? theme.accentStrong : theme.textSecondary)
+                .padding(.horizontal, 16)
+                .frame(height: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
+                        .fill(isCurrent ? theme.card : (hovering ? theme.hover : .clear))
+                }
+                // 底部强调条：QML 里宽度是 `parent.width - 20`，即左右各让 10。
+                .overlay(alignment: .bottom) {
+                    if isCurrent {
+                        RoundedRectangle(cornerRadius: 1, style: .continuous)
+                            .fill(theme.accent)
+                            .frame(height: 2)
+                            .padding(.horizontal, 10)
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
+/// 日志时间线。对齐 `qml/LogTimeline.qml`：不透明卡内一个滚动列表，
+/// 左侧一颗按严重级别上色的圆点（红=失败/错误、橙=警告、绿=成功/完成、蓝=信息），
+/// 右侧时间戳 + 正文。**最新在顶部**，新条目到达自动滚回顶部。
+struct LogTimeline: View {
+    @Environment(Theme.self) private var theme
+    let entries: [AppState.LogEntry]
+
+    var body: some View {
+        Card {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    // 行间距 0：行与行的间隔由每行自己的下内距 10 提供（与 QML 一致）。
+                    LazyVStack(spacing: 0) {
+                        ForEach(entries) { entry in
+                            row(entry).id(entry.id)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 6)
+                    .padding(.bottom, 10)
+                }
+                // 新日志插在第 0 行 → 把视图拉回顶部（QML 的 `positionViewAtBeginning()`）。
+                .onChange(of: entries.count) {
+                    if let newest = entries.first { proxy.scrollTo(newest.id, anchor: .top) }
+                }
+            }
+            .overlay {
+                if entries.isEmpty {
+                    Text("暂无日志".t)
+                        .font(.system(size: 13))
+                        .foregroundStyle(theme.textMuted)
+                }
             }
         }
+    }
+
+    private func row(_ entry: AppState.LogEntry) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            // 圆点槽：宽 14，圆点 8×8 落在 (3, 5) —— 圆心 y≈9，与时间戳那行对齐。
+            Color.clear
+                .frame(width: 14, height: 1)
+                .overlay(alignment: .topLeading) {
+                    Circle()
+                        .fill(Color(hex: entry.severity.colorHex))
+                        .frame(width: 8, height: 8)
+                        .offset(x: 3, y: 5)
+                }
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.time)
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textMuted)
+                Text(entry.message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.top, 4)
+            .padding(.bottom, 10)
+        }
+        .padding(.horizontal, 10)
     }
 }
 

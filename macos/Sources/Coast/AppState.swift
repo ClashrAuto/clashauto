@@ -98,15 +98,37 @@ public final class AppState {
 
     /// 环形日志。**必须有上限** —— 核心在 debug 级别下每秒能刷几十条，无界数组跑一晚上
     /// 就是几百 MB，而日志页只看得到最近几屏。
+    ///
+    /// **索引 0 = 最新**，与 Qt 的 `LogEntryModel` 一致（它 prepend 到第 0 行、
+    /// 界面最新置顶）。
     public private(set) var logs: [LogEntry] = []
+
+    /// 「Clash 内核」标签页：只有核心进程吐出来的那些。与 Qt 一样**单独存一份**
+    /// 而不是每次渲染 `logs.filter` —— 过滤要扫全部 2000 条，而这个数组每条日志只写一次。
+    public private(set) var coreLogs: [LogEntry] = []
+
     public private(set) var lastLog = ""
     private static let logCapacity = 2000
 
     public struct LogEntry: Identifiable, Sendable {
         public let id = UUID()
-        public let time: Date
+        /// 已格式化的时间戳。与 Qt 一样在 append 时定型（`yyyy-MM-dd HH:mm:ss`），
+        /// 不在渲染时算 —— 滚动时每帧跑 DateFormatter 是纯浪费。
+        public let time: String
         public let message: String
+        public let severity: LogSeverity
     }
+
+    /// 固定格式、固定历法的时间戳。**必须锁 `en_US_POSIX` + 公历**：
+    /// 跟随用户区域设置的话，日本历/佛历用户看到的年份会是 R8、2569 这种，
+    /// 而这一栏的用途是和核心日志、系统日志对时间。
+    private static let logTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        return f
+    }()
 
     // MARK: 派生显示值
 
@@ -130,7 +152,9 @@ public final class AppState {
         devices = DeviceStore()
 
         controller.deviceStore = devices
-        controller.onLog = { [weak self] message in self?.append(log: message) }
+        // `CoastController` 这条流里既有它自己的编排消息、也有核心进程的 stdout ——
+        // 与 Qt 的 `CoreController::logUpdated` 是同一个口径，那边也整条路由进「Clash 内核」标签。
+        controller.onLog = { [weak self] message in self?.append(log: message, isCore: true) }
         // 核心意外死亡是必须打扰用户的少数几件事之一：系统代理刚被撤掉，网络行为会突变,
         // 不说一声的话用户只会觉得「网怎么突然不走代理了」。
         controller.onCoreUnexpectedlyExited = {
@@ -424,13 +448,25 @@ public final class AppState {
     @MainActor
     public static var modeTitles: [String] { ["规则".t, "全局".t, "直连".t] }
 
-    private func append(log message: String) {
+    /// 追加一条日志。`isCore` 为真时**同时**进「主日志」和「Clash 内核」两个时间线 ——
+    /// 对齐 Qt 的路由：应用日志只进主线，核心日志两边都进。
+    private func append(log message: String, isCore: Bool = false) {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        logs.append(LogEntry(time: Date(), message: trimmed))
-        if logs.count > Self.logCapacity {
-            logs.removeFirst(logs.count - Self.logCapacity)
-        }
+        let entry = LogEntry(time: Self.logTimeFormatter.string(from: Date()),
+                             message: trimmed,
+                             severity: LogSeverity.of(trimmed))
+        Self.prepend(entry, into: &logs)
+        if isCore { Self.prepend(entry, into: &coreLogs) }
         lastLog = trimmed
+    }
+
+    /// 最新置顶 + 封顶。`insert(at: 0)` 是 O(n) 的搬移，但 n 封顶 2000、每条日志只搬一次，
+    /// 远比渲染侧每帧倒序一遍便宜。
+    private static func prepend(_ entry: LogEntry, into list: inout [LogEntry]) {
+        list.insert(entry, at: 0)
+        if list.count > logCapacity {
+            list.removeLast(list.count - logCapacity)
+        }
     }
 }
