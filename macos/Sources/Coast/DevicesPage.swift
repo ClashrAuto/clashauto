@@ -521,7 +521,7 @@ private struct DeviceRow: View {
             ZStack {
                 if rejection == nil || row.proxyEnabled {
                     proxySwitch
-                } else {
+                } else if showsReasonBadge {
                     reasonBadge
                 }
             }
@@ -624,6 +624,19 @@ private struct DeviceRow: View {
         .onTapGesture { if canToggle { onToggleProxy(!row.proxyEnabled) } }
         .allowsHitTesting(canToggle)
         .help(rejection?.reason.t ?? "代理网络".t)
+    }
+
+    /// 要不要显示原因徽章。
+    ///
+    /// ★ 「其它网络」这个结论**只在设备在线时才敢下** —— 判据依赖当轮扫描拿到的地址，
+    ///   而从台账加载出来、还没被本轮扫描确认的设备一律拿不到地址。不加这个条件的话，
+    ///   刚进页面那一两秒里**每台离线设备都会被扣上「其它网络」的帽子**（Qt 的注释
+    ///   专门写了这一条）。本机与网关两种是恒定事实，离线也照说。
+    private var showsReasonBadge: Bool {
+        switch rejection {
+        case .isLocalMachine, .isGateway: return true
+        default: return row.online
+        }
     }
 
     /// 不可代理的原因徽章，**占开关的位置**（同一个 38 宽的槽）。

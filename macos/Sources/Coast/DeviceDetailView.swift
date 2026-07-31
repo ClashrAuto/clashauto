@@ -117,11 +117,29 @@ struct DeviceDetailView: View {
 
     // MARK: 提示区
 
+    /// 透明接管是否真的能生效。
+    ///
+    /// macOS 上 ARP 欺骗与 PF 重定向全在**特权 helper**里跑（见 `Redirector`），
+    /// 没装 helper 就只是在台账里记了一笔「要代理这台」，流量根本不会拐过来 ——
+    /// 与 Qt 的 `devices.gatewayReady`（网关模块可用性）是同一个意思。
+    private var gatewayReady: Bool { state.controller.helperStatus == .enabled }
+
     @ViewBuilder
     private var notices: some View {
+        // ★ 开着代理但网关还没就绪：**如实说明它现在还没生效**（Qt 的琥珀色提示）。
+        //   原来这里不分状态、一律显示下面那条「联网由本机转发」—— 而在没有 helper 时
+        //   那句话是**假的**：什么都没被接管。两种状态两句话，不能混。
+        if proxyEnabled, !gatewayReady {
+            noticeBox(background: Color(red: 200 / 255, green: 154 / 255,
+                                        blue: 84 / 255, opacity: 0.15),
+                      color: Color(hex: 0xC6_9A_54)) {
+                "已标记代理此设备；透明网关模块启用后将自动接管其流量。".t
+            }
+        }
+
         // 代理生效中的**依赖说明**：这台设备的默认网关已经指到本机，它的每个包都要本机
         // 转发 —— 用户必须知道「本机不在 = 它上不了网」，以及各种退出方式的实际后果。
-        if proxyEnabled {
+        if proxyEnabled, gatewayReady {
             noticeBox(background: theme.metricBg, color: theme.textMuted) {
                 var text = "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。".t
                 if !state.config.autoStart {
