@@ -20,11 +20,33 @@ struct DevicesPage: View {
     @State private var ledger: [String: DeviceStore.Device] = [:]
     @State private var scanning = false
     @State private var expanded: String?
+    @State private var search = ""
 
     private let browser = LanBrowser()
 
-    /// 合并后的行：发现到的 + 只在台账里的（设备离线了但凭据还在，不能让它从界面上消失）。
+    /// 当前网络的网关 IP（概览头显示）。
+    private var gatewayIP: String { LanTopology.defaultGateway()?.ip ?? "" }
+    /// 代理中的台数。
+    /// 代理中的台数。
+    ///
+    /// 用 `allRows` 而不是筛过的 `rows`：这是「这个网络里有几台在被代理」的统计，
+    /// 跟用户此刻在搜什么无关。用 `rows` 的话，一搜索这个数就跳，看着像状态突变。
+    private var enabledCount: Int { allRows.filter(\.proxyEnabled).count }
+
+    /// 经搜索筛过的行。
     private var rows: [Row] {
+        allRows.filter { row in
+            DeviceFilter.matches(keyword: search, fields: DeviceFilter.haystack(
+                alias: row.record?.alias ?? "",
+                hostname: row.discovered.hostname,
+                vendor: row.discovered.vendor,
+                ip: row.discovered.ip,
+                mac: row.discovered.mac))
+        }
+    }
+
+    /// 合并后的行：发现到的 + 只在台账里的（设备离线了但凭据还在，不能让它从界面上消失）。
+    private var allRows: [Row] {
         var result = discovered.map { Row(discovered: $0, record: ledger[$0.mac]) }
         let seen = Set(discovered.map(\.mac))
         for (mac, record) in ledger where !seen.contains(mac) {
@@ -54,25 +76,64 @@ struct DevicesPage: View {
         .task { await scan() }
     }
 
+    /// 概览头。对齐 Qt 设备页顶部那一块：标题 + 在线/代理中两个计数 + 网关。
+    ///
+    /// 计数用**在线**而不是「发现的总数」：邻居表里会留着早就搬走的设备，
+    /// 拿总数当「我家有几台设备」会一直偏大，越用越离谱。
     private var header: some View {
-        HStack(spacing: 8) {
-            Button { Task { await scan() } } label: {
-                Label(scanning ? "扫描中…".t : "重新扫描".t, systemImage: "arrow.clockwise")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text("设备".t)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(theme.textPrimary)
+                stat("在线".t, "\(allRows.filter(\.online).count)")
+                stat("代理中".t, "\(enabledCount)")
+                Spacer()
+                Button { Task { await scan() } } label: {
+                    Label(scanning ? "扫描中…".t : "重新扫描".t, systemImage: "arrow.clockwise")
+                }
+                .disabled(scanning)
             }
-            .disabled(scanning)
-            Spacer()
-            Text(String(format: "%d 台".t, rows.count))
-                .font(.system(size: 11)).foregroundStyle(theme.textMuted)
+            HStack(spacing: 8) {
+                Text("网关 ".t + (gatewayIP.isEmpty ? "-" : gatewayIP))
+                    .font(.system(size: 11))
+                    .foregroundStyle(theme.textMuted)
+                Spacer()
+                TextField("搜索设备 / IP / 厂商".t, text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 220)
+            }
         }
         .padding(10)
+    }
+
+    private func stat(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 4) {
+            Text(value)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(theme.textPrimary)
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(theme.textMuted)
+        }
     }
 
     private var emptyState: some View {
         VStack(spacing: 6) {
             Image(systemName: "wifi.slash").font(.system(size: 26)).foregroundStyle(theme.textMuted)
-            Text(scanning ? "扫描中…".t : "邻居表里还没有设备".t).foregroundStyle(theme.textMuted)
-            Text("只读取系统已有的邻居表，所以只看得到最近通信过的设备".t)
-                .font(.system(size: 11)).foregroundStyle(theme.textMuted)
+            // 「一台都没发现」「正在扫描」「被搜索筛没了」是三种情况，提示必须分开 ——
+            // 混成一句的话，用户搜错一个字就以为设备全不见了。
+            if scanning {
+                Text("正在扫描局域网…".t).foregroundStyle(theme.textMuted)
+            } else if !search.trimmingCharacters(in: .whitespaces).isEmpty {
+                Text("没有匹配的设备".t).foregroundStyle(theme.textMuted)
+                Text(String(format: "共 %d 台被筛掉".t, allRows.count))
+                    .font(.system(size: 11)).foregroundStyle(theme.textMuted)
+            } else {
+                Text("未发现设备".t).foregroundStyle(theme.textMuted)
+                Text("只读取系统已有的邻居表，所以只看得到最近通信过的设备".t)
+                    .font(.system(size: 11)).foregroundStyle(theme.textMuted)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -102,7 +163,6 @@ struct DevicesPage: View {
     /// 底部横幅：说明当前状态。设备端零配置，所以这里没有任何要用户抄的东西。
     @ViewBuilder
     private var proxyBanner: some View {
-        let enabledCount = rows.filter(\.proxyEnabled).count
         // 安全告警排在提示条之前 —— 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。
         ForEach(state.securityAlerts) { alert in
             HStack(spacing: 6) {
