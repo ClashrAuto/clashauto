@@ -53,7 +53,7 @@ int main(int argc, char *argv[])
     if (app.arguments().contains("--build-config")) {
         const AppConfig config = AppConfigLoader::load();
         ConfigBuilder builder(config);
-        const QString path = builder.ensureFullConfig(config.tun);
+        const QString path = builder.ensureFullConfig(config.tun, config.ipv6);
         QTextStream(stdout) << path << Qt::endl;
         return 0;
     }

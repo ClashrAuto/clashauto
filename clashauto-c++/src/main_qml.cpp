@@ -341,7 +341,7 @@ int main(int argc, char *argv[])
             cfg.configDir = dir;
             cfg.userDir = dir;
             ConfigBuilder builder(cfg);
-            const QString full = builder.ensureFullConfig(false);
+            const QString full = builder.ensureFullConfig(false, cfg.ipv6);
             QFile ff(full);
             int listeners = 0, inUserRules = 0;
             if (ff.open(QIODevice::ReadOnly)) {

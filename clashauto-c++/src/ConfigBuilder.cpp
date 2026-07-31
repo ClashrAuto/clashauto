@@ -18,7 +18,7 @@ ConfigBuilder::ConfigBuilder(AppConfig config) : m_config(std::move(config))
 {
 }
 
-QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
+QString ConfigBuilder::ensureFullConfig(bool tunEnabled, bool ipv6Enabled)
 {
     const QString defaultPath = QDir(m_config.configDir).filePath("default.yaml");
     const QString bundledDefault = QStringLiteral(":/assets/bundle/config/default.yaml"); // 内嵌种子
@@ -59,6 +59,7 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled)
     // 时断时通（现象：直连 IP 通、换公共 DNS 通、用路由器当 DNS 全超时）。转投后设备拿到 mihomo 的
     // fake-ip 结果，连 fake-ip 再经网关回到核心做国内外分流。端口须与 NetStack::kDnsHijackPort 一致(1053)。
     yaml = setNestedScalar(yaml, "dns", "listen", "127.0.0.1:1053");
+    yaml = applyIpv6(yaml, ipv6Enabled);
     yaml = normalizeEmptyProxies(yaml);
     yaml = applySubscriptions(yaml, readSubscriptions());
     yaml = applyCustomRules(yaml);
@@ -947,6 +948,30 @@ QString ConfigBuilder::ensureProxyServerNameserver(QString yaml) const
     }
     const QString block = "  proxy-server-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n";
     yaml.insert(dnsHead.capturedEnd(0), block);
+    return yaml;
+}
+
+QString ConfigBuilder::applyIpv6(QString yaml, bool enabled) const
+{
+    // IPv6 是一个整体，三个键缺一不可，所以放在一处一起写，别拆到各处去：
+    //
+    //   ipv6              核心是否使用 v6 出站；也决定 parseIPV6 保不保留 tun.inet6-address。
+    //                     这个键我们以前从来不写，于是核心用的是 mihomo 默认值 true ——
+    //                     结果是「用户看得见的地方（AAAA 应答）关着，看不见的地方半开着」：
+    //                     TUN 拿到了 v6 地址和默认路由，却没有任何应用能解析出 AAAA。
+    //                     现在无论开关处于哪一侧都显式写死，行为才和开关一致。
+    //   dns.ipv6          本地 DNS 服务器是否对客户端返回 AAAA。关着时核心回空答案。
+    //   dns.fake-ip-range6  fake-ip 模式下 AAAA 的假地址池。**没有它，前两个开了也白搭** ——
+    //                     核心的 withFakeIP 在没有 v6 池时对 AAAA 一律回空答案。
+    //
+    // 取值沿用上游文档里的示例网段，和 tun.inet6-address 的默认值 fdfe:dcba:9876::1/126
+    // 同前缀且不冲突（池子从 ::4 起分配，正好落在那个 /126 之外）；auto-route 会装 ::/0，
+    // 所以这些假地址能回到 TUN。
+    yaml = setScalar(yaml, "ipv6", enabled ? "true" : "false");
+    yaml = setNestedScalar(yaml, "dns", "ipv6", enabled ? "true" : "false");
+    if (enabled) {
+        yaml = setNestedScalar(yaml, "dns", "fake-ip-range6", "fdfe:dcba:9876::1/64");
+    }
     return yaml;
 }
 

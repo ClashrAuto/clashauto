@@ -32,6 +32,11 @@ public:
     void setUiPort(int port);
     int uiPort() const { return m_config.uiPort; }
 
+    // 设置 IPv6 开关。只改内存里的运行态，不自己触发重建 —— 调用方（SettingsController）
+    // 落完 config.yaml 后统一调 rebuildConfig()，避免一次开关引发两次热重载。
+    void setIpv6Enabled(bool enabled);
+    bool isIpv6Enabled() const { return m_ipv6Enabled; }
+
 public slots:
     void startCore();
     void stopCore();
@@ -68,6 +73,7 @@ private:
     QString m_fullConfigPath;
     bool m_proxyEnabled = false;
     bool m_tunEnabled = false;
+    bool m_ipv6Enabled = false;
     bool m_sysproxyActive = false; // 本会话是否真的应用过系统代理：stopProxy 据此跳过无谓的还原动作
 #if defined(Q_OS_MACOS)
     const void *m_macAuthRef = nullptr; // 实为 AuthorizationRef(=const AuthorizationOpaqueRef*)；const void* 避免引 Security 头且不丢 const

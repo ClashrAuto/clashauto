@@ -10,7 +10,9 @@ class ConfigBuilder
 public:
     explicit ConfigBuilder(AppConfig config);
 
-    QString ensureFullConfig(bool tunEnabled);
+    // tunEnabled / ipv6Enabled 都按参数传而不是读 m_config：这个 ConfigBuilder 是启动时
+    // 用 AppConfig 的一份副本构造的，运行时会变的开关读它只会拿到旧值。
+    QString ensureFullConfig(bool tunEnabled, bool ipv6Enabled);
     bool writeTunEnabled(const QString &filePath, bool enabled) const;
 
     // 从 YAML 文本提取全部节点名 / 策略组名。静态公开：规则编辑器「节点」下拉
@@ -54,6 +56,7 @@ private:
     QString setScalar(QString yaml, const QString &key, const QString &value) const;
     QString setNestedScalar(QString yaml, const QString &section, const QString &key, const QString &value) const;
     QString ensureProxyServerNameserver(QString yaml) const;
+    QString applyIpv6(QString yaml, bool enabled) const; // ipv6 / dns.ipv6 / dns.fake-ip-range6 三件套
     QString normalizeEmptyProxies(QString yaml) const;
     QString yamlQuote(const QString &value) const;
     static QString yamlScalar(const QString &line); // 静态：供上面两个静态解析函数调用

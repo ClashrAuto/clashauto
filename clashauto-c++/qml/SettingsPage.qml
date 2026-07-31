@@ -512,6 +512,12 @@ Item {
                                 ThemedSwitch { id: clearSwitch; checked: settings.clearConnections
                                     onToggled: settings.setClearConnections(checked) } }
                             CardDivider {}
+                            SettingRow { label: qsTr("启用 IPv6")
+                                ThemedSwitch { id: ipv6Switch; checked: settings.ipv6
+                                    ToolTip.visible: hovered
+                                    ToolTip.text: qsTr("开启后核心才会解析 AAAA 并使用 IPv6 出站；关闭时完全禁用 IPv6")
+                                    onToggled: settings.setIpv6(checked) } }
+                            CardDivider {}
                             SettingRow { label: qsTr("GeoIP 数据")
                                 PillButton {
                                     text: settings.geoipUpdating ? settings.geoipStatus : qsTr("更新 GeoIP")

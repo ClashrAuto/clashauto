@@ -40,6 +40,7 @@ class SettingsController final : public QObject
     Q_PROPERTY(bool nodeSwitchNote READ nodeSwitchNote CONSTANT)
     Q_PROPERTY(bool mirror READ mirror NOTIFY mirrorChanged)
     Q_PROPERTY(bool receiveBeta READ receiveBeta NOTIFY receiveBetaChanged)
+    Q_PROPERTY(bool ipv6 READ ipv6 NOTIFY ipv6Changed)
     Q_PROPERTY(int autoUpdateMinutes READ autoUpdateMinutes CONSTANT)
     Q_PROPERTY(bool themeLight READ themeLight CONSTANT)
     Q_PROPERTY(bool autoTheme READ autoTheme CONSTANT)
@@ -90,6 +91,7 @@ public:
     bool nodeSwitchNote() const { return m_nodeNote; }
     bool mirror() const { return m_mirror; }
     bool receiveBeta() const { return m_receiveBeta; }
+    bool ipv6() const { return m_ipv6; }
     int autoUpdateMinutes() const { return m_autoUpdate; }
     bool themeLight() const { return m_themeLight; }
     bool autoTheme() const { return m_autoTheme; }
@@ -130,6 +132,7 @@ public:
     Q_INVOKABLE void setNodeOnly(bool on);
     Q_INVOKABLE void setMirror(bool on);
     Q_INVOKABLE void setReceiveBeta(bool on);
+    Q_INVOKABLE void setIpv6(bool on);
 
     // 系统 tab 开关/下拉全部即时落盘+即时生效；「应用」按钮仍整表保存（Host/端口等文本项用）。
     Q_INVOKABLE void setAutoStart(bool on);          // sys：写注册表 Run 键
@@ -169,6 +172,7 @@ signals:
     void areasChanged();
     void mirrorChanged();
     void receiveBetaChanged();
+    void ipv6Changed();
     void coreUpdatingChanged();
     void coreUpdateStatusChanged();
     void geoipUpdatingChanged();
@@ -219,6 +223,7 @@ private:
     bool m_nodeNote = true;
     bool m_mirror = false;
     bool m_receiveBeta = false;
+    bool m_ipv6 = false;
     int m_autoUpdate = 0;
     bool m_themeLight = false;
     bool m_autoTheme = false;

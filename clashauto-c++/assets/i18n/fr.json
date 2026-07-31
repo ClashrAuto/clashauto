@@ -63,6 +63,8 @@
   "仅可用节点": "Nœuds disponibles uniquement",
   "增量更新": "Mise à jour incrémentielle",
   "切换时清理连接": "Effacer les connexions au changement",
+  "启用 IPv6": "Activer l'IPv6",
+  "开启后核心才会解析 AAAA 并使用 IPv6 出站；关闭时完全禁用 IPv6": "Activé, le cœur résout les enregistrements AAAA et se connecte en IPv6 ; désactivé, l'IPv6 est entièrement désactivé",
   "切换通知": "Notifications de changement",
   "跟随系统深浅色": "Suivre le thème du système",
   "跟随系统语言": "Suivre la langue du système",

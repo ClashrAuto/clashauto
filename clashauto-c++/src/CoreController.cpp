@@ -196,7 +196,8 @@ CoreController::CoreController(AppConfig config, QObject *parent)
       m_config(std::move(config)),
       m_configBuilder(m_config),
       m_proxyEnabled(m_config.webProxy),
-      m_tunEnabled(m_config.tun)
+      m_tunEnabled(m_config.tun),
+      m_ipv6Enabled(m_config.ipv6)
 {
 #if defined(Q_OS_WIN)
     // 核心为控制台程序，GUI 子系统下启动会新开控制台窗口——用 CREATE_NO_WINDOW 隐藏
@@ -307,7 +308,7 @@ void CoreController::startCore()
     }
 
     const QString exe = m_config.clashExecutable();
-    m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
+    m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled, m_ipv6Enabled);
     const QString cfg = m_fullConfigPath.isEmpty() ? m_config.clashConfig() : m_fullConfigPath;
     if (!QFileInfo::exists(exe)) {
         // 不再预装内核：未找到时提示用户去「设置 → 系统」下载，而不是静默失败
@@ -460,6 +461,11 @@ void CoreController::setUiPort(int port)
     m_configBuilder = ConfigBuilder(m_config);
 }
 
+void CoreController::setIpv6Enabled(bool enabled)
+{
+    m_ipv6Enabled = enabled;
+}
+
 void CoreController::setTunEnabled(bool enabled)
 {
     // 仅置位，不重载：核心还没起时用它预置 TUN，随后 startCore() 会按此写入 full.yaml
@@ -508,7 +514,7 @@ void CoreController::toggleTun()
 {
     m_tunEnabled = !m_tunEnabled;
     if (m_fullConfigPath.isEmpty()) {
-        m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
+        m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled, m_ipv6Enabled);
     } else {
         m_configBuilder.writeTunEnabled(m_fullConfigPath, m_tunEnabled);
     }
@@ -538,7 +544,7 @@ void CoreController::toggleTun()
 
 void CoreController::rebuildConfig()
 {
-    m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled);
+    m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled, m_ipv6Enabled);
     emit logUpdated(QString("Config generated: %1").arg(m_fullConfigPath));
     reloadConfig();
 }

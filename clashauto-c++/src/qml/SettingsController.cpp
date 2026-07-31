@@ -164,6 +164,7 @@ void SettingsController::loadInitialValues()
     m_nodeNote = c.nodeSwitchNote;
     m_mirror = c.mirror;
     m_receiveBeta = c.receiveBeta;
+    m_ipv6 = c.ipv6;
     m_autoUpdate = c.autoUpdateMinutes;
     m_themeLight = c.theme.compare(QLatin1String("light"), Qt::CaseInsensitive) == 0;
     m_autoTheme = c.autoTheme;
@@ -278,6 +279,23 @@ void SettingsController::setReceiveBeta(bool on)
     m_receiveBeta = on;
     persistConfigBool(QStringLiteral("beta"), on);
     emit receiveBetaChanged();
+}
+
+// 启用 IPv6。落 config.yaml 的 ipv6 键，再把运行态推给核心并重建配置 ——
+// ConfigBuilder 持有的是启动时那份 AppConfig 副本，不推的话重建出来还是旧值。
+// 三个键（ipv6 / dns.ipv6 / dns.fake-ip-range6）由 ConfigBuilder::applyIpv6 一起写。
+void SettingsController::setIpv6(bool on)
+{
+    if (m_ipv6 == on) {
+        return;
+    }
+    m_ipv6 = on;
+    persistConfigBool(QStringLiteral("ipv6"), on);
+    if (m_core) {
+        m_core->setIpv6Enabled(on);
+        m_core->rebuildConfig();
+    }
+    emit ipv6Changed();
 }
 
 // —— 系统 tab 的即时 setter：切换即落盘 + 即生效（副作用与 apply() 一一对应）——

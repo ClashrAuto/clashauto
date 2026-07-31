@@ -63,6 +63,8 @@
   "仅可用节点": "Yalnızca kullanılabilir düğümler",
   "增量更新": "Artımlı güncelleme",
   "切换时清理连接": "Geçişte bağlantıları temizle",
+  "启用 IPv6": "IPv6'yı etkinleştir",
+  "开启后核心才会解析 AAAA 并使用 IPv6 出站；关闭时完全禁用 IPv6": "Açıkken çekirdek AAAA kayıtlarını çözer ve IPv6 üzerinden bağlanır; kapalıyken IPv6 tamamen devre dışıdır",
   "切换通知": "Geçiş bildirimleri",
   "跟随系统深浅色": "Sistem temasını izle",
   "跟随系统语言": "Sistem dilini izle",

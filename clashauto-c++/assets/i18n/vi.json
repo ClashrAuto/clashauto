@@ -63,6 +63,8 @@
   "仅可用节点": "Chỉ nút khả dụng",
   "增量更新": "Cập nhật tăng dần",
   "切换时清理连接": "Xóa kết nối khi chuyển",
+  "启用 IPv6": "Bật IPv6",
+  "开启后核心才会解析 AAAA 并使用 IPv6 出站；关闭时完全禁用 IPv6": "Khi bật, lõi phân giải bản ghi AAAA và kết nối qua IPv6; khi tắt, IPv6 bị vô hiệu hoàn toàn",
   "切换通知": "Thông báo khi chuyển",
   "跟随系统深浅色": "Theo giao diện hệ thống",
   "跟随系统语言": "Theo ngôn ngữ hệ thống",

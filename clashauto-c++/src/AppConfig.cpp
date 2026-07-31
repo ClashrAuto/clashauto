@@ -107,6 +107,7 @@ AppConfig AppConfigLoader::load()
     config.autoLanguage = boolFromYaml(yaml, "autoLanguage", config.autoLanguage);
     config.mirror = boolFromYaml(yaml, "mirror", config.mirror);
     config.receiveBeta = boolFromYaml(yaml, "beta", config.receiveBeta);
+    config.ipv6 = boolFromYaml(yaml, "ipv6", config.ipv6);
     config.language = valueFromYaml(yaml, "language", config.language);
     config.secret = valueFromYaml(yaml, "secret", QString());
 
