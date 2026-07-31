@@ -64,6 +64,14 @@ public:
     // Linux 专用：出站打的 fwmark。要与 `ip rule ... fwmark <mark>` 一致。
     static quint32 fwmark();
 
+    // 物理出口网卡上的本机地址（v6=false 取 IPv4，true 取全局 IPv6）。取不到返回空串。
+    //
+    // ★ 为什么单独要这个：**msquic 那条路够不着 fd**（socket 由它内部创建），
+    //   applyToFd/prepareSocket 对 QUIC 出站一律无效。msquic 提供的钩子是
+    //   QUIC_PARAM_CONN_LOCAL_ADDRESS —— 它要的是一个**地址**，不是 ifIndex。
+    //   把本地地址钉在物理网卡的 IP 上，路由查表就不会命中我们自己的 TUN。
+    static QString physicalAddress(bool v6 = false);
+
     // 在 **connect() 之前**作用于 fd。family 取 AF_INET / AF_INET6。
     // 返回 false = 没能应用（*err 说明原因）。调用方**照常拨号**：没有环路保护总好过连不上，
     // 但必须把 err 记进日志——静默失效正是这类 bug 最难查的地方。

@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QHostAddress>
+#include <QNetworkInterface>
 #include <QProcess>
 #include <QStringList>
 #include <QTcpSocket>
@@ -180,6 +181,29 @@ bool SelfRouteGuard::enabled()
 quint32 SelfRouteGuard::fwmark()
 {
     return kFwmark;
+}
+
+QString SelfRouteGuard::physicalAddress(bool v6)
+{
+    if (!g_iface.valid())
+        return {};
+    // 按 ifIndex 找那张网卡，取它的第一个**非回环、非链路本地**地址。
+    // 用 ifIndex 而不是名字：名字在各平台的口径不一（见 L2Endpoint_win.cpp 里那段 LUID 名的坑）。
+    const QList<QNetworkInterface> all = QNetworkInterface::allInterfaces();
+    for (const QNetworkInterface &ni : all) {
+        if (ni.index() != g_iface.ifIndex)
+            continue;
+        const QList<QNetworkAddressEntry> entries = ni.addressEntries();
+        for (const QNetworkAddressEntry &e : entries) {
+            const QHostAddress a = e.ip();
+            if (a.isLoopback() || a.isLinkLocal())
+                continue;
+            const bool isV6 = (a.protocol() == QAbstractSocket::IPv6Protocol);
+            if (isV6 == v6)
+                return a.toString();
+        }
+    }
+    return {};
 }
 
 bool SelfRouteGuard::applyToFd(qintptr fd, int family, QString *err)

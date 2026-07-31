@@ -1,5 +1,7 @@
 #include "QuicTransport.h"
 
+#include "../SelfRouteGuard.h" // 自身流量排除：msquic 够不着 fd，只能钉本地地址
+
 #include <QAtomicInteger>
 #include <QByteArray>
 #include <QMetaObject>
@@ -595,6 +597,31 @@ void QuicTransport::openConnection(const QString &host, quint16 port, const QByt
         //   的同时用另一个名字做 SNI;此场景下 sni≠host 时以 host 为准保证连得上(见报告)。
         serverName = hostUtf8.constData();
     }
+    // ★★ 自身流量排除（TUN 开着时的**唯一**手段）。
+    //   msquic 的 socket 由它内部创建，SelfRouteGuard::prepareSocket / applyToFd 那条路
+    //   **根本够不着** —— 于是 TUN 一接管默认路由，Hy2/TUIC 的 UDP 就会被路由进我们自己的
+    //   TUN，死循环。msquic 给的钩子是 QUIC_PARAM_CONN_LOCAL_ADDRESS：把本地地址钉在物理
+    //   出口网卡的 IP 上，路由查表就命中不到 TUN。
+    //   **必须在 ConnectionStart 之前设**（msquic 对客户端连接只允许开始前设这个参数）。
+    //   端口给 0 = 由系统挑，我们只想约束地址、不想固定端口。
+    //   拿不到地址时**照常拨号**：没有环路保护也好过连不上，但要留一行日志——静默失效
+    //   正是这类 bug 最难查的地方。
+    if (SelfRouteGuard::enabled()) {
+        // 远端是 v6 就钉 v6 本地地址，否则 v4。域名场景下还没解析，按 v4 走（绝大多数情况）。
+        const bool wantV6 = hostIsIp && QuicAddrGetFamily(&remoteAddr) == QUIC_ADDRESS_FAMILY_INET6;
+        const QByteArray local = SelfRouteGuard::physicalAddress(wantV6).toUtf8();
+        QUIC_ADDR localAddr;
+        std::memset(&localAddr, 0, sizeof(localAddr));
+        if (!local.isEmpty() && QuicAddrFromString(local.constData(), 0, &localAddr) != FALSE) {
+            api->SetParam(d->conn, QUIC_PARAM_CONN_LOCAL_ADDRESS, sizeof(localAddr), &localAddr);
+        } else {
+            std::fprintf(stderr,
+                         "[SelfRouteGuard] QUIC 未能钉住物理出口(%s)——TUN 开着时可能环路\n",
+                         local.isEmpty() ? "取不到物理出口地址" : "地址解析失败");
+            std::fflush(stderr);
+        }
+    }
+
     // 注:serverName 指向本作用域内的 sniName / hostUtf8, 二者活到本函数返回;ConnectionStart 内部会
     //     复制 ServerName, 故调用期间有效即可。
     const QUIC_STATUS st = api->ConnectionStart(d->conn, d->config, QUIC_ADDRESS_FAMILY_UNSPEC,
