@@ -148,6 +148,29 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
             }
         }
     }
+
+    // MARK: - 透明代理接管
+
+    public func startRedirect(deviceIPs: [String], interface: String,
+                              gatewayIP: String, gatewayMAC: String,
+                              redirPort: Int, dnsPort: Int) async throws {
+        let joined = deviceIPs.joined(separator: ",")
+        let _: Bool = try await withProxy { helper, done in
+            helper.startRedirect(deviceIPsCommaSep: joined, interface: interface,
+                                 gatewayIP: gatewayIP, gatewayMAC: gatewayMAC,
+                                 redirPort: redirPort, dnsPort: dnsPort) { ok, error in
+                done(ok ? .success(true) : .failure(HelperError.remote(error)))
+            }
+        }
+    }
+
+    public func stopRedirect() async throws {
+        let _: Bool = try await withProxy { helper, done in
+            helper.stopRedirect { ok, error in
+                done(ok ? .success(true) : .failure(HelperError.remote(error)))
+            }
+        }
+    }
 }
 
 /// 一次性认领标记。XPC 的错误处理块与正常回复块都可能触发，`CheckedContinuation`

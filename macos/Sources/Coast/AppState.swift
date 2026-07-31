@@ -107,6 +107,7 @@ public final class AppState {
         history = HistoryStore()
         devices = DeviceStore()
 
+        controller.deviceStore = devices
         controller.onLog = { [weak self] message in self?.append(log: message) }
         clash.onLog = { [weak self] message in self?.append(log: message) }
         // 历史库消费**同一份** /connections 快照，不为此多发一次请求。

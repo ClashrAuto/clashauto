@@ -33,11 +33,13 @@ let package = Package(
             // 历史库直接用系统自带的 sqlite3（macOS 一直有），不引第三方 SQLite 包。
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
+        // BPF ioctl 常量的 C shim（BIOCSETIF 等是 _IOW 宏，Swift 导入不进来）。
+        .target(name: "CBPF", path: "Sources/CBPF", publicHeadersPath: "include"),
         // 特权 helper（root daemon）。产物名 = mach service 名 = launchd Label = codesign -i，
         // 四者必须一致，见 HelperConstants。
         .executableTarget(
             name: "CoastHelper",
-            dependencies: ["CoastHelperProtocol"],
+            dependencies: ["CoastHelperProtocol", "CBPF"],
             swiftSettings: [.swiftLanguageMode(.v5)],
             // helper 是裸 Mach-O（不是 bundle），Info.plist 只能嵌进 __TEXT,__info_plist 段。
             linkerSettings: [.unsafeFlags([
@@ -53,7 +55,7 @@ let package = Package(
         ),
         .testTarget(
             name: "CoastKitTests",
-            dependencies: ["CoastKit"],
+            dependencies: ["CoastKit", "CoastHelperProtocol"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

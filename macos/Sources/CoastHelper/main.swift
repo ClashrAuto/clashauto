@@ -12,6 +12,8 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
 
     /// 由本 helper 启动的核心进程。只允许有一个。
     private var core: Process?
+    /// 透明代理接管器（root：ARP 欺骗 + PF + ip.forwarding）。
+    private let redirector = Redirector()
     private let queue = DispatchQueue(label: "com.yuehongsun.coast.helper.state")
 
     // MARK: - NSXPCListenerDelegate
@@ -24,6 +26,10 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
 
         connection.exportedInterface = NSXPCInterface(with: CoastHelperProtocol.self)
         connection.exportedObject = self
+        // ★ 命门：连接一断（app 正常退出 / 崩溃 / 被 SIGKILL）就把被欺骗的设备复原。
+        //   没有这一步，app 意外死掉时那些设备会一直把本机当网关、直接断网十几分钟。
+        connection.invalidationHandler = { [weak self] in self?.redirector.stop() }
+        connection.interruptionHandler = { [weak self] in self?.redirector.stop() }
         connection.resume()
         return true
     }
@@ -139,6 +145,25 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
             stopCoreLocked()
             reply(true, "")
         }
+    }
+
+    func startRedirect(deviceIPsCommaSep: String, interface: String,
+                       gatewayIP: String, gatewayMAC: String,
+                       redirPort: Int, dnsPort: Int,
+                       withReply reply: @escaping (Bool, String) -> Void) {
+        let ips = deviceIPsCommaSep.split(separator: ",").map(String.init)
+        if let error = redirector.start(deviceIPs: ips, interface: interface,
+                                        gatewayIP: gatewayIP, gatewayMAC: gatewayMAC,
+                                        redirPort: redirPort, dnsPort: dnsPort) {
+            reply(false, error)
+        } else {
+            reply(true, "")
+        }
+    }
+
+    func stopRedirect(withReply reply: @escaping (Bool, String) -> Void) {
+        redirector.stop()
+        reply(true, "")
     }
 
     /// 调用方必须已持有 `queue`。

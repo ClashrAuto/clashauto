@@ -15,6 +15,7 @@ enum SelfTests {
         if environment["COAST_HELPER_SELFTEST"] == "1" { helperSelfTest() }
         if environment["COAST_SYSPROXY_SELFTEST"] == "1" { systemProxySelfTest() }
         if environment["COAST_PATHS_SELFTEST"] == "1" { pathsSelfTest() }
+        if environment["COAST_TOPO_SELFTEST"] == "1" { topoSelfTest() }
     }
 
     /// helper 自检：报告 bundle 布局与 SMAppService 状态。
@@ -59,6 +60,17 @@ enum SelfTests {
             print("  判断包本身对不对，看上面两行：plist 与可执行文件在位、且状态不是 notFound。）")
         }
         exit(0)
+    }
+
+    private static func topoSelfTest() {
+        print("=== 默认网关自检 ===")
+        if let gw = LanTopology.defaultGateway() {
+            print("IP: \(gw.ip)  MAC: \(gw.mac)  接口: \(gw.interface)")
+            print("接管设备所需的三要素齐全 ✅")
+            exit(0)
+        }
+        print("取不到默认网关（三要素缺一即无法安全接管，会拒绝开始）")
+        exit(1)
     }
 
     private static func systemProxySelfTest() {

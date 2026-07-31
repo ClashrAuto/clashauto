@@ -26,6 +26,10 @@ public final class CoastController {
     private let helper = MacHelperClient()
 
     private var fullConfigPath: URL?
+    /// 台账（生成设备规则时用）。由 app 注入 —— controller 不该自己开库。
+    public var deviceStore: DeviceStore?
+    /// 当前已下发给 helper 的被接管设备 IP 集合。用来判断「需不需要重新下发」。
+    private var activeRedirectIPs: Set<String> = []
     /// 本会话是否真的设过系统代理。退出路径上 stop 会被调用多次，没设过就别做无谓的还原动作。
     private var systemProxyActive = false
 
@@ -63,6 +67,9 @@ public final class CoastController {
     }
 
     public func stopCore() async {
+        // 退出/停核心前先复原被接管的设备。放在最前面：哪怕后面出错，设备也已经被放回去了。
+        try? await helper.stopRedirect()
+        activeRedirectIPs = []
         await stopProxy()
         await core.stop()
         isCoreRunning = core.isRunning
@@ -158,6 +165,54 @@ public final class CoastController {
         }
         fullConfigPath = path
         await reloadConfig()
+        await syncRedirect()
+    }
+
+    /// 把「哪些设备该被接管」下发给 helper。
+    ///
+    /// 每次设备开关/策略变更后经 `rebuildConfig` 调到这里。逻辑很简单：
+    ///   • 有设备开代理 → 让 helper（重新）开始接管这批 IP；
+    ///   • 一台都没有 → 让 helper 停下并**复原**。
+    ///
+    /// helper 侧的 start 是幂等的（换 IP 列表时先干净收上一轮），所以这里无脑重发也没问题；
+    /// 但仍然比对一下集合，没变就不打扰 —— 避免每次热重载都触发一轮 ARP 重置。
+    private func syncRedirect() async {
+        guard let store = deviceStore else { return }
+        let devices = store.proxiedDevices()
+        let ips = Set(devices.map(\.lastIP))
+
+        guard ips != activeRedirectIPs else { return }
+
+        // helper 没启用就没法接管（BPF/PF/sysctl 都要 root）。有设备开着却没 helper，
+        // 明确记一条 —— 否则用户开了开关却毫无反应，无从查起。
+        guard await helper.isEnabled else {
+            if !ips.isEmpty { log("已开启设备代理，但免密助手未启用 —— 无法接管（需 root）") }
+            return
+        }
+
+        if ips.isEmpty {
+            try? await helper.stopRedirect()
+            activeRedirectIPs = []
+            log("已停止接管所有设备并复原")
+            return
+        }
+
+        guard let gateway = LanTopology.defaultGateway() else {
+            log("取不到默认网关，无法接管设备")
+            return
+        }
+        do {
+            try await helper.startRedirect(deviceIPs: Array(ips),
+                                           interface: gateway.interface,
+                                           gatewayIP: gateway.ip,
+                                           gatewayMAC: gateway.mac,
+                                           redirPort: DeviceStore.redirPort,
+                                           dnsPort: DeviceStore.dnsPort)
+            activeRedirectIPs = ips
+            log("正在接管 \(ips.count) 台设备的流量")
+        } catch {
+            log("接管设备失败：\(error)")
+        }
     }
 
     /// 热重载。

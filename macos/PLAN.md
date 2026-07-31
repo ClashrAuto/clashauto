@@ -109,9 +109,12 @@
   - [x] `DeviceStore`（`device` 表：别名/代理开关/策略/最近 IP）
   - [x] `ConfigBuilder`：`redir-port` + `dns.listen` + 每设备 `SRC-IP-CIDR` 规则
   - [x] DevicesPage：**一个开关 + 一个策略选择**，设备端零配置
-  - [ ] 特权 helper 补三件事：写 ARP 应答（BPF）、开 `ip.forwarding`、装/卸 PF anchor
-  - [ ] `ARPSpoofer`（Swift）：周期性发 ARP 应答，停止时**发真网关的正确应答复原**
-  - [ ] 真机验证：拿一台真设备验「开开关即接管、关开关即恢复」
+  - [x] 特权 helper 的 `Redirector`：ARP 欺骗 + `ip.forwarding` + PF anchor，全 Swift
+  - [x] 复原路径：XPC 连接一断（app 崩/被杀）就自动复原；`ARPPacket` 复原字节有单测钉住
+  - [x] `LanTopology`：取默认网关三要素，真机自检通过（COAST_TOPO_SELFTEST）
+  - [x] `CoastController.syncRedirect`：开关/策略变更后下发给 helper，退出时先复原
+  - [ ] **真机验证**：拿一台真设备验「开开关即接管、关开关即恢复」——
+        需正式签名的 helper（ad-hoc 装不了），只能等签名构建，本地到此为止
 
 ## 变更日志
 
@@ -518,3 +521,24 @@
 
   `lastIP` 落库而不是只放内存：设备暂时不在邻居表里（睡眠、刚重启）时规则不能凭空消失 ——
   那会让它在恢复的一瞬间直连出去。
+- 2026-07-31：**透明代理的接管与复原全部落地**（168 用例全绿，全 Swift、零 C++）。
+
+  ★ **复原是这个功能的命门，我把它设计成第一位**：被欺骗的设备把本机当网关，一旦停止转发
+  就直接断网，且 ARP 缓存要十几分钟才过期。为此：
+  - **整个欺骗循环跑在 helper 里，不把 BPF fd 传回 app**（Qt 版是后者）。这样 app 无论怎么死
+    （正常退出 / 崩溃 / 被 SIGKILL），XPC 连接一断，helper 的 `invalidationHandler` 就复原。
+    fd 传给 app 的话，app 被 SIGKILL 时没有任何人来发那几个复原包。
+  - 复原发的是「网关 IP → **真网关 MAC**」，发三遍加冗余（ARP 不可靠，丢一个包=一台设备断网
+    十几分钟）。`ARPPacket` 的复原字节有专门单测逐字节钉住。
+  - `stopCore` 里**第一件事**就是 stopRedirect —— 哪怕后面出错，设备也已经放回去了。
+  - `ip.forwarding` **只回滚我们开的那一次**：用户可能自己开着它干别的。
+  - `LanTopology.defaultGateway` **三要素缺一就返回 nil**，让调用方根本不开始接管，
+    而不是带着残缺信息硬上（没有网关 MAC = 发不出复原包）。
+
+  组件：`ARPPacket`（报文构造，纯字节可测）、`Redirector`（helper 里的 root 侧实现）、
+  `CBPF`（BIOCSETIF 等 _IOW 宏的 C shim，Swift 导入不进来）、`LanTopology`（网关三要素）、
+  `MacHelperClient.startRedirect/stopRedirect`、`CoastController.syncRedirect`。
+
+  ⚠️ **真机联调还没做**：需要正式签名的 helper（ad-hoc 装不了，见阶段 8 的结论），
+  本地只能验到「网关三要素取得到、配置规则生成对、报文字节对」。真设备上的
+  「开开关即接管、关开关即恢复」得等签名构建。这一点如实记着，没假装跑通。

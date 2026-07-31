@@ -53,4 +53,27 @@ public enum HelperConstants {
 
     /// 停止由本 helper 启动的核心。
     func stopCore(withReply reply: @escaping (Bool, String) -> Void)
+
+    /// 开始接管指定设备的流量（零配置透明代理）。以 root 做三件事：
+    ///   1. `net.inet.ip.forwarding=1`；
+    ///   2. 装 PF anchor：把这些源 IP 的 TCP 重定向到 `redirPort`、UDP :53 重定向到 `dnsPort`；
+    ///   3. 周期性向这些设备发 ARP 应答，宣称网关 IP 的 MAC 是本机。
+    ///
+    /// ★ **欺骗循环整个跑在 helper 里，而不是把 BPF fd 传回 app**（Qt 版是后者）。
+    ///   理由是安全收尾：被欺骗的设备把本机当网关，一旦我们不再转发它就**直接断网**，
+    ///   而且它的 ARP 缓存要十几分钟才过期。只有 helper 能保证「app 崩了也复原」——
+    ///   XPC 连接一断它就自己收尾（见 helper 里的 invalidationHandler）。
+    ///   fd 传给 app 的话，app 被 SIGKILL 时没有任何人来发那几个复原包。
+    ///
+    /// `deviceIPsCommaSep`：逗号分隔的设备 IP（避免 NSXPC 的容器类白名单样板）。
+    func startRedirect(deviceIPsCommaSep: String,
+                       interface: String,
+                       gatewayIP: String,
+                       gatewayMAC: String,
+                       redirPort: Int,
+                       dnsPort: Int,
+                       withReply reply: @escaping (Bool, String) -> Void)
+
+    /// 停止接管并**把设备复原**：向它们发真网关 MAC 的 ARP 应答，卸掉 PF anchor。
+    func stopRedirect(withReply reply: @escaping (Bool, String) -> Void)
 }
