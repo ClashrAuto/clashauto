@@ -2326,3 +2326,25 @@ macOS 上的对应物是 `NSWindow.contentMinSize`。新增 `.windowMinSize(widt
 （在 `updateNSView` 里反复写窗口约束本来就是错的），四个窗的最小尺寸都真的生效了。
 
 `swift test` 308 全绿；`i18n_check.py` 248/248。
+
+
+## 2026-08-01(续三十二) · 翻译第一次**真的跑起来看**：英文与德文都对
+
+`i18n_check.py` 一路报 248/248，但那只证明**表里有这一条**，不证明界面真的换得过去。
+这一轮用 `COAST_LANG=<code>` 把设置页（文案最密的一页）分别渲染成英文与德文。
+
+**两门都完整换过去了**：侧栏（Status / Nodes / Device / Subscriptions / Settings / Logs /
+About；德文 Status / Knoten / Gerät / Abos / Einstellungen / Protokolle / Über）、
+标签（System / Filter / Groups / Rules）、右上「应用」→ Apply / Anwenden、
+每一行设置项、页脚（Ultra / Web / Core / Rules）。
+
+★ **德文那张最有价值** —— 它正是 Qt 注释里反复点名的「长译文」场景：
+`Intervall der automatischen Abonnement-Aktualisierung` 这一行长得离谱，
+而行仍然是好的：标签占满剩余宽、数字框与「Min.」纹丝不动、没有换行也没有溢出。
+侧栏的 `Einstellungen` / `Benachrichtigungen` 同样在 150 宽里排得下。
+
+这是这次移植里**第一次**端到端验翻译 —— 之前全部是「表覆盖率」。
+覆盖率 100% 而界面不换，是完全可能同时成立的两件事（`.id(i18n.language)` 那条重建路径
+一旦断掉就是这样），现在这条路也钉住了。
+
+`swift test` 308 全绿；`i18n_check.py` 248/248。
