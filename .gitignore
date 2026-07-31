@@ -3,3 +3,4 @@ screenshots/
 *.png
 clashauto-c++/build-qml/
 clashauto-c++/build-release/
+schat.build/
