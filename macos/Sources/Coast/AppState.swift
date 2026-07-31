@@ -54,6 +54,13 @@ public final class AppState {
         return page
     }()
 
+    /// 供**独立窗口** scene 取用的那一份 `AppState`。
+    ///
+    /// SwiftUI 的 `Window` scene 不在主窗的 environment 链里，拿不到 `RootView` 注入的
+    /// 那个实例。而这个应用**只有一份状态**（核心、轮询、台账都只能有一份），
+    /// 所以主窗建好时把它登记在这里，独立窗口按需取。
+    @MainActor public static var sharedForWindows: AppState?
+
     // MARK: 后端
 
     public private(set) var config: AppConfig

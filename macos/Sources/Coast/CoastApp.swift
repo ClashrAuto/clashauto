@@ -24,6 +24,16 @@ struct CoastApp: App {
             // 默认的「新建窗口」对常驻托盘的单窗应用没有意义，去掉免得用户开出第二个。
             CommandGroup(replacing: .newItem) {}
         }
+
+        // 更新窗是**独立顶层窗**，不是 sheet —— 与 Qt 一致，而且这里有个硬理由：
+        // 它 600×560，比主窗默认的 900×**510** 还高。做成 sheet 的话底部那行
+        // 「国内代理下载 / 关闭 / 更新」会被主窗边界裁掉，**按钮根本点不到**
+        // （截图里就是这样：整条动作行不见了）。独立窗口不受主窗尺寸约束。
+        Window("Coast 更新".t, id: UpdateWindowID.value) {
+            UpdateWindowRoot()
+        }
+        .defaultSize(width: 600, height: 560)
+        .keyboardShortcut(nil)
     }
 }
 
@@ -43,6 +53,7 @@ private struct RootView: View {
             .background(.ultraThinMaterial)
             .task {
                 I18n.shared.applyConfig(state.config)
+                AppState.sharedForWindows = state
                 AppDelegate.shared?.attach(state: state)
                 state.start()
             }
@@ -135,5 +146,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
         NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+    }
+}
+
+/// 更新窗的 scene id。写成常量而不是散在两处的字面量 —— 打开与声明用的必须是同一个串。
+enum UpdateWindowID { static let value = "coast.update" }
+
+/// 更新窗的根视图：自己拿 `AppState`（`Window` scene 不在主窗的 environment 链里）。
+///
+/// ★ **不能用 `@State` 接** —— `@State` 的初值只算一次，而 SwiftUI 可能在主窗
+/// 建好（也就是 `sharedForWindows` 被赋值）**之前**就先求值一次这个 scene 的根，
+/// 于是它永远抱着那个 nil，窗口开出来是**全空的**（截图里就是一整块空白）。
+/// 每次 body 求值时现读那个静态量才对。
+private struct UpdateWindowRoot: View {
+    var body: some View {
+        if let state = AppState.sharedForWindows {
+            UpdateView()
+                .environment(state)
+                .environment(state.theme)
+        } else {
+            // 主窗还没建好（理论上打不开这个窗，留个兜底而不是崩）。
+            Color.clear
+        }
     }
 }

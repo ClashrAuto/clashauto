@@ -49,7 +49,12 @@ struct DeviceDetailView: View {
             }
             .padding(12)
         }
-        .frame(width: 600, height: 720)
+        // Qt 那边是 600×720 的**独立窗**（最小 420×420）。这里仍是 sheet，所以高度写成
+        // 「理想 720、但不超过可用高度」——写死 720 的话，主窗默认才 510 高，
+        // sheet 会被裁掉一大截（更新窗就是这么发现的：底部整条动作行消失、按钮点不到）。
+        // 内容本来就在 ScrollView 里，压矮只是要多滚两下，不会丢东西。
+        .frame(width: 600)
+        .frame(minHeight: 420, idealHeight: 720, maxHeight: 720)
         .background(theme.card)
         .task { await load() }
     }

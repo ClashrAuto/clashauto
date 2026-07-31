@@ -8,8 +8,8 @@ struct MainView: View {
     @Environment(Theme.self) private var theme
     /// 模式按钮组是否展开。
     @State private var modeExpanded = false
-    /// 更新窗（点侧栏版本行打开）。
-    @State private var showingUpdate = false
+    /// 打开独立窗口用（更新窗）。
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 0) {
@@ -27,9 +27,6 @@ struct MainView: View {
         // mac 上窗体本身透明、露出毛玻璃（见 CoastApp 的 .background(.ultraThinMaterial)）
         .background(.clear)
         .preferredColorScheme(theme.dark ? .dark : .light)
-        .sheet(isPresented: $showingUpdate) {
-            UpdateView().environment(state).environment(theme)
-        }
     }
 
     // MARK: 侧栏
@@ -78,7 +75,7 @@ struct MainView: View {
     /// 沿用本项目对 `ConnectionsWindow` / `RuleEditorWindow` 的既有做法）。
     private var versionRow: some View {
         Button {
-            showingUpdate = true
+            openWindow(id: UpdateWindowID.value)
         } label: {
             // 角标贴在版本文字的**右上角**：QML 里 badgeRow 的
             // `verticalCenter` 对的是 `verText.top`，也就是整组有一半浮在文字上方。
