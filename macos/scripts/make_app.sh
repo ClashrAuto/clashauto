@@ -19,7 +19,23 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 ASSETS="$ROOT/../clashauto-c++/assets"
 
-VERSION="0.1.0"
+# 版本号规则与 CI 完全一致：`major.minor` 取自 clashauto-c++/CMakeLists.txt 的
+# project(... VERSION x.y)，末位是 git 提交数。**只有最后一位会变** ——
+# major/minor 是人工决定的产品版本，不该因为本地打了一次包就跳。
+#
+# 写死一个 "0.1.0" 的话，本地包和 CI 包的版本对不上：升级检查按版本比大小，
+# 一个 0.1.0 的本地包会认为线上任何版本都是「新版」，每次启动都提示更新。
+default_version() {
+    local base major minor count
+    base="$(sed -nE 's/.*project[[:space:]]*\([[:space:]]*[^ ]+[[:space:]]+VERSION[[:space:]]+([0-9]+(\.[0-9]+){1,3}).*/\1/p' \
+        "$ROOT/../clashauto-c++/CMakeLists.txt" 2>/dev/null | head -n 1)"
+    [ -n "$base" ] || { echo "0.0.0"; return; }
+    major="$(echo "$base" | cut -d. -f1)"
+    minor="$(echo "$base" | cut -d. -f2)"; [ -n "$minor" ] || minor=0
+    count="$(git -C "$ROOT/.." rev-list --count HEAD 2>/dev/null || echo 0)"
+    echo "${major}.${minor}.${count}"
+}
+VERSION=""
 UNIVERSAL=0
 SIGN_IDENTITY="-"
 
@@ -40,6 +56,7 @@ else
     BIN_DIR="$ROOT/.build/release"
 fi
 
+[ -n "$VERSION" ] || VERSION="$(default_version)"
 echo "==> 构建 (version=$VERSION, universal=$UNIVERSAL)"
 swift build "${BUILD_ARGS[@]}"
 

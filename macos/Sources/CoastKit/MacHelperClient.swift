@@ -367,7 +367,9 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
 
 /// 一次性认领标记。XPC 的错误处理块与正常回复块都可能触发，`CheckedContinuation`
 /// 被 resume 两次会直接崩，用它保证只有第一个赢。
-private final class OnceFlag: @unchecked Sendable {
+/// 只放行一次的标志。多个回调都可能先到（正常回复 / 错误 / 超时），
+/// 而 `CheckedContinuation` 恢复两次会直接崩。
+final class OnceFlag: @unchecked Sendable {
     private var claimed = false
     private let lock = NSLock()
 
