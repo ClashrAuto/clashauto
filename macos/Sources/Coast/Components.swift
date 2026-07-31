@@ -8,7 +8,13 @@ struct Card<Content: View>: View {
     var body: some View {
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(theme.card)
+            // 内容卡半透：整窗玻璃的关键一层。
+            //
+            // 原来是实底 `theme.card`，于是只有侧栏和页脚透、中间一大块是死的 ——
+            // 「整个窗口的毛玻璃」其实只做了个边。这里压到 0.55 而不是全透：
+            // 全透的话卡片上的正文会直接压在桌面壁纸上，深色壁纸尚可，
+            // 亮色壁纸下小字基本读不了。
+            .background(theme.card.opacity(0.55))
             .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
     }
 }

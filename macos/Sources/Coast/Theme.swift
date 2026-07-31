@@ -50,7 +50,11 @@ public final class Theme {
     // MARK: 结构面
     /// 主内容卡 / 页脚开关底
     public var card: Color { dark ? Color(hex: 0x000000) : Color(hex: 0xFFFFFF) }
-    public var metricBg: Color { dark ? Color(hex: 0x2A2A2A) : Color(hex: 0xEEEEEE) }
+    /// 小卡底色。整窗玻璃化后带一点通透 —— 完全实底的话，六张卡会像六块贴纸糊在
+    /// 玻璃上，玻璃只在卡与卡的缝隙里露出来，反而更显脏。
+    public var metricBg: Color {
+        (dark ? Color(hex: 0x2A2A2A) : Color(hex: 0xEEEEEE)).opacity(0.82)
+    }
     public var nodeRowBg: Color { dark ? Color(hex: 0x252525) : Color(hex: 0xEEEEEE) }
     public let nodeRowActive = Color(red: 72 / 255, green: 151 / 255, blue: 248 / 255, opacity: 0.69)
 

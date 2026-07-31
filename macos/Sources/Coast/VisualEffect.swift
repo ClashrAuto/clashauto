@@ -33,10 +33,38 @@ struct VisualEffectBackground: NSViewRepresentable {
     }
 }
 
+/// 把承载它的 `NSWindow` 设成非不透明 + 透明底。
+///
+/// ★ 这一步不做的话，前面那层 `NSVisualEffectView(.behindWindow)` **等于白做**：
+///   窗口本身不透明时，窗口服务器根本不会把它后面的内容合成进来，材质只能退化成
+///   一块和背景色差不多的灰。实测：不设的话把窗口挪到屏幕两端，侧栏像素只从
+///   #3C4045 变到 #3B3D3C —— 几乎不动，那不是玻璃，是灰底。
+struct WindowConfigurator: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { configure(view.window) }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async { configure(view.window) }
+    }
+
+    private func configure(_ window: NSWindow?) {
+        guard let window else { return }
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        // 阴影要保留：非不透明窗口若不显式开启，macOS 会连投影一起去掉，
+        // 窗口边缘会糊在桌面上，看不出这是一个独立的窗。
+        window.hasShadow = true
+    }
+}
+
 extension View {
-    /// 给整窗铺一层毛玻璃底。
+    /// 给整窗铺一层毛玻璃底（并把窗口本身设为透明，否则材质无效）。
     func windowGlass(_ material: NSVisualEffectView.Material = .sidebar) -> some View {
         background(VisualEffectBackground(material: material).ignoresSafeArea())
+            .background(WindowConfigurator().frame(width: 0, height: 0))
     }
 }
 
