@@ -1,59 +1,67 @@
 import CoastKit
 import SwiftUI
 
-/// 局域网设备**浏览**页（只读）。
+/// 局域网设备页。
 ///
-/// ★ 这里刻意**没有**「代理这台设备」开关。Qt 版有，但那个开关要生效，前提是把设备的流量
-///   经二层投毒引到本机（`src/net/**` 那套网关），而它是否移植还没定
-///   （见 `docs/gateway-evaluation.md`）。放一个点了没反应的开关，比不放更糟 ——
-///   用户会以为自己配对了、然后困惑于为什么没生效。所以这里把话直接写在页面上。
+/// 两份数据按 MAC 合并：
+///   • **发现**（`LanBrowser`，读系统邻居表）—— 这个网络上现在有谁；
+///   • **台账**（`DeviceStore`，SQLite）—— 我们给谁签发过代理凭据、用什么策略。
+///
+/// 代理是**零配置**的：用户在这里点一下开关，设备端什么都不用改。
+/// 底下发生的是 ARP 欺骗 + 内核转发 + PF 重定向到 mihomo 的 redir-port（见 `DeviceStore` 的说明）。
+///
+/// 正因为设备端不配置，这一页就**不该出现任何要用户去抄的东西** ——
+/// 一个开关、一个策略选择，就是全部。
 struct DevicesPage: View {
+    @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
 
-    @State private var devices: [LanBrowser.Device] = []
+    @State private var discovered: [LanBrowser.Device] = []
+    @State private var ledger: [String: DeviceStore.Device] = [:]
     @State private var scanning = false
-    @State private var lastScan: Date?
+    @State private var expanded: String?
 
     private let browser = LanBrowser()
+
+    /// 合并后的行：发现到的 + 只在台账里的（设备离线了但凭据还在，不能让它从界面上消失）。
+    private var rows: [Row] {
+        var result = discovered.map { Row(discovered: $0, record: ledger[$0.mac]) }
+        let seen = Set(discovered.map(\.mac))
+        for (mac, record) in ledger where !seen.contains(mac) {
+            var offline = LanBrowser.Device(mac: mac, ip: "", interface: "")
+            offline.hostname = record.alias
+            result.append(Row(discovered: offline, record: record, online: false))
+        }
+        return result
+    }
+
+    struct Row: Identifiable {
+        var discovered: LanBrowser.Device
+        var record: DeviceStore.Device?
+        var online = true
+        var id: String { discovered.mac }
+        var proxyEnabled: Bool { record?.proxyEnabled ?? false }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().overlay(theme.divider)
-
-            if devices.isEmpty {
-                emptyState
-            } else {
-                List(devices) { device in
-                    DeviceRow(device: device)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-            }
-
+            if rows.isEmpty { emptyState } else { list }
             Divider().overlay(theme.divider)
-            footnote
+            proxyBanner
         }
         .task { await scan() }
     }
 
     private var header: some View {
         HStack(spacing: 8) {
-            Button {
-                Task { await scan() }
-            } label: {
+            Button { Task { await scan() } } label: {
                 Label(scanning ? "扫描中…".t : "重新扫描".t, systemImage: "arrow.clockwise")
             }
             .disabled(scanning)
-
-            if let lastScan {
-                Text(lastScan, format: .dateTime.hour().minute().second())
-                    .font(.system(size: 10)).foregroundStyle(theme.textMuted)
-            }
             Spacer()
-            Text("\(devices.count) 台")
+            Text("\(rows.count) 台")
                 .font(.system(size: 11)).foregroundStyle(theme.textMuted)
         }
         .padding(10)
@@ -61,85 +69,188 @@ struct DevicesPage: View {
 
     private var emptyState: some View {
         VStack(spacing: 6) {
-            Image(systemName: "wifi.slash")
-                .font(.system(size: 26)).foregroundStyle(theme.textMuted)
-            Text(scanning ? "扫描中…".t : "邻居表里还没有设备".t)
-                .foregroundStyle(theme.textMuted)
+            Image(systemName: "wifi.slash").font(.system(size: 26)).foregroundStyle(theme.textMuted)
+            Text(scanning ? "扫描中…".t : "邻居表里还没有设备".t).foregroundStyle(theme.textMuted)
             Text("只读取系统已有的邻居表，所以只看得到最近通信过的设备".t)
                 .font(.system(size: 11)).foregroundStyle(theme.textMuted)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// 把「为什么没有代理开关」明说出来，而不是留一片空白让人猜。
-    private var footnote: some View {
+    private var list: some View {
+        List(rows) { row in
+            VStack(spacing: 0) {
+                DeviceRow(row: row,
+                          expanded: expanded == row.id,
+                          onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
+                          onToggleExpand: { expanded = expanded == row.id ? nil : row.id })
+                if expanded == row.id, let record = row.record, record.proxyEnabled {
+                    PolicyBox(record: record,
+                              targets: state.clash.groups,
+                              onPolicyChange: { mode, target in
+                                  setPolicy(row: row, mode: mode, target: target)
+                              })
+                }
+            }
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+    }
+
+    /// 底部横幅：说明当前状态。设备端零配置，所以这里没有任何要用户抄的东西。
+    @ViewBuilder
+    private var proxyBanner: some View {
+        let enabledCount = rows.filter(\.proxyEnabled).count
         HStack(spacing: 6) {
-            Image(systemName: "info.circle")
+            Image(systemName: enabledCount > 0 ? "network" : "info.circle")
                 .font(.system(size: 10)).foregroundStyle(theme.textMuted)
-            Text("本页仅浏览。「代理局域网设备」需要二层网关支持，macOS 版尚未提供".t)
-                .font(.system(size: 10)).foregroundStyle(theme.textMuted)
+            if enabledCount > 0 {
+                Text("\(enabledCount) 台设备已接管 · 设备端无需任何配置")
+                    .font(.system(size: 10)).foregroundStyle(theme.textSecondary)
+            } else {
+                Text("打开开关即可接管该设备的流量，设备端无需任何配置".t)
+                    .font(.system(size: 10)).foregroundStyle(theme.textMuted)
+            }
             Spacer()
         }
         .padding(.horizontal, 10)
         .frame(height: 26)
     }
 
+    // MARK: 动作
+
     private func scan() async {
         scanning = true
         defer { scanning = false }
-        devices = await browser.scan()
-        lastScan = Date()
+        discovered = await browser.scan()
+        reloadLedger()
+    }
+
+    private func reloadLedger() {
+        ledger = Dictionary(uniqueKeysWithValues: state.devices.all().map { ($0.mac, $0) })
+    }
+
+    private func setProxy(row: Row, enabled: Bool) {
+        _ = state.devices.setProxyEnabled(mac: row.discovered.mac, enabled, ip: row.discovered.ip)
+        reloadLedger()
+        if enabled { expanded = row.id }   // 刚开启就把策略选择摊开
+        Task { await state.controller.rebuildConfig() }
+    }
+
+    private func setPolicy(row: Row, mode: DeviceStore.PolicyMode, target: String) {
+        guard var record = state.devices.device(mac: row.discovered.mac) else { return }
+        record.policyMode = mode
+        record.policyTarget = target
+        _ = state.devices.save(record)
+        reloadLedger()
+        Task { await state.controller.rebuildConfig() }
     }
 }
 
 private struct DeviceRow: View {
     @Environment(Theme.self) private var theme
-    let device: LanBrowser.Device
+    let row: DevicesPage.Row
+    let expanded: Bool
+    let onToggleProxy: (Bool) -> Void
+    let onToggleExpand: () -> Void
 
     var body: some View {
         HStack(spacing: 10) {
-            // 类型底色 + 白图标，与 Qt 版 Theme.deviceColor/deviceGlyph 同一套配色
             RoundedRectangle(cornerRadius: 7, style: .continuous)
-                .fill(theme.deviceColor(device.typeKey))
+                .fill(theme.deviceColor(row.discovered.typeKey))
                 .frame(width: 30, height: 30)
                 .overlay {
-                    Image(systemName: theme.deviceSymbol(device.typeKey))
-                        .font(.system(size: 14))
-                        .foregroundStyle(.white)
+                    Image(systemName: theme.deviceSymbol(row.discovered.typeKey))
+                        .font(.system(size: 14)).foregroundStyle(.white)
                 }
+                .opacity(row.online ? 1 : 0.45)
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {
-                    Text(device.displayName)
-                        .font(.system(size: 13)).foregroundStyle(theme.textPrimary)
-                        .lineLimit(1)
-                    if device.isGateway {
-                        Text("网关".t)
-                            .font(.system(size: 9))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 4).padding(.vertical, 1)
-                            .background(Capsule().fill(theme.accent))
-                    }
+                    Text(row.discovered.displayName)
+                        .font(.system(size: 13)).foregroundStyle(theme.textPrimary).lineLimit(1)
+                    if row.discovered.isGateway { tag("网关".t, theme.accent) }
+                    if !row.online { tag("离线".t, theme.textMuted) }
                 }
-                Text("\(device.ip) · \(device.mac)\(device.interface.isEmpty ? "" : " · " + device.interface)")
+                Text(subtitle)
                     .font(.system(size: 10).monospacedDigit())
-                    .foregroundStyle(theme.textMuted)
-                    .lineLimit(1)
+                    .foregroundStyle(theme.textMuted).lineLimit(1)
             }
 
             Spacer(minLength: 8)
 
-            if !device.vendor.isEmpty {
-                Text(device.vendor)
-                    .font(.system(size: 10)).foregroundStyle(theme.textMuted)
-                    .lineLimit(1).truncationMode(.tail)
-                    .frame(maxWidth: 180, alignment: .trailing)
+            if row.proxyEnabled {
+                Button(action: onToggleExpand) {
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.borderless)
             }
+
+            Toggle("", isOn: Binding(get: { row.proxyEnabled }, set: onToggleProxy))
+                .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                .help("代理".t)
         }
         .padding(.horizontal, 10)
         .frame(height: 46)
         .background(theme.nodeRowBg)
         .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
-        .textSelection(.enabled)
+    }
+
+    private var subtitle: String {
+        var parts: [String] = []
+        if !row.discovered.ip.isEmpty { parts.append(row.discovered.ip) }
+        parts.append(row.discovered.mac)
+        if !row.discovered.vendor.isEmpty { parts.append(row.discovered.vendor) }
+        return parts.joined(separator: " · ")
+    }
+
+    private func tag(_ text: String, _ color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9)).foregroundStyle(.white)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .background(Capsule().fill(color))
+    }
+}
+
+/// 展开后只有策略选择。**没有凭据、没有地址** —— 设备端零配置是这个功能的全部意义，
+/// 让用户去抄任何东西都等于没做。
+private struct PolicyBox: View {
+    @Environment(Theme.self) private var theme
+    let record: DeviceStore.Device
+    let targets: [String]
+    let onPolicyChange: (DeviceStore.PolicyMode, String) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("策略".t).font(.system(size: 11)).foregroundStyle(theme.textMuted)
+            Picker("", selection: Binding(
+                get: { record.policyMode },
+                set: { onPolicyChange($0, record.policyTarget) }
+            )) {
+                ForEach(DeviceStore.PolicyMode.allCases, id: \.self) { Text($0.title.t).tag($0) }
+            }
+            .labelsHidden().frame(width: 130)
+
+            if record.policyMode == .global {
+                Picker("", selection: Binding(
+                    get: { record.policyTarget },
+                    set: { onPolicyChange(.global, $0) }
+                )) {
+                    // 没选目标时 applyDevicePolicies 会跳过这条规则，给个明确占位而不是空白
+                    Text("（未选）".t).tag("")
+                    ForEach(targets, id: \.self) { Text($0).tag($0) }
+                }
+                .labelsHidden().frame(maxWidth: 200)
+            }
+            Spacer()
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(theme.metricBg)
+        .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        .padding(.top, 4)
     }
 }

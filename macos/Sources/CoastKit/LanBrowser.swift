@@ -23,6 +23,14 @@ public struct LanBrowser: Sendable {
 
         public var id: String { mac }
 
+        /// 台账里有、但这轮没扫到的设备也要能构造出来（离线行）——
+        /// 凭据还在，不能因为设备暂时不响应就从界面上消失。
+        public init(mac: String, ip: String, interface: String) {
+            self.mac = mac
+            self.ip = ip
+            self.interface = interface
+        }
+
         /// 显示名：主机名 > 厂商 > IP。
         public var displayName: String {
             if !hostname.isEmpty { return hostname }

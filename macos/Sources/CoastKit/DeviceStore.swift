@@ -2,25 +2,29 @@ import Foundation
 
 /// 设备台账（`coast.db` 的 `device` 表）——「设备」页的持久层。
 ///
-/// ## 与 Qt 版的架构差异（重要）
+/// ## macOS 原生的**零配置**透明代理
 ///
-/// Qt 版靠**二层 ARP/NDP 投毒**把局域网设备的流量劫持到本机，设备端零配置。
-/// Swift 版走 **macOS 原生路子**：核心开一个绑 `0.0.0.0` 的**带认证的代理入站**，
-/// 设备端手动指向 `本机IP:端口` 并填凭据。代价是设备要配一次，换来的是
-/// 不做投毒、不需要用户态 TCP/IP 栈、不需要 root、不需要 BPF —— 少了整整一个子系统。
+/// 设备端**什么都不用配**，用户只在软件里点一下开关。链路是：
 ///
-/// 两个由此产生的、**必须**与 Qt 版不同的决定：
-///   1. **listener 绑 `0.0.0.0` 而不是 `127.0.0.1`** —— 不劫持就得让设备够得着。
-///   2. **每台设备一个随机密码**，而不是 Qt 版那个固定字面量 `coast`。
-///      端口现在暴露在局域网上，固定密码等于开放代理 —— 谁扫到这个口都能白嫖，
-///      甚至拿它当跳板。这是架构变化**强制**的，不是可选的加固。
+///   1. **ARP 欺骗**让目标设备把本机当成网关，于是它的流量发到我们网卡上；
+///   2. **`net.inet.ip.forwarding=1`** 让内核愿意转发这些不是发给自己的包；
+///   3. **PF 的 `rdr` 规则**把该设备的 TCP 重定向到 mihomo 的 `redir-port`、
+///      UDP :53 重定向到 mihomo 的 DNS 口；
+///   4. mihomo 按规则分流。
 ///
-/// 身份也随之变了：Qt 版按 MAC 认设备（投毒时看得到二层地址）；这里按**我们签发的凭据**
-/// 认设备（`IN-USER` 规则的用户名）。MAC 仍然是台账主键 —— 它是设备发现时唯一稳定的身份，
-/// 用户在界面上看到的也是它。
+/// **关键点：不需要用户态 TCP/IP 栈。** Qt 版为此背了 13 万行 lwIP，是因为它在二层自己
+/// 收发帧、自己重组 TCP；而 macOS 上内核转发 + PF 重定向把这一整层都省掉了 ——
+/// 包由内核处理，我们只负责「让它来」和「让它拐弯」。这就是同一个问题的 macOS 原生答案。
+///
+/// ## 由此决定的身份口径
+///
+/// 透明重定向看不到任何凭据，设备只能**按源 IP** 识别，所以每设备策略走
+/// `SRC-IP-CIDR,<ip>/32,<目标>` 而不是 Qt 版的 `IN-USER`。
+/// 台账主键仍是 **MAC** —— IP 会随 DHCP 漂移，MAC 才是稳定身份；每轮扫描把当前 IP
+/// 刷进来，规则随之重新生成。
 public final class DeviceStore: @unchecked Sendable {
 
-    /// 每设备的代理策略。写进 `full.yaml` 就是 `IN-USER` 规则。
+    /// 每设备的代理策略。写进 `full.yaml` 就是 `SRC-IP-CIDR` 规则。
     public enum PolicyMode: String, Sendable, CaseIterable, Codable {
         case follow   // 跟随全局（不生成专属规则）
         case rule     // 规则分流（走主选择组）
@@ -44,27 +48,31 @@ public final class DeviceStore: @unchecked Sendable {
         public var mac: String
         /// 用户备注名（优先于自动识别名显示）。
         public var alias = ""
-        /// 是否为它签发了代理凭据。
+        /// 是否代理这台设备（ARP 欺骗 + PF 重定向）。
         public var proxyEnabled = false
         public var policyMode: PolicyMode = .follow
         /// `global` 模式下的目标节点/策略组名。
         public var policyTarget = ""
-        /// 签发给这台设备的代理密码。**随机生成，每台不同**。
-        public var password = ""
+        /// 最近一次看到的 IP。生成 `SRC-IP-CIDR` 规则要用它。
+        ///
+        /// 落库而不是只放内存：设备暂时不在邻居表里（睡眠、刚重启）时，
+        /// 规则不能因此凭空消失 —— 那会让它在恢复的一瞬间直连出去。
+        public var lastIP = ""
         public var firstSeen = Date()
 
         public var id: String { mac }
 
-        /// 代理用户名：`dev-<去冒号小写 mac>`。
-        /// 纯 ASCII，可直接写进 YAML 而不必加引号；也便于在核心日志里一眼认出是哪台。
-        public var proxyUser: String { DeviceStore.proxyUser(for: mac) }
-
         public init(mac: String) { self.mac = mac }
     }
 
-    /// 局域网代理入站端口。与主混合端口分开：**主混合口保持免认证且只监听本机**，
-    /// Coast 自己的下载测速走它；对外的这个口恒带认证。
-    public static let lanProxyPort = 7899
+    /// mihomo 的透明代理端口（`redir-port`）。PF 把被代理设备的 TCP 重定向到这里。
+    ///
+    /// 与主混合端口分开：混合口仍 `allow-lan: false` 只监听本机，
+    /// 而这个口只接受**经 PF 重定向进来的**流量，不对外广播。
+    public static let redirPort = 7893
+    /// mihomo 的 DNS 监听端口。被代理设备的 UDP :53 重定向到这里，
+    /// 让它拿到 fake-ip 结果，域名规则才匹配得上。
+    public static let dnsPort = 1053
 
     private let database: SQLiteDatabase?
 
@@ -84,7 +92,7 @@ public final class DeviceStore: @unchecked Sendable {
               proxy_enabled INTEGER NOT NULL DEFAULT 0,
               policy_mode TEXT NOT NULL DEFAULT 'follow',
               policy_target TEXT NOT NULL DEFAULT '',
-              password TEXT NOT NULL DEFAULT '',
+              last_ip TEXT NOT NULL DEFAULT '',
               first_seen INTEGER NOT NULL DEFAULT 0)
             """)
         // 生成配置时只查「开着代理的」，给它一条索引。
@@ -96,7 +104,7 @@ public final class DeviceStore: @unchecked Sendable {
     public func all() -> [Device] {
         var result: [Device] = []
         database?.query("""
-            SELECT mac, alias, proxy_enabled, policy_mode, policy_target, password, first_seen
+            SELECT mac, alias, proxy_enabled, policy_mode, policy_target, last_ip, first_seen
             FROM device ORDER BY mac
             """) { row in
             var device = Device(mac: row.text(0))
@@ -104,7 +112,7 @@ public final class DeviceStore: @unchecked Sendable {
             device.proxyEnabled = row.int(2) != 0
             device.policyMode = PolicyMode(rawValue: row.text(3)) ?? .follow
             device.policyTarget = row.text(4)
-            device.password = row.text(5)
+            device.lastIP = row.text(5)
             device.firstSeen = Date(timeIntervalSince1970: Double(row.int(6)))
             result.append(device)
         }
@@ -119,19 +127,19 @@ public final class DeviceStore: @unchecked Sendable {
     public func save(_ device: Device) -> Bool {
         guard let database else { return false }
         return database.run("""
-            INSERT INTO device (mac, alias, proxy_enabled, policy_mode, policy_target, password, first_seen)
+            INSERT INTO device (mac, alias, proxy_enabled, policy_mode, policy_target, last_ip, first_seen)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(mac) DO UPDATE SET
               alias = excluded.alias,
               proxy_enabled = excluded.proxy_enabled,
               policy_mode = excluded.policy_mode,
               policy_target = excluded.policy_target,
-              password = excluded.password
+              last_ip = excluded.last_ip
             """, [
             .text(device.mac), .text(device.alias),
             .int(device.proxyEnabled ? 1 : 0),
             .text(device.policyMode.rawValue), .text(device.policyTarget),
-            .text(device.password),
+            .text(device.lastIP),
             .int(Int64(device.firstSeen.timeIntervalSince1970)),
         ])
     }
@@ -141,42 +149,33 @@ public final class DeviceStore: @unchecked Sendable {
         database?.run("DELETE FROM device WHERE mac = ?", [.text(mac)]) ?? false
     }
 
-    /// 为设备开启代理：没有密码就**当场签发一个随机的**。
-    ///
-    /// 密码只在这里生成一次并落库，之后一直复用 —— 每次重建配置都换密码的话，
-    /// 用户已经配好的设备会在下一次热重载后集体掉线。
+    /// 开/关某台设备的代理。`ip` 是这一刻看到的地址，用来生成 `SRC-IP-CIDR` 规则。
     @discardableResult
-    public func setProxyEnabled(mac: String, _ enabled: Bool) -> Device? {
+    public func setProxyEnabled(mac: String, _ enabled: Bool, ip: String = "") -> Device? {
         var device = self.device(mac: mac) ?? Device(mac: mac)
         device.proxyEnabled = enabled
-        if enabled, device.password.isEmpty {
-            device.password = Self.generatePassword()
-        }
+        // 空 IP 不覆盖已有值：设备这轮没扫到不代表它换地址了，抹掉反而会让规则消失。
+        if !ip.isEmpty { device.lastIP = ip }
         return save(device) ? device : nil
     }
 
-    /// 生成配置时用的快照：只要开着代理的那些。
+    /// 扫描时把当前 IP 刷进台账。IP 变了就得重生成规则，否则策略会挂在旧地址上。
+    /// 返回 true 表示确实变了，调用方据此决定要不要重建配置。
+    @discardableResult
+    public func updateAddress(mac: String, ip: String) -> Bool {
+        guard !ip.isEmpty, var device = self.device(mac: mac), device.lastIP != ip else { return false }
+        device.lastIP = ip
+        return save(device)
+    }
+
+    /// 生成配置/装 PF 规则时用的快照：开着代理**且知道地址**的那些。
+    /// 不知道地址就没法写规则，跳过（设备一旦出现在邻居表里，下一轮就补上了）。
     public func proxiedDevices() -> [Device] {
-        all().filter { $0.proxyEnabled && !$0.password.isEmpty }
+        all().filter { $0.proxyEnabled && !$0.lastIP.isEmpty }
     }
 
     // MARK: - 工具
 
-    /// `dev-<去冒号小写 mac>`。MAC 非法时返回空串，调用方据此跳过 ——
-    /// 写出一个坏用户名会让核心的 listener 配置整段失效。
-    public static func proxyUser(for mac: String) -> String {
-        let hex = mac.lowercased().filter { $0.isHexDigit }
-        guard hex.count == 12 else { return "" }
-        return "dev-" + hex
-    }
-
-    /// 20 位随机密码。用 `SystemRandomNumberGenerator`（底层 arc4random）——
-    /// 这个口暴露在局域网上，要的是不可预测。
-    static func generatePassword() -> String {
-        let alphabet = Array("abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789")
-        var generator = SystemRandomNumberGenerator()
-        return String((0..<20).map { _ in alphabet[Int.random(in: 0..<alphabet.count, using: &generator)] })
-    }
 
     /// 本机在局域网上的 IPv4 地址（给用户填到设备里的那个）。
     /// 取第一个非回环、非链路本地的 IPv4。

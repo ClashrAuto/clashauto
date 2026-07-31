@@ -59,6 +59,7 @@ public final class AppState {
     public let clash: ClashService
     public let subscriptions: SubscriptionStore
     public let history: HistoryStore
+    public let devices: DeviceStore
     public let theme: Theme
 
     // MARK: 今日流量（数据来自历史库，跨重启保留）
@@ -104,6 +105,7 @@ public final class AppState {
         clash = ClashService(config: loaded)
         subscriptions = SubscriptionStore(config: loaded)
         history = HistoryStore()
+        devices = DeviceStore()
 
         controller.onLog = { [weak self] message in self?.append(log: message) }
         clash.onLog = { [weak self] message in self?.append(log: message) }

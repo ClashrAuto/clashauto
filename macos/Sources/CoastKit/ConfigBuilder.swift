@@ -58,6 +58,14 @@ public final class ConfigBuilder: @unchecked Sendable {
         // 用 always 而不是 strict：strict 由核心自行决定要不要查，没有 PROCESS-NAME 规则时它就不查了，
         // 于是 UI 永远拿不到进程名。代价是每条新连接多一次本机套接字表查询，核心内部有缓存。
         yaml = YAMLSurgery.setScalar(yaml, key: "find-process-mode", value: "always")
+        // 透明代理口：PF 把被代理设备的 TCP 重定向到这里。**不对外广播**，
+        // 只接受经内核重定向进来的连接，所以开着它不等于开放代理。
+        yaml = YAMLSurgery.setScalar(yaml, key: "redir-port", value: String(DeviceStore.redirPort))
+        // DNS 监听口：被代理设备的 UDP :53 也被重定向过来。不转投的话设备会拿着它自己配的
+        // DNS（常是路由器）去查，经我们转发出去解析不到，表现为「直连 IP 通、用域名全超时」。
+        // 转过来之后它拿到 fake-ip，域名规则才匹配得上。
+        yaml = YAMLSurgery.setNestedScalar(yaml, section: "dns", key: "listen",
+                                           value: "0.0.0.0:" + String(DeviceStore.dnsPort))
         yaml = YAMLSurgery.setNestedScalar(yaml, section: "tun", key: "enable",
                                            value: tunEnabled ? "true" : "false")
         yaml = Self.ensureProxyServerNameserver(yaml)
@@ -376,52 +384,36 @@ public final class ConfigBuilder: @unchecked Sendable {
 
     // MARK: - 局域网设备代理
 
-    /// 为「开着代理」的设备生成带认证的入站 listener + 每设备的 `IN-USER` 规则。
+    /// 为「开着代理」的设备生成每设备的 `SRC-IP-CIDR` 规则。
     ///
-    /// ## 与 Qt 版的两处**必须**不同（架构使然，不是口味问题）
+    /// 透明重定向下我们看不到任何凭据，**只能按源 IP 认设备**，所以策略是
+    /// `SRC-IP-CIDR,<ip>/32,<目标>`（Qt 版走 `IN-USER`，那是它经带认证 SOCKS 拨号的产物）。
     ///
-    /// 1. **`listen: 0.0.0.0` 而不是 `127.0.0.1`**。Qt 版靠二层投毒把流量劫持到本机再本地拨，
-    ///    所以只监听回环就够；这里设备是**直接连过来**的，绑回环等于谁也连不上。
-    /// 2. **每台设备一个随机密码**，而不是 Qt 版那个固定字面量 `coast`。端口现在暴露在
-    ///    局域网上，固定密码等于开放代理 —— 任何扫到这个口的人都能白嫖、甚至拿它当跳板。
+    /// 规则**前插到 `rules:` 顶部**，压过默认规则表；但会被随后前插的私网直连再压一层 ——
+    /// 那是对的：被代理设备访问自家路由器后台也该直连，不该绕一圈出国。
     ///
-    /// 主混合端口（`mixed-port`）**不受影响**：它仍然 `allow-lan: false` 只监听本机、免认证，
-    /// Coast 自己的下载测速走它。对外的能力全集中在这一个带认证的口上，边界清楚。
+    /// 注意这里**只管分流策略**。「把流量弄过来」是 ARP 欺骗 + PF 重定向的事，
+    /// 两者分开：配置生成是纯函数、可测；改系统状态的那部分需要 root。
     func applyDevicePolicies(_ yaml: String) -> String {
         let devices = DeviceStore(configDir: directory).proxiedDevices()
-            .filter { !$0.proxyUser.isEmpty }   // MAC 非法 → 用户名为空，跳过，否则写出坏配置
-        guard !devices.isEmpty else { return yaml }   // 没有设备开代理就什么都不生成
+        guard !devices.isEmpty else { return yaml }
 
-        var block = "listeners:\n"
-        block += "  - name: coast-lan\n"
-        block += "    type: mixed\n"      // mixed = 同一个口同时收 HTTP 与 SOCKS，设备端两种都能填
-        block += "    listen: 0.0.0.0\n"
-        block += "    port: \(DeviceStore.lanProxyPort)\n"
-        block += "    users:\n"
-        for device in devices {
-            block += "      - username: \(device.proxyUser)\n"
-            block += "        password: \(YAMLSurgery.quote(device.password))\n"
-        }
-        var out = YAMLSurgery.replaceOrAppendBlock(yaml, key: "listeners", with: block)
-
-        // 每设备一条 IN-USER 规则，前插到 rules: 顶部。follow 不生成（那就是「跟随全局」的含义）。
         var ruleLines = ""
         for device in devices {
             let target: String
             switch device.policyMode {
-            case .follow: continue
-            case .rule: continue          // 规则分流 = 不加专属规则，走默认规则表
+            case .follow, .rule: continue   // 不加专属规则 = 跟随全局 / 走默认规则表
             case .direct: target = "DIRECT"
             case .reject: target = "REJECT"
             case .global:
                 guard !device.policyTarget.isEmpty else { continue }
                 target = device.policyTarget
             }
-            ruleLines += "  - \(YAMLSurgery.quote("IN-USER,\(device.proxyUser),\(target)"))\n"
+            ruleLines += "  - " + YAMLSurgery.quote("SRC-IP-CIDR,\(device.lastIP)/32,\(target)") + "\n"
         }
-        if !ruleLines.isEmpty, let insertion = YAMLSurgery.rulesInsertionPoint(out) {
-            out.insert(contentsOf: ruleLines, at: insertion)
-        }
+        guard !ruleLines.isEmpty, let insertion = YAMLSurgery.rulesInsertionPoint(yaml) else { return yaml }
+        var out = yaml
+        out.insert(contentsOf: ruleLines, at: insertion)
         return out
     }
 
