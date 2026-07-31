@@ -25,7 +25,11 @@ public struct RulesStore: Sendable {
             self.value = value
         }
 
-        /// 生成到 full.yaml 里的那一行（与 `ConfigBuilder.applyCustomRules` 的拼法一致）。
+        /// 生成到 full.yaml 里的那一行。
+        ///
+        /// **`ConfigBuilder.applyCustomRules` 直接调这里**，不再自己拼一遍。
+        /// 之前是两处各写一份同样的三元表达式，靠注释声明「拼法一致」—— 而测试只测这一份，
+        /// 真正上线的是 ConfigBuilder 里那份：改坏它，测试照样全绿。
         public var ruleLine: String {
             type == "MATCH" ? "\(type),\(node)" : "\(type),\(value),\(node)"
         }

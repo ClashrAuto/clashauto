@@ -967,3 +967,45 @@ mihomo 卡死、REST 端口被别人占住导致绑定失败、热重载崩在�
 新增文案让覆盖率掉到 128/138。补齐 10 条 × 12 种语言，全部回到 138/138，
 并确认它们真的进了 app bundle（ja/ru/zh-TW 抽查渲染值，不是只写进源 JSON）。
 其中 7 条是更早几轮遗留的（连接查看器、设备页），一并补上。
+
+
+## 2026-07-31(续五) · 把「算出来却没人用」变成一次系统性排查
+
+上一轮 `coreReachable` 是死属性这件事值得推广：写脚本扫全部 214 个对外属性，
+找出产品代码里零引用的 9 个。多数是误报（`description` / `errorDescription`
+是协议实现，插值时隐式调用），但有一个是**真问题**：
+
+### `RulesStore.Rule.ruleLine` 与 ConfigBuilder 各写了一份
+
+同一个三元表达式写了两遍：
+
+```swift
+// RulesStore.swift:30
+type == "MATCH" ? "\(type),\(node)" : "\(type),\(value),\(node)"
+// ConfigBuilder.swift:366  ← 一模一样，独立的一份
+```
+
+`ruleLine` 的注释还写着「与 `ConfigBuilder.applyCustomRules` 的拼法一致」——
+把一致性当成约定，却没有任何东西保证它。
+
+而致命的是**测试测的是 `ruleLine`，产品代码里没人调用它**；真正写进 `full.yaml` 的是
+ConfigBuilder 里那一份，无人看守。改坏它，测试照样全绿。甚至有一个测试就叫
+「生成的规则行与 ConfigBuilder 的拼法一致」—— 它靠硬编码期望串来断言，
+只能守住死代码那一侧。
+
+修：ConfigBuilder 直接调 `RulesStore.Rule(...).ruleLine`，拼法只此一处。
+
+**验证合并确实起作用**：把 `ruleLine` 改坏（`type,node,value` 顺序调换）后重跑 ——
+现在会连带打挂 **ConfigBuilder 的测试**和 rules.json 端到端测试（合并前只会挂那个
+测死代码的）。恢复后 47/47 通过。
+
+### 顺带清掉的死 API
+
+- `AppConfig.clashConfig` —— `AppPaths.fullConfig` 的纯别名，注释说「保留成员形式便于
+  对齐 C++ 调用点」，但没有任何调用点。同一个东西两个名字。
+- `Theme` 的 `shell` / `inputBg` / `inputBorder` / `scrollHandle` —— Qt 时代的遗留。
+  确认过 `MainView` 上设了 `.preferredColorScheme(theme.dark ? ...)`，且带输入框的三个
+  视图全是同一个 `WindowGroup` 内的 `.sheet`（继承环境），所以原生控件本来就跟着 app
+  主题走。留着这几个硬编码色反而会引诱后来者绕过主题体系、和系统外观打架。
+
+214 全绿，打包签名正常。

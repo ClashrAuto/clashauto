@@ -6,6 +6,13 @@ import SwiftUI
 /// 翻 `dark` 即整窗换肤：所有颜色都是依赖它的计算属性，`@Observable` 保证读到它们的视图
 /// 自动重算。
 @Observable
+/// 设计令牌。
+///
+/// **不为原生控件准备令牌**（输入框底色/描边、滚动条把手、窗口壳层等）：
+/// `MainView` 上设了 `.preferredColorScheme(theme.dark ? .dark : .light)`，
+/// 系统控件与所有 sheet 都会跟着 app 主题走 —— 手写一组硬编码色反而会和系统外观打架。
+/// 早先从 Qt 直译过来的那几个（shell / inputBg / inputBorder / scrollHandle）确认无人引用，已移除；
+/// Qt 那边必须手动画一切，SwiftUI 不必。
 public final class Theme {
     /// 真值来源。启动时按配置/系统外观初始化。
     public var dark: Bool = true
@@ -18,8 +25,6 @@ public final class Theme {
     public let danger = Color(hex: 0xFF4D4F)
 
     // MARK: 结构面
-    /// 窗口壳 / 侧栏 / 页脚。mac 上这一层是透明的，露出毛玻璃。
-    public var shell: Color { dark ? Color(hex: 0x222222) : Color(hex: 0xEEEEEE) }
     /// 主内容卡 / 页脚开关底
     public var card: Color { dark ? Color(hex: 0x000000) : Color(hex: 0xFFFFFF) }
     public var metricBg: Color { dark ? Color(hex: 0x2A2A2A) : Color(hex: 0xEEEEEE) }
@@ -33,11 +38,8 @@ public final class Theme {
     public let versionColor = Color(hex: 0x666666)
 
     // MARK: 控件
-    public var inputBg: Color { dark ? Color(hex: 0x444444) : Color(hex: 0xEAEAEA) }
-    public var inputBorder: Color { dark ? Color(hex: 0x333333) : Color(hex: 0xCCCCCC) }
     public var footerComboBg: Color { dark ? Color(hex: 0x111111) : Color(hex: 0xFFFFFF) }
     public var switchTrackOff: Color { dark ? Color(hex: 0x666666) : Color(hex: 0xFFFFFF) }
-    public var scrollHandle: Color { dark ? Color(hex: 0x555555) : Color(hex: 0xCCCCCC) }
     public var hover: Color { dark ? Color(hex: 0x3E3E3E) : Color(hex: 0xD2D2D2) }
     public var divider: Color { dark ? Color(hex: 0x333333) : Color(hex: 0xCCCCCC) }
 

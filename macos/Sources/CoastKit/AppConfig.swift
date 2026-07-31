@@ -40,9 +40,6 @@ public struct AppConfig: Sendable, Equatable {
     public var receiveBeta = false      // YAML: beta —— 更新检查是否看 prerelease
 
     public init() {}
-
-    /// 生成的核心配置路径（与 `AppPaths.fullConfig` 同义，保留成员形式便于对齐 C++ 调用点）。
-    public var clashConfig: URL { AppPaths.fullConfig }
 }
 
 // MARK: - 加载 / 保存

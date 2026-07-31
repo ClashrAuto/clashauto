@@ -362,8 +362,13 @@ public final class ConfigBuilder: @unchecked Sendable {
             let node = (entry["node"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             let value = (entry["value"] as? String ?? "").trimmingCharacters(in: .whitespaces)
             guard !type.isEmpty, !node.isEmpty else { continue }
-            // MATCH 是兜底规则，只有两段
-            let rule = type == "MATCH" ? "\(type),\(node)" : "\(type),\(value),\(node)"
+            // 拼法只此一处 —— 用 `RulesStore.Rule.ruleLine`。
+            //
+            // 这里原本自己写了一遍同样的三元表达式，而 `ruleLine` 的注释写着「与
+            // ConfigBuilder.applyCustomRules 的拼法一致」—— 把一致性当约定，没有任何东西
+            // 保证它。更糟的是测试测的是 `ruleLine`（**产品代码里没人调用**），
+            // 给真正上线的这一份提供了虚假信心：改坏这里，测试照样全绿。
+            let rule = RulesStore.Rule(type: type, node: node, value: value).ruleLine
             ruleLines += "  - \(YAMLSurgery.quote(rule))\n"
         }
         if !ruleLines.isEmpty, let insertion = YAMLSurgery.rulesInsertionPoint(out) {
