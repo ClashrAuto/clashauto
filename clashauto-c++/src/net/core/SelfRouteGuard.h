@@ -26,11 +26,12 @@
 // 用法：进程启动/网络变化时 refreshPhysicalInterface()；每个出站 socket 在 connect 前
 //   prepareSocket()。未启用（TUN 没开）时是空操作。
 //
-// ★★ 已知**未覆盖**的一条路，接 TUN 之前必须解决：**QUIC / Hysteria2**。
-//   它的 socket 由 msquic 内部创建（见 transport/QuicTransport.cpp），Qt 这条路根本够不着，
-//   于是 prepareSocket 对它无效 —— TUN 开着时 Hy2 会走进环路。
-//   解法是走 msquic 自己的接口把本地地址钉在物理出口的 IP 上（QUIC_PARAM_CONN_LOCAL_ADDRESS，
-//   必须在 ConnectionStart 之前设）。在那之前，**TUN 与 Hy2 节点不能同时用**。
+// ★★ **QUIC / Hysteria2 走的是另一条路**：它的 socket 由 msquic 内部创建（见
+//   transport/QuicTransport.cpp），prepareSocket/applyToFd 这条 fd 路径根本够不着。
+//   已改为用 msquic 自己的 QUIC_PARAM_CONN_LOCAL_ADDRESS + 本文件的 physicalAddress()
+//   把本地地址钉在物理出口 IP 上（**必须在 ConnectionStart 之前设**）。
+//   证据到哪一步：编译（三平台 CI，含 MSVC）+ 打包后的 QUIC self-test 均过；
+//   **「TUN 开着时 Hy2 真的不环路」尚无真机证据** —— 验它要真 Hy2 服务端 + TUN + 管理员同时到位。
 //
 // 审计方法（改动出站时照这个查，别照 connectToHost 查）：
 //   grep -rn "new QTcpSocket\|new QUdpSocket\|new QSslSocket" src/

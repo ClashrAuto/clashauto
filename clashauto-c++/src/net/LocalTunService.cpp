@@ -83,13 +83,20 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
             *err = tr("没有出站配置");
         return false;
     }
-    // ★ 先拦 QUIC：让用户在**点下去之前**就知道，而不是网断了才发现。
+    // QUIC 系节点（hysteria2 / tuic）：**曾经在这里直接拒绝启动**，因为它们的 socket 由 msquic
+    // 内部创建、SelfRouteGuard 那条 fd 路径够不着 → 开 TUN 必然环路 → 整机断网。
+    // 现已改为经 msquic 自己的 QUIC_PARAM_CONN_LOCAL_ADDRESS 把本地地址钉在物理出口 IP 上
+    //（见 QuicTransport.cpp，必须在 ConnectionStart 之前设），所以闸门撤掉。
+    //
+    // ★ 但**留一条明确告警**，别让它变成静默的坑：这条路目前只有「编译 + 打包后 msquic 可加载」
+    //   的证据（CI 三平台的 QUIC self-test），**没有「TUN 开着时 Hy2 真的不环路」的真机证据**
+    //   —— 验它需要真 Hy2 服务端 + TUN + 管理员同时到位。
+    //   真出问题的表现是整机断网，自救办法：关掉「增强」，或 config.yaml 写 coastcore: false。
     QString why;
-    if (blockedByQuicNode(store, &why)) {
-        if (err)
-            *err = why;
-        return false;
-    }
+    if (blockedByQuicNode(store, &why))
+        emit logged(tr("提示：配置里有 QUIC 类节点。它们靠 msquic 的本地地址绑定绕开 TUN，"
+                       "该机制已过编译与打包自检、但尚无真机环路验证。若开启后整机断网，"
+                       "请关掉「增强」。"));
 
     // ① 自身流量排除必须**先于**任何出站建立。顺序反了就会有一段"路由已接管、出站还没钉住"的
     //    窗口，那段时间里新建的连接直接进环路。
