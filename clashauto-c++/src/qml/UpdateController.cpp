@@ -1,3 +1,4 @@
+#include "AppConfig.h"
 #include "CoreRelease.h"
 #include "UpdateController.h"
 
@@ -353,30 +354,27 @@ void UpdateController::fetchCore()
             emit coreChanged();
             return;
         }
-        const QJsonObject r = QJsonDocument::fromJson(body).object();
-        // 滚动 prerelease：tag 恒为 Prerelease-master，版本在产物名里
-        QString tag;
-        for (const QString &prefix : CoreRelease::assetPrefixes()) {
-            for (const QJsonValue &av : r.value(QStringLiteral("assets")).toArray()) {
-                const QString v = CoreRelease::versionFromAsset(av.toObject().value("name").toString(), prefix);
-                if (!v.isEmpty()) { tag = v; break; }
-            }
-            if (!tag.isEmpty()) break;
-        }
-        if (tag.isEmpty()) {
-            const QString apiMsg = r.value(QStringLiteral("message")).toString();
-            m_coreVersion = QString::fromUtf8("内核版本: %1（查询最新版失败）").arg(localShown);
-            m_coreNotes = QString::fromUtf8("获取失败: 未取到版本号%1")
-                              .arg(apiMsg.isEmpty() ? QString() : QString::fromUtf8("（%1）").arg(apiMsg));
+        const bool wantBeta = AppConfigLoader::load().receiveBeta;
+        const CoreRelease::Pick pick =
+            CoreRelease::pick(QJsonDocument::fromJson(body).array(), wantBeta);
+        if (!pick.isValid()) {
+            m_coreVersion = QString::fromUtf8("内核版本: %1（%2通道暂无可用产物）")
+                                .arg(localShown, wantBeta ? QString::fromUtf8("测试版")
+                                                          : QString::fromUtf8("正式版"));
+            m_coreNotes = QString::fromUtf8("获取失败: 该通道的 release 里没有本平台的内核产物");
             emit coreChanged();
             return;
         }
-        const bool newer = localCoreVer.isEmpty() || CoreRelease::hasUpdate(tag, localCoreVer);
-        m_coreVersion = QString::fromUtf8("内核版本: %1 → 最新 %2 %3")
-                            .arg(localShown, tag,
-                                 newer ? QString::fromUtf8("（可更新）") : QString::fromUtf8("（已是最新）"));
-        const QString notes = r.value(QStringLiteral("body")).toString();
-        m_coreNotes = notes.trimmed().isEmpty() ? QString::fromUtf8("（此版本未附更新说明）") : notes;
+        // 「可切换」而不是「可更新」：正式版↔测试版是双向的，从测试版切回正式版
+        // 版本号是变小的，这里只看「和本地不一样」。
+        const bool differs = localCoreVer.isEmpty() || CoreRelease::hasUpdate(pick.version, localCoreVer);
+        m_coreVersion = QString::fromUtf8("内核版本: %1 → %2 %3%4")
+                            .arg(localShown,
+                                 pick.beta ? QString::fromUtf8("测试版") : QString::fromUtf8("正式版"),
+                                 pick.version,
+                                 differs ? QString::fromUtf8("（可切换）") : QString::fromUtf8("（已是此版本）"));
+        m_coreNotes = pick.notes.trimmed().isEmpty() ? QString::fromUtf8("（此版本未附更新说明）")
+                                                     : pick.notes;
         emit coreChanged();
     });
 }

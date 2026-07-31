@@ -22,19 +22,6 @@
 
 namespace {
 // 与 Widgets 版 MainWindow.cpp 的 versionNewer() 同款：去掉非数字/点，逐段比较。
-// 从 release 的 assets 里剥出本平台产物的版本号（master-<sha7>）。
-QString remoteCoreVersion(const QJsonArray &assets)
-{
-    for (const QString &prefix : CoreRelease::assetPrefixes()) {
-        for (const QJsonValue &av : assets) {
-            const QString v = CoreRelease::versionFromAsset(av.toObject().value("name").toString(), prefix);
-            if (!v.isEmpty()) {
-                return v;
-            }
-        }
-    }
-    return {};
-}
 
 bool versionNewer(const QString &remote, const QString &local)
 {
@@ -244,14 +231,14 @@ void AboutController::checkCore()
         if (reply->error() != QNetworkReply::NoError) {
             return; // 网络失败：保持原角标状态，不动
         }
-        const QJsonObject r = QJsonDocument::fromJson(reply->readAll()).object();
-        // 滚动 prerelease 的 tag 恒为 Prerelease-master，不含版本信息；
-        // 真正的版本嵌在产物名里（master-<sha7>），得从资产列表里剥。
-        const QString remote = remoteCoreVersion(r.value(QStringLiteral("assets")).toArray());
-        if (remote.isEmpty()) {
+        // 按当前通道（是否接收测试版）挑，版本嵌在产物名里而不是 tag 上。
+        const bool wantBeta = AppConfigLoader::load().receiveBeta;
+        const CoreRelease::Pick pick =
+            CoreRelease::pick(QJsonDocument::fromJson(reply->readAll()).array(), wantBeta);
+        if (!pick.isValid()) {
             return;
         }
-        setCoreUpdateAvailable(CoreRelease::hasUpdate(remote, localCoreVer));
+        setCoreUpdateAvailable(CoreRelease::hasUpdate(pick.version, localCoreVer));
     });
 }
 

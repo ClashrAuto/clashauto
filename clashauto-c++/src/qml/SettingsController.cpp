@@ -1069,37 +1069,27 @@ void SettingsController::updateCore()
             setMessage(QStringLiteral("内核更新失败: 查询版本出错 %1").arg(err));
             return;
         }
-        const QJsonObject rel = QJsonDocument::fromJson(body).object();
-        const QJsonArray assets = rel.value("assets").toArray();
-
-        // 按前缀挑本平台的产物。不能像以前那样用 tag 拼出确切文件名：
-        // 滚动 prerelease 的 tag 恒为 Prerelease-master，而产物名里嵌的是 master-<sha7>。
-        QString url, assetName, tag;
-        for (const QString &prefix : CoreRelease::assetPrefixes()) {
-            for (const QJsonValue &av : assets) {
-                const QString n = av.toObject().value("name").toString();
-                const QString ver = CoreRelease::versionFromAsset(n, prefix);
-                if (!ver.isEmpty()) {
-                    url = av.toObject().value("browser_download_url").toString();
-                    assetName = n;
-                    tag = ver;
-                    break;
-                }
-            }
-            if (!url.isEmpty()) {
-                break;
-            }
-        }
-        if (url.isEmpty()) {
+        // 全量列表里按通道挑：接收测试版则取最新 prerelease，否则取最新正式版。
+        // 开关每次现读 AppConfig，不用构造时的快照 —— 用户刚在设置页改完就该生效。
+        const bool wantBeta = AppConfigLoader::load().receiveBeta;
+        const QJsonArray releases = QJsonDocument::fromJson(body).array();
+        const CoreRelease::Pick pick = CoreRelease::pick(releases, wantBeta);
+        if (!pick.isValid()) {
             nam->deleteLater();
             setCoreStatus(QStringLiteral("更新内核"), false);
-            setMessage(QStringLiteral("内核更新失败: 未找到匹配的内核资源 (%1/%2)")
-                           .arg(CoreRelease::osName(), QSysInfo::currentCpuArchitecture()));
+            setMessage(QStringLiteral("内核更新失败: %1通道里没有 %2/%3 的可用产物")
+                           .arg(wantBeta ? QStringLiteral("测试版") : QStringLiteral("正式版"),
+                                CoreRelease::osName(), QSysInfo::currentCpuArchitecture()));
             return;
         }
+        const QString url = pick.url;
+        const QString assetName = pick.assetName;
+        const QString tag = pick.version;
 
         setCoreStatus(QStringLiteral("下载中..."), true);
-        setMessage(QStringLiteral("下载内核 %1 ...%2").arg(tag, mirror.isEmpty() ? QString() : QStringLiteral("（国内加速）")));
+        setMessage(QStringLiteral("下载内核 %1（%2）...%3")
+                       .arg(tag, pick.beta ? QStringLiteral("测试版") : QStringLiteral("正式版"),
+                            mirror.isEmpty() ? QString() : QStringLiteral("（国内加速）")));
         QNetworkRequest dreq{QUrl(mirror + url)};
         dreq.setRawHeader("User-Agent", "clashauto-cpp");
         dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
