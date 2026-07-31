@@ -7,9 +7,11 @@
 #include "core/CoreDialerFactory.h"
 #include "core/CoreRouter.h"
 #include "core/ProxyConfig.h"
+#include "core/ProxyConfigBuilder.h" // 自检可喂真实订阅：从 full.yaml 解析节点
 #include "core/SelfRouteGuard.h"
 
 #include <QEventLoop>
+#include <QFile>
 #include <QProcess>
 #include <QTimer>
 
@@ -213,11 +215,54 @@ int LocalTunService::selfTest()
         return 2; // ★ 先验前提。少了这一步，"失败"可能只是环境本来就没网
     }
 
+    // 出站配置：默认只装内建 DIRECT（严格模式下 PASS 即证明整条链路在进程内）。
+    //
+    // ★ 也可以喂**真实订阅**，用来验「TUN 开着时某个具体协议节点会不会环路」——
+    //   这是 Hy2 那条唯一的验法：msquic 的 socket 我们够不着，只有真跑一次才知道
+    //   QUIC_PARAM_CONN_LOCAL_ADDRESS 是不是真的把它钉住了。
+    //     COAST_TUNSERVICE_YAML=<full.yaml 路径>   —— 从中解析 proxies
+    //     COAST_TUNSERVICE_NODE=<节点名>           —— 选它并走 Global 模式（全部流量都过这个节点）
+    //   两者都给才生效；给了但解析不出该节点会**直接失败**而不是悄悄回落 DIRECT ——
+    //   否则「测了个寂寞」：以为在测 Hy2，其实一直在测直连。
     auto store = std::make_shared<ProxyConfigStore>();
-    QVector<ProxyNode> nodes;
-    nodes.push_back(ProxyNode::direct());
-    store->reload(std::make_shared<const ProxyConfig>(nodes, QStringLiteral("DIRECT"),
-                                                      ProxyConfig::Mode::Direct));
+    const QString yamlPath = qEnvironmentVariable("COAST_TUNSERVICE_YAML");
+    const QString wantNode = qEnvironmentVariable("COAST_TUNSERVICE_NODE");
+    if (!yamlPath.isEmpty() && !wantNode.isEmpty()) {
+        QFile yf(yamlPath);
+        if (!yf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            std::fprintf(stderr, "✗ 打不开 %s\n", qUtf8Printable(yamlPath));
+            return 2;
+        }
+        const QString yaml = QString::fromUtf8(yf.readAll());
+        yf.close();
+        auto cfg = coastcore::buildProxyConfig(yaml, wantNode, ProxyConfig::Mode::Global);
+        if (!cfg) {
+            std::fprintf(stderr, "✗ 解析 %s 失败\n", qUtf8Printable(yamlPath));
+            return 2;
+        }
+        // 前提检查：那个节点必须真的在解析结果里，且不是被降级成了 DIRECT。
+        const ProxyNode *hit = nullptr;
+        for (const ProxyNode &n : cfg->nodes()) {
+            if (n.name == wantNode) {
+                hit = &n;
+                break;
+            }
+        }
+        if (!hit) {
+            std::fprintf(stderr, "✗ 解析出 %d 个节点，但没有「%s」——测下去只会测到别的东西\n",
+                         int(cfg->nodes().size()), qUtf8Printable(wantNode));
+            return 2;
+        }
+        std::fprintf(stderr, "出站：Global 模式，节点「%s」type=%s server=%s:%u（共解析出 %d 个节点）\n",
+                     qUtf8Printable(hit->name), qUtf8Printable(hit->type),
+                     qUtf8Printable(hit->server), unsigned(hit->port), int(cfg->nodes().size()));
+        store->reload(cfg);
+    } else {
+        QVector<ProxyNode> nodes;
+        nodes.push_back(ProxyNode::direct());
+        store->reload(std::make_shared<const ProxyConfig>(nodes, QStringLiteral("DIRECT"),
+                                                          ProxyConfig::Mode::Direct));
+    }
 
     LocalTunService svc;
     QObject::connect(&svc, &LocalTunService::logged, [](const QString &l) {
