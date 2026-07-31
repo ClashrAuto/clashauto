@@ -651,3 +651,21 @@
   =依赖网关流量聚合(随网关);其余页面全部已有对应。**至此页面级功能对等达成。**
 
   截图用的两个临时钩子(COAST_FAKE_CONNS/OPEN_CONNS)已移除,不留调试代码。
+- 2026-07-31：**行为对等审计:接上三个「存了值却没接上」的空开关**(191 用例全绿)。
+
+  逐一核对需要运行时行为支撑的 config 开关,发现三个**空开关**——用户拨了但运行时什么都不
+  发生(比缺功能更糟,用户以为它在工作):
+  - **`autoUpdateMinutes`**(定时自动更新订阅):接上定时 Task,内容变了才重建配置
+    (周期短时「没变就不重建」很关键,否则每次到点白重载一次核心);
+  - **`autoTheme`**(跟随系统深浅色):启动对齐一次 + 监听 `AppleInterfaceThemeChangedNotification`;
+  - **`closeToTray`/mini**(启动静默到托盘):启动即 orderOut 窗口、只留托盘。
+
+  验证都走真机、不只看编译:
+  - closeToTray:临时设 mini:true 启动,**在屏主窗数 = 0**、托盘项仍在(用 optionOnScreenOnly
+    核实,`optionAll` 会把已隐藏窗口也算进来,差点误判);
+  - autoTheme:自检读到「深色」不崩。
+
+  ★ **自检抓到一个真崩溃 bug**:`systemIsDark` 原用全局 `NSApp`,而它在 app 启动完成前是 nil,
+  早启动路径读它直接崩。改用恒有效的 `NSApplication.shared` + `AppleInterfaceStyle` 兜底。
+  正常流程虽从 `start()` 调(NSApp 已就绪),但依赖这个时序脆弱 —— 自检把它逼出来了。
+  临时钩子用完即移除。

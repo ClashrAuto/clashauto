@@ -94,6 +94,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard self.state == nil else { return }
         self.state = state
         setupTray(state: state)
+
+        // 「启动静默到托盘」(config.mini):启动即隐藏窗口,只留托盘/Dock。
+        // 之后经托盘「控制面板」或点 Dock 图标重新打开(applicationShouldHandleReopen)。
+        // 延一拍再隐藏:WindowGroup 的窗口此刻可能还没建出来。
+        if state.config.closeToTray {
+            DispatchQueue.main.async {
+                NSApplication.shared.windows.forEach { $0.orderOut(nil) }
+            }
+        }
     }
 
     private func setupTray(state: AppState) {

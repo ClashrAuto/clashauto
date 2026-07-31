@@ -128,6 +128,9 @@ public final class AppState {
         clash.start()
         startBandwidthSampling()
         startTodayTrafficRefresh()
+        applySystemAppearanceIfNeeded()   // 启动时若跟随系统,先对齐一次
+        startSystemAppearanceObserver()   // 之后系统外观变了也跟上
+        startSubscriptionAutoUpdate()     // 定时自动更新订阅
 
         guard ProcessInfo.processInfo.environment["COAST_NO_AUTOSTART"] != "1" else {
             append(log: "COAST_NO_AUTOSTART=1，跳过自动启动核心".t)
@@ -141,6 +144,57 @@ public final class AppState {
         // 在途的长连接也各落一条 —— 否则一条挂了几小时的连接永远进不了库。
         history.flush(includingLive: true)
         await controller.stopCore()
+    }
+
+    // MARK: 跟随系统深浅色
+
+    /// 跟随系统时,把主题的明暗对齐当前系统外观。手选主题(autoTheme 关)时不动。
+    func applySystemAppearanceIfNeeded() {
+        guard config.autoTheme else { return }
+        theme.dark = Self.systemIsDark()
+    }
+
+    static func systemIsDark() -> Bool {
+        // 用 `NSApplication.shared`(恒返回共享实例)而不是全局 `NSApp` —— 后者在 app 启动
+        // 完成前是 nil,早期读它会崩。`AppleInterfaceStyle` 兜底:那是系统外观在全局域里的标记
+        // ("Dark"=深色,不存在=浅色),完全不依赖 AppKit 是否就绪。
+        if let match = NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) {
+            return match == .darkAqua
+        }
+        return UserDefaults.standard.string(forKey: "AppleInterfaceStyle")?.lowercased() == "dark"
+    }
+
+    /// 系统深浅色切换会发这个分布式通知(改「系统设置 → 外观」时)。只在跟随模式下响应。
+    private func startSystemAppearanceObserver() {
+        DistributedNotificationCenter.default.addObserver(
+            forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil, queue: .main) { [weak self] _ in
+            self?.applySystemAppearanceIfNeeded()
+        }
+    }
+
+    // MARK: 订阅自动更新
+
+    /// 每 `autoUpdateMinutes` 分钟自动更新所有订阅;内容变了才重建配置。0 = 关。
+    /// 周期短时「内容没变就不重建」很关键 —— 否则每次到点都白重载一次核心。
+    private func startSubscriptionAutoUpdate() {
+        let minutes = config.autoUpdateMinutes
+        guard minutes > 0 else { return }
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Double(minutes) * 60))
+                guard let self else { return }
+                var changed = false
+                for index in self.subscriptions.load().indices {
+                    let result = await self.subscriptions.updateSubscription(at: index)
+                    changed = changed || result.changed
+                }
+                if changed {
+                    self.append(log: "订阅自动更新:有变化,已重建配置")
+                    await self.controller.rebuildConfig()
+                }
+            }
+        }
     }
 
     /// 今日流量卡的刷新。**不跟着每秒轮询走** —— 那是几条 GROUP BY 聚合查询，
