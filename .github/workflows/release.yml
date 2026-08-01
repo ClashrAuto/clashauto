@@ -1100,14 +1100,24 @@ jobs:
         working-directory: macos
         run: |
           set -euo pipefail
-          # 通用二进制两个架构都要在（regression.sh 不查这个，单独验）
-          lipo -info Coast.app/Contents/MacOS/Coast
-          lipo -info Coast.app/Contents/MacOS/com.yuehongsun.coast.helper
+          # 只做打包产物的**结构**校验——每项毫秒级、零挂死风险：
+          #   • universal 两架构齐全（缺一半的包在另一半机器上直接打不开）
+          #   • 签名封存完整（--deep --strict：浅校验在内层二进制签坏时照样报 OK）
+          #   • 种子资源 / 集成内核 / helper 布局在位（缺了要等用户首启才炸，CI 就该拦住）
+          # ★ 不在 CI 跑 scripts/regression.sh：它是本地开发工具。swift test 和 i18n
+          #   上面已各有独立步骤，再跑一遍纯重复；其自检钩子在 runner 上不是 SKIP 就是
+          #   无意义（topo 验的是 runner 的网关，helper 注册 ad-hoc 必 SKIP），sysproxy
+          #   的授权弹窗还把 Verify bundle 吊死过一个多小时。
+          lipo -archs Coast.app/Contents/MacOS/Coast | grep -q x86_64
+          lipo -archs Coast.app/Contents/MacOS/Coast | grep -q arm64
+          lipo -archs Coast.app/Contents/MacOS/com.yuehongsun.coast.helper | grep -q arm64
           codesign --verify --deep --strict Coast.app
-          # 打包产物的全套自检钩子（paths/topo/helper/sysproxy）。--no-build 复用上一步
-          # 刚打好的包，与本地 `bash scripts/regression.sh` 同一套逻辑，不让 CI 和本地漂移。
-          # 脚本把「环境验不了」（如 ad-hoc 装不了 helper）判为 SKIP，只有真失败才退非 0。
-          bash scripts/regression.sh --no-build
+          test -f Coast.app/Contents/Library/LaunchDaemons/com.yuehongsun.coast.helper.plist
+          test -x Coast.app/Contents/MacOS/com.yuehongsun.coast.helper
+          test -f Coast.app/Contents/Resources/bundle/config/config.yaml
+          test -f Coast.app/Contents/Resources/bundle/config/Country.mmdb
+          test -x Coast.app/Contents/Resources/core
+          echo "bundle 结构 OK"
 
       - name: Package .zip / .dmg + notarize
         working-directory: macos
