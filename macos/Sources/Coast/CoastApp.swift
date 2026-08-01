@@ -72,8 +72,9 @@ private struct RootView: View {
             // 切换语言时整体重建视图树 —— 等价于 QML 的 retranslate()。
             // `.t` 走的是全局单例，SwiftUI 看不见它变了，必须靠这个 id 触发重建。
             .id(i18n.language)
-            // mac 上整窗毛玻璃，内容卡浮在上面 —— 与 Qt 版 applyMacGlass 的观感一致。
-            .background(.ultraThinMaterial)
+            // 毛玻璃只有 `.windowGlass(.sidebar)` 那一层（系统 NSVisualEffectView，
+            // 窗口服务器直接采样桌面）。原来这里还垫着一层 `.ultraThinMaterial` ——
+            // 它采样不到窗后内容，叠上去等于给真玻璃再蒙一层灰纱，越看越像假的。
             .task {
                 I18n.shared.applyConfig(state.config)
                 AppState.sharedForWindows = state

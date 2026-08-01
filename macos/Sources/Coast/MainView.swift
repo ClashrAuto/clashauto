@@ -30,7 +30,7 @@ struct MainView: View {
                     .padding(.trailing, theme.inset)
             }
         }
-        // mac 上窗体本身透明、露出毛玻璃（见 CoastApp 的 .background(.ultraThinMaterial)）
+        // mac 上窗体本身透明、露出毛玻璃（见 CoastApp 的 .windowGlass(.sidebar)）
         .background(.clear)
         .preferredColorScheme(theme.dark ? .dark : .light)
     }
