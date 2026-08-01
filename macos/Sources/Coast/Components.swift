@@ -28,7 +28,7 @@ struct Card<Content: View>: View {
 struct NavButton: View {
     @Environment(Theme.self) private var theme
     let title: String
-    let symbol: String
+    let icon: String
     let isCurrent: Bool
     let action: () -> Void
 
@@ -37,10 +37,14 @@ struct NavButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 0) {
-                Image(systemName: symbol)
-                    .font(.system(size: 17))
+                // Remix 字形（与 Qt 同一份 remixicon.ttf）而不是 SF Symbol ——
+                // SF 各字形视觉尺寸/字宽不一，同一字号下侧栏图标大小参差；
+                // Remix 是统一 em 方格，17pt 下每个都一样大。定宽 17 让文字列对齐。
+                Text(icon)
+                    .font(.custom(IconFont.remix, size: 17))
                     // 图标：深色主题下浅灰、浅色主题下深灰（与文字不同色，Qt 同）。
                     .foregroundStyle(theme.dark ? Color(hex: 0xAA_AA_AA) : Color(hex: 0x66_66_66))
+                    .frame(width: 17)
                     .padding(.leading, 12)
                 Text(title)
                     .font(.system(size: 14))
@@ -53,10 +57,15 @@ struct NavButton: View {
             }
             .frame(height: 40)
             .background {
-                // 右侧多铺一个圆角的宽度并裁掉：可见处的右角是**直角**，紧贴内容卡。
-                RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
+                // 右侧直角、只有左侧圆角：Qt 用「多铺一个圆角再让内容卡盖住」实现同一效果，
+                // 但 mac 的内容卡是半透明的（0.55），压不住 —— 负内距伸进去的那条会
+                // 透出来，看着就是高亮块越进了内容区。改成本来就不越界的不对称圆角。
+                UnevenRoundedRectangle(topLeadingRadius: theme.radius,
+                                       bottomLeadingRadius: theme.radius,
+                                       bottomTrailingRadius: 0,
+                                       topTrailingRadius: 0,
+                                       style: .continuous)
                     .fill(isCurrent ? theme.card : (hovering ? theme.hover : .clear))
-                    .padding(.trailing, -theme.radius)
             }
             .contentShape(Rectangle())
         }

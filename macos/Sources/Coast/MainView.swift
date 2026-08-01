@@ -44,7 +44,7 @@ struct MainView: View {
 
             ForEach(AppState.Page.allCases) { page in
                 NavButton(title: page.title,
-                          symbol: page.symbol,
+                          icon: page.icon,
                           isCurrent: state.currentPage == page) {
                     state.currentPage = page
                 }
@@ -61,8 +61,10 @@ struct MainView: View {
 
     private var logo: some View {
         ZStack(alignment: .bottomTrailing) {
-            Image(systemName: "globe")
-                .font(.system(size: 60))
+            // Qt `qml/Main.qml` logoBox：iconfont 字体的地球字形 U+E600、74px ——
+            // 不是 SF 的 "globe"（形状不同，60pt 时也比 Qt 的小一圈）。
+            Text("\u{E600}")
+                .font(.custom(IconFont.logo, size: 74))
                 .foregroundStyle(theme.accent)
                 .frame(width: 74, height: 74)
 

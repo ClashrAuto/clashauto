@@ -30,18 +30,18 @@ public final class AppState {
             }
         }
 
-        /// SF Symbol。顺序与 Qt 版侧栏一致：状态/节点/设备/订阅/设置/日志/关于。
-        var symbol: String {
+        /// Remix 图标码点（`IconFont.remix` 字体渲染）。与 Qt `qml/Main.qml` 的
+        /// navIcons 逐项相同：dashboard / global / device / rss /
+        /// settings-3 / file-list-3 / information。
+        var icon: String {
             switch self {
-            // 对齐 Qt 的 Remix 图标：dashboard / global / device / rss /
-            // settings-3 / file-list-3 / information。
-            case .status: return "square.grid.2x2"
-            case .nodes: return "globe"
-            case .devices: return "desktopcomputer"
-            case .subscriptions: return "dot.radiowaves.left.and.right"
-            case .settings: return "gearshape.fill"
-            case .logs: return "doc.text"
-            case .about: return "info.circle"
+            case .status: return "\u{EC14}"
+            case .nodes: return "\u{EDCF}"
+            case .devices: return "\u{EC2E}"
+            case .subscriptions: return "\u{F09F}"
+            case .settings: return "\u{F0E6}"
+            case .logs: return "\u{ECEF}"
+            case .about: return "\u{EE59}"
             }
         }
     }

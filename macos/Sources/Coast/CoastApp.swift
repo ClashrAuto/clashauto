@@ -8,6 +8,7 @@ struct CoastApp: App {
 
     init() {
         SelfTests.runIfRequested()
+        IconFont.registerAll()
     }
 
     var body: some Scene {
