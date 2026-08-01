@@ -6,19 +6,45 @@ struct Card<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
-        content
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // 内容卡半透：整窗玻璃的关键一层。
-            //
-            // 原来是实底 `theme.card`，于是只有侧栏和页脚透、中间一大块是死的 ——
-            // 「整个窗口的毛玻璃」其实只做了个边。这里压到 0.55 而不是全透：
-            // 全透的话卡片上的正文会直接压在桌面壁纸上，深色壁纸尚可，
-            // 亮色壁纸下小字基本读不了。
-            //
-            // （macOS 26 上主窗不再用它包页面 —— 见 MainView 的分支；这里保持原样，
-            //   给日志时间线这类**内层面板**继续当底。）
-            .background(theme.card.opacity(0.55))
-            .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        if #available(macOS 26.0, *) {
+            // macOS 26：整窗都是玻璃、主内容不垫底（见 MainView），残留一块面板的
+            // 只剩日志时间线和关于页 —— 一并去掉，内容直接浮在玻璃上；
+            // 里面的滚动列表自然接上页面顶栏/页脚的系统边缘渐隐。
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // 内容卡半透：整窗玻璃的关键一层。
+                //
+                // 原来是实底 `theme.card`，于是只有侧栏和页脚透、中间一大块是死的 ——
+                // 「整个窗口的毛玻璃」其实只做了个边。这里压到 0.55 而不是全透：
+                // 全透的话卡片上的正文会直接压在桌面壁纸上，深色壁纸尚可，
+                // 亮色壁纸下小字基本读不了。
+                .background(theme.card.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
+        }
+    }
+}
+
+extension View {
+    /// 页面顶栏的挂载方式。
+    ///
+    /// macOS 26：顶栏抬成钉在**最顶部**的系统导航栏（`safeAreaBar(edge: .top)`）——
+    /// 滚动内容从它底下穿过，由系统 scroll edge effect 渐隐（与 MainView 的页脚
+    /// 同一机制）；26 以下：按原布局插回内容列顶部（与 Qt 一致），观感不变。
+    /// `spacing` 只作用于 26 以下那条路径（= 原来 VStack 的行距）。
+    @ViewBuilder
+    func pageHeaderBar<Header: View>(spacing: CGFloat = 8,
+                                     @ViewBuilder header: () -> Header) -> some View {
+        if #available(macOS 26.0, *) {
+            safeAreaBar(edge: .top, spacing: 0) { header() }
+        } else {
+            VStack(spacing: spacing) {
+                header()
+                self
+            }
+        }
     }
 }
 

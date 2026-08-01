@@ -21,22 +21,15 @@ struct MainView: View {
 
             if #available(macOS 26.0, *) {
                 // macOS 26（Liquid Glass）：主内容**不再是一块带底的卡**，改用系统应用
-                // 的条形层级 —— 页脚是 `safeAreaBar` 压在滚动区之上，顶部一条透明 bar；
-                // 页面里的 ScrollView 把内容滚进这两条**底下**，系统 scroll edge effect
-                // （`.soft`）把穿过去的内容渐进淡出。
+                // 的条形层级 —— 页脚是 `safeAreaBar` 压在滚动区之上，各页自己的顶栏
+                // 经 `pageHeaderBar` 抬成钉在最顶部的导航栏（无顶栏的状态页放一条
+                // 不可见 bar）；页面里的 ScrollView 把内容滚进这些条**底下**，
+                // 系统 scroll edge effect（`.soft`）把穿过去的内容渐进淡出。
                 //
                 // ★ 必须是 `safeAreaBar` 而不是 `safeAreaInset`：只有 bar 会让其内的
                 //   滚动视图自动挂上边缘效果 —— 用 inset 时内容照样从页脚底下穿过，
                 //   但没有任何淡出，footer 的字直接叠在内容的字上（实测截图看得一清二楚）。
                 page
-                    .safeAreaBar(edge: .top, spacing: 0) {
-                        // ★ 不能用 `Color.clear`：全透明的 bar 会被当成「没有 bar」，
-                        //   顶部就挂不上边缘效果（实测底部的页脚有效、顶部无效，差的
-                        //   就是这一点）。放一个肉眼不可见但真实参与绘制的视图。
-                        Color.black.opacity(0.001)
-                            .frame(height: 24)
-                            .allowsHitTesting(false)
-                    }
                     .safeAreaBar(edge: .bottom, spacing: 0) {
                         // 页脚成了「底部条」：内容从它底下穿过，本体仍旧透玻璃。
                         footer.frame(height: theme.footerHeight)

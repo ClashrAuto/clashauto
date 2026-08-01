@@ -150,12 +150,17 @@ struct DevicesPage: View {
         ZStack(alignment: .bottomTrailing) {
         // Qt 的设备页没有任何分隔线：概览条 / 搜索行 / 列表靠 10 的行距分开。
         VStack(spacing: 10) {
-            // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 搜索行 → 列表）——
-            // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。
-            securityBanner
-            header
             if rows.isEmpty { emptyState } else { list }
             proxyBanner
+        }
+        // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 搜索行 → 列表）——
+        // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。26 上它和概览条
+        // 一起进顶部导航栏（告警钉着不随滚动走，只会更醒目）。
+        .pageHeaderBar(spacing: 10) {
+            VStack(spacing: 10) {
+                securityBanner
+                header
+            }
         }
         .task { await scan() }
         // 详情窗改完台账后立刻重读（否则列表要等下一轮扫描才更新图标/名字）

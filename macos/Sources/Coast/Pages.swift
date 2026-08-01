@@ -84,6 +84,16 @@ struct StatusPage: View {
             .padding(.vertical, 10)
             .padding(.trailing, 10)
         }
+        // 状态页没有顶栏。26 上其他页的顶栏都经 `pageHeaderBar` 抬成了顶部导航条，
+        // 这里放一条**不可见** bar 顶替：没有它，滚动内容在顶边就是硬截断
+        // （全透明 Color.clear 会被当成没有 bar，见 MainView 页脚旁的注释）。
+        .pageHeaderBar(spacing: 0) {
+            if #available(macOS 26.0, *) {
+                Color.black.opacity(0.001)
+                    .frame(height: 24)
+                    .allowsHitTesting(false)
+            }
+        }
     }
 }
 
@@ -113,9 +123,15 @@ struct NodesPage: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            // 顶栏固定 30 高（搜索框 28，展开时不撑高整行）、间距 6 —— 与 Qt 逐项一致。
-            HStack(spacing: 6) {
+        content
+            .pageHeaderBar(spacing: 8) { topBar }
+            // Qt: `anchors.margins: 10`，各页自管内距（StackLayout 那边是 0）。
+            .padding(10)
+    }
+
+    /// 顶栏固定 30 高（搜索框 28，展开时不撑高整行）、间距 6 —— 与 Qt 逐项一致。
+    private var topBar: some View {
+        HStack(spacing: 6) {
                 Text("节点".t)
                     .lineLimit(1)
                     .font(.system(size: 18))
@@ -194,9 +210,12 @@ struct NodesPage: View {
                 .buttonStyle(.plain)
                 .padding(.trailing, 5)
                 .help("帮助".t)
-            }
-            .frame(height: 30)
+        }
+        .frame(height: 30)
+    }
 
+    @ViewBuilder
+    private var content: some View {
             if visibleNodes.isEmpty {
                 VStack(spacing: 6) {
                     // 「一个都没有」与「筛没了」是两回事，提示必须分开 ——
@@ -229,9 +248,6 @@ struct NodesPage: View {
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
             }
-        }
-        // Qt: `anchors.margins: 10`，各页自管内距（StackLayout 那边是 0）。
-        .padding(10)
     }
 }
 
@@ -350,17 +366,16 @@ struct LogsPage: View {
     @State private var tab = 0
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 6) {
-                LogTab(title: "主日志".t, isCurrent: tab == 0) { tab = 0 }
-                LogTab(title: "Clash 内核".t, isCurrent: tab == 1) { tab = 1 }
-                Spacer(minLength: 0)
+        LogTimeline(entries: tab == 0 ? state.logs : state.coreLogs)
+            .pageHeaderBar(spacing: 8) {
+                HStack(spacing: 6) {
+                    LogTab(title: "主日志".t, isCurrent: tab == 0) { tab = 0 }
+                    LogTab(title: "Clash 内核".t, isCurrent: tab == 1) { tab = 1 }
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 10)
+                .padding(.horizontal, 10)
             }
-            .padding(.top, 10)
-            .padding(.horizontal, 10)
-
-            LogTimeline(entries: tab == 0 ? state.logs : state.coreLogs)
-        }
     }
 }
 

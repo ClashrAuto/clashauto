@@ -43,8 +43,6 @@ struct SubscriptionsPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            toolbar
-
             if summaries.isEmpty {
                 Text("暂无订阅，点击右上角「添加订阅」".t)
                     .font(.system(size: 13))
@@ -70,6 +68,7 @@ struct SubscriptionsPage: View {
                     .padding(.bottom, 6)
             }
         }
+        .pageHeaderBar(spacing: 8) { toolbar }
         .task { reload() }
         .sheet(item: $editing) { draft in
             SubscriptionEditor(draft: draft) { saved in apply(saved) }

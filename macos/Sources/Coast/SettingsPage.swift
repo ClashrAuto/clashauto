@@ -60,8 +60,6 @@ struct SettingsPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            header
-
             if !message.isEmpty {
                 Text(message)
                     .font(.system(size: 11))
@@ -78,6 +76,7 @@ struct SettingsPage: View {
             case .rule: ruleTab
             }
         }
+        .pageHeaderBar(spacing: 8) { header }
         .task { reload() }
         .sheet(item: $editingRule) { draft in
             RuleEditorSheet(draft: draft) { saved in save(rule: saved) }
