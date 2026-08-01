@@ -95,6 +95,10 @@ public final class Theme {
     public let radius: CGFloat = 5
     public let sidebarWidth: CGFloat = 170
     public let footerHeight: CGFloat = 38
+    /// 页脚一排按钮（增强/网页/核心 + 模式）的统一尺寸。四颗按钮定宽同高，
+    /// 模式展开后的按钮组 = 3 段 × 同一个宽度，收放前后每段都与单颗开关对得上。
+    public let footerButtonWidth: CGFloat = 100
+    public let footerButtonHeight: CGFloat = 28
     /// mac 上主内容离窗顶/右 5px，透出玻璃。
     public let inset: CGFloat = 5
 

@@ -87,13 +87,11 @@ struct FooterSwitch: View {
                     // 两处都表达同一件事时，浅色主题下的 #999999 只是让标签更难读。
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1).truncationMode(.tail)
-                    // 长译文封顶 80（约 8~9 字符）再省略：既不溢出页脚，
-                    // 也不把左边的日志和右边的模式挤没。
-                    .frame(maxWidth: 80)
             }
-            .padding(.leading, 8)
-            .padding(.trailing, 10)
-            .frame(height: 28)
+            // 定宽定高（Theme.footerButtonWidth/Height），内容居中：
+            // 页脚四颗按钮（三个开关 + 模式按钮）尺寸完全一致，长译文在框内省略。
+            .padding(.horizontal, 8)
+            .frame(width: theme.footerButtonWidth, height: theme.footerButtonHeight)
             .contentShape(Rectangle())
         }
         // ★ 用 `.glassCapsule()` 而不是 `.glassButton()`。
