@@ -246,3 +246,45 @@ struct TodayTopLabelTests {
         #expect(!HistoryStore.isProxied(""))
     }
 }
+
+@Suite("在途连接要算进统计")
+@MainActor
+struct LiveMergeTests {
+
+    /// 造一份「一条正开着的连接」的快照。
+    private func liveConnection(host: String, up: Int64, down: Int64,
+                                chain: String = "US1-HY2") -> [[String: Any]] {
+        [["id": "live-1", "chains": [chain],
+          "upload": NSNumber(value: up), "download": NSNumber(value: down),
+          "metadata": ["host": host, "sourceIP": "192.168.1.5"]]]
+    }
+
+    @Test("★ 常用域名要算上正开着的连接——否则刚打开的网页看不见，像统计坏了")
+    func topDomainsIncludesLive() {
+        let temp = TempHistory()
+        temp.store.setDeviceMap(["192.168.1.5": "aa:bb:cc:dd:ee:ff"])
+        temp.store.observe(liveConnection(host: "live.example.com", up: 100, down: 900))
+        let top = temp.store.topDomains(mac: "aa:bb:cc:dd:ee:ff")
+        #expect(top.map(\.key) == ["live.example.com"])
+        #expect(top.first?.bytes == 1_000)
+    }
+
+    @Test("★ 近 7 天里「今天」那一格也要算上在途连接")
+    func recentDaysIncludesLive() {
+        let temp = TempHistory()
+        temp.store.setDeviceMap(["192.168.1.5": "aa:bb:cc:dd:ee:ff"])
+        temp.store.observe(liveConnection(host: "x.com", up: 10, down: 90))
+        let days = temp.store.recentDays(mac: "aa:bb:cc:dd:ee:ff")
+        #expect(days.count == 7)
+        #expect(days.last?.total == 100)      // 最后一格是今天
+        #expect(days.dropLast().allSatisfy { $0.total == 0 })
+    }
+
+    @Test("别的设备的在途连接不算到这台头上")
+    func liveIsScopedToDevice() {
+        let temp = TempHistory()
+        temp.store.setDeviceMap(["192.168.1.5": "aa:bb:cc:dd:ee:ff"])
+        temp.store.observe(liveConnection(host: "x.com", up: 10, down: 90))
+        #expect(temp.store.topDomains(mac: "11:22:33:44:55:66").isEmpty)
+    }
+}

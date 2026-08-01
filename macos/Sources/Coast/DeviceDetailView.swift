@@ -38,8 +38,15 @@ struct DeviceDetailView: View {
     private var sample: DeviceTraffic.Sample { state.deviceTraffic.sample(ip: discovered.ip) }
 
     /// 这台设备当前的连接。按发起方 IP 认 —— 透明重定向看不到任何凭据，只有源 IP。
+    /// 这台设备此刻在跟谁说话。**新的在最上面**（start 倒序，同刻按 id 兜底）。
+    ///
+    /// ★ 原来是直接拿 `/connections` 的原始顺序 —— 那是 Go map 的快照，**顺序是随机的**，
+    ///   于是这张表每一拍都在重排，看着像在抽风（Qt 的注释专门讲了这件事，
+    ///   它那边还额外做了 reconcile：存活的行原地不动，新行插到最上面）。
     private var connections: [ConnectionRow] {
-        state.connections.filter { $0.sourceIP == discovered.ip }
+        state.connections
+            .filter { $0.sourceIP == discovered.ip }
+            .sorted { $0.start == $1.start ? $0.id > $1.id : $0.start > $1.start }
     }
 
     var body: some View {

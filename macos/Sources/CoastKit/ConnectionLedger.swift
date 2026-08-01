@@ -45,13 +45,17 @@ public struct ConnectionLedger: Sendable {
                 entries[index].offline = true
             }
         }
+        // 新出现的**追加到末尾**，已有的行**一律不动**。
+        //
+        // ★ 原来这里每次合并都按总流量降序重排一遍。后果是：只要有连接在跑流量，
+        //   这张表就一直在换位置 —— 想点某一行的「断开」，手还没到它就已经挪走了。
+        //   Qt 的 `ConnectionsModel::recompute()` 整套 reconcile（删已消失 → 原地刷存活 →
+        //   新的追加到末尾）存在的全部意义就是**让行不动**：核心的 `/connections`
+        //   是 Go map 的快照、原始顺序本来就是随机的，靠位置稳定来抵消它。
+        //   要找「跑得最多」的那条，用窗口自带的搜索框，而不是让整张表跳。
         for row in snapshot where !seen.contains(row.id) {
             entries.append(Entry(row: row, offline: false))
         }
-
-        // 与 `ConnectionRow.parse` 同一口径：总流量降序。离线条目照样参与排序 ——
-        // 它们的流量是真实发生过的，按「跑得最多」排才找得到刚才那条大的。
-        entries.sort { $0.row.totalBytes > $1.row.totalBytes }
     }
 
     /// 进程名是**迟到**的：核心的 find-process-mode 要查本机套接字表，头几拍常常还是空的。

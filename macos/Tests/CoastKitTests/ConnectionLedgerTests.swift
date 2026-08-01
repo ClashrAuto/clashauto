@@ -76,10 +76,20 @@ struct ConnectionLedgerTests {
                       start: .distantPast, sourceIP: "127.0.0.1")
     }
 
-    @Test func sortedByTotalBytesDescending() {
+    @Test("★ 行的位置**不随流量变** —— 新的追加到末尾，已有的一律不动")
+    func keepsInsertionOrder() {
         var ledger = ConnectionLedger()
+        // 曾经这里按总流量降序排（断言写的是 ["big","mid","small"]）。那意味着只要有连接
+        // 在跑流量，整张表就一直在换位置 —— 想点某一行的「断开」，手还没到它就挪走了。
+        // Qt 的 reconcile 存在的全部意义就是让行不动（`/connections` 是 Go map 的快照，
+        // 原始顺序本来就是随机的，靠位置稳定来抵消）。
         ledger.merge([row("small", down: 1), row("big", down: 1000), row("mid", up: 100)])
-        #expect(ledger.entries.map(\.id) == ["big", "mid", "small"])
+        #expect(ledger.entries.map(\.id) == ["small", "big", "mid"])
+
+        // 第二拍：small 变成了跑得最多的那条，位置**仍然不动**；新来的排在最后。
+        ledger.merge([row("small", down: 9_000), row("big", down: 1000),
+                      row("mid", up: 100), row("new", down: 5)])
+        #expect(ledger.entries.map(\.id) == ["small", "big", "mid", "new"])
     }
 
     @Test func resetClearsEverything() {

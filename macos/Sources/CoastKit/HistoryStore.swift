@@ -281,18 +281,13 @@ public final class HistoryStore: @unchecked Sendable {
             aggregate[row.text(0), default: 0] += row.int(1)
         }
 
-        // 在途的那些（还没落库）。锁着读一份快照就走，别在锁里做排序/格式化。
-        lock.lock()
-        let inFlight = live.values.map(\.record)
-        let map = deviceMap
-        lock.unlock()
-        for record in inFlight {
+        for (record, _) in liveSnapshot() {
             guard scope == .all || Self.isProxied(record.chain) else { continue }
             let key: String
             switch dimension {
             case .process: key = record.process
             case .host: key = record.host.isEmpty ? record.destIP : record.host
-            case .device: key = map[record.sourceIP] ?? ""
+            case .device: key = liveMAC(record)
             }
             aggregate[key, default: 0] += record.up + record.down
         }
@@ -378,6 +373,16 @@ public final class HistoryStore: @unchecked Sendable {
             }
         }
 
+        // 今天这格再把在途连接加上 —— 与 `topDomains` 同一个理由：只查库的话，
+        // 正开着的那条连接一个字节都不算，今天这根柱子会一直是 0。
+        let todayKey = Self.dayKey(today)
+        for (record, recordMAC) in liveSnapshot() where recordMAC == mac {
+            var bucket = buckets[todayKey] ?? (0, 0)
+            bucket.up += record.up
+            bucket.down += record.down
+            buckets[todayKey] = bucket
+        }
+
         return (0..<days).reversed().map { offset in
             let date = calendar.date(byAdding: .day, value: -offset, to: today) ?? today
             let key = Self.dayKey(date)
@@ -387,17 +392,47 @@ public final class HistoryStore: @unchecked Sendable {
     }
 
     /// 某台设备的常用域名（按累计字节降序）。
-    public func topDomains(mac: String, limit: Int = 5) -> [GroupTotal] {
-        guard let database, !mac.isEmpty else { return [] }
-        var result: [GroupTotal] = []
-        database.query("""
+    /// 某台设备**近 `days` 天**用得最多的域名。
+    ///
+    /// 两处对齐 Qt（原来都缺）：
+    ///   • **有时间窗**（Qt 传的是 7 天）。原来是把库里全部 30 天都算进来，
+    ///     「常用域名」于是变成了「一个月里的常用域名」，答的不是同一个问题；
+    ///   • **合并在途连接**。只查库的话正开着的连接一条都算不进去 ——
+    ///     刚打开的那个网页在「常用域名」里看不见，看起来就像统计坏了（Qt 的原话）。
+    public func topDomains(mac: String, days: Int = 7, limit: Int = 5) -> [GroupTotal] {
+        guard !mac.isEmpty, limit > 0 else { return [] }
+        let since = Int64(Date().addingTimeInterval(-Double(max(1, days)) * 86_400)
+            .timeIntervalSince1970 * 1000)
+        var aggregate: [String: Int64] = [:]
+        database?.query("""
             SELECT host, SUM(up + down) AS bytes FROM conn
-            WHERE mac = ? AND host != ''
-            GROUP BY host ORDER BY bytes DESC LIMIT ?
-            """, [.text(mac), .int(Int64(limit))]) { row in
-            result.append(GroupTotal(key: row.text(0), bytes: row.int(1)))
+            WHERE mac = ? AND ended_at >= ? AND host != ''
+            GROUP BY host
+            """, [.text(mac), .int(since)]) { row in
+            aggregate[row.text(0), default: 0] += row.int(1)
         }
-        return result
+        for (record, recordMAC) in liveSnapshot() where recordMAC == mac {
+            let host = record.host.isEmpty ? record.destIP : record.host
+            guard !host.isEmpty else { continue }
+            aggregate[host, default: 0] += record.up + record.down
+        }
+        var totals = aggregate.map { GroupTotal(key: $0.key, bytes: $0.value) }
+        totals.sort { $0.bytes == $1.bytes ? $0.key < $1.key : $0.bytes > $1.bytes }
+        return Array(totals.prefix(limit))
+    }
+
+    /// 在途连接的快照（记录 + 解析出的设备 MAC）。锁着取一份就走，
+    /// 别在锁里做排序/格式化。
+    private func liveSnapshot() -> [(record: Record, mac: String)] {
+        lock.lock()
+        defer { lock.unlock() }
+        return live.values.map { (record: $0.record, mac: deviceMap[$0.record.sourceIP] ?? "") }
+    }
+
+    private func liveMAC(_ record: Record) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return deviceMap[record.sourceIP] ?? ""
     }
 
     /// 某台设备的累计上/下行（保留期内的全部记录）。
