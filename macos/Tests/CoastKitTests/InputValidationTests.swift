@@ -27,6 +27,29 @@ struct InterfaceValidationTests {
     }
 }
 
+@Suite("IPv6 字面量校验(防 PF 注入)")
+struct IPv6ValidationTests {
+
+    @Test("合法 v6 字面量都过")
+    func acceptsValid() {
+        for v6 in ["::1", "fe80::1", "2408:8240:c000::1",
+                   "2408:8240:c000:abcd:1122:3344:5566:7788", "fd00:abcd::1"] {
+            #expect(InputValidation.isValidIPv6(v6), "应接受 \(v6)")
+        }
+    }
+
+    @Test("★ 注入字符、区标、非 v6 一律拒")
+    func rejectsInjection() {
+        // 设备 v6 拼进 PF `inet6 ... from <v6>` 规则文本,注入字符必须拒
+        #expect(InputValidation.isValidIPv6("2408::1 to any -> ::1") == false)  // 空格
+        #expect(InputValidation.isValidIPv6("2408::1\nrdr pass") == false)      // 换行
+        #expect(InputValidation.isValidIPv6("fe80::1%en0") == false)            // 区标(PF from 不接受)
+        #expect(InputValidation.isValidIPv6("192.168.1.1") == false)           // v4 不是 v6
+        #expect(InputValidation.isValidIPv6("nonsense") == false)
+        #expect(InputValidation.isValidIPv6("") == false)
+    }
+}
+
 @Suite("路径卫生(防遍历)")
 struct PathValidationTests {
 

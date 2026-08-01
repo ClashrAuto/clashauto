@@ -259,15 +259,26 @@ public final class CoastController {
             log("取不到默认网关，无法接管设备")
             return
         }
+        // —— IPv6（尽力）——：拿得到 v6 默认路由器就一并接管设备的 v6，拿不到就只做 v4。
+        //   设备 v6 源地址只在 v6 拓扑存在时才查（省一次 `ndp -an`）。这份地址表进 helper 的
+        //   PF `inet6 from <v6>` 规则；查不到 v6 的设备照样被 NDP 投毒，只是走转发而非代理。
+        let gateway6 = LanTopology.defaultGatewayV6()
+        let deviceV6s = gateway6 == nil
+            ? []
+            : LanTopology.deviceV6Addresses(ofMACs: Set(targets.map(\.mac)))
         do {
             try await helper.startRedirect(devices: targets,
                                            interface: gateway.interface,
                                            gatewayIP: gateway.ip,
                                            gatewayMAC: gateway.mac,
                                            redirPort: DeviceStore.redirPort,
-                                           dnsPort: DeviceStore.dnsPort)
+                                           dnsPort: DeviceStore.dnsPort,
+                                           routerLL6: gateway6?.routerLL ?? "",
+                                           routerMAC6: gateway6?.routerMAC ?? "",
+                                           deviceV6s: deviceV6s)
             activeRedirectIPs = ips
-            log("正在接管 \(targets.count) 台设备的流量")
+            let v6Note = gateway6 == nil ? "" : "（含 IPv6，\(deviceV6s.count) 个 v6 源）"
+            log("正在接管 \(targets.count) 台设备的流量\(v6Note)")
         } catch {
             log("接管设备失败：\(error)")
         }

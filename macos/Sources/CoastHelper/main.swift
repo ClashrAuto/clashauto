@@ -173,19 +173,25 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
     func startRedirect(deviceIPsCommaSep: String, deviceMACsCommaSep: String,
                        interface: String, gatewayIP: String, gatewayMAC: String,
                        redirPort: Int, dnsPort: Int,
+                       routerLL6: String, routerMAC6: String, deviceV6sCommaSep: String,
                        withReply reply: @escaping (Bool, String) -> Void) {
         // 接管别人的流量是本程序做过的最重的一件事，日志必须记全:接管了谁、冒充哪个网关、
         // 走哪块网卡。出问题时(局域网异常、某台设备断网)这是唯一能自证「我做了什么」的记录。
+        let v6Note = routerLL6.isEmpty ? "" : " v6路由器=\(routerLL6)/\(routerMAC6) v6设备=[\(deviceV6sCommaSep)]"
         Audit.log("startRedirect 设备=[\(deviceIPsCommaSep)] 网卡=\(interface) "
-                  + "网关=\(gatewayIP)/\(gatewayMAC) redir=\(redirPort) dns=\(dnsPort)",
+                  + "网关=\(gatewayIP)/\(gatewayMAC) redir=\(redirPort) dns=\(dnsPort)\(v6Note)",
                   caller: NSXPCConnection.current())
         // 先取住这条连接:reply 之后 `NSXPCConnection.current()` 就不在本次调用上下文里了。
         let caller = NSXPCConnection.current()
         let ips = deviceIPsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         let macs = deviceMACsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        // v6 地址表用 omittingEmptySubsequences:true —— 空串（无 v6）不该变成一个空元素。
+        let v6s = deviceV6sCommaSep.split(separator: ",", omittingEmptySubsequences: true).map(String.init)
         if let error = redirector.start(deviceIPs: ips, deviceMACs: macs, interface: interface,
                                         gatewayIP: gatewayIP, gatewayMAC: gatewayMAC,
-                                        redirPort: redirPort, dnsPort: dnsPort) {
+                                        redirPort: redirPort, dnsPort: dnsPort,
+                                        routerLL6: routerLL6, routerMAC6: routerMAC6,
+                                        deviceV6s: v6s) {
             reply(false, error)
         } else {
             // **只在真的接管成功后**才记下发起方。失败时记下的话会留一个悬空 owner ——
