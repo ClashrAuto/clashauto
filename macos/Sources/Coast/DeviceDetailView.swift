@@ -44,8 +44,12 @@ struct DeviceDetailView: View {
     ///   于是这张表每一拍都在重排，看着像在抽风（Qt 的注释专门讲了这件事，
     ///   它那边还额外做了 reconcile：存活的行原地不动，新行插到最上面）。
     private var connections: [ConnectionRow] {
-        state.connections
-            .filter { $0.sourceIP == discovered.ip }
+        // 本机那一行同理：它的连接源地址是 127.0.0.1 / TUN 地址，不是它的局域网 IP。
+        let isLocal = discovered.ip == DeviceStore.localLANAddress()
+        return state.connections
+            .filter { DeviceStore.connectionBelongs(sourceIP: $0.sourceIP,
+                                                    deviceIP: discovered.ip,
+                                                    isLocalMachine: isLocal) }
             .sorted { $0.start == $1.start ? $0.id > $1.id : $0.start > $1.start }
     }
 

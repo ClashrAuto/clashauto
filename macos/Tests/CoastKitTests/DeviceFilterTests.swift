@@ -104,3 +104,32 @@ struct DeviceOrderingTests {
         ]) == ["aa", "bb", "cc"])
     }
 }
+
+@Suite("连接归属到哪台设备")
+struct ConnectionBelongsTests {
+
+    @Test("普通设备：源 IP 相同才算")
+    func plainMatch() {
+        #expect(DeviceStore.connectionBelongs(sourceIP: "192.168.1.9", deviceIP: "192.168.1.9",
+                                              isLocalMachine: false))
+        #expect(!DeviceStore.connectionBelongs(sourceIP: "192.168.1.8", deviceIP: "192.168.1.9",
+                                               isLocalMachine: false))
+    }
+
+    @Test("★ 本机那一行要认回环与 TUN 地址——只比局域网 IP 的话它永远匹配不到任何连接")
+    func localMachineAcceptsLoopbackAndTUN() {
+        #expect(DeviceStore.connectionBelongs(sourceIP: "127.0.0.1", deviceIP: "192.168.1.5",
+                                              isLocalMachine: true))
+        #expect(DeviceStore.connectionBelongs(sourceIP: "198.18.0.1", deviceIP: "192.168.1.5",
+                                              isLocalMachine: true))
+        // 不是本机那一行就不能借这条路认领别人的流量
+        #expect(!DeviceStore.connectionBelongs(sourceIP: "127.0.0.1", deviceIP: "192.168.1.9",
+                                               isLocalMachine: false))
+    }
+
+    @Test("源地址为空一律不算")
+    func emptySourceNeverMatches() {
+        #expect(!DeviceStore.connectionBelongs(sourceIP: "", deviceIP: "192.168.1.5",
+                                               isLocalMachine: true))
+    }
+}

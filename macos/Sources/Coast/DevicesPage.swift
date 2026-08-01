@@ -268,8 +268,14 @@ struct DevicesPage: View {
     /// 行里那一行也就整条收起来，不占位。
     private func lastHost(for row: Row) -> String {
         guard !row.discovered.ip.isEmpty else { return "" }
+        // 本机那一行要认 `127.0.0.1` / TUN 地址 —— 只比局域网 IP 的话它永远是空的
+        // （与速率那处同一个坑，判据抽在 `DeviceStore.connectionBelongs`）。
+        let isLocal = row.discovered.ip == DeviceStore.localLANAddress()
         return state.connections
-            .filter { $0.sourceIP == row.discovered.ip && !$0.host.isEmpty }
+            .filter { !$0.host.isEmpty
+                && DeviceStore.connectionBelongs(sourceIP: $0.sourceIP,
+                                                 deviceIP: row.discovered.ip,
+                                                 isLocalMachine: isLocal) }
             .max { $0.start < $1.start }?
             .host ?? ""
     }

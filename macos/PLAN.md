@@ -3167,3 +3167,36 @@ Qt 的 `apply()` 是**整份重写 `config.yaml`**，只写它认识的那 20 �
 这条不跟，理由不用多说。
 
 `swift test` 350 全绿；`i18n_check.py` 258/258；`settings_persist_check.py` 7/7。
+
+---
+
+## 续五十五（2026-08-01）本机那一行的「最近访问」与详情连接表，也是空的
+
+上一轮把**速率**的归属修了（本机自己的连接源地址是 `127.0.0.1` / TUN 地址，
+而设备行认的是局域网 IP）。这一轮顺着同一个判据把剩下两处一起补上：
+
+- **设备行的「→ 最近访问」**：`lastHost(for:)` 也是直接比 `sourceIP == row.ip`，
+  于是本机那一行永远没有这一行（Qt 那边 `setLastHost` 是在已经应用过本机归属规则的
+  聚合循环里写的，所以它有）。
+- **详情窗的连接表**：同样的比法，本机的详情窗里「连接 (0)」，而实际有几百条。
+
+判据抽成了 `DeviceStore.connectionBelongs(sourceIP:deviceIP:isLocalMachine:)`
+放进 CoastKit（3 条测试：普通设备只认同 IP、本机认回环与 TUN、
+**不是本机那一行不能借这条路认领别人的流量**、空源地址一律不算）。
+
+### 这一轮核对过、无差异的
+
+- **主题令牌逐条对**：accent / accentStrong / danger / card / nodeRowBg / nodeRowActive /
+  三档文字色 / versionColor / inputBg / inputBorder / footerComboBg / switchTrackOff /
+  hover / divider / radius 5 / sidebarWidth 170 / footerHeight 38 / inset 5 —— 全中。
+  `metricBg` 多了 0.82 透明度（整窗玻璃化后的刻意调整，代码里写了理由）；
+  `shell` 与 `scrollHandle` 在 macOS 上分别由玻璃材质与原生滚动条取代。
+- 延迟测速：URL、`timeout=5000`、`generate_204` 目标、独立连接池、
+  **9 秒的请求兜底**（Qt 用 `setTransferTimeout(9000)`，Swift 用
+  `timeoutIntervalForRequest = 9`）—— 逐项相同。
+- 切换节点：防重入、转圈态、`clearConnections` 开关、切完重拉列表，一致。
+  （Qt 另有 6 秒兜底定时器；Swift 靠 8 秒的请求超时收口，都有界。）
+- Qt 的详情窗连接表也是按设备的**局域网 IP** 过滤的，所以本机详情窗在 Qt 上同样看不到
+  连接 —— Swift 这次做得比 Qt 好一点，如实记着（不是「对不齐」，是补了同一处的另一半）。
+
+`swift test` 353 全绿；`i18n_check.py` 258/258；`settings_persist_check.py` 7/7。

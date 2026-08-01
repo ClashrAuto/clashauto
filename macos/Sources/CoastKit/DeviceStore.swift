@@ -255,6 +255,18 @@ public final class DeviceStore: @unchecked Sendable {
         return localMachineIPs().contains(ip)
     }
 
+    /// 这条连接算不算这台设备发出的。
+    ///
+    /// 一般就是源 IP 相同；**本机那一行特殊**：它在列表里的身份是局域网 IP，
+    /// 而它自己发出的连接源地址多半是 `127.0.0.1` 或 TUN 地址 —— 直接比 IP 的话，
+    /// 本机那一行永远匹配不到任何连接（速率、最近访问、详情里的连接表全是空的）。
+    public static func connectionBelongs(sourceIP: String, deviceIP: String,
+                                         isLocalMachine: Bool) -> Bool {
+        guard !sourceIP.isEmpty else { return false }
+        if !deviceIP.isEmpty, sourceIP == deviceIP { return true }
+        return isLocalMachine && isLocalMachineIP(sourceIP)
+    }
+
     /// 本机在局域网上的 IPv4 地址（给用户填到设备里的那个）。
     /// 取第一个非回环、非链路本地的 IPv4。
     public static func localLANAddress() -> String? {
