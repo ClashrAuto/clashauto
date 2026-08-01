@@ -30,14 +30,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # core_prefixes：打包集成的内核产物名前缀（fork ClashrAuto/clash 的正式版通道），
+          # 逗号分隔按优先级排列。x64 优先 -compatible（v1 基线，普通 amd64 是 GOAMD64=v3，
+          # 老 CPU 直接非法指令崩），与应用内 CoreRelease.h 的 assetPrefixes 一字不差。
           - arch: x64
             cmake_arch: x64
             qt_arch: win64_msvc2022_64
-            clash_core: clash-windows-amd64.exe
+            core_prefixes: coast-windows-amd64-compatible-,coast-windows-amd64-v1-
           - arch: arm64
             cmake_arch: ARM64
             qt_arch: win64_msvc2022_arm64_cross_compiled
-            clash_core: clash-windows-arm64.exe
+            core_prefixes: coast-windows-arm64-
 
     steps:
       - name: Checkout
@@ -223,6 +226,41 @@ jobs:
           if (-not (Test-Path "$stage\sqldrivers\qsqlite.dll")) {
             Write-Host "::warning::未见 sqldrivers\qsqlite.dll（上网历史/常用域名将不可用）"
           }
+
+      - name: Bundle latest stable core
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 打包默认集成最新**正式版**内核到包根 core.exe；首次运行由
+          # CoreController::seedBundledCore() 落位到 userDir\command\core.exe（缺了才补，
+          # 绝不覆盖），之后的版本管理仍归应用内下载/更新。挑选规则与应用内 CoreRelease.h
+          # 一字不差：走 /releases 全量列表（不能用 /releases/latest——fork 从上游继承了
+          # 一堆零资产空 tag，latest 常正好落在那上面）、跳过 draft/prerelease、
+          # 必须真带本平台产物才认。下载失败**打包当场失败**——默认集成的包缺内核是静默劣化。
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" }
+          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/ClashrAuto/clash/releases?per_page=20" -Headers $headers
+          $asset = $null
+          foreach ($r in $releases) {
+            if ($r.draft -or $r.prerelease) { continue }
+            foreach ($p in "${{ matrix.core_prefixes }}".Split(',')) {
+              $asset = @($r.assets | Where-Object { $_.name.StartsWith($p) -and $_.name.EndsWith(".zip") })[0]
+              if ($asset) { break }
+            }
+            if ($asset) { break }
+          }
+          if (-not $asset) { throw "正式版通道里没有 ${{ matrix.core_prefixes }} 产物" }
+          Write-Host "集成内核: $($asset.name)"
+          $tmp = Join-Path $env:RUNNER_TEMP "core-bundle"
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          # 下载直链不带 Authorization：它 302 到对象存储，多带一层凭据可能被拒
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$tmp\core.zip"
+          Expand-Archive -Path "$tmp\core.zip" -DestinationPath "$tmp\x" -Force
+          $exe = Get-ChildItem "$tmp\x" -Recurse -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw "内核 zip 里没有 exe" }
+          Copy-Item $exe.FullName "$env:STAGE_DIR\core.exe" -Force
+          if (-not (Test-Path "$env:STAGE_DIR\core.exe")) { throw "core.exe 未落到包根" }
 
       - name: Create portable zip
         shell: pwsh
@@ -565,14 +603,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # core_prefixes：打包集成的内核产物名前缀（含义见 windows job 矩阵的注释）
           - arch: x64
             runner: ubuntu-22.04
             deb_arch: amd64
-            clash_core: clash-linux-amd64
+            core_prefixes: coast-linux-amd64-compatible-,coast-linux-amd64-v1-
           - arch: arm64
             runner: ubuntu-24.04-arm
             deb_arch: arm64
-            clash_core: clash-linux-arm64
+            core_prefixes: coast-linux-arm64-
 
     steps:
       - name: Checkout
@@ -730,7 +769,41 @@ jobs:
           # 上网历史库（src/HistoryStore）用 QSQLITE 驱动插件；缺了不会崩，但历史会静默不记录
           test -e "$app_dir/plugins/sqldrivers/libqsqlite.so" \
             || echo "::warning::未见 plugins/sqldrivers/libqsqlite.so（上网历史/常用域名将不可用）"
-          # 内核不再随包分发：不校验 command/clash 下的核心是否存在
+
+      - name: Bundle latest stable core
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_PREFIXES: ${{ matrix.core_prefixes }}
+        run: |
+          set -euo pipefail
+          # 打包默认集成最新**正式版**内核到包根 core（.deb 落 /opt/coast/core）；首次运行由
+          # CoreController::seedBundledCore() 落位到 ~/.local/share/Coast/command/core（缺了
+          # 才补，绝不覆盖）。挑选规则与应用内 CoreRelease.h 一字不差：/releases 全量列表
+          # （latest 会落到 fork 从上游继承的零资产空 tag 上）、跳过 draft/prerelease。
+          # 下载失败**打包当场失败**——默认集成的包缺内核是静默劣化。
+          curl -fsSL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            'https://api.github.com/repos/ClashrAuto/clash/releases?per_page=20' -o /tmp/core-releases.json
+          url="$(python3 - /tmp/core-releases.json <<'PY'
+          import json, os, sys
+          releases = json.load(open(sys.argv[1]))
+          for release in releases:
+              if release.get("draft") or release.get("prerelease"):
+                  continue
+              for prefix in os.environ["CORE_PREFIXES"].split(","):
+                  for asset in release.get("assets", []):
+                      name = asset.get("name", "")
+                      if name.startswith(prefix) and name.endswith(".gz"):
+                          print(asset["browser_download_url"])
+                          sys.exit(0)
+          sys.exit(1)
+          PY
+          )" || { echo "正式版通道里没有 $CORE_PREFIXES 产物" >&2; exit 1; }
+          echo "集成内核: $(basename "$url")"
+          # 下载直链不带 Authorization：它 302 到对象存储，多带一层凭据可能被拒
+          curl -fsSL --retry 3 "$url" | gunzip > "$STAGE_DIR/core"
+          test -s "$STAGE_DIR/core"
+          chmod 755 "$STAGE_DIR/core"
 
       - name: Create portable tar.gz
         shell: bash
@@ -1013,6 +1086,10 @@ jobs:
 
       - name: Package Coast.app (universal)
         working-directory: macos
+        env:
+          # make_app.sh 默认集成最新正式版内核，要打 GitHub API 挑产物；Actions 共享
+          # 出口 IP，匿名限流（60 次/时）几乎必中 —— 必须带 token。
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           bash scripts/make_app.sh \
             --version "${{ steps.ver.outputs.version }}" \

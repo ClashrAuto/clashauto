@@ -2,6 +2,7 @@
 
 #include "MmdbFile.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -301,17 +302,66 @@ bool CoreController::isCoreInstalled() const
     return QFileInfo::exists(m_config.clashExecutable());
 }
 
+// 打包时集成的内核（Windows/Linux 在可执行文件同目录的 core[.exe]，macOS 在 bundle 的
+// Contents/Resources/core）首次运行落位到 userDir/command。只做「缺了才补」：**绝不覆盖**
+// 已装内核 —— 用户手动升级过（或切了测试版通道）的内核被一次启动静默回滚是最难查的
+// 那种坑。集成只是让全新安装开箱即用，之后的版本管理仍归「设置 → 系统」的下载/更新。
+// 开发构建旁边没有这个文件，安静跳过，行为与从前一致。
+void CoreController::seedBundledCore()
+{
+    if (QFileInfo::exists(m_config.clashExecutable())) {
+        return;
+    }
+#if defined(Q_OS_WIN)
+    const QString coreName = QStringLiteral("core.exe");
+#else
+    const QString coreName = QStringLiteral("core");
+#endif
+    QStringList candidates{QDir(QCoreApplication::applicationDirPath()).filePath(coreName)};
+#if defined(Q_OS_MACOS)
+    candidates << QDir(QCoreApplication::applicationDirPath())
+                      .filePath(QStringLiteral("../Resources/core"));
+#endif
+    QString bundled;
+    for (const QString &candidate : candidates) {
+        if (QFileInfo::exists(candidate)) {
+            bundled = candidate;
+            break;
+        }
+    }
+    if (bundled.isEmpty()) {
+        return;
+    }
+    const QString target = QDir(m_config.userDir).filePath(QStringLiteral("command/") + coreName);
+    QDir().mkpath(QFileInfo(target).absolutePath());
+    if (!QFile::copy(bundled, target)) {
+        emit logUpdated(tr("集成内核落位失败: %1 -> %2").arg(bundled, target));
+        return;
+    }
+    // /opt/coast 下的源文件是 root 属主、对用户只读；副本必须补回属主写（应用内更新要
+    // 覆盖它，否则以后每次更新都静默失败）+ 执行位（缺了核心起不来，报错只有「启动失败」）。
+    QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                      | QFileDevice::ExeOwner | QFileDevice::ReadUser
+                                      | QFileDevice::WriteUser | QFileDevice::ExeUser
+                                      | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                      | QFileDevice::ReadOther | QFileDevice::ExeOther);
+    emit logUpdated(tr("已启用打包集成的内核: %1").arg(target));
+}
+
 void CoreController::startCore()
 {
     if (isRunning()) {
         return;
     }
 
+    // 集成内核先落位再取 clashExecutable()：它的「扁平优先、回退旧路径」判定依赖文件是否存在
+    seedBundledCore();
+
     const QString exe = m_config.clashExecutable();
     m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled, m_ipv6Enabled);
     const QString cfg = m_fullConfigPath.isEmpty() ? m_config.clashConfig() : m_fullConfigPath;
     if (!QFileInfo::exists(exe)) {
-        // 不再预装内核：未找到时提示用户去「设置 → 系统」下载，而不是静默失败
+        // 包里未集成内核（开发构建/--no-core）且用户也没下载过：提示去「设置 → 系统」下载，而不是静默失败
         emit logUpdated(tr("未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1").arg(exe));
         emit coreMissing(exe);
         emitStatus();
