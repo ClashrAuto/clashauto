@@ -330,6 +330,25 @@ public final class HistoryStore: @unchecked Sendable {
     }
 
     /// 某台设备的累计上/下行（保留期内的全部记录）。
+    /// 今日每台设备的累计字节（上+下）。设备页拿它排序 —— 一次分组查询，
+    /// 而不是每台设备查一遍。
+    ///
+    /// **排序键不能用实时速率**：速率每一拍都在变，拿它排序会让跑着流量的设备
+    /// 一直换位置，列表抖个不停。今日累计是单调的，只会偶尔超车一次。
+    public func todayByDevice() -> [String: Int64] {
+        guard let database else { return [:] }
+        let (start, end) = Self.todayRange()
+        var result: [String: Int64] = [:]
+        database.query("""
+            SELECT mac, COALESCE(SUM(up + down), 0) FROM conn
+            WHERE ended_at >= ? AND ended_at < ? AND mac != ''
+            GROUP BY mac
+            """, [.int(start), .int(end)]) { row in
+            result[row.text(0)] = row.int(1)
+        }
+        return result
+    }
+
     public func total(mac: String) -> (up: Int64, down: Int64) {
         guard let database, !mac.isEmpty else { return (0, 0) }
         var result: (up: Int64, down: Int64) = (0, 0)

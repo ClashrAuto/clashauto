@@ -33,3 +33,39 @@ public enum DeviceFilter {
         }
     }
 }
+
+/// 设备列表的**次序**。照搬 Qt `DeviceListModel::buildTarget()` 的排序键：
+/// **在线优先 → 今日流量（MB 档位）降序 → IP 升序 → MAC 兜底**。
+///
+/// 三点都是 Qt 注释里写明的理由，逐条抄过来：
+///
+///   • **排序键里绝不能出现实时速率** —— 速率每一拍都在变，一旦拿它排序，
+///     只要有设备在跑流量，每次刷新都会重排，列表肉眼可见地抖；
+///   • 今日流量**按 MB 取档**再比 —— 压掉「两台用量相近的设备来回互超」那点抖动；
+///   • 最后拿 MAC 兜底 —— 保证任何时候次序都是确定的，不随上游容器的遍历顺序漂移。
+///
+/// 放在 `CoastKit` 而不是设备页里，是为了能单独测：排序错了在界面上只表现为
+/// 「行怎么老在动」，很难指认。
+public enum DeviceOrdering {
+
+    /// 升序排列即为界面上的从上到下。
+    public struct Key: Comparable, Sendable {
+        let offline: Bool          // false 排前面 → 在线优先
+        let negatedBucket: Int64   // 取负 → 今日流量大的排前面
+        let ip: UInt32
+        let mac: String
+
+        public static func < (lhs: Key, rhs: Key) -> Bool {
+            if lhs.offline != rhs.offline { return !lhs.offline }
+            if lhs.negatedBucket != rhs.negatedBucket { return lhs.negatedBucket < rhs.negatedBucket }
+            if lhs.ip != rhs.ip { return lhs.ip < rhs.ip }
+            return lhs.mac < rhs.mac
+        }
+    }
+
+    public static func key(online: Bool, ip: String, mac: String, todayBytes: Int64) -> Key {
+        // `>> 20` = 按 MB 取档，与 Qt 的 `todayBucket()` 同一个写法。
+        Key(offline: !online, negatedBucket: -(max(0, todayBytes) >> 20),
+            ip: LanBrowser.ipSortKey(ip), mac: mac)
+    }
+}

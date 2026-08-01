@@ -50,3 +50,57 @@ struct DeviceFilterTests {
         #expect(DeviceFilter.matches(keyword: "192.168.1.7", fields: bare))
     }
 }
+
+@Suite("设备列表次序")
+struct DeviceOrderingTests {
+
+    private func sorted(_ items: [(online: Bool, ip: String, mac: String, bytes: Int64)])
+        -> [String] {
+        items.sorted {
+            DeviceOrdering.key(online: $0.online, ip: $0.ip, mac: $0.mac, todayBytes: $0.bytes)
+                < DeviceOrdering.key(online: $1.online, ip: $1.ip, mac: $1.mac, todayBytes: $1.bytes)
+        }.map(\.mac)
+    }
+
+    @Test("在线的一律排在离线的前面——哪怕离线那台今天跑得更多")
+    func onlineFirst() {
+        let order = sorted([
+            (false, "", "bb", 900_000_000),
+            (true, "192.168.1.9", "aa", 0),
+        ])
+        #expect(order == ["aa", "bb"])
+    }
+
+    @Test("★ 今日流量按 MB 取档降序——同档位内不因为差几百字节就互换")
+    func bucketedByMegabyte() {
+        // 两台差 100 字节：同一个 MB 档 → 不比流量，改按 IP 定序
+        let sameBucket = sorted([
+            (true, "192.168.1.20", "bb", 5_000_100),
+            (true, "192.168.1.10", "aa", 5_000_000),
+        ])
+        #expect(sameBucket == ["aa", "bb"])
+        // 差一个 MB 档：流量大的在前，IP 再大也压不过
+        let differentBucket = sorted([
+            (true, "192.168.1.10", "aa", 1_000_000),
+            (true, "192.168.1.20", "bb", 9_000_000),
+        ])
+        #expect(differentBucket == ["bb", "aa"])
+    }
+
+    @Test("IP 按数值排，不是按字符串——.2 要排在 .10 前面")
+    func ipIsNumeric() {
+        #expect(sorted([
+            (true, "192.168.1.10", "bb", 0),
+            (true, "192.168.1.2", "aa", 0),
+        ]) == ["aa", "bb"])
+    }
+
+    @Test("★ 全部相同时用 MAC 兜底——次序必须是确定的（离线行原来是字典遍历顺序）")
+    func macBreaksTies() {
+        #expect(sorted([
+            (false, "", "cc", 0),
+            (false, "", "aa", 0),
+            (false, "", "bb", 0),
+        ]) == ["aa", "bb", "cc"])
+    }
+}

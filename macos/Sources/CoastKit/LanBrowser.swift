@@ -237,7 +237,7 @@ public struct LanBrowser: Sendable {
     }
 
     /// IP → 可比较的整数。按字符串排会把 `.10` 排在 `.2` 前面。
-    static func ipSortKey(_ ip: String) -> UInt32 {
+    public static func ipSortKey(_ ip: String) -> UInt32 {
         let parts = ip.split(separator: ".").compactMap { UInt32($0) }
         guard parts.count == 4 else { return 0 }
         return parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]

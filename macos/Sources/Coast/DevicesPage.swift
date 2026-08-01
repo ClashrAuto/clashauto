@@ -20,6 +20,8 @@ struct DevicesPage: View {
 
     @State private var discovered: [LanBrowser.Device] = []
     @State private var ledger: [String: DeviceStore.Device] = [:]
+    /// 今日每台设备的累计字节。只用来**排序**，不显示 —— 跟着扫描那一拍刷新即可。
+    @State private var todayByDevice: [String: Int64] = [:]
     @State private var scanning = false
     /// 打开设备详情窗用。窗口显示的是 `AppState.selectedDevice`，
     /// 所以「点开某一行」= 先写选中、再开窗（与 Qt 的 `openFor(mac)` 完全一致：
@@ -99,6 +101,15 @@ struct DevicesPage: View {
     }
 
     /// 合并后的行：发现到的 + 只在台账里的（设备离线了但凭据还在，不能让它从界面上消失）。
+    ///
+    /// 排序照搬 Qt `DeviceListModel::buildTarget()`：**在线优先 → 今日流量（MB 档位）降序
+    /// → IP 升序 → MAC 兜底**。三点说明，都是 Qt 注释里写明的理由：
+    ///
+    ///   • **排序键里绝不能出现实时速率** —— 速率每拍都在变，跑流量的设备会一直换位置；
+    ///   • 今日流量按 **MB 取档**再比，压掉「两台用量相近的设备来回互超」的抖动；
+    ///   • 最后拿 MAC 兜底，保证次序**任何时候都是确定的**。
+    ///     原来这里是「发现顺序 + 离线设备按字典遍历顺序追加」——
+    ///     Swift 的 `Dictionary` 没有顺序保证，离线那几行每次刷新都可能换个位置。
     private var allRows: [Row] {
         var result = discovered.map { Row(discovered: $0, record: ledger[$0.mac]) }
         let seen = Set(discovered.map(\.mac))
@@ -107,7 +118,17 @@ struct DevicesPage: View {
             offline.hostname = record.alias
             result.append(Row(discovered: offline, record: record, online: false))
         }
-        return result
+        return Self.ordered(result, todayBytes: todayByDevice)
+    }
+
+    /// 见 `allRows` 的说明。比较键在 `CoastKit.DeviceOrdering`（那边有测试）。
+    static func ordered(_ rows: [Row], todayBytes: [String: Int64]) -> [Row] {
+        rows.sorted {
+            DeviceOrdering.key(online: $0.online, ip: $0.discovered.ip, mac: $0.discovered.mac,
+                               todayBytes: todayBytes[$0.discovered.mac] ?? 0)
+                < DeviceOrdering.key(online: $1.online, ip: $1.discovered.ip, mac: $1.discovered.mac,
+                                     todayBytes: todayBytes[$1.discovered.mac] ?? 0)
+        }
     }
 
     struct Row: Identifiable {
@@ -456,6 +477,7 @@ struct DevicesPage: View {
         reloadLedger()
         // 今日全网上/下行是几条 SUM 聚合，跟着扫描那一拍刷新即可，不必每帧算。
         todayTotals = state.history.todayUpDown(scope: .all)
+        todayByDevice = state.history.todayByDevice()
     }
 
     private func reloadLedger() {
