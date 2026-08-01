@@ -213,7 +213,6 @@ struct DevicesPage: View {
             TextField("搜索设备 / IP / 厂商".t, text: $search)
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
-                .foregroundStyle(theme.textPrimary)
                 .padding(.leading, 12)
                 .padding(.trailing, 26)
             Button {
@@ -221,7 +220,7 @@ struct DevicesPage: View {
                 withAnimation(.snappy(duration: 0.28)) { searchShown = false }
             } label: {
                 Image(systemName: "xmark").font(.system(size: 13))
-                    .foregroundStyle(theme.textMuted)
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .padding(.trailing, 9)
@@ -252,7 +251,8 @@ struct DevicesPage: View {
             }
             .buttonStyle(.plain)
             .background {
-                if onlineOnly { Capsule().fill(theme.accent.opacity(0.45)) }
+                // 开启衬底用**系统 tint**（跟随用户的系统强调色），不用品牌色。
+                if onlineOnly { Capsule().fill(.tint.opacity(0.35)) }
             }
             .help("仅显示在线设备".t)
 

@@ -173,7 +173,7 @@ struct NodesPage: View {
                 } else {
                     Button { searchShown = true } label: {
                         Image(systemName: "magnifyingglass").font(.system(size: 16))
-                            .foregroundStyle(theme.textMuted)
+                            .legacyTint(theme.textMuted)
                     }
                     .buttonStyle(.plain)
                     .topBarGlass()
@@ -187,7 +187,7 @@ struct NodesPage: View {
                     Image(systemName: state.clash.speedTesting
                           ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
                         .font(.system(size: 19))
-                        .foregroundStyle(theme.accent)
+                        .legacyTint(theme.accent)
                         .rotationEffect(.degrees(state.clash.speedTesting ? 360 : 0))
                         .animation(state.clash.speedTesting
                                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
@@ -207,7 +207,7 @@ struct NodesPage: View {
                 } label: {
                     Image(systemName: "questionmark.circle.fill")
                         .font(.system(size: 18))
-                        .foregroundStyle(theme.textMuted)
+                        .legacyTint(theme.textMuted)
                 }
                 .buttonStyle(.plain)
                 .topBarGlass()
@@ -372,8 +372,17 @@ struct LogsPage: View {
         LogTimeline(entries: tab == 0 ? state.logs : state.coreLogs)
             .pageHeaderBar(spacing: 8) {
                 HStack(spacing: 6) {
-                    LogTab(title: "主日志".t, isCurrent: tab == 0) { tab = 0 }
-                    LogTab(title: "Clash 内核".t, isCurrent: tab == 1) { tab = 1 }
+                    if #available(macOS 26.0, *) {
+                        // 26：两个标签并成一颗连体玻璃按钮组（设置页同款）。
+                        HStack(spacing: 0) {
+                            LogTab(title: "主日志".t, isCurrent: tab == 0) { tab = 0 }
+                            LogTab(title: "Clash 内核".t, isCurrent: tab == 1) { tab = 1 }
+                        }
+                        .glassCapsule()
+                    } else {
+                        LogTab(title: "主日志".t, isCurrent: tab == 0) { tab = 0 }
+                        LogTab(title: "Clash 内核".t, isCurrent: tab == 1) { tab = 1 }
+                    }
                     Spacer(minLength: 0)
                 }
                 .padding(.top, 10)
@@ -394,22 +403,20 @@ private struct LogTab: View {
 
     var body: some View {
         if #available(macOS 26.0, *) {
-            // 26：液态玻璃胶囊标签，选中段品牌色 tint（与设置页标签同语言），
-            // 不再画卡底和底部强调条。
+            // 26：按钮组里的一段（玻璃由外层的组统一上，见 LogsPage）。
+            // 配色全交给系统：文字 primary/secondary，选中底衬用系统 tint。
             Button(action: action) {
                 Text(title)
                     .font(.system(size: 13))
-                    .foregroundStyle(isCurrent ? theme.textPrimary : theme.textSecondary)
+                    .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                     .padding(.horizontal, 16)
-                    .frame(height: 30)
-                    // 选中底衬在玻璃**里面**（glassEffect 的 .tint 实测发白看不出来）。
+                    .frame(height: 28)
                     .background {
-                        if isCurrent { Capsule().fill(theme.accent.opacity(0.45)) }
+                        if isCurrent { Capsule().fill(.tint.opacity(0.35)) }
                     }
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .glassCapsule()
         } else {
             Button(action: action) {
                 Text(title)

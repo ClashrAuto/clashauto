@@ -299,9 +299,8 @@ struct TextBtn: View {
 
     var body: some View {
         if #available(macOS 26.0, *) {
-            // 26：液态玻璃胶囊按钮。主按钮 = 玻璃里内衬一层品牌色 Capsule
-            // （页脚模式段验证过的画法）—— `.glassProminent`/`glassEffect(.tint)`
-            // 的着色实测不可靠（一个发白、一个把次按钮也染成实底蓝）。
+            // 26：液态玻璃胶囊按钮，配色交给系统（默认前景色、无自定义底）——
+            // 顶栏统一系统语言，主/次按钮不再靠底色区分。
             Button(action: action) {
                 HStack(spacing: 6) {
                     if let symbol {
@@ -309,13 +308,9 @@ struct TextBtn: View {
                     }
                     Text(label).font(.system(size: 13))
                 }
-                .foregroundStyle(primary ? .white : theme.textPrimary)
                 .fixedSize()
                 .padding(.horizontal, 12)
-                .frame(minHeight: 30)
-                .background {
-                    if primary { Capsule().fill(theme.accent) }
-                }
+                .frame(minHeight: 28)
                 .contentShape(Capsule())
             }
             .buttonStyle(.plain)

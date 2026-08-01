@@ -141,6 +141,17 @@ extension View {
 }
 
 extension View {
+    /// 26 上用系统默认前景色（玻璃按钮的配色交给系统）；26 以下沿用传入的
+    /// 旧配色（Qt 对齐的那套灰/蓝）。
+    @ViewBuilder
+    func legacyTint(_ color: Color) -> some View {
+        if #available(macOS 26.0, *) {
+            self
+        } else {
+            foregroundStyle(color)
+        }
+    }
+
     /// 顶栏图标钮的液态玻璃底：26 上定尺寸 + 系统 glassEffect 胶囊；
     /// 26 以下**什么都不加** —— 玻璃是 26 的设计语言，旧系统保持 Qt 的裸图标。
     /// （区别于 `glassCapsule`：那个在旧系统会手画一个灰胶囊底。）

@@ -354,23 +354,21 @@ struct SettingTab: View {
 
     var body: some View {
         if #available(macOS 26.0, *) {
-            // 26：液态玻璃胶囊标签，选中段是品牌色 tint 的玻璃（与页脚模式段同款），
-            // 不再画底部那条 2px 下划线 —— 玻璃语言里选中态由底色说话。
+            // 26：按钮组里的一段（玻璃由**外层的组**统一上，见 SettingsPage.header）。
+            // 配色全交给系统：文字 primary/secondary，选中底衬用系统 tint。
             Button(action: action) {
                 Text(title)
-                    .font(.system(size: 14))
-                    .foregroundStyle(isCurrent ? theme.textPrimary : theme.textSecondary)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(width: 84, height: 30)
-                    // 选中底衬在玻璃**里面**（glassEffect 的 .tint 实测发白看不出来）。
+                    .frame(width: 84, height: 28)
                     .background {
-                        if isCurrent { Capsule().fill(theme.accent.opacity(0.45)) }
+                        if isCurrent { Capsule().fill(.tint.opacity(0.35)) }
                     }
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .glassCapsule()
         } else {
             Button(action: action) {
                 Text(title)

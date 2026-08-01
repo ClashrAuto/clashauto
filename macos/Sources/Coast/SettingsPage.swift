@@ -92,25 +92,33 @@ struct SettingsPage: View {
 
     private var header: some View {
         HStack(spacing: 4) {
-            ForEach(Tab.allCases) { item in
-                SettingTab(title: item.title, isCurrent: tab == item) { tab = item }
+            if #available(macOS 26.0, *) {
+                // 26：左侧标签并成**一颗连体玻璃按钮组**（设备页 ●⟳ 同款）——
+                // 段与段紧挨、共一层玻璃，选中段由段内的系统 tint 底衬表达。
+                HStack(spacing: 0) {
+                    ForEach(Tab.allCases) { item in
+                        SettingTab(title: item.title, isCurrent: tab == item) { tab = item }
+                    }
+                }
+                .glassCapsule()
+            } else {
+                ForEach(Tab.allCases) { item in
+                    SettingTab(title: item.title, isCurrent: tab == item) { tab = item }
+                }
             }
             Spacer(minLength: 0)
 
             // 区域 / 规则页没有「应用」。QML 用的是**透明占位**而不是隐藏 ——
             // 隐藏会让它被布局移除、标签栏随之变宽，切标签时整条顶栏跳一下。
             if #available(macOS 26.0, *) {
-                // 26：液态玻璃主按钮 —— 玻璃内衬品牌色 Capsule + 白字
-                // （`.glassProminent` 的着色实测不可靠，发白）。
+                // 26：中性液态玻璃按钮，配色交给系统（无自定义底色）。
                 Button {
                     Task { await apply() }
                 } label: {
                     Text("应用".t)
                         .font(.system(size: 13))
-                        .foregroundStyle(.white)
                         .lineLimit(1)
-                        .frame(width: 66, height: 30)
-                        .background(Capsule().fill(theme.accent))
+                        .frame(width: 66, height: 28)
                         .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
