@@ -125,12 +125,14 @@ struct NodesPage: View {
 
     var body: some View {
         content
-            .pageHeaderBar(spacing: 8) { topBar }
-            // Qt: `anchors.margins: 10`，各页自管内距（StackLayout 那边是 0）；
-            // 26 上左缘贴边（pageLeadingInset = 0）。
-            .padding(.vertical, 10)
+            // 左贴侧栏（0），右离窗缘 10。
+            //
+            // ★ 这条内距加在 `content` 上、**在 `pageHeaderBar` 之前** —— 26 上
+            //   `pageHeaderBar` 是 `safeAreaBar`，加在它后面会和顶栏自己那份
+            //   叠成 20（见 `topBar`）。
             .padding(.trailing, 10)
-            .padding(.leading, pageLeadingInset)
+            .pageHeaderBar(spacing: 8) { topBar }
+            .padding(.vertical, 10)
     }
 
     /// 顶栏固定 30 高（搜索框 28，展开时不撑高整行）、间距 6 —— 与 Qt 逐项一致。
@@ -218,6 +220,9 @@ struct NodesPage: View {
                 .help("帮助".t)
         }
         .frame(height: 30)
+        // 顶栏自管左右内距（主内容不再有，见 body）。
+        .padding(.leading, pageLeadingInset)
+        .padding(.trailing, 10)
     }
 
     @ViewBuilder
@@ -241,18 +246,22 @@ struct NodesPage: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 // Qt: ListView spacing 1 —— 行距紧凑,行占满列表宽
-                List(visibleNodes) { node in
-                    NodeRow(node: node,
-                            switching: state.clash.switchingTo != nil,
-                            isTarget: state.clash.switchingTo == node.name,
-                            onApply: { state.selectNode(node.name) },
-                            onDisable: { state.disableCurrentNode(node) })
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0.5, leading: 0, bottom: 0.5, trailing: 0))
+                //
+                // ★ 用 `ScrollView + LazyVStack` 而不是 `List`：macOS 的 List 自带一层
+                //   左右外边距（实测左 6.5 / 右 9 点），`listRowInsets` 归零和
+                //   `contentMargins(.horizontal, 0)` 都清不掉它 —— 而这一页的左右内距
+                //   要能自己说了算（左 0、右 10，见 `body`）。LazyVStack 一样是按需构建行。
+                ScrollView {
+                    LazyVStack(spacing: 1) {
+                        ForEach(visibleNodes) { node in
+                            NodeRow(node: node,
+                                    switching: state.clash.switchingTo != nil,
+                                    isTarget: state.clash.switchingTo == node.name,
+                                    onApply: { state.selectNode(node.name) },
+                                    onDisable: { state.disableCurrentNode(node) })
+                        }
+                    }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
             }
     }
 }
@@ -373,6 +382,9 @@ struct LogsPage: View {
 
     var body: some View {
         LogTimeline(entries: tab == 0 ? state.logs : state.coreLogs)
+            // 左贴侧栏（0），右离窗缘 10。加在时间线上、**不是**加在整页上 ——
+            // 后者会和标签栏自己那份内距叠起来（见 NodesPage 的说明）。
+            .padding(.trailing, 10)
             .pageHeaderBar(spacing: 8) {
                 HStack(spacing: 6) {
                     if #available(macOS 26.0, *) {
@@ -511,7 +523,8 @@ struct LogTimeline: View {
             .padding(.top, 4)
             .padding(.bottom, 10)
         }
-        .padding(.horizontal, 10)
+        // 行内**不留左右内距**（原来是 10）：日志正文与内容区左右两缘齐平，
+        // 右侧那 10 的窗缘距离由 `LogsPage` 统一给（见那边的 `.padding(.trailing:)`）。
     }
 }
 

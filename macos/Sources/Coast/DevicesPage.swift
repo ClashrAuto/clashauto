@@ -118,6 +118,10 @@ struct DevicesPage: View {
         VStack(spacing: 10) {
             if rows.isEmpty { emptyState } else { list }
         }
+        // 左贴侧栏（0），右离窗缘 10。加在内容上、**在 `pageHeaderBar` 之前** ——
+        // 26 上那是 `safeAreaBar`，加在它后面会和顶栏/告警条自己那份内距叠成 20
+        // （见 `header` / `securityBanner`）。
+        .padding(.trailing, 10)
         // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 列表）——
         // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。26 上它和概览条
         // 一起进顶部导航栏（告警钉着不随滚动走，只会更醒目）。
@@ -380,28 +384,27 @@ struct DevicesPage: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    /// Qt: 列表 `spacing: 4`，行**铺满整个内容列**（左贴侧栏、右到 `body` 给的 10 为止，
+    /// 悬浮滚动条压在行上，系统列表的常态）。
+    ///
+    /// ★ 用 `ScrollView + LazyVStack` 而不是 `List`：macOS 的 List 自带一层左右外边距
+    ///   （实测左 6.5 / 右 9 点），`listRowInsets` 归零和 `contentMargins(.horizontal, 0)`
+    ///   都清不掉 —— 而这一页的左右内距要能自己说了算。LazyVStack 一样是按需构建行。
     private var list: some View {
-        List(rows) { row in
-            VStack(spacing: 0) {
-                DeviceRow(row: row,
-                          rejection: rejection(for: row),
-                          sample: state.deviceTraffic.sample(ip: row.discovered.ip),
-                          lastHost: lastHost(for: row),
-                          tick: state.pollTick,
-                          contended: contendedIPs.contains(row.discovered.ip),
-                          onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
-                          onOpenDetail: { openDetail(row) })
+        ScrollView {
+            LazyVStack(spacing: 4) {
+                ForEach(rows) { row in
+                    DeviceRow(row: row,
+                              rejection: rejection(for: row),
+                              sample: state.deviceTraffic.sample(ip: row.discovered.ip),
+                              lastHost: lastHost(for: row),
+                              tick: state.pollTick,
+                              contended: contendedIPs.contains(row.discovered.ip),
+                              onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
+                              onOpenDetail: { openDetail(row) })
+                }
             }
-            .listRowBackground(Color.clear)
-            .listRowSeparator(.hidden)
-            // Qt: 列表 `spacing: 4`，行宽 = 列表宽 - 10（行右端与上面几行对齐，
-            // 滚动条正好悬在那条 10px 的空隙上）。
-            // 行铺到列表最右缘（悬浮滚动条压在行上，系统列表的常态）——
-            // 原来右让 10 是配旧的两行顶栏对齐用的，单行顶栏后只剩一条空缝。
-            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 0))
         }
-        .listStyle(.plain)
-        .scrollContentBackground(.hidden)
     }
 
     /// 安全告警横幅。**逐元素对齐** `qml/DevicesPage.qml` 顶部那一块：
