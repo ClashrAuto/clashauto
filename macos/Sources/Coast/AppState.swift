@@ -296,7 +296,11 @@ public final class AppState {
             self?.connections = rows
             self?.connectionLedger.merge(rows)
             self?.deviceTraffic.observe(rows)
-            self?.composition.observe(connections)
+            // 「用量最多」那一列要显示设备名，而设备名只有 AppState 认得（台账在它手上）。
+            let proxied = self?.proxiedDeviceLabels ?? []
+            self?.composition.observe(connections) { sourceIP, _ in
+                ConnectionRow.deviceLabel(sourceIP: sourceIP, proxied: proxied)
+            }
         }
     }
 

@@ -89,7 +89,12 @@ public struct ConnectionRow: Sendable, Equatable, Identifiable {
     /// 各写一份的话迟早会漂移，而漂移了没有任何东西会报警。
     public static func deviceLabel(for row: ConnectionRow,
                                    proxied: [(ip: String, alias: String)]) -> String {
-        let ip = row.sourceIP
+        deviceLabel(sourceIP: row.sourceIP, proxied: proxied)
+    }
+
+    /// 同上，直接给 IP 的版本 —— 「用量最多」那张榜是按 host 聚合的，手里没有 `ConnectionRow`。
+    public static func deviceLabel(sourceIP ip: String,
+                                   proxied: [(ip: String, alias: String)]) -> String {
         guard !ip.isEmpty, !ip.hasPrefix("127."), ip != "::1" else { return "" }
         guard let match = proxied.first(where: { $0.ip == ip }) else { return ip }
         return match.alias.isEmpty ? ip : match.alias

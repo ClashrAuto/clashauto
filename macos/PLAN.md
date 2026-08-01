@@ -2918,3 +2918,46 @@ Swift 这边压根没有排序：在线的那批沿用 `LanBrowser.scan()` 的�
 （这个 profile 里今日每台流量都是 0，所以全落在同一档，正好验的是 IP 那一级）。
 
 `swift test` 325 全绿；`i18n_check.py` 254/254；`settings_persist_check.py` 7/7。
+
+---
+
+## 续四十九（2026-08-01）「用量最多」答错了问题；REJECT 被算成了直连
+
+继续对排序/聚合这条线。`ConnectionRow.recent/top` 的**排序**本身与 Qt 一致
+（start 倒序 / 字节倒序），但再往上一层看**被排的是什么**，就对不上了。
+
+### 1. ★ 「用量最多」按连接排，Qt 是按 host 累计
+
+Qt 维护一张 `m_hostBytes`（host → {字节, 设备, 直连?}），**跨连接累加、跨会话生命周期保留**，
+连接断了也还在榜上；表满 512 就只留用量最大的一半；零字节的目标不占榜位。
+
+Swift 拿的是**当前在途连接**排前 5。两个后果：同一个域名往往同时开着十几条连接，
+一个域名就能占满整张榜；而刚下完的那个大文件一断线就从榜上消失。
+那答的是「此刻谁在跑」，不是「这次运行谁跑得最多」。
+
+已按 Qt 补 `TrafficComposition.hostBytes` + `topHosts(limit:)`（含 512 上限与减半裁剪、
+零字节剔除、字节相同时按 host 定序以免字典序漂移），卡片改成固定 5 行、不足补空。
+
+### 2. ★ REJECT 的流量被算进了「直连」
+
+Qt 明确：`if (outbound.startsWith("REJECT")) continue;` —— **两桶都不记**
+（既没出网也没流量）。Swift 写的是 `chain == "REJECT"` 时计入 **directBytes**，
+于是「被规则拦掉」的流量在对比条上显示成「直连出去的」，意思正好相反；
+而且只匹配了 `REJECT`，漏掉 `REJECT-DROP`。已改成前缀匹配 + 跳过。
+
+**这条 bug 有一条测试在替它站岗**：`splitsByChain` 断言的是 `directBytes == 250`
+（注释还写着「DIRECT + REJECT」）—— 照着当时的实现写的断言，而实现本身是错的。
+已连同改正。这是本项目第五次撞见「测试/检查在为错误行为背书」。
+
+### 3. chains 为空的归属
+
+Qt 是 `direct = (outbound == "DIRECT")`，空 chains 落进**代理**桶；Swift 原来落进直连桶。
+已按 Qt 改，并补一条测试写明这是 Qt 的口径。
+
+### 验证
+
+5 条新测试：同 host 多连接合成一行、断开后仍在榜、REJECT/REJECT-DROP 两桶都不记、
+空 chains 算代理、零字节不占位。截图确认空态（核心没跑）仍是「暂无流量」——
+有数据的那一支要核心真在跑，与菜单栏两行速率同一个限制，没有截图。
+
+`swift test` 330 全绿；`i18n_check.py` 254/254；`settings_persist_check.py` 7/7。

@@ -8,9 +8,6 @@ import SwiftUI
 struct StatusPage: View {
     /// 最近建立的 5 条。
     private var recentRows: [ConnectionRow] { ConnectionRow.recent(state.connections, limit: 5) }
-    /// 跑量最多的 5 条。
-    private var topRows: [ConnectionRow] { ConnectionRow.top(state.connections, limit: 5) }
-
     /// 发起方的设备名。判定逻辑在 `ConnectionRow.deviceLabel` —— 状态页两张卡共用一份。
     private func deviceName(for row: ConnectionRow) -> String {
         ConnectionRow.deviceLabel(for: row, proxied: state.proxiedDeviceLabels)
@@ -582,12 +579,13 @@ struct TodayTrafficCard: View {
 
 /// 本次会话的流量构成:直连 vs 代理,一根占比条 + 两个数值。对齐 Qt 的 directBytes/proxyBytes。
 struct CompositionCard: View {
-    /// 跑量最多的 5 条。与「最近连接」是两个不同的榜 —— 刚建立的连接往往还没跑量。
-    private var topRows: [ConnectionRow] { ConnectionRow.top(state.connections, limit: 5) }
-
-    /// 发起方的设备名。判定逻辑在 `ConnectionRow.deviceLabel` —— 状态页两张卡共用一份。
-    private func deviceName(for row: ConnectionRow) -> String {
-        ConnectionRow.deviceLabel(for: row, proxied: state.proxiedDeviceLabels)
+    /// 用量最多的 5 个**目标**（按 host 跨连接累计，本次会话内有效）。
+    ///
+    /// ★ 不是「当前在途连接里跑量最多的 5 条」。同一个域名往往同时开着十几条连接，
+    ///   按连接排会让一个域名占满整张榜；而刚下完的那个大文件一断线就从榜上消失 ——
+    ///   那答的是「此刻谁在跑」，不是「这次运行谁跑得最多」。Qt 那边是 `m_hostBytes`。
+    private var topHosts: [(host: String, stat: TrafficComposition.HostStat)] {
+        state.composition.topHosts(limit: 5)
     }
 
     @Environment(AppState.self) private var state
@@ -647,14 +645,27 @@ struct CompositionCard: View {
                 .lineLimit(1)
                 .font(.system(size: 11))
                 .foregroundStyle(theme.textMuted)
-            if topRows.isEmpty {
+            if topHosts.isEmpty {
                 Text("暂无流量".t)
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textMuted)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 12)
             } else {
-                ConnLineList(items: topRows, rows: 5, deviceName: deviceName)
+                // 与「最近连接」一样固定 5 行、不足补空 —— 条数随流量增减的话卡片会一直跳。
+                VStack(spacing: 3) {
+                    ForEach(0..<5, id: \.self) { index in
+                        if index < topHosts.count {
+                            let item = topHosts[index]
+                            ConnLine(host: item.host.isEmpty ? "-" : item.host,
+                                     device: item.stat.device,
+                                     trailing: Formatting.bytes(item.stat.bytes),
+                                     direct: item.stat.direct)
+                        } else {
+                            ConnLine(host: "", device: "", trailing: "", direct: true).hidden()
+                        }
+                    }
+                }
             }
         }
         // Qt 这几张卡：内距 12、`radius: 4`（比 Theme.radius(5) 小一档）。
