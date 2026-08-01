@@ -96,11 +96,19 @@ struct CoreCrashE2ETests {
 
     @Test("★ 核心崩溃后 CoastController 必须知道:否则永远起不起来,且系统代理挂在死端口上")
     @MainActor func controllerNoticesCrash() async throws {
-        guard let mihomo = Self.mihomo else {
-            Issue.record("没有可用的 mihomo,本测试无法证明任何事")
+        // ★ 判据必须是 **`AppPaths.coreExecutable`**,不是「机器上某处有没有 mihomo」。
+        //   `CoastController.startCore()` 只会去 `AppPaths.coreExecutable` 找核心;
+        //   而 `Self.mihomo` 找的是开发机上的那一份(`~/.local/share/coast-devtools/mihomo`)。
+        //   两者不是一回事:设了 COAST_DATA_DIR、没设 COAST_CORE_PATH 时,
+        //   `Self.mihomo` 有值、隔离根里却没有核心 —— 这条测试于是**跑起来然后必挂**,
+        //   而隔壁 `processNoticesCrash` 判的是 coreExecutable,老老实实跳过了。
+        //   同一个套件里两条测试用两个判据,是这次「bash 下必挂、zsh 下全绿」的真正原因
+        //   (真正的变量是 COAST_DATA_DIR 设没设,与 shell 无关)。
+        guard FileManager.default.isExecutableFile(atPath: AppPaths.coreExecutable.path) else {
+            print("⏭  跳过「核心崩溃」控制器测试:\(AppPaths.coreExecutable.path) 没有核心。"
+                  + "跑 bash scripts/regression.sh,或设 COAST_CORE_PATH=<mihomo 路径>。")
             return
         }
-        _ = mihomo
         // ★ **不在测试里 setenv**。环境变量是进程级共享可变状态,而 swift-testing 默认并行跑
         //   套件 —— 一个测试改掉 COAST_CORE_PATH,另一个套件恰好在这期间读它,就会莫名其妙地
         //   失败。这不是假设:第一版就是这么写的,结果 RealCoreE2ETests 单跑全过、全量跑必挂。

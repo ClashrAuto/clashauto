@@ -118,6 +118,15 @@ struct GeoIPHealthTests {
             print("⏭  跳过 GeoIP 自愈测试:需要隔离数据根(跑 scripts/regression.sh)")
             return
         }
+        // ★ 还得有**核心**。体检那一步在 `CoreProcess.start()` 里,而 `start()` 的第一道 guard
+        //   就是「核心在不在」—— 没有核心它在那儿就 return 了,压根走不到 GeoIP 收尾,
+        //   坏库自然还是坏的。只判隔离根的话,这条测试在「设了 COAST_DATA_DIR、
+        //   没设 COAST_CORE_PATH」时就会跑起来然后必挂(而它挂的其实是运行器配置)。
+        guard FileManager.default.isExecutableFile(atPath: AppPaths.coreExecutable.path) else {
+            print("⏭  跳过 GeoIP 自愈测试:\(AppPaths.coreExecutable.path) 没有核心。"
+                  + "跑 bash scripts/regression.sh,或设 COAST_CORE_PATH=<mihomo 路径>。")
+            return
+        }
         guard let seedURL = Resources.seed("Country.mmdb"),
               let good = try? Data(contentsOf: seedURL) else { return }
         try FileManager.default.createDirectory(at: AppPaths.userDir,

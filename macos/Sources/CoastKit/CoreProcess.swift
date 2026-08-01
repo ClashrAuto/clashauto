@@ -133,6 +133,19 @@ public final class CoreProcess {
             return .failure(.launchFailed(error.localizedDescription))
         }
 
+        // ★ **父进程必须关掉管道的写端**。`Process` 只把写端交给子进程，父进程手里那一份
+        //   仍然开着 —— 于是子进程死了之后读端**永远等不到 EOF**，下面那个读日志的
+        //   `for try await line in ….bytes.lines` 会一直卡在 `read(2)` 里。
+        //
+        //   后果不是「多一个闲置任务」那么轻：`AsyncBytes` 的 `read` 是**阻塞调用**，
+        //   而它跑在 Swift 并发的协作线程池上 —— 每起一次核心就永久占掉一个池线程。
+        //   在测试进程里连起几次核心，池子被占满，整个 `swift test` 就挂住不动了
+        //   （实测：`swift test --filter CoreCrashE2ETests` 跑 400 秒不结束，
+        //   `sample` 抓到的正是这个 `read`）。测试进程挂住 → 子核心也没人收 →
+        //   `ps` 里留下一串指向已删除临时目录的 mihomo。
+        try? pipe.fileHandleForWriting.close()
+        logPipe = pipe
+
         process = task
         isRunning = true
         isPrivileged = false
@@ -144,6 +157,13 @@ public final class CoreProcess {
     public func stop() async {
         stopRequested = true
         logTask?.cancel(); logTask = nil
+        // 只 `cancel()` 不够：任务此刻多半正阻塞在 `read(2)` 里，而取消**打断不了**
+        // 已经进内核的读。关掉读端才会让那个 read 立刻返回，任务随之结束。
+        if let pipe = logPipe {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            try? pipe.fileHandleForReading.close()
+            logPipe = nil
+        }
 
         if isPrivileged, let launcher = privilegedLauncher {
             try? await launcher.stopCore()
@@ -172,18 +192,58 @@ public final class CoreProcess {
     // MARK: - 日志
 
     /// 非特权路径：直接读子进程的 stdout/stderr。
+    ///
+    /// ★ **绝不能用 `for try await line in handle.bytes.lines`。** `CoreProcess` 整个类是
+    ///   `@MainActor`，`Task { }` 会继承这个 actor —— 而 `AsyncBytes` 底下是**阻塞的
+    ///   `read(2)`**，于是那一行代码等于「在主线程上死等管道来数据」。核心不吭声的时候，
+    ///   主线程就卡在内核里：界面不响应，任何 `@MainActor` 的活都排不上。
+    ///
+    ///   在测试进程里后果更直白：`swift test --filter CoreCrashE2ETests` 跑到 400 秒
+    ///   不结束，`sample` 抓到的栈就是 main-thread → `streamOutput` → `read`。
+    ///   进程挂住，子核心也没人收，`ps` 里于是留下一串指向已删除临时目录的 mihomo。
+    ///
+    ///   改用 `readabilityHandler`：它由 Foundation 在**自己的串行队列**上回调，
+    ///   一次拿走当前可读的字节，谁也不阻塞；只有在真的凑出一整行时才跳回主 actor 记一条日志。
     private func streamOutput(from pipe: Pipe) {
-        logTask = Task { [weak self] in
-            do {
-                for try await line in pipe.fileHandleForReading.bytes.lines {
-                    guard let self, !Task.isCancelled else { return }
-                    self.log(line)
-                }
-            } catch {
-                // 管道断开 = 核心退出，交给 terminationHandler 记账，这里不必再报
+        let handle = pipe.fileHandleForReading
+        let buffer = LineBuffer()
+        handle.readabilityHandler = { [weak self] fileHandle in
+            let chunk = fileHandle.availableData
+            guard !chunk.isEmpty else {
+                // 空 = EOF：核心已退出，摘掉回调，别再被叫起来。
+                fileHandle.readabilityHandler = nil
+                return
+            }
+            let lines = buffer.append(chunk)
+            guard !lines.isEmpty else { return }
+            Task { @MainActor in
+                guard let self else { return }
+                for line in lines { self.log(line) }
             }
         }
     }
+
+    /// 把字节流切成整行。半行留着等下一块 —— 管道不保证按行边界到达。
+    /// 只在 `readabilityHandler` 那条串行队列上使用，故 `@unchecked Sendable`。
+    private final class LineBuffer: @unchecked Sendable {
+        private var pending = Data()
+
+        func append(_ chunk: Data) -> [String] {
+            pending.append(chunk)
+            var lines: [String] = []
+            while let index = pending.firstIndex(of: 0x0A) {
+                let line = String(data: pending[pending.startIndex..<index], encoding: .utf8)
+                pending.removeSubrange(pending.startIndex...index)
+                if let line, !line.isEmpty { lines.append(line) }
+            }
+            // 单行长到离谱（核心吐了一大坨没有换行的东西）就丢掉，别让缓冲无界增长。
+            if pending.count > 1 << 20 { pending.removeAll() }
+            return lines
+        }
+    }
+
+    /// 非特权路径的日志管道。`stop()` 要拿它关读端 —— 见那里的说明。
+    private var logPipe: Pipe?
 
     /// helper 路径：核心是 root 起的，拿不到它的管道，改为 tail `logs/core.log`。
     /// helper 每次 startCore 会把该文件截断到 0，所以从头读即可。
