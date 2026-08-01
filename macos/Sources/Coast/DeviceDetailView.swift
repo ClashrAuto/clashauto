@@ -159,6 +159,11 @@ struct DeviceDetailView: View {
         if proxyEnabled, gatewayReady {
             noticeBox(background: theme.metricBg, color: theme.textMuted) {
                 var text = "该设备的联网由本机转发。退出 / 关机 / 睡眠都会自动把它交还给路由器（约 1 秒内恢复）；但断电或强制结束进程时，它最多可能断网 30 秒左右。".t
+                // v6 如实说明：本网络有 v6 路由器时 v6 一并接管（NDP 投毒 + inet6 重定向），
+                // 否则只接管 v4。是网络级事实,不逐设备判定（见 CoastController.v6GatewayActive）。
+                text += "\n" + (state.controller.v6GatewayActive
+                    ? "本网络的 IPv6 也已一并接管。".t
+                    : "本网络未发现 IPv6 路由器，仅接管 IPv4。".t)
                 if !state.config.autoStart {
                     text += "\n" + "建议在「设置」里打开「开机自启」，重启后才能自动接着代理。".t
                 }

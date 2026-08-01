@@ -14,6 +14,10 @@ public final class CoastController {
     public private(set) var isTunEnabled = false
     /// 核心是否由特权 helper 以 root 启动。TUN 只有在这个为 true 时才真正生效。
     public private(set) var isPrivileged = false
+    /// 当前是否正在接管被代理设备的 **IPv6** 流量：网络有 v6 默认路由器、且确有设备被接管着。
+    /// UI 据此如实区分「v6 也拐过来了」与「本网络只有 v4」。没接管任何设备 / 本网络无 v6 /
+    /// 助手未启用时都是 false（见 `syncRedirect` 各分支）。
+    public private(set) var v6GatewayActive = false
 
     public var onLog: ((String) -> Void)?
     /// 核心二进制缺失，UI 据此引导用户去「设置 → 系统」下载。
@@ -100,6 +104,7 @@ public final class CoastController {
         onCoreUnexpectedlyExited?()
         try? await helper.stopRedirect()
         activeRedirectIPs = []
+        v6GatewayActive = false
         await stopProxy()
     }
 
@@ -110,6 +115,7 @@ public final class CoastController {
         // 退出/停核心前先复原被接管的设备。放在最前面：哪怕后面出错，设备也已经被放回去了。
         try? await helper.stopRedirect()
         activeRedirectIPs = []
+        v6GatewayActive = false
         await stopProxy()
         await core.stop()
         isCoreRunning = core.isRunning
@@ -245,18 +251,21 @@ public final class CoastController {
         // 明确记一条 —— 否则用户开了开关却毫无反应，无从查起。
         guard await helper.isEnabled else {
             if !ips.isEmpty { log("已开启设备代理，但免密助手未启用 —— 无法接管（需 root）") }
+            v6GatewayActive = false
             return
         }
 
         if targets.isEmpty {
             try? await helper.stopRedirect()
             activeRedirectIPs = []
+            v6GatewayActive = false
             log("已停止接管所有设备并复原")
             return
         }
 
         guard let gateway = gatewayNow else {
             log("取不到默认网关，无法接管设备")
+            v6GatewayActive = false
             return
         }
         // —— IPv6（尽力）——：拿得到 v6 默认路由器就一并接管设备的 v6，拿不到就只做 v4。
@@ -277,9 +286,11 @@ public final class CoastController {
                                            routerMAC6: gateway6?.routerMAC ?? "",
                                            deviceV6s: deviceV6s)
             activeRedirectIPs = ips
+            v6GatewayActive = gateway6 != nil
             let v6Note = gateway6 == nil ? "" : "（含 IPv6，\(deviceV6s.count) 个 v6 源）"
             log("正在接管 \(targets.count) 台设备的流量\(v6Note)")
         } catch {
+            v6GatewayActive = false
             log("接管设备失败：\(error)")
         }
     }

@@ -437,5 +437,7 @@
   "正在应用…": "Đang áp dụng…",
   "检测到局域网内有异常代理行为": "Phát hiện hoạt động proxy bất thường trong mạng nội bộ",
   "被争抢": "Đang bị tranh chấp",
-  "另一台设备也在把这台设备的流量劫走": "Một máy khác cũng đang chiếm lưu lượng của thiết bị này"
+  "另一台设备也在把这台设备的流量劫走": "Một máy khác cũng đang chiếm lưu lượng của thiết bị này",
+  "本网络的 IPv6 也已一并接管。": "IPv6 của mạng này cũng đang được tiếp quản.",
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Không tìm thấy bộ định tuyến IPv6 trên mạng này; chỉ tiếp quản IPv4."
 }

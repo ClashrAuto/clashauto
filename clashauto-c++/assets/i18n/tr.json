@@ -437,5 +437,7 @@
   "正在应用…": "Uygulanıyor…",
   "检测到局域网内有异常代理行为": "Yerel ağda şüpheli vekil sunucu etkinliği algılandı",
   "被争抢": "Çekişmeli",
-  "另一台设备也在把这台设备的流量劫走": "Başka bir makine de bu cihazın trafiğini ele geçiriyor"
+  "另一台设备也在把这台设备的流量劫走": "Başka bir makine de bu cihazın trafiğini ele geçiriyor",
+  "本网络的 IPv6 也已一并接管。": "Bu ağın IPv6 trafiği de yönetiliyor.",
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Bu ağda IPv6 yönlendiricisi bulunamadı; yalnızca IPv4 yönetiliyor."
 }

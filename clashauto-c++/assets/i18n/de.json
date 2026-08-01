@@ -437,5 +437,7 @@
   "正在应用…": "Wird angewendet…",
   "检测到局域网内有异常代理行为": "Verdächtige Proxy-Aktivität im lokalen Netzwerk erkannt",
   "被争抢": "Umkämpft",
-  "另一台设备也在把这台设备的流量劫走": "Ein anderer Rechner leitet den Datenverkehr dieses Geräts ebenfalls um"
+  "另一台设备也在把这台设备的流量劫走": "Ein anderer Rechner leitet den Datenverkehr dieses Geräts ebenfalls um",
+  "本网络的 IPv6 也已一并接管。": "Das IPv6 dieses Netzwerks wird ebenfalls übernommen.",
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Kein IPv6-Router in diesem Netzwerk gefunden; nur IPv4 wird übernommen."
 }
