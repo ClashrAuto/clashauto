@@ -181,6 +181,7 @@
   "已导出到 %@": "Đã xuất ra %@",
   "已应用": "Đã áp dụng",
   "已应用（核心已重启）": "Đã áp dụng (đã khởi động lại lõi)",
+  "已应用（下次启动核心生效）": "Đã áp dụng (có hiệu lực khi khởi động lõi lần sau)",
   "已开启「接收测试版」，检查范围包含 prerelease": "Kênh beta đang bật — bao gồm cả bản tiền phát hành",
   "已开启增强模式，正在重载 TUN 配置": "Đã bật chế độ Ultra, đang tải lại cấu hình TUN",
   "已是最新版本": "Đã là phiên bản mới nhất",

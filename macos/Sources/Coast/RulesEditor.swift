@@ -289,6 +289,9 @@ enum ProcessChoices {
             guard !full.isEmpty else { continue }
             seen.insert(paths ? full : (full as NSString).lastPathComponent)
         }
-        return seen.sorted()
+        // ★ **不区分大小写**排序（Qt 的 `list.sort(Qt::CaseInsensitive)`）。
+        //   默认的 `sorted()` 按码点比，于是 `Xcode` 排在 `curl` 前面、
+        //   大小写混排的进程名被切成两段，想找 `chrome` 得先猜它被排到了哪一半。
+        return seen.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 }

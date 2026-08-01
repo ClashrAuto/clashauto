@@ -181,6 +181,7 @@
   "已导出到 %@": "Esportato in %@",
   "已应用": "Applicato",
   "已应用（核心已重启）": "Applicato (core riavviato)",
+  "已应用（下次启动核心生效）": "Applicato (attivo al prossimo avvio del core)",
   "已开启「接收测试版」，检查范围包含 prerelease": "Il canale beta è attivo: le prerelease sono incluse",
   "已开启增强模式，正在重载 TUN 配置": "Modalità Ultra attivata, ricaricamento della configurazione TUN",
   "已是最新版本": "Già aggiornato",

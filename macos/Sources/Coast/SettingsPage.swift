@@ -488,17 +488,25 @@ struct SettingsPage: View {
         state.applyConfig(next)
         state.clash.setMixedPort(next.mixedPort)
 
-        // 端口变更**必须重启核心** —— 热重载改不了监听端口，核心会继续 bind 在旧端口，
-        // 而 UI 已按新端口去连，表现为「应用之后一切都断了」。
-        if next.uiPort != old.uiPort || next.mixedPort != old.mixedPort {
+        // 只有 **API 端口**（`external-controller`）改了才需要重启核心 —— 它不在
+        // `full.yaml` 里，热重载碰不到它，核心会继续 bind 在旧端口而 UI 已按新端口去连。
+        //
+        // ★ 混合端口**不重启**：它就写在 `full.yaml` 里，`rebuildConfig()` 的热重载
+        //   会让核心重新监听。原来两个端口任一变化都重启，白白把所有连接断一次
+        //   （Qt 那边分得很清楚：只有 uiPort 变了才 stop/start）。
+        let apiPortChanged = next.uiPort != old.uiPort
+        if apiPortChanged, state.controller.isCoreRunning {
             message = "端口已变更，正在重启核心…".t
             await state.controller.stopCore()
             await state.controller.startCore()
             state.clash.setEndpoint(host: next.host, port: next.uiPort)
             message = "已应用（核心已重启）".t
         } else {
+            if apiPortChanged { state.clash.setEndpoint(host: next.host, port: next.uiPort) }
             await state.controller.rebuildConfig()
-            message = "已应用".t
+            // 核心没在跑时改 API 端口：不能说「已重启」，也不能什么都不说 ——
+            // 用户改完得知道它什么时候生效（Qt 的第三条分支）。
+            message = apiPortChanged ? "已应用（下次启动核心生效）".t : "已应用".t
         }
     }
 

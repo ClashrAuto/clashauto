@@ -181,6 +181,7 @@
   "已导出到 %@": "%@ konumuna aktarıldı",
   "已应用": "Uygulandı",
   "已应用（核心已重启）": "Uygulandı (çekirdek yeniden başlatıldı)",
+  "已应用（下次启动核心生效）": "Uygulandı (çekirdek yeniden başlatılınca etkin olur)",
   "已开启「接收测试版」，检查范围包含 prerelease": "Beta kanalı açık — ön sürümler de denetleniyor",
   "已开启增强模式，正在重载 TUN 配置": "Ultra modu etkinleştirildi, TUN yapılandırması yeniden yükleniyor",
   "已是最新版本": "Zaten güncel",

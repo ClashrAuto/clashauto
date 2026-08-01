@@ -3126,3 +3126,44 @@ Qt 的 `deviceNameFor()` 拿**整张台账**去匹配源 IP；Swift 传进去的
 
 `swift test` 350 全绿；`i18n_check.py` 257/257（「本机」表里本来就有）；
 `settings_persist_check.py` 7/7。截图确认设备页与概览条正常。
+
+---
+
+## 续五十四（2026-08-01）进程候选的排序；「应用」不该为混合端口重启核心
+
+### 1. 进程候选按码点排，Qt 是不区分大小写
+
+Qt：`list.sort(Qt::CaseInsensitive)`。Swift：`seen.sorted()`（按码点）——
+于是 `Xcode` 排在 `curl` 前面，大小写混排的进程名被切成两段，
+想找 `chrome` 得先猜它被排到了哪一半。已改成 `localizedCaseInsensitiveCompare`。
+
+### 2. ★ 改混合端口不该重启核心
+
+Qt 分得很清楚：只有 **API 端口**（`external-controller`）变了才 `stopCore()/startCore()` ——
+它不在 `full.yaml` 里，热重载碰不到；**混合端口**就写在 `full.yaml` 里，
+`rebuildConfig()` 的热重载会让核心重新监听。
+
+Swift 是「两个端口任一变化就重启」，白白把所有连接断一次。已按 Qt 改。
+顺带补上 Qt 的**第三条分支**：核心没在跑时改 API 端口，既不能说「已重启」也不能什么都不说，
+要告诉用户何时生效 —— 新增「已应用（下次启动核心生效）」，12 种语言按既有约定补齐。
+
+### 核对过、无差异的
+
+- `nodeAllowed()` 的允许/排除正则（含「正则非法就当这条规则不存在」）逐条相同；
+- 更新检查：`/releases?per_page=20` 全量列表 + `prerelease` 按开关过滤 +
+  版本号砍掉第一个 `-` 之后再比（Qt 注释里那个坑），三处都一样；
+- GeoIP 源地址与 Qt 同一个（`MetaCubeX/meta-rules-dat` 的 `country.mmdb`）；
+- 关于页：列宽 `min(卡宽-80, 420)`、间距 14、logo 84 / 标题 30 / 版本行 14 /
+  提示 12 / 简介 13 且行距 1.35、链接行前让 6、三个链接的文案与 URL 逐条相同；
+- 设置页「过滤」tab：4 行、间距 10、左右 10 距底 10、标签列宽 150 字号 13，
+  两组正则预设与 Qt 的 `allowRulePresets`/`noAllowRulePresets` 逐条相同（截图确认）；
+- Qt `apply()` 会写的 20 个配置键，Swift 全都写（多数经 `bool(_:key:)` 这个泛型 helper）。
+
+### 一处**刻意不跟**（补记）
+
+Qt 的 `apply()` 是**整份重写 `config.yaml`**，只写它认识的那 20 个键 ——
+用户配置里的 `root`/`route`/`power`/`experimental`/`gateway`/`timer`/`socket`/`secret`/`beta`
+等等会在保存的一瞬间**全部丢失**。Swift 是逐键就地改写、其余原样保留。
+这条不跟，理由不用多说。
+
+`swift test` 350 全绿；`i18n_check.py` 258/258；`settings_persist_check.py` 7/7。
