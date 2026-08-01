@@ -8,8 +8,14 @@
 // 且不得阻塞。把 fd 设成非阻塞 + Notifier(Read)，就绪回调里一次把内核那边攒下的帧全吃掉——
 // 零轮询、零额外线程。
 //
-// ——————————————————— 收方：TPACKET_v2 mmap 环形缓冲（本文件的性能核心）———————————————————
+// ——————————————————— 收方：当前走逐帧 recvfrom；mmap 环形缓冲**已实现但关着** ————————————
 //
+// ★ 结论先行：环的代码完整保留在下面（`COAST_ENABLE_RX_RING`），但**默认关**，理由是真机量出来的
+//   ——TPACKET_v3 的块超时给单条往返加 ~15ms，TPACKET_v2 的定长槽装不下 GRO 合并的大帧、把
+//   **上行打到不足 1 MB/s**。逐帧 recvfrom 是唯一全维度正确的，代价只有 ~8% 连接速率。
+//   完整的三方对照数据与机理见下面 `COAST_ENABLE_RX_RING` 那段注释 —— 想把环打开的人务必先读它。
+//
+// 下面这段是当初做环的动机，仍然成立（只是被上面那两个坑压过）：
 // 老写法是「每帧一次 recvfrom + 每帧一个 QByteArray」。83k pps 量级下，两笔开销都和整个用户态
 // 协议栈处理同量级：
 //   · syscall：每帧一次 recvfrom ≈ 一次进出内核（现在还叠着 spectre/meltdown 的缓解代价）；
@@ -96,11 +102,31 @@
 #define SOL_PACKET 263
 #endif
 
-// TPACKET_v2 的编译期可用性探针。
-// TPACKET_V2 本身是 enum 常量（无法 #ifdef），而 TP_STATUS_COPY 这个宏是和 V2 同期（2.6.27,
-// "packet: tpacket_v2 support"）引入的，拿它当「这套内核头懂 V2」的探针最贴切。
-// PACKET_VERSION/PACKET_RX_RING 再兜一层。
-#if defined(TP_STATUS_COPY) && defined(PACKET_VERSION) && defined(PACKET_RX_RING)
+// ★★ RX 环当前**关着**，走逐帧 recvfrom —— 这是量出来的选择，不是没做完。
+//
+// 三种收包方式在同一台子上逐一实测（树莓派网关，被接管设备跑批量传输 + 连接速率两类负载）：
+//
+//                     上行(设备→外网)   下行     连接速率    轻载单条延迟
+//   TPACKET_v3          正常           正常     1245/s      16.1 ms   ← 块超时，延迟不可接受
+//   TPACKET_v2        **0.5~2 MB/s**   114MB/s  1192/s       2.09 ms  ← 上行崩了
+//   逐帧 recvfrom       118.6 MB/s     115MB/s  1095/s       2.18 ms  ← 全维度正确
+//
+// **V2 为什么会把上行打瘫**：它的槽是**定长**的（tp_frame_size），而 Linux 的 **GRO 默认开着**
+// （`ethtool -k eth0` 里 generic-receive-offload: on），入站方向内核会把多个 MTU 段**合并成
+// 远超 MTU 的大帧**再交给 ptype_all —— 真机抓到的就是 7300 字节（5×1460）的帧。这种帧塞不进
+// 2048 的槽，直接丢。设备侧的表现是：大段全丢、只有小段过得去，于是它按 RTO 退避重传
+// （抓包实测 +201ms、+408ms），吞吐塌到不足 1 MB/s。而 V3 是变长紧凑排布、块 64 KiB，装得下，
+// 所以这个坑只在 V2 上有。**下行完全正常**，因为那是发方，不经收环 —— 只测下行会漏掉它。
+//
+// 那为什么不把槽放大到能装 GRO 帧？GRO 帧上限是 64 KiB，槽要按最坏情况定长 ⇒ 同样的 1 MiB
+// 预算只剩 16 个槽，缓冲深度反而不够；试过 16 KiB 的折中，实测直接把进程搞崩（未深究）。
+//
+// 逐帧 recvfrom 没有定长槽这回事，GRO 大帧原样收得到，全维度正确，只损失 ~8% 连接速率
+// （1192 → 1095/s）—— 而那 8% 换的是「批量上传能不能用」。要把环加回来，先解决
+// 「定长槽 vs GRO 大帧」这个矛盾，并且**必须同时测上行**（别再只测下行和连接速率）。
+#define COAST_ENABLE_RX_RING 0
+
+#if COAST_ENABLE_RX_RING && defined(TP_STATUS_COPY) && defined(PACKET_VERSION) && defined(PACKET_RX_RING)
 #define COAST_HAVE_TPACKET_V2 1
 #endif
 
