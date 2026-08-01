@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 // 设置页用的一组手画控件。**逐个复刻** `qml/SettingsPage.qml` 顶部那批 inline component
@@ -136,13 +137,13 @@ struct ThemedField: View {
 /// 手画下拉（不可编辑）。对齐公共组件 `qml/ThemedCombo.qml`：
 /// 30 高、半径 3、**文字左对齐、右侧一个 ▾**。
 ///
-/// ★ **视觉自己画，`Menu` 只当一层透明的点击层盖在上面。**
-///   `.menuStyle(.borderlessButton)` 对 `label:` 的处理很霸道，两次都栽在这上面：
-///   ① 装饰画在 label 里 → 被整个吃掉，控件变成一段裸文字（设备详情窗「策略」那行的截图）；
-///   ② 把底色描边挪到 `Menu` 外面之后底是有了，但 label 里的 `HStack` 仍被**居中**、
-///      右侧那个 ▾ 直接不见（第二张截图）。
-///   所以别再试图让它按我们的排版渲染 —— 自己画一份完整的样子，
-///   再叠一个几乎全透明的 `Menu` 接管点击。
+/// 视觉自己画，但整个画好的样子**就是 `Menu` 的 label**（`.buttonStyle(.plain)`
+/// 让它原样渲染）—— 整块控件都是原生点击区，命中交给系统。
+///
+/// ★ 历史坑：早先用的是 `.menuStyle(.borderlessButton)` + 一层 0.001 透明度的
+///   点击层盖在画好的样子上。borderlessButton 会吃掉/居中 label（两次截图都栽在
+///   这上面），而透明点击层的命中时灵时不灵 —— 「下拉框不容易点开」就是它。
+///   `.buttonStyle(.plain)` 的 Menu 没有这两个问题，别再回去。
 ///
 /// 用 `Menu` 而不是 `Picker`：`Picker` 在 macOS 上会渲染成系统 pop-up button，
 /// 高度和描边都不受控。
@@ -159,8 +160,11 @@ struct ThemedCombo: View {
     }
 
     var body: some View {
-        ZStack {
-            // —— 自己画的样子 ——
+        Menu {
+            ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+                Button(option) { selection = index }
+            }
+        } label: {
             HStack(spacing: 0) {
                 Text(title)
                     .font(.system(size: 13))
@@ -181,19 +185,11 @@ struct ThemedCombo: View {
                 RoundedRectangle(cornerRadius: 3, style: .continuous)
                     .stroke(theme.inputBorder, lineWidth: 1)
             }
-
-            // —— 只负责弹菜单的那一层 ——
-            // 不能用 `.opacity(0)`：完全透明的视图不参与命中测试，点下去没反应。
-            Menu {
-                ForEach(Array(options.enumerated()), id: \.offset) { index, option in
-                    Button(option) { selection = index }
-                }
-            } label: {
-                Rectangle().fill(Color.white.opacity(0.001))
-            }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .menuStyle(.button)
+        .menuIndicator(.hidden)
         .frame(width: width, height: 30)
         .frame(maxWidth: width == nil ? .infinity : nil)
         .disabled(!enabled)
@@ -202,8 +198,12 @@ struct ThemedCombo: View {
 }
 
 /// 手画**可编辑**下拉（Host / 允许规则 / 排除规则）：能手输，也能从预置项里挑。
-/// 输入框铺满，右侧 ▾ 单独可点 —— 与 QML 里那个自定义 `indicator` 同义
-/// （那边同样因为 contentItem 吃掉了整控件的点击，才给箭头单挂了一个 TapHandler）。
+/// **点进输入框（获得焦点）或点右侧 ▾ 都会弹出预置项**；选中填入；
+/// 按 Esc 或点旁边收起菜单后，焦点还在框里，可以直接手输。
+///
+/// 弹出用的是**程序化的 `NSMenu`** 而不是 SwiftUI `Menu`：后者没法在「输入框
+/// 获得焦点」时打开（只能由它自己的 label 触发）；自绘浮层又会被卡片圆角和
+/// ScrollView 裁掉、还压不过后画的兄弟行。原生菜单自带独立窗口，两个问题都没有。
 struct ThemedEditCombo: View {
     @Environment(Theme.self) private var theme
     @Binding var text: String
@@ -213,6 +213,7 @@ struct ThemedEditCombo: View {
     var enabled = true
 
     @FocusState private var focused: Bool
+    @State private var menuHost = ComboMenuHost()
 
     var body: some View {
         HStack(spacing: 0) {
@@ -223,32 +224,81 @@ struct ThemedEditCombo: View {
                 .focused($focused)
                 .padding(.leading, 8)
 
-            Menu {
-                ForEach(options, id: \.self) { option in
-                    Button(option) { text = option }
-                }
-            } label: {
+            Button { popMenu() } label: {
                 Text("▾")
                     .font(.system(size: 12))
                     .foregroundStyle(theme.textMuted)
-                    .padding(6)
+                    // 点击区做到接近整个控件高（28×28）—— 原来 ▾ 加 6 内距只有
+                    // ~24pt 见方，「不容易点中」多半就是在够这个小目标。
+                    .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
+            .buttonStyle(.plain)
             .fixedSize()
-            .padding(.trailing, 2)
+            .padding(.trailing, 1)
         }
         .frame(width: width, height: 30)
         .background {
             RoundedRectangle(cornerRadius: 3, style: .continuous).fill(theme.inputBg)
         }
+        // 铺满整控件的隐形 NSView，给 NSMenu 定位（菜单贴着控件下缘弹）。
+        .background { ComboMenuAnchor(host: menuHost) }
         .overlay {
             RoundedRectangle(cornerRadius: 3, style: .continuous)
                 .stroke(focused ? theme.accent : theme.inputBorder, lineWidth: 1)
         }
+        .onChange(of: focused) { _, isFocused in
+            // 等这次点击处理完再弹 —— 在 mouseDown 里同步开菜单会吃掉焦点切换。
+            if isFocused { DispatchQueue.main.async { popMenu() } }
+        }
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
+    }
+
+    private func popMenu() {
+        guard enabled else { return }
+        menuHost.show(options: options) { text = $0 }
+    }
+}
+
+/// `ThemedEditCombo` 的菜单执行器：持有锚点 NSView，把预置项做成原生 NSMenu
+/// 贴着控件下缘弹出。类而不是结构体 —— NSMenuItem 的 target-action 需要一个
+/// 稳定的 objc 对象。
+private final class ComboMenuHost: NSObject {
+    weak var anchor: NSView?
+    private var onPick: ((String) -> Void)?
+
+    func show(options: [String], onPick: @escaping (String) -> Void) {
+        guard let anchor, anchor.window != nil else { return }
+        self.onPick = onPick
+        let menu = NSMenu()
+        for option in options {
+            let item = NSMenuItem(title: option, action: #selector(pick(_:)), keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        }
+        menu.minimumWidth = anchor.bounds.width
+        // 非翻转坐标系里 (0,0) 是锚点左下角 —— 菜单顶边正好接在控件底下，留 4 的缝。
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: -4), in: anchor)
+    }
+
+    @objc private func pick(_ sender: NSMenuItem) {
+        onPick?(sender.title)
+    }
+}
+
+/// 铺在 `ThemedEditCombo` 底下的隐形锚点视图（NSMenu 需要一个真实的 NSView 定位）。
+private struct ComboMenuAnchor: NSViewRepresentable {
+    let host: ComboMenuHost
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        host.anchor = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        host.anchor = view
     }
 }
 
