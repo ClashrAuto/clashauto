@@ -102,6 +102,17 @@ public enum NDPPacket {
         return Array(frame[62..<78])
     }
 
+    /// 是否路由器通告(RA, type 134)或邻居通告(NA, type 136)。真路由器发的这两类会把设备的网关
+    /// 邻居条目**解毒**回真 MAC —— 收到（且以太源是真路由器）就立刻重投盖回（见 `Redirector`）。
+    /// RA 周期发到 ff02::1（本机是 all-nodes 成员，非混杂也收得到），是最主要的解毒来源。
+    public static func isRouterAdvertOrNA(_ frame: [UInt8]) -> Bool {
+        guard frame.count >= 55 else { return false }
+        guard frame[12] == 0x86, frame[13] == 0xDD else { return false }
+        guard frame[20] == 58 else { return false }
+        let t = frame[54]
+        return t == 134 || t == 136
+    }
+
     /// 帧的 IPv6 源地址（NS 发起者的地址，抢答 NA 要单播回它）。`::`（DAD 阶段的 NS）返回 nil
     /// —— 无法单播回一个未指定地址，那种 NS 交给真路由器处理。
     public static func ipv6Source(_ frame: [UInt8]) -> [UInt8]? {

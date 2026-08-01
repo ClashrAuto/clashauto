@@ -27,6 +27,8 @@ final class Redirector: @unchecked Sendable {
     private var bpfReadBuf: UnsafeMutableRawBufferPointer?
     // 抢答时记下每台设备的链路本地地址（NS 源）：复原时优先单播 solicited 回它（更快落 REACHABLE）。
     private var deviceLLByMAC: [String: [UInt8]] = [:]
+    // 反制真路由器 RA/NA 的重投节流（uptime 纳秒；0 = 还没反制过）。
+    private var lastReassertNanos: UInt64 = 0
 
     // 当前接管的会话状态（复原时要原样用回去）。
     private var deviceIPs: [[UInt8]] = []
@@ -400,9 +402,23 @@ final class Redirector: @unchecked Sendable {
         }
     }
 
-    /// 一帧：若是设备发来复核我们冒充的路由器 LL 的 NS → 抢答一条 solicited NA，并记下它的 LL。
+    /// 一帧：两种关心的情况——
+    ///   ① 真路由器发的 RA/NA（会把设备解毒）→ 立刻重投盖回（节流 50ms，防真路由器连发时风暴）；
+    ///   ② 设备发来复核我们冒充的路由器 LL 的 NS → 抢答一条 solicited NA，并记下它的 LL。
     private func handleCapturedFrame(_ frame: [UInt8]) {
         guard v6Active, bpfFD >= 0 else { return }
+
+        // ① 反制：真路由器（以太源 = 真路由器 MAC）的 RA/NA 会把设备的网关条目解毒回真 MAC。
+        if NDPPacket.isRouterAdvertOrNA(frame), let src = NDPPacket.ethSource(frame),
+           src == routerMAC6.bytes {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now &- lastReassertNanos > 50_000_000 {   // 50ms 节流
+                lastReassertNanos = now
+                sendNDPSpoof()                            // 给所有设备重投一轮，盖回本机 MAC
+            }
+            return
+        }
+
         guard NDPPacket.isNeighborSolicitation(frame),
               let target = NDPPacket.nsTarget(frame), target == routerLL6,
               let srcMACBytes = NDPPacket.ethSource(frame),

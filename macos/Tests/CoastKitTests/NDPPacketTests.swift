@@ -130,6 +130,26 @@ struct NDPPacketTests {
         #expect(NDPPacket.ipv6Source(dad) == nil)
     }
 
+    @Test("RA/NA 识别：投毒 NA 是 NA、NS 不是")
+    func routerAdvertOrNA() {
+        let device = ARPPacket.MAC("dd:dd:dd:dd:dd:dd")!
+        let selfMAC = ARPPacket.MAC("aa:aa:aa:aa:aa:aa")!
+        let routerLL = NDPPacket.ipv6Bytes("fe80::1")!
+        // NA(type 136) → true
+        let na = NDPPacket.poison(deviceMAC: device, selfMAC: selfMAC, routerLL6: routerLL)
+        #expect(NDPPacket.isRouterAdvertOrNA(na))
+        // NS(type 135) → false（那是设备来问的，不是解毒源）
+        let ns = makeNS(deviceMAC: device, selfMAC: selfMAC,
+                        deviceLL: NDPPacket.ipv6Bytes("fe80::d00d")!, target: routerLL)
+        #expect(!NDPPacket.isRouterAdvertOrNA(ns))
+        // 手拼一个 RA(type 134) → true
+        var ra = na
+        ra[54] = 134
+        #expect(NDPPacket.isRouterAdvertOrNA(ra))
+        // 非 ICMPv6 → false
+        #expect(!NDPPacket.isRouterAdvertOrNA([UInt8](repeating: 0, count: 80)))
+    }
+
     @Test("★ 抢答 NA：单播回设备 LL、含 Solicited、TLLA = 本机")
     func solicitedAnswer() {
         let device = ARPPacket.MAC("dd:dd:dd:dd:dd:dd")!
