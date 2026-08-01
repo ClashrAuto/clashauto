@@ -352,7 +352,29 @@ public final class AppState {
             append(log: "COAST_NO_AUTOSTART=1，跳过自动启动核心".t)
             return
         }
-        Task { await controller.startCore() }
+        Task {
+            await controller.startCore()
+            // 台账里还开着代理的设备要重新接管 —— 接管随上次退出被复原了，只有开关状态是持久的。
+            await controller.resumeDeviceTakeover()
+            await startGatewayTestDeviceIfRequested()
+        }
+    }
+
+    /// 真机联调钩子：`COAST_GATEWAY_TESTDEV=<设备IP>` 启动即接管该设备，免去点界面开关。
+    ///
+    /// 与 Qt 版 `COAST_GATEWAY_TESTDEV` 同名同语义。走的是**与界面开关完全相同**的那条路
+    /// （写台账 → `rebuildConfig()` → `syncRedirect()` → helper），所以它验的是真实实现，
+    /// 不是一条测试专用的旁路。MAC 从本机 ARP 表解析 —— 解析不到就不接管（接管的硬前提）。
+    private func startGatewayTestDeviceIfRequested() async {
+        let env = ProcessInfo.processInfo.environment
+        guard let ip = env["COAST_GATEWAY_TESTDEV"], !ip.isEmpty else { return }
+        guard let mac = LanBrowser.arpMap()[ip] else {
+            append(log: "COAST_GATEWAY_TESTDEV=\(ip)：ARP 表里没有它，先让它发点流量再试")
+            return
+        }
+        _ = devices.setProxyEnabled(mac: mac, true, ip: ip)
+        append(log: "COAST_GATEWAY_TESTDEV=\(ip)（\(mac)）：已开代理，正在接管")
+        await controller.rebuildConfig()
     }
 
     public func shutdown() async {

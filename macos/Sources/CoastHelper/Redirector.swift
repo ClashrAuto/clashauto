@@ -70,7 +70,16 @@ final class Redirector: @unchecked Sendable {
     private var v6Active = false
     private var forwarding6WasOn = false
 
-    static let anchorName = "coast.redirect"
+    /// ★ **必须挂在 `com.apple/` 之下**。macOS 的主规则集（`/etc/pf.conf`）只有
+    ///   `rdr-anchor "com.apple/*"` / `anchor "com.apple/*"` 这几条通配引用 —— 一个平级的
+    ///   `coast.redirect` anchor 装得进去、`pfctl -s Anchors` 也看得见，却**从来不会被求值**，
+    ///   规则等于没装。真机实测（iMac 网关 + Android 设备）：平级 anchor 下 PF 状态表
+    ///   `inserts=0`、设备的包被原样转发给真路由器，核心一条连接都收不到；换成
+    ///   `com.apple/coast.redirect` 后同一条规则立刻开始命中。
+    ///
+    ///   只在这个通配命名空间下**新开我们自己的子 anchor**，不碰 Apple 已有的任何规则；
+    ///   卸载时只 flush 这一个子 anchor（见 `uninstallPF`）。
+    static let anchorName = "com.apple/coast.redirect"
 
     // MARK: - 开始
 
@@ -534,11 +543,8 @@ final class Redirector: @unchecked Sendable {
     /// 把规则写进一个专用 anchor，只影响这些源 IP，绝不动用户既有的 PF 配置。
     ///
     /// `deviceV6s`：被接管设备的**全局/ULA** v6 源地址（可空 = 无 v6 或没发现任何 v6 地址）。
-    /// v6 只重定向 **TCP**：v4 那条 `udp port 53 → dns` 是为了让域名走 fake-ip；v6 的 DNS 走向
-    /// 更杂（设备常有独立的 v6 解析器），且核心的 DNS 只监听 v4（`dns.listen: 0.0.0.0`），
-    /// 硬把 v6 的 :53 重定向到 `::1` 会打到一个没人监听的口。所以 v6 的 DNS 让设备照旧自己解析
-    /// —— 拿到真实 AAAA 后走 v6 TCP，仍被这条 rdr 收进核心（按 IP/GEOIP 规则代理，只是域名匹配
-    /// 退化成按 IP 匹配，不影响是否代理）。**这是有意的取舍,不是遗漏。**
+    /// 现在只记着备用：**v6 一条 rdr 都不装**，因为 macOS 的 pf 投递不了转发流量的 inet6 rdr
+    /// （真机实证与取舍见 `anchorRulesText()`）。设备的 v6 走普通内核转发，能上网但不经核心。
     private func installPF(deviceIPs: [String], deviceV6s: [String],
                           redirPort: Int, dnsPort: Int) -> String? {
         // 存下重建 anchor 需要的一切（收包路径现学到新 v6 源时要照这份重灌）。
@@ -555,16 +561,49 @@ final class Redirector: @unchecked Sendable {
     }
 
     /// 按当前 PF 状态（v4 设备 + v6 源集合 + 端口）生成 anchor 规则文本。
+    ///
+    /// ★ **每条 rdr 都要配一条 `route-to (lo0 …)` 的 pass**，而且 rdr **不能带 `pass`**。
+    ///   被接管设备的包对本机而言是**转发流量**：rdr 把目的改写成环回地址之后，内核仍按
+    ///   「这个包要转发出去」处理，于是它既不出网也不本地投递，直接消失 —— 设备侧表现为
+    ///   SYN 重传到超时。`route-to (lo0 …)` 明确把它交给环回口，才真正送进核心的监听套接字。
+    ///   而 `rdr pass` 的 `pass` 会让这个包**跳过整个过滤规则集**，那条 route-to 永远轮不上，
+    ///   所以必须拆成「rdr 只做翻译」+「filter 规则负责投递」两条。
+    ///   真机实测（iMac 网关 + Android 设备）：`rdr pass` 单条 → 本地监听 0 连接；
+    ///   拆成两条后同一请求立刻被核心收下并按规则选中节点。
     private func anchorRulesText() -> String {
         var rules = ""
         for ip in pfDeviceIP4s {
             // TCP 全部重定向到 redir 口；UDP :53 单独重定向到 DNS 口（域名要走 fake-ip）
-            rules += "rdr pass on \(interface) inet proto tcp from \(ip) to any -> 127.0.0.1 port \(pfRedirPort)\n"
-            rules += "rdr pass on \(interface) inet proto udp from \(ip) to any port 53 -> 127.0.0.1 port \(pfDnsPort)\n"
+            rules += "rdr on \(interface) inet proto tcp from \(ip) to any -> 127.0.0.1 port \(pfRedirPort)\n"
+            rules += "rdr on \(interface) inet proto udp from \(ip) to any port 53 -> 127.0.0.1 port \(pfDnsPort)\n"
         }
-        for v6 in pfV6set.sorted() {   // 排序让规则文本稳定、可复现
-            // 目的用 `::1`（核心的 redir 监听在所有接口上，含 v6 环回）。只 TCP,理由见上。
-            rules += "rdr pass on \(interface) inet6 proto tcp from \(v6) to any -> ::1 port \(pfRedirPort)\n"
+        // ★ **v6 不装 rdr** —— macOS 的 pf 不会把「转发流量的 inet6 rdr」投递到本机监听。
+        //
+        //   真机实测（iMac 网关 + Android 设备，macOS 26.5，NDP 投毒正常、设备 v6 帧确实到达本机）：
+        //   inet6 rdr 规则**命中并建了状态**（Packets>0、States=2），配套的 route-to 过滤规则也命中，
+        //   可目标端口上的监听**一条连接都收不到**；设备侧是 SYN 一直重传到超时。
+        //   两种目的地址都试过 —— `::1`（核心的 redir 确认在 `[::1]` 上 LISTEN）和本机 en1 的全局
+        //   v6 地址 —— **都不投递**。同一时刻、同一份 anchor 里，等价的 inet **v4** 规则工作正常。
+        //   即 v4 能走通不是运气，v6 走不通也不是配置问题，是 pf 这条路本身在 macOS 上不通。
+        //
+        //   于是装 v6 rdr 的后果是**设备 IPv6 直接断网**：包被 pf 吃掉，既不投递也不再转发 ——
+        //   比不接管还糟。去掉 rdr 之后（投毒照旧，本机仍是它的 v6 网关），设备 v6 走普通内核转发
+        //   正常出网（同一台设备实测 `https://ipv6.baidu.com` 200）。
+        //
+        //   **代价**：设备的 v6 流量不经核心，不受规则/节点选择约束。这是当下两害相权 ——
+        //   「v6 能用但不代理」优于「v6 直接断」。要真正代理 v6 得换机制（不是 rdr），
+        //   在此之前 v6 的接管只用于「本机当网关 + 可靠复原」，不做重定向。
+        //   注意 `learnDeviceV6` 现学到的地址仍然记着，换机制时可直接复用。
+        //
+        // 投递规则必须排在全部 rdr 之后：pfctl 要求 anchor 里翻译规则先于过滤规则。
+        //
+        // ★ `rdr` 之外还要这条 `route-to`：见上方方法注释 —— 转发流量被 rdr 改写目的之后，
+        //   内核仍按「要转发出去」处理，只有显式 route-to 环回才真正送进本机监听。
+        for ip in pfDeviceIP4s {
+            rules += "pass in quick on \(interface) route-to (lo0 127.0.0.1) inet proto tcp"
+                + " from \(ip) to 127.0.0.1 port \(pfRedirPort) keep state\n"
+            rules += "pass in quick on \(interface) route-to (lo0 127.0.0.1) inet proto udp"
+                + " from \(ip) to 127.0.0.1 port \(pfDnsPort) keep state\n"
         }
         return rules
     }

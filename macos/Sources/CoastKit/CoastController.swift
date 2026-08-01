@@ -214,6 +214,20 @@ public final class CoastController {
         await syncRedirect()
     }
 
+    /// 启动时把台账里**已经开着代理**的设备重新接管起来。
+    ///
+    /// 台账是持久的，接管不是 —— 接管活在 helper 的进程状态里，app 一退出（正常退出、崩溃、
+    /// 关机）就随 XPC 断开被复原掉。所以重开 app 之后，界面上那些开关还都亮着，实际却一台
+    /// 都没在接管：**用户以为在代理，其实没有**，而且没有任何提示。这里补上这一次同步。
+    ///
+    /// ★ **必须在核心确实起来之后才做**。被接管的设备没有"直连"这条路 —— 本机就是它的默认
+    ///   网关，它的每个包（含最终命中 DIRECT 的）都要经核心才出得去。核心没起就先去投毒，
+    ///   等于把设备劫持到一个不存在的出口上，那不是"代理失效"而是**彻底断网**。
+    public func resumeDeviceTakeover() async {
+        guard isCoreRunning else { return }
+        await syncRedirect()
+    }
+
     /// 把「哪些设备该被接管」下发给 helper。
     ///
     /// 每次设备开关/策略变更后经 `rebuildConfig` 调到这里。逻辑很简单：
