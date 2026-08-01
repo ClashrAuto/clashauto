@@ -107,6 +107,15 @@ public enum LanTopology {
         return result
     }
 
+    /// 邻居表 `v6 → MAC`（规范化小写）。给 `ArpWatch.evaluateV6` 用（NDP 安全监视）。
+    /// 一台设备有多个 v6 → MAC 会重复，键唯一即可。
+    public static func ndpNeighborMap() -> [String: String] {
+        guard let output = run("/usr/sbin/ndp", ["-an"]) else { return [:] }
+        var map: [String: String] = [:]
+        for n in parseNdpNeighbors(output) { map[n.ip] = n.mac.lowercased() }
+        return map
+    }
+
     // MARK: - IPv6 解析（纯函数，可单测）
 
     /// 解析 `netstat -rn -f inet6` 里的默认路由：取第一条下一跳为**链路本地**的 `default`。

@@ -12,6 +12,53 @@ struct ArpWatchTests {
                           localMACs: local, proxiedDevices: proxied)
     }
 
+    // MARK: - v6（NDP）监视
+
+    private func snapshotV6(neighbors: [String: String], proxiedV6: [String: String] = [:],
+                            routerLL: String = "fe80::1", routerMAC: String = "11:22:33:44:55:66",
+                            local: Set<String> = ["aa:aa:aa:aa:aa:aa"]) -> ArpWatch.SnapshotV6 {
+        ArpWatch.SnapshotV6(neighbors: neighbors, routerLL: routerLL, routerMAC: routerMAC,
+                            localMACs: local, proxiedV6: proxiedV6)
+    }
+
+    @Test("v6 一切正常时不报警")
+    func v6Quiet() {
+        let alerts = ArpWatch().evaluateV6(snapshotV6(
+            neighbors: ["fe80::1": "11:22:33:44:55:66",
+                        "240e:3a1::50": "de:ad:be:ef:00:01"],
+            proxiedV6: ["240e:3a1::50": "de:ad:be:ef:00:01"]))
+        #expect(alerts.isEmpty, "误报:\(alerts)")
+    }
+
+    @Test("★ v6 路由器 LL 被冒充 → gatewaySpoofed")
+    func v6GatewaySpoofed() {
+        let alerts = ArpWatch().evaluateV6(snapshotV6(
+            neighbors: ["fe80::1": "66:66:66:66:66:66"]))   // 期望 11:22..，实际是别的 MAC
+        #expect(alerts.count == 1)
+        #expect(alerts.first?.kind == .gatewaySpoofed)
+        #expect(alerts.first?.offenderMAC == "66:66:66:66:66:66")
+        #expect(alerts.first?.subjectIP == "fe80::1")
+    }
+
+    @Test("★ 代理设备的 v6 被争抢 → deviceContended（基线锚住真 MAC）")
+    func v6DeviceContended() {
+        let alerts = ArpWatch().evaluateV6(snapshotV6(
+            neighbors: ["fe80::1": "11:22:33:44:55:66",
+                        "240e:3a1::50": "66:66:66:66:66:66"],   // 现在指向攻击者
+            proxiedV6: ["240e:3a1::50": "de:ad:be:ef:00:01"]))   // 基线里本该是设备真 MAC
+        #expect(alerts.count == 1)
+        #expect(alerts.first?.kind == .deviceContended)
+        #expect(alerts.first?.subjectIP == "240e:3a1::50")
+        #expect(alerts.first?.offenderMAC == "66:66:66:66:66:66")
+    }
+
+    @Test("v6：绑到本机 MAC 不算欺骗（接管期间对别的设备冒充是我们自己在做）")
+    func v6LocalNotSpoof() {
+        let alerts = ArpWatch().evaluateV6(snapshotV6(
+            neighbors: ["fe80::1": "aa:aa:aa:aa:aa:aa"]))   // 本机 MAC
+        #expect(alerts.isEmpty)
+    }
+
     @Test("一切正常时不报警")
     func quiet() {
         let alerts = ArpWatch().evaluate(snapshot(

@@ -134,6 +134,9 @@ public final class AppState {
     /// 告警留存：一条威胁出现后在横幅里待到连续 150 秒没再观察到为止（Qt 的 `kSecTtlMs`）。
     /// 直接用每轮的检测结果替换的话，横幅会随 ARP 绑定来回翻而每隔几秒闪一次。
     private let arpRetention = ArpAlertRetention()
+    /// v6 争抢检测的基线：设备 v6 → 设备真实 MAC，在**观察到干净绑定时**逐步攒起来
+    /// （见 `runArpWatchOnce`）。不能每轮从当前邻居表现取——地址一旦被投毒就锚不住了。
+    private var v6Baseline: [String: String] = [:]
 
     // MARK: 日志
 
@@ -451,6 +454,7 @@ public final class AppState {
 
     private func runArpWatchOnce() {
         guard let gateway = LanTopology.defaultGateway() else { return }
+        let localMACs = LanTopology.localMACs()
         // 只盯**正在代理**的设备：没接管的设备其 ARP 变化与我们无关，报了只是噪音。
         var proxied: [String: String] = [:]
         for device in devices.proxiedDevices() where !device.lastIP.isEmpty {
@@ -458,9 +462,23 @@ public final class AppState {
         }
         let snapshot = ArpWatch.Snapshot(arp: LanBrowser.arpMap(),
                                          gatewayIP: gateway.ip, gatewayMAC: gateway.mac,
-                                         localMACs: LanTopology.localMACs(),
+                                         localMACs: localMACs,
                                          proxiedDevices: proxied)
-        let alerts = arpWatch.evaluate(snapshot)
+        var alerts = arpWatch.evaluate(snapshot)
+
+        // —— IPv6（NDP）监视：本网络有 v6 路由器才做（与 v4 共用 Alert/节流/留存/界面）——
+        if let gw6 = LanTopology.defaultGatewayV6() {
+            let neighbors = LanTopology.ndpNeighborMap()
+            let proxiedMACs = Set(devices.proxiedDevices().map { $0.mac.lowercased() })
+            // 基线：把当前绑到**代理设备 MAC** 的 v6 记进去（只在干净时攒），并剔除已不再代理的。
+            for (v6, mac) in neighbors where proxiedMACs.contains(mac) { v6Baseline[v6] = mac }
+            v6Baseline = v6Baseline.filter { proxiedMACs.contains($0.value.lowercased()) }
+            let snap6 = ArpWatch.SnapshotV6(neighbors: neighbors,
+                                            routerLL: gw6.routerLL, routerMAC: gw6.routerMAC,
+                                            localMACs: localMACs, proxiedV6: v6Baseline)
+            alerts += arpWatch.evaluateV6(snap6)
+        }
+
         securityAlerts = arpRetention.absorb(alerts)
         // 通知仍只对**本轮真的观察到**的那些发 —— 留存是给界面看的，不该让 TTL 内的
         // 旧告警反复触发通知。
