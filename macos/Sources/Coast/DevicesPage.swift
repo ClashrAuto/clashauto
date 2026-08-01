@@ -54,7 +54,6 @@ struct DevicesPage: View {
     ///
     /// 用 `allRows` 而不是筛过的 `rows`：这是「这个网络里有几台在被代理」的统计，
     /// 跟用户此刻在搜什么无关。用 `rows` 的话，一搜索这个数就跳，看着像状态突变。
-    private var enabledCount: Int { allRows.filter(\.proxyEnabled).count }
 
     /// 经搜索与「仅在线」筛过的行。
     private var rows: [Row] {
@@ -118,7 +117,6 @@ struct DevicesPage: View {
         // Qt 的设备页没有任何分隔线：概览条 / 列表靠 10 的行距分开。
         VStack(spacing: 10) {
             if rows.isEmpty { emptyState } else { list }
-            proxyBanner
         }
         // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 列表）——
         // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。26 上它和概览条
@@ -395,7 +393,9 @@ struct DevicesPage: View {
             .listRowSeparator(.hidden)
             // Qt: 列表 `spacing: 4`，行宽 = 列表宽 - 10（行右端与上面几行对齐，
             // 滚动条正好悬在那条 10px 的空隙上）。
-            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 10))
+            // 行铺到列表最右缘（悬浮滚动条压在行上，系统列表的常态）——
+            // 原来右让 10 是配旧的两行顶栏对齐用的，单行顶栏后只剩一条空缝。
+            .listRowInsets(EdgeInsets(top: 2, leading: 0, bottom: 2, trailing: 0))
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
@@ -448,25 +448,6 @@ struct DevicesPage: View {
             }
             .padding(.trailing, 10)
         }
-    }
-
-    /// 底部横幅：说明当前状态。设备端零配置，所以这里没有任何要用户抄的东西。
-    @ViewBuilder
-    private var proxyBanner: some View {
-        HStack(spacing: 6) {
-            Image(systemName: enabledCount > 0 ? "network" : "info.circle")
-                .font(.system(size: 10)).foregroundStyle(theme.textMuted)
-            if enabledCount > 0 {
-                Text(String(format: "%d 台设备已接管 · 设备端无需任何配置".t, enabledCount))
-                    .font(.system(size: 10)).foregroundStyle(theme.textSecondary)
-            } else {
-                Text("打开开关即可接管该设备的流量，设备端无需任何配置".t)
-                    .font(.system(size: 10)).foregroundStyle(theme.textMuted)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 10)
-        .frame(height: 26)
     }
 
     // MARK: 动作
