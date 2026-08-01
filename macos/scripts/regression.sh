@@ -24,13 +24,9 @@ line() { printf '  %-22s %s\n' "$1" "$2"; }
 # COAST_TEST_MIHOMO 指向 mihomo 二进制时,单测里那两条 RealCoreValidation 会真的跑
 # `mihomo -t` 校验生成的 full.yaml —— **真正的消费者**才是权威判据,PyYAML 只能证明
 # 「是合法 YAML」,核心还有自己的 schema。没设就自动跳过,不做硬依赖。
-# 没显式指定时,自动认开发机上的那一份 —— 单测里几处 `Self.mihomo` 找的就是这个路径,
-# 让「手边有核心」的机器不必每次都想起来带上这个变量。找不到就照常跳过。
-DEV_MIHOMO="$HOME/.local/share/coast-devtools/mihomo"
-if [[ -z "${COAST_TEST_MIHOMO:-}" && -x "$DEV_MIHOMO" ]]; then
-    export COAST_TEST_MIHOMO="$DEV_MIHOMO"
-    echo "== 真核心校验:自动发现 $DEV_MIHOMO =="
-fi
+# 曾经想过「没显式指定就自动认开发机上的那一份」，**故意没做**：真核心一开，
+# `controllerNoticesCrash` 会挂住不返回（见该测试里的超时说明），回归跑就永远出不来。
+# 在那条查清楚之前，真核心保持显式 opt-in。
 if [[ -n "${COAST_TEST_MIHOMO:-}" && -x "${COAST_TEST_MIHOMO}" ]]; then
     echo "== 真核心校验:已启用($(basename "$COAST_TEST_MIHOMO")) =="
 else

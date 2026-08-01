@@ -17,6 +17,24 @@ struct CoreCrashE2ETests {
         return FileManager.default.isExecutableFile(atPath: path) ? path : nil
     }()
 
+    /// 给一段可能挂住的 async 代码限时。返回 false = 超时。
+    ///
+    /// 用 `TaskGroup` 而不是 `Task.sleep` + 取消：被超时的那一支**取消不掉**
+    /// （它卡在不可取消的位置），所以这里只是不再等它，而不假装能把它收回来。
+    static func withTimeout(seconds: Double, _ body: @escaping @Sendable () async -> Void) async
+        -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await body(); return true }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(seconds))
+                return false
+            }
+            let first = await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+    }
+
     /// 等 REST 起来。核心 `task.run()` 返回时它还没开始监听。
     static func waitForREST(port: Int, secret: String) async -> Bool {
         let url = URL(string: "http://127.0.0.1:\(port)/version")!
@@ -135,7 +153,19 @@ struct CoreCrashE2ETests {
         nonisolated(unsafe) var notified = false
         controller.onCoreUnexpectedlyExited = { notified = true }
 
-        await controller.startCore()
+        // ★ **必须限时**。`startCore()` 在设了真核心(COAST_CORE_PATH)时会挂住不返回 ——
+        //   实测：单跑这一条 8 分钟不结束,`sample` 抓到的进程是空转的(没有阻塞线程、
+        //   也没有子核心),即某个 await 的续体再没被恢复。原因**尚未查清**。
+        //
+        //   在查清之前也绝不能让它裸奔:一个能永久挂住的测试比一条红的测试糟得多——
+        //   回归跑会永远出不来,而且测试进程被外部杀掉时子核心也跟着漏出去。
+        //   限时之后,最坏情况是这条测试变红并说清楚卡在哪儿。
+        let started = await Self.withTimeout(seconds: 30) { await controller.startCore() }
+        guard started else {
+            Issue.record("startCore() 30 秒没返回 —— 卡在启动路径里(已知未解问题)")
+            await controller.stopCore()
+            return
+        }
         guard controller.isCoreRunning else {
             Issue.record("核心没起来,后面的断言没有意义")
             return
