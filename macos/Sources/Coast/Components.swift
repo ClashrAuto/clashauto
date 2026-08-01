@@ -14,6 +14,9 @@ struct Card<Content: View>: View {
             // 「整个窗口的毛玻璃」其实只做了个边。这里压到 0.55 而不是全透：
             // 全透的话卡片上的正文会直接压在桌面壁纸上，深色壁纸尚可，
             // 亮色壁纸下小字基本读不了。
+            //
+            // （macOS 26 上主窗不再用它包页面 —— 见 MainView 的分支；这里保持原样，
+            //   给日志时间线这类**内层面板**继续当底。）
             .background(theme.card.opacity(0.55))
             .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
     }

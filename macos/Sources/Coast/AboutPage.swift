@@ -24,9 +24,9 @@ struct AboutPage: View {
         Card {
             GeometryReader { geo in
                 VStack(spacing: 14) {
-                    // —— logo ——（Qt 用 iconfont 字形 84px，这里是同尺寸的 SF Symbol）
-                    Image(systemName: "globe")
-                        .font(.system(size: 84))
+                    // —— logo ——（与侧栏同一 iconfont 地球字形，84px，对齐 Qt）
+                    Text("\u{E600}")
+                        .font(.custom(IconFont.logo, size: 84))
                         .foregroundStyle(theme.accent)
 
                     Text("Coast")
