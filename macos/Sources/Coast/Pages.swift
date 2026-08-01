@@ -504,21 +504,18 @@ struct TodayTrafficCard: View {
                            selection: $bindable.trafficDimension,
                            tint: theme.todayAccent.opacity(0.45))
 
+            topFive
+
+            Spacer(minLength: 0)
+
             if state.todayTop.isEmpty {
-                Text(state.history.isOpen ? "今天还没有已结束的连接".t : "历史库不可用".t)
+                // Qt 是**居中**的一行「今日暂无数据」，压在卡片底部（前面一个
+                // `Item { Layout.fillHeight: true }` 把它顶下去）。
+                // 「历史库不可用」是 Qt 没有的一档：库开不开得起来和「今天没跑流量」
+                // 是两回事，混成一句会让人以为是没流量。
+                Text(state.history.isOpen ? "今日暂无数据".t : "历史库不可用".t)
                     .font(.system(size: 11)).foregroundStyle(theme.textMuted)
-            } else {
-                ForEach(state.todayTop) { item in
-                    HStack(spacing: 6) {
-                        Text(item.key)
-                            .font(.system(size: 11)).foregroundStyle(theme.textSecondary)
-                            .lineLimit(1).truncationMode(.middle)
-                        Spacer(minLength: 8)
-                        Text(Formatting.bytes(item.bytes))
-                            .font(.system(size: 11).monospacedDigit())
-                            .foregroundStyle(theme.textMuted)
-                    }
-                }
+                    .frame(maxWidth: .infinity, alignment: .center)
             }
         }
         // Qt 这几张卡：内距 12、`radius: 4`（比 Theme.radius(5) 小一档）。
@@ -528,15 +525,55 @@ struct TodayTrafficCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
     }
 
+    /// Top5（最多 5 条；没有的那几条**不占位**——Qt 是 `visible: e !== undefined`，
+    /// QML 的 `visible: false` 会把元素从布局里摘掉，不是留个空位）。
+    ///
+    /// 每条下面一根占比条，基准是**榜首**而不是今日总量：Top5 之外还有长尾，
+    /// 按总量算的话五根全是细线，比不出高下（Qt 的注释讲的就是这个）。
+    private var topFive: some View {
+        let peak = max(1, state.todayTop.first?.bytes ?? 1)
+        return ForEach(state.todayTop.prefix(5)) { item in
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 8) {
+                    Text(item.key)
+                        .font(.system(size: 11)).foregroundStyle(theme.textSecondary)
+                        .lineLimit(1).truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text(Formatting.bytes(item.bytes))
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(theme.textMuted)
+                }
+                GeometryReader { geo in
+                    ZStack(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                            .fill(theme.dark ? Color(hex: 0x1C_1C_1C) : Color(hex: 0xDD_DD_DD))
+                        RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                            .fill(theme.todayAccent)
+                            .frame(width: geo.size.width * CGFloat(item.bytes) / CGFloat(peak))
+                    }
+                }
+                .frame(height: 3)
+            }
+        }
+    }
+
+    /// 24 根小时柱（0~23 时）。
+    ///
+    /// 颜色**只有一种**（`#8a72c6`），靠透明度区分：当前小时 1.0、其余 0.55 ——
+    /// 这样一眼知道柱子读到哪儿了（Qt 的注释就是这么写的）。原来是「有流量才上色、
+    /// 没流量画成灰」，等于把「现在几点」这条信息整个丢了，灰柱子还看着像坏掉的格子。
     private var hourlyBars: some View {
         // 纵轴按当日峰值自适应；全 0 时给 1 兜底，免得除零。
         let peak = max(state.todayHourly.max() ?? 0, 1)
+        let currentHour = Calendar.current.component(.hour, from: Date())
         return HStack(alignment: .bottom, spacing: 2) {
             ForEach(Array(state.todayHourly.enumerated()), id: \.offset) { hour, bytes in
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(bytes > 0 ? theme.todayAccent : theme.textMuted.opacity(0.15))
+                    .fill(theme.todayAccent)
+                    .opacity(hour == currentHour ? 1.0 : 0.55)
+                    // 至少 1pt：0 字节的小时也要有一格底线，柱子的间隔才看得出来。
                     .frame(height: max(1, CGFloat(bytes) / CGFloat(peak) * 34))
-                    .help(String(format: "%d 点：%@".t, hour, Formatting.bytes(bytes)))
+                    .help("\(hour):00  " + Formatting.bytes(bytes))
             }
         }
         .frame(height: 34)
@@ -558,7 +595,11 @@ struct CompositionCard: View {
 
     var body: some View {
         let comp = state.composition
-        let total = max(comp.totalBytes, 1)
+        // ★ 分母和「有没有数据」是**两件事**。原来只有一个 `total = max(totalBytes, 1)`，
+        //   于是下面的 `total > 0` 恒真 —— 空槽那条分支形同虚设，一个字节都没跑时
+        //   整条仍被填成满条（截图里就是一整条蓝）。除零要兜底，判空要看真值。
+        let hasTraffic = comp.totalBytes > 0
+        let divisor = max(comp.totalBytes, 1)
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "arrow.left.arrow.right.circle")
@@ -583,10 +624,10 @@ struct CompositionCard: View {
                     Rectangle().fill(theme.dark ? Color(hex: 0x1C_1C_1C) : Color(hex: 0xDD_DD_DD))
                     HStack(spacing: 0) {
                         Rectangle().fill(theme.directDot)
-                            .frame(width: total > 0
-                                   ? geo.size.width * CGFloat(comp.directBytes) / CGFloat(total)
+                            .frame(width: hasTraffic
+                                   ? geo.size.width * CGFloat(comp.directBytes) / CGFloat(divisor)
                                    : 0)
-                        if total > 0 { Rectangle().fill(theme.accent) }
+                        if hasTraffic { Rectangle().fill(theme.accent) }
                     }
                 }
             }
