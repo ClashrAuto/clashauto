@@ -77,10 +77,11 @@ struct BandwidthChart: View {
                     }
 
                     if !minimal, !title.isEmpty {
+                        // Qt：`11px`、线色 70%、`fillText(title, 10, 18)`（18 是**基线**）。
                         Text(title)
-                            .font(.system(size: 10))
-                            .foregroundStyle(theme.textMuted)
-                            .padding(4)
+                            .font(.system(size: 11))
+                            .foregroundStyle(lineColor.opacity(0.70))
+                            .offset(x: 10, y: Self.topForBaseline(18, size: 11))
                     }
                 }
                 }
@@ -118,26 +119,36 @@ struct BandwidthChart: View {
                 .font(.system(size: 9))
                 .foregroundStyle(theme.dark ? Color(hex: 0x9A_9A_9A) : Color(hex: 0x7A_7A_7A))
                 .frame(width: size.width - 6, alignment: .trailing)
-                .offset(y: tick.y - 3 - 6)
+                .offset(y: Self.topForBaseline(tick.y - 3, size: 9))
         }
     }
 
-    /// 四分网格 + 右侧速度刻度（max / ¾ / ½ / ¼）。
+    /// Canvas 的 `fillText` 给的是**基线**，SwiftUI 的 `offset` 定的是**顶边**。
+    /// 系统字体的 ascent 约等于字号，拿字号当近似即可 —— 差一两个点在这个尺度上看不出来，
+    /// 而按基线原样写会整体偏低一整行。
+    static func topForBaseline(_ baseline: CGFloat, size: CGFloat) -> CGFloat {
+        baseline - size
+    }
+
+    /// 四分网格 + 右侧速度刻度（max / ¾ / ½ / ¼）。逐项照 Qt 的非 minimal 分支：
+    /// **五条**线（`gi = 0…4`，含顶边与底边）、线色 `rgba(线色, 0.10)`、
+    /// 刻度文字 10px `#969696`、贴右边缘 6、基线在 `H/4*li + 12`。
     private func grid(in size: CGSize) -> some View {
-        ForEach(1...4, id: \.self) { step in
-            let ratio = Double(step) / 4
-            let y = size.height * (1 - ratio)
-            ZStack(alignment: .topTrailing) {
+        ZStack(alignment: .topLeading) {
+            ForEach(0...4, id: \.self) { step in
+                let y = (size.height / 4 * CGFloat(step)).rounded() + 0.5
                 Path { path in
                     path.move(to: CGPoint(x: 0, y: y))
                     path.addLine(to: CGPoint(x: size.width, y: y))
                 }
-                .stroke(theme.divider.opacity(0.5), lineWidth: 1)
-
-                Text(Formatting.rate(Int64(scale * ratio)))
-                    .font(.system(size: 9))
-                    .foregroundStyle(theme.textMuted.opacity(0.7))
-                    .offset(y: y + 1)
+                .stroke(lineColor.opacity(0.10), lineWidth: 1)
+            }
+            ForEach(0..<4, id: \.self) { index in
+                Text(Formatting.rate(Int64(scale * (1 - Double(index) / 4))))
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(hex: 0x96_96_96))
+                    .frame(width: size.width - 6, alignment: .trailing)
+                    .offset(y: Self.topForBaseline(size.height / 4 * CGFloat(index) + 12, size: 10))
             }
         }
     }
