@@ -90,7 +90,8 @@ public:
         qint64 downPauseHits;   // 下行水位到顶 → 停止从 socks 读
         // —— UDP ——
         qint64 udpFlowsCreated;
-        qint64 udpFlowsEvicted; // 撞上限被淘汰（可能是活流被顶掉 → QUIC 莫名卡住）
+        qint64 udpFlowsEvicted; // 撞上限被淘汰（只淘汰**确已空闲**的，见 NetStack 的准入策略）
+        qint64 udpFlowsRefused; // 撞上限且一条空闲的都没有 → 拒收这条新流的包（不顶活流）
         qint64 dnsHijacked;     // 转投 mihomo DNS 的查询数
         qint64 dnsNoReply;      // 5s 兜底回收时仍没等到应答
         // —— 定时器泵健康度（**单线程饱和度**的直接指标）——

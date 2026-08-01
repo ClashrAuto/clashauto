@@ -178,6 +178,10 @@ QString lwipStatsLine();
 // 方案友好），但「源端口也乱换」的极端情况必须挡住，不能让一台设备把整个进程的 fd 吃光。
 constexpr int kMaxUdpFlowsPerDevice = 128;
 constexpr int kMaxUdpFlowsTotal = 1024;
+// 顶到上限时「多久没用才算可以淘汰」。比这更近用过的一律不动 —— 详见 evictOldestFlowOfDevice
+// 那段：顶掉活流会让整条 UDP 抖到 0% 成功率。取 1s：正常交互流（QUIC/游戏/RTP）的包间隔远小于它，
+// 而真正闲下来的流 1 秒不发包也就等着老化了，早淘汰一点无害。
+constexpr qint64 kUdpEvictMinIdleMs = 1000;
 // peers 只为保留老代码「查不到就丢」的严格度（地址限制型 NAT）。超过上限说明这条流在广撒，
 // 再记下去只是白吃内存 → 退化成全锥，不再校验来源。
 constexpr int kMaxUdpPeersPerFlow = 256;
@@ -291,29 +295,49 @@ void reapUdpFlows(NetStack::Impl *d)
     }
 }
 
-// 淘汰某设备最久未用的一条流。只在该设备顶到上限时才走，这时扫它自己那张最多 128 条的表，比在
-// 全局 LRU 链上一路找「属于这台设备的最旧一条」更划算（后者最坏要走完 1024 条）。
-void evictOldestFlowOfDevice(NetStack::Impl *d, UdpSess *s)
+// 淘汰某设备最久未用的一条流 —— **但只淘汰确已空闲的**。返回 false = 一条都不该动。
+//
+// ★ 为什么不能"满了就顶掉最旧的那条"（LRU），这是实测出来的：设备的并发 UDP 流一旦超过上限，
+//   纯 LRU 会**剧烈抖动并把整条 UDP 打瘫**，不是优雅降级。真机（树莓派网关，被接管设备开
+//   200 个源端口、上限 128）：10 秒窗口里 `udpNew=24088 udpEvict=23962` —— 每秒建/拆 2400 条流，
+//   而每条流都要新建一个 UDP socket **外加一条到 mihomo 的 SOCKS 控制连接**；
+//   同时 `rxdrop=6732`、泵开始迟到，**应用侧成功率 0.0%**（发 38400 收 4）。
+//   机理是经典的 LRU 抖动：被顶掉的那条流下一个包又要重建，重建又顶掉另一条正在用的，
+//   **停摆自我维持**。原注释写的「可能顶掉一条正在用的流（QUIC 会莫名卡住）」低估了后果。
+//
+//   所以准入策略改成：**宁可拒收新流，也不动正在用的流**。空闲判据取 kUdpEvictMinIdleMs——
+//   比它更近用过的就算"活着"。这样最坏情况是「前 128 条流照常工作，第 129 条起的目的地收不到
+//   包」：QUIC 会回落 TCP、DNS 会重试，而已经建立的会话一条都不受影响。被拒的次数记进
+//   `udpRefuse=`，长期不为零就说明该调大上限，而不是让它静默抖动。
+bool evictOldestFlowOfDevice(NetStack::Impl *d, UdpSess *s)
 {
     UdpFlow *victim = nullptr;
     for (UdpFlow *f : std::as_const(s->flows)) {
         if (!victim || f->lastUsed < victim->lastUsed)
             victim = f;
     }
-    if (victim)
-        ++GatewayDiag::c.udpFlowsEvicted; // 撞每设备上限：可能顶掉一条正在用的流（QUIC 会莫名卡住）
+    if (!victim)
+        return false;
+    if (monoMs() - victim->lastUsed < kUdpEvictMinIdleMs)
+        return false; // 最旧的那条也还活着 ⇒ 这台设备真有这么多并发流，别动它们
+    ++GatewayDiag::c.udpFlowsEvicted;
     destroyUdpFlow(d, victim);
+    return true;
 }
 
-// 全局最久未用：两条链的链尾里挑更旧的那个，O(1)。
-void evictGlobalOldestFlow(NetStack::Impl *d)
+// 全局最久未用：两条链的链尾里挑更旧的那个，O(1)。同样只淘汰确已空闲的（理由见上）。
+bool evictGlobalOldestFlow(NetStack::Impl *d)
 {
     UdpFlow *a = d->udpLruShort.tail;
     UdpFlow *b = d->udpLruLong.tail;
     UdpFlow *victim = !a ? b : (!b ? a : (a->lastUsed <= b->lastUsed ? a : b));
-    if (victim)
-        ++GatewayDiag::c.udpFlowsEvicted; // 撞全局上限，同上
+    if (!victim)
+        return false;
+    if (monoMs() - victim->lastUsed < kUdpEvictMinIdleMs)
+        return false;
+    ++GatewayDiag::c.udpFlowsEvicted; // 撞全局上限，同上
     destroyUdpFlow(d, victim);
+    return true;
 }
 
 // 收掉一台设备的全部流并释放会话壳。
@@ -1521,11 +1545,19 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
     UdpFlow *flow = s->flows.value(sport);
     if (!flow) {
         reapUdpFlows(d); // 建流前顺手回收：突发 DNS 场景下这一步就够把上一波流还回去了
-        if (s->flows.size() >= kMaxUdpFlowsPerDevice)
-            evictOldestFlowOfDevice(d, s);
+        // 顶到上限时只淘汰**确已空闲**的流；一条都腾不出来就拒收这条新流（丢这个包），
+        // 绝不顶掉正在用的 —— 那会让整条 UDP 抖到 0%，见 evictOldestFlowOfDevice 的说明。
+        if (s->flows.size() >= kMaxUdpFlowsPerDevice && !evictOldestFlowOfDevice(d, s)) {
+            ++GatewayDiag::c.udpFlowsRefused;
+            return;
+        }
         while (d->udpFlowCount >= kMaxUdpFlowsTotal
-               && (d->udpLruShort.tail || d->udpLruLong.tail))
-            evictGlobalOldestFlow(d);
+               && (d->udpLruShort.tail || d->udpLruLong.tail)) {
+            if (!evictGlobalOldestFlow(d)) {
+                ++GatewayDiag::c.udpFlowsRefused;
+                return;
+            }
+        }
 
         ++GatewayDiag::c.udpFlowsCreated;
         flow = new UdpFlow;
@@ -1631,11 +1663,19 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
     UdpFlow *flow = s->flows.value(sport);
     if (!flow) {
         reapUdpFlows(d);
-        if (s->flows.size() >= kMaxUdpFlowsPerDevice)
-            evictOldestFlowOfDevice(d, s);
+        // 顶到上限时只淘汰**确已空闲**的流；一条都腾不出来就拒收这条新流（丢这个包），
+        // 绝不顶掉正在用的 —— 那会让整条 UDP 抖到 0%，见 evictOldestFlowOfDevice 的说明。
+        if (s->flows.size() >= kMaxUdpFlowsPerDevice && !evictOldestFlowOfDevice(d, s)) {
+            ++GatewayDiag::c.udpFlowsRefused;
+            return;
+        }
         while (d->udpFlowCount >= kMaxUdpFlowsTotal
-               && (d->udpLruShort.tail || d->udpLruLong.tail))
-            evictGlobalOldestFlow(d);
+               && (d->udpLruShort.tail || d->udpLruLong.tail)) {
+            if (!evictGlobalOldestFlow(d)) {
+                ++GatewayDiag::c.udpFlowsRefused;
+                return;
+            }
+        }
 
         ++GatewayDiag::c.udpFlowsCreated;
         flow = new UdpFlow;
