@@ -59,6 +59,11 @@
 #include "lwip/nd6.h"
 #endif /* LWIP_ND6_TCP_REACHABILITY_HINTS */
 
+/* Coast 诊断补丁：静默丢 SYN 的两条路径各挂一个计数器。
+   ★ 必须在 ND6 那个 #if **之外** —— 本移植的 lwipopts 没开
+   LWIP_ND6_TCP_REACHABILITY_HINTS，放在里面等于不包含，下面用到计数器的地方直接编不过。 */
+#include "coast_lwip_diag.h"
+
 #include <string.h>
 
 #ifdef LWIP_HOOK_FILENAME
@@ -300,6 +305,42 @@ tcp_input(struct pbuf *p, struct netif *inp)
            of the list since we are not very likely to receive that
            many segments for connections in TIME-WAIT. */
         LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_input: packed for TIME_WAITing connection.\n"));
+#if LWIP_ACCEPT_ALL_UNICAST
+        /* ★★ Coast 透明网关补丁：TIME_WAIT 复用（RFC 1122 §4.2.2.13 / RFC 6191）。
+         *
+         * 原生 lwIP 在这里是**静默丢弃**：一个新 SYN 命中还在 TIME_WAIT 的四元组时，
+         * tcp_timewait_input() 只在「序号落在旧连接的接收窗内」时回 RST，否则（ISN 随机 ⇒ 绝大多数
+         * 情况）什么都不做就 return —— 不 RST、不交给监听 pcb、不回调上层、无日志。对端于是只能按
+         * RTO 重传**同一个四元组**的 SYN，再次命中，再次被吞……直到 TIME_WAIT 自己老化。
+         *
+         * 这在普通 lwIP 应用里罕见（它多半是主动连接方，自己挑源端口），但本移植是**透明网关**：
+         * 四元组由被劫持设备决定，而设备的临时端口只有两三万个、会不断轮转复用。真机压测实测
+         * （并发 64、~2500 conn/s，日志 synHitTw/ tcpAcc 两栏）：
+         *   · 轻则每秒上百条连接白等一个 RTO（≥1s），表现为「网页偶尔卡一下」；
+         *   · 重则**整台网关停止接受连接**——TIME_WAIT 表被压满后，压力一停就不再有新连接去回收它，
+         *     2048 条原地冻结（默认 TCP_MSL 下是 120 秒），下一轮流量的端口正好落在这张表里，
+         *     于是 `tcpAcc=0 synHitTw=64`（64 = 客户端并发数）持续十几秒，**停摆本身维持着造成
+         *     停摆的状态**，这就是那个「压力一停就好、一压就死」的活锁。
+         *
+         * RFC 1122 §4.2.2.13 明确允许（Linux 的 tcp_timewait_state_process 返回 TCP_TW_SYN 就是
+         * 这么做的）：TIME_WAIT 期间收到序号在窗外的 SYN，可以认定这是对端开的**新连接**——旧连接
+         * 的数据早已全部交付，TIME_WAIT 只是在等一个可能永远不来的重传。于是这里把那条 TIME_WAIT
+         * 直接回收（tcp_abandon(...,0)：只摘链释放，**不发 RST**，见 tcp.c 的 TIME_WAIT 分支），
+         * 然后 `pcb = NULL; break;` 让本函数继续往下走 LISTEN 查找 —— 这个 SYN 就当作一条全新连接
+         * 被正常 accept。放弃的是「防旧连接游荡重复段」这一项保护，而在局域网这条腿上（RTT<1ms、
+         * 无跨域重路由）游荡重复段基本不存在，且 TCP 自身的序号窗口还会再挡一道。
+         *
+         * 判据必须是「纯 SYN」：带 ACK 的 SYN-ACK、带 RST 的都不算新连接请求，仍交原逻辑处理。
+         * 与 tcp_timewait_input 里那条 RST 分支互斥：窗内的 SYN 走原路回 RST（那确实是异常）。
+         */
+        if ((flags & (TCP_SYN | TCP_ACK | TCP_RST)) == TCP_SYN &&
+            !TCP_SEQ_BETWEEN(seqno, pcb->rcv_nxt, pcb->rcv_nxt + pcb->rcv_wnd)) {
+          coast_lwip_diag.tw_recycled++;
+          tcp_abandon(pcb, 0); /* TIME_WAIT 分支：只摘链 + tcp_free，不发 RST、不回调 */
+          pcb = NULL;          /* 之后的 `if (pcb != NULL)` 分支不能再碰这块已释放的内存 */
+          break;               /* 跳出 tw 查找，继续走下面的 LISTEN 查找 */
+        }
+#endif /* LWIP_ACCEPT_ALL_UNICAST */
 #ifdef LWIP_HOOK_TCP_INPACKET_PCB
         if (LWIP_HOOK_TCP_INPACKET_PCB(pcb, tcphdr, tcphdr_optlen, tcphdr_opt1len,
                                        tcphdr_opt2, p) == ERR_OK)
@@ -659,6 +700,7 @@ tcp_listen_input(struct tcp_pcb_listen *pcb)
     LWIP_DEBUGF(TCP_DEBUG, ("TCP connection request %"U16_F" -> %"U16_F".\n", tcphdr->src, tcphdr->dest));
 #if TCP_LISTEN_BACKLOG
     if (pcb->accepts_pending >= pcb->backlog) {
+      coast_lwip_diag.syn_drop_backlog++; /* Coast 诊断补丁：静默丢 SYN，上层完全看不见 */
       LWIP_DEBUGF(TCP_DEBUG, ("tcp_listen_input: listen backlog exceeded for port %"U16_F"\n", tcphdr->dest));
       return;
     }
@@ -767,10 +809,15 @@ tcp_timewait_input(struct tcp_pcb *pcb)
 
   /* - fourth, check the SYN bit, */
   if (flags & TCP_SYN) {
+    /* Coast 诊断补丁：设备复用了一个还在 TIME_WAIT 里的四元组。序号在窗内 → RST（下面那条）；
+       不在窗内（正常情况，ISN 是随机的）→ 一路落到函数尾，tcplen==1 时只回一个空 ACK，
+       新连接建不起来，客户端只能 RTO 重传。这是本栈第二条静默丢 SYN 的路径。 */
+    coast_lwip_diag.syn_hit_timewait++;
     /* If an incoming segment is not acceptable, an acknowledgment
        should be sent in reply */
     if (TCP_SEQ_BETWEEN(seqno, pcb->rcv_nxt, pcb->rcv_nxt + pcb->rcv_wnd)) {
       /* If the SYN is in the window it is an error, send a reset */
+      coast_lwip_diag.tw_rst++; /* Coast 诊断补丁 */
       tcp_rst(pcb, ackno, seqno + tcplen, ip_current_dest_addr(),
               ip_current_src_addr(), tcphdr->dest, tcphdr->src);
       return;
@@ -1170,6 +1217,14 @@ tcp_receive(struct tcp_pcb *pcb)
   u32_t right_wnd_edge;
 
   LWIP_ASSERT("tcp_receive: invalid pcb", pcb != NULL);
+  /* Coast 诊断补丁：这条断言在高连接速率下会真的触发（真机压测复现）。默认的消息只有一句
+     "wrong state"，不知道是哪个状态、也不知道当时收到的是什么标志位，根本无从下手。
+     把 state/flags/端口打出来再 abort —— 崩溃现场只有一次机会，别浪费它。 */
+  if (!(pcb->state >= ESTABLISHED)) {
+    fprintf(stderr, "lwip assert: tcp_receive wrong state=%d flags=0x%02x local=%d remote=%d\n",
+            (int)pcb->state, (unsigned)flags, (int)pcb->local_port, (int)pcb->remote_port);
+    fflush(stderr);
+  }
   LWIP_ASSERT("tcp_receive: wrong state", pcb->state >= ESTABLISHED);
 
   if (flags & TCP_ACK) {

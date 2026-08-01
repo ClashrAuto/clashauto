@@ -163,6 +163,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         src/net/NetStack.cpp src/net/NetStack.h
         src/net/NdpSpoofer.cpp src/net/NdpSpoofer.h  # IPv6 的 ICMPv6/NDP 投毒器（ArpSpoofer 的 v6 对应物）
         src/net/LanGateway_linux.cpp
+        # lwIP 那几条静默丢 SYN/静默杀连接路径的计数器实例（声明在同名 .h，累加在 tcp_in.c）。
+        # 必须是 .c：定义在 C++ 里会被名字修饰，lwIP 侧链接不到。
+        src/net/lwip_port/coast_lwip_diag.c
         ${LWIP_DIR}/core/init.c        ${LWIP_DIR}/core/def.c
         ${LWIP_DIR}/core/dns.c         ${LWIP_DIR}/core/inet_chksum.c
         ${LWIP_DIR}/core/ip.c          ${LWIP_DIR}/core/mem.c
