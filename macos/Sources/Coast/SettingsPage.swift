@@ -607,11 +607,11 @@ struct SettingsPage: View {
         coreBusy = true
         defer { coreBusy = false; coreStatus = "更新内核".t }
         let wasRunning = state.controller.isCoreRunning
-        if wasRunning { await state.controller.stopCore() }   // 正在跑的核心文件替换不掉
-        let downloader = CoreDownloader(useMirror: state.config.mirror,
-                                        proxyPort: wasRunning ? state.config.mixedPort : nil)
+        // ★ 查询/下载阶段**不停核心**（用户的网还靠它跑着；下载本身不走代理，
+        //   只有「国内加速」镜像开关）。拿到产物后才停核 → 替换 → 重启。
+        let downloader = CoreDownloader(useMirror: state.config.mirror)
         do {
-            let tag = try await downloader.install { step in
+            let downloaded = try await downloader.fetchAndExtract { step in
                 Task { @MainActor in
                     switch step {
                     case .checking: coreStatus = "检查中…".t
@@ -621,11 +621,16 @@ struct SettingsPage: View {
                     }
                 }
             }
-            message = String(format: "内核已更新到 %@".t, tag)
+            coreStatus = "安装中…".t
+            if wasRunning { await state.controller.stopCore() }
+            let installResult = Result { try CoreDownloader.finishInstall(downloaded) }
+            // 核心是停了才装的，所以**装失败也要拉回来** —— 别让一次更新失败断了网。
+            if wasRunning { await state.controller.startCore() }
+            try installResult.get()
+            message = String(format: "内核已更新到 %@".t, downloaded.tag)
         } catch {
             message = String(format: "内核更新失败：%@".t, "\(error)")
         }
-        if wasRunning { await state.controller.startCore() }
     }
 
 }

@@ -25,45 +25,35 @@ public struct CoreDownloader: Sendable {
     /// 国内加速：下载走 ghfast.top 镜像。
     ///
     /// ⚠️ 注意它**只镜像下载，不镜像 GitHub API**（实测 ghfast.top 不代理 api.github.com）。
-    /// 也就是说「连不上 GitHub」的用户光靠这个开关仍然装不上内核 —— 版本查询那一步就断了。
-    /// 这一点与 Qt 版相同，不是本次移植引入的。缓解手段见下面的 `proxyPort`。
+    /// 内核下载**不做任何显式代理**（这是产品决定：出不出得去网由系统环境说了算，
+    /// 应用只提供这一个镜像开关）；系统级代理（若开着）会被 URLSession 自然沿用。
     public var useMirror: Bool
 
-    /// 版本查询与下载走本机代理的端口（通常是核心的混合端口）。nil = 直连。
-    ///
-    /// 对齐 C++ `SettingsController::applyDownloadProxy`：**核心已经在跑**时，把这些请求
-    /// 丢给它自己去出网。这解决的是「更新内核」这个常见场景 —— 首次安装时核心还没有，
-    /// 帮不上忙，那种情况只能靠用户自己有办法访问 GitHub。
-    public var proxyPort: Int?
-
-    public init(useMirror: Bool = false, proxyPort: Int? = nil) {
+    public init(useMirror: Bool = false) {
         self.useMirror = useMirror
-        self.proxyPort = proxyPort
     }
 
-    /// 按 `proxyPort` 造 session 配置。
-    private func sessionConfiguration(bypassProxy: Bool) -> URLSessionConfiguration {
+    private func sessionConfiguration() -> URLSessionConfiguration {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 30
-        if bypassProxy {
-            config.connectionProxyDictionary = [:]
-        } else if let proxyPort {
-            config.connectionProxyDictionary = [
-                kCFNetworkProxiesHTTPEnable as String: 1,
-                kCFNetworkProxiesHTTPProxy as String: "127.0.0.1",
-                kCFNetworkProxiesHTTPPort as String: proxyPort,
-                "HTTPSEnable": 1,
-                "HTTPSProxy": "127.0.0.1",
-                "HTTPSPort": proxyPort,
-            ]
-        }
         return config
     }
 
-    /// 查最新版 → 下载 → 解压 → 装到 `AppPaths.coreExecutable`。返回安装的版本号。
+    /// 下载并解压好的内核（还躺在临时目录里）。装完或放弃后调 `cleanup()`。
+    public struct Downloaded: Sendable {
+        public let tag: String
+        public let binary: URL
+        let tmpDir: URL
+        public func cleanup() { try? FileManager.default.removeItem(at: tmpDir) }
+    }
+
+    /// 查最新版 → 下载 → 解压。**不动**已装的内核。
     ///
-    /// 调用方负责在此前后停/起核心 —— 正在跑的核心文件替换不掉。
-    public func install(onProgress: @Sendable @escaping (Progress) -> Void) async throws -> String {
+    /// ★ 与安装（`finishInstall`）拆成两步是刻意的：下载/解压期间**不该动核心**
+    ///   （用户网络还靠它跑着；系统代理开着时这些请求也会自然经它出网）——
+    ///   调用方在拿到产物后才停核、替换、重启。原来是一步式的 `install()`，
+    ///   调用方「先停核再下载」，一次更新失败网就断了。
+    public func fetchAndExtract(onProgress: @Sendable @escaping (Progress) -> Void) async throws -> Downloaded {
         onProgress(.checking)
 
         let release = try await fetchLatestRelease()
@@ -75,20 +65,25 @@ public struct CoreDownloader: Sendable {
 
         let data = try await download(urlString: asset.url, onProgress: onProgress)
 
-        onProgress(.installing)
         let tmpDir = AppPaths.userDir.appendingPathComponent("core-update")
         try? FileManager.default.removeItem(at: tmpDir)
-        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tmpDir) }
+        do {
+            try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+            let archive = tmpDir.appendingPathComponent(asset.name)
+            try data.write(to: archive)
+            let binary = try Self.extract(archive: archive, into: tmpDir)
+            return Downloaded(tag: tag, binary: binary, tmpDir: tmpDir)
+        } catch {
+            try? FileManager.default.removeItem(at: tmpDir)
+            throw error
+        }
+    }
 
-        let archive = tmpDir.appendingPathComponent(asset.name)
-        try data.write(to: archive)
-
-        let binary = try Self.extract(archive: archive, into: tmpDir)
-        try Self.install(binary: binary)
-
-        onProgress(.done(tag: tag))
-        return tag
+    /// 把解压好的内核装到 `command/core`。调用方此刻应已停掉核心（装完再起，
+    /// 新文件才会被用上）。无论成败都清掉临时目录。
+    public static func finishInstall(_ downloaded: Downloaded) throws {
+        defer { downloaded.cleanup() }
+        try install(binary: downloaded.binary)
     }
 
     // MARK: - 资源匹配
@@ -142,9 +137,7 @@ public struct CoreDownloader: Sendable {
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 20
-        // 核心在跑就让它代出去 —— 这一步直连 api.github.com 在部分网络下是必然失败的，
-        // 而镜像帮不上忙（它不代理 API）。
-        let session = URLSession(configuration: sessionConfiguration(bypassProxy: false))
+        let session = URLSession(configuration: sessionConfiguration())
         defer { session.finishTasksAndInvalidate() }
         do {
             let (data, _) = try await session.data(for: request)
@@ -167,9 +160,8 @@ public struct CoreDownloader: Sendable {
         request.timeoutInterval = 30
 
         let downloader = FileDownloader { percent in onProgress(.downloading(percent: percent)) }
-        // 走镜像时**不套代理**：镜像本来就是给「连不上 GitHub」的场景用的，再绕回代理没意义。
         switch await downloader.download(request: request,
-                                         configuration: sessionConfiguration(bypassProxy: useMirror)) {
+                                         configuration: sessionConfiguration()) {
         case .success(let data):
             guard !data.isEmpty else { throw DownloadError.downloadFailed("下载内容为空") }
             return data
