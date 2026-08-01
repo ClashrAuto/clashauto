@@ -2829,3 +2829,58 @@ i18n 表里 Qt 的 `%1/%2` 版早就有，按本项目既有约定给 12 种语�
 它早就改成 `Window(id:)` 独立窗了。
 
 `swift test` 315 全绿；`i18n_check.py` 254/254；`settings_persist_check.py` 7/7。
+
+---
+
+## 续四十七（2026-08-01）菜单栏 —— Qt 在图标旁画两行速率，Swift 只有一个图标
+
+顺着「数字怎么格式化」这条线查下去，发现 Qt 有**三个**速率格式化器，而它们各管一摊：
+
+| 出处 | 函数 | 样子 |
+|---|---|---|
+| `Theme.fmtRate`（设备行/详情窗） | `fmtBytes + "/s"` | `0 B/s`、`1.20 MB/s` |
+| `QmlBridge::speedText`（状态页两张大卡） | 恒两位小数、单位到 TB、**不带 `/s`** | `0.00 B`、`1.20 MB` |
+| `TrayController::speedTextCompact`（macOS 菜单栏） | B 不带小数、其余**一位**、带 `/s` | `0 B/s`、`12.3 KB/s` |
+
+由此抓出两处：
+
+### 1. ★ 菜单栏少了两行速率（Qt 的 `MacSpeedItem.mm`）
+
+Qt 在 macOS 上把「图标 + 两行速率」**手绘成一张恰好等于菜单栏厚度的图**：
+核心没跑只画图标（宽 `iconSide + 4`）；核心在跑则图标在最左（边长 = 厚度 − 3）、
+间隔 2pt、再一块**定宽右对齐**的两行文字（上行上传、下行下载，无 ↑↓ 标识，
+`menuBarFont(8.5)`，宽度按最宽模板 `888.8 MB/s` 算死）。定宽是全部意义所在 ——
+不定宽的话数字一长一短就把图标推来推去，菜单栏里看着在抖。
+
+Swift 这边只有一个 SF Symbol 图标，速率只在菜单里的 UP/DOWN 两行 ——
+那是 Qt 的**非 macOS** 分支。已按 Qt 补齐（同一套数值），图标也改成
+`NSApp.applicationIconImage`（Qt 画的就是彩色应用图标，所以文字颜色要自己按明暗取）。
+
+顺带把 `NSStatusItem` 的 `autosaveName` 钉成 `"CoastTray"` 并强制 `isVisible = true` ——
+Qt 那边的注释记着这个坑：`visible` 会按 autosaveName 持久化，历史上写进去的 NO
+会让整项在菜单栏里根本不出现。
+
+### 2. 菜单里的 UP/DOWN 用错了格式化器
+
+Swift 用的是 `Formatting.rate`（两位小数），Qt 用的是紧凑版。已加
+`Formatting.compactRate` 并改用它 —— 菜单栏那两行与菜单里的 UP/DOWN 取的是同一个串
+（Qt `macTraySetSpeed` 也是这么做的）。
+
+### 状态页那两张大卡的 `/s`：**刻意不跟**
+
+Qt 的 `speedText` 不带 `/s`（`MetricCard` 的默认值就写着 `"0.00 B"`），
+而它自己在设备行、详情窗、菜单栏三处都带 `/s`。这是 Qt 自己的不一致，
+Swift 保留 `0 B/s` 的写法 —— 一个每秒在变的数字不标单位时间，读者只能猜。
+**同时更正续三十几轮的一条旧记录**：那里写着「`upText` 是 `speedText`（带 `/s`）」，
+括号里那半句是错的，`speedText` 不带。绑定本身（速率而非累计量）是对的。
+
+### 验证
+
+`trayImage(...)` 抽成了纯函数（`NSStatusItem` 在测试进程里造不出来），
+三条测试量它：核心停 → 宽度 `iconSide + 4`；核心跑 → **`0 B/s` 与 `888.8 MB/s` 画出来一样宽**；
+图标画不出来时也不塌成 0 宽。另加 6 条 `compactRate` 的逐值断言。
+
+⚠️ **两行速率那一支没有截图**：要让它出现得核心真的在跑，而启动核心会去改**用户本机的
+系统代理**设置 —— 为一张截图不值得。截图验到的是「图标那一支」以及状态项确实出现在菜单栏里。
+
+`swift test` 321 全绿；`i18n_check.py` 254/254；`settings_persist_check.py` 7/7。
