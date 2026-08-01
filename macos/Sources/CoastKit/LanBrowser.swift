@@ -18,6 +18,9 @@ public struct LanBrowser: Sendable {
         public var interface: String
         public var vendor: String = ""
         public var hostname: String = ""
+        /// 型号串（`iPhone15,2` / `MacBookPro18,3`）。来自 Bonjour `_device-info._tcp`
+        /// 的 TXT `model=`，与 Qt 的 `DeviceStore::model` 是同一份数据。
+        public var model: String = ""
         /// 是否本机默认网关（路由器）。
         public var isGateway: Bool = false
 
@@ -80,6 +83,12 @@ public struct LanBrowser: Sendable {
         }
         // 反查主机名会走 DNS/mDNS，逐个串行会很慢（一台超时就拖住整轮），并发做。
         devices = await Self.resolveHostnames(devices)
+        // 型号靠主机名连接，所以只能在反查之后填。浏览器是常驻的，这里只是取一次快照。
+        DeviceModelBrowser.shared.start()
+        for index in devices.indices {
+            devices[index].model = DeviceModelBrowser.shared.model(mac: devices[index].mac,
+                                                                   hostname: devices[index].hostname)
+        }
         // 网关置顶，其余按 IP 的数值顺序 —— 字符串排序会把 .10 排在 .2 前面。
         return devices.sorted { lhs, rhs in
             if lhs.isGateway != rhs.isGateway { return lhs.isGateway }

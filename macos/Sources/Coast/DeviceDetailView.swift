@@ -184,9 +184,14 @@ struct DeviceDetailView: View {
             ("IP", discovered.ip),
             ("MAC", discovered.mac),
             ("厂商".t, discovered.vendor),
-            ("接口".t, discovered.interface),
+            // Qt 的第四格就是「型号」（`DeviceDetailWindow.qml:264`），位置照搬。
+            ("型号".t, discovered.model),
             ("首次发现".t, record.map { Self.dateText($0.firstSeen) } ?? ""),
             ("主机名".t, discovered.hostname),
+            // 第七格是 macOS 独有的：Qt 那边没有「接口」这一项，但本机可能同时挂着
+            // Wi-Fi、有线和雷雳网桥，设备是从哪张网卡看到的直接决定 ARP 欺骗往哪儿发。
+            // 放在 Qt 六项**之后**，前六格的位置与 Qt 逐格对齐。
+            ("接口".t, discovered.interface),
         ]
         return LazyVGrid(columns: [GridItem(.flexible(), spacing: 24),
                                    GridItem(.flexible(), spacing: 24)],

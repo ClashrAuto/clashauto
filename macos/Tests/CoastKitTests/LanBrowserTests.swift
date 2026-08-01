@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import CoastKit
 
@@ -158,5 +159,51 @@ struct MulticastFilterTests {
     func rejectsMulticastLine() {
         #expect(LanBrowser.parseARPLine(
             "mdns.mcast.net (224.0.0.251) at 1:0:5e:0:0:fb on en1 ifscope permanent [ethernet]") == nil)
+    }
+}
+
+@Suite("型号发现")
+struct DeviceModelBrowserTests {
+
+    @Test("连接键：小写 + 去掉 .local 后缀（Bonjour 服务名与反查主机名的写法对不上）")
+    func hostnameKey() {
+        #expect(DeviceModelBrowser.key("Wangchaos-iMac.local") == "wangchaos-imac")
+        #expect(DeviceModelBrowser.key("Wangchaos-iMac.local.") == "wangchaos-imac")
+        #expect(DeviceModelBrowser.key("Wangchaos-iMac") == "wangchaos-imac")
+        // .local 只削尾巴，名字中间带 local 的不能动
+        #expect(DeviceModelBrowser.key("local-nas") == "local-nas")
+    }
+
+    @Test("没广播过型号的设备返回空串，不返回 nil 也不崩")
+    func unknownHostname() {
+        #expect(DeviceModelBrowser.shared.model(mac: "", hostname: "") == "")
+        #expect(DeviceModelBrowser.shared.model(mac: "aa:bb:cc:dd:ee:ff",
+                                                hostname: "never-\(UUID().uuidString)") == "")
+    }
+
+    @Test("TXT 取型号：model / md / am 依次认（Qt 认前两个，am 是 AirPlay 自己的字段）")
+    func modelKeys() {
+        #expect(DeviceModelBrowser.model(in: NWTXTRecord(["model": "iMac21,1"])) == "iMac21,1")
+        #expect(DeviceModelBrowser.model(in: NWTXTRecord(["md": "Chromecast"])) == "Chromecast")
+        #expect(DeviceModelBrowser.model(in: NWTXTRecord(["am": "AppleTV6,2"])) == "AppleTV6,2")
+        // 只有空白值等于没有 —— 否则详情窗那一格会显示成一片空白而不是 "-"
+        #expect(DeviceModelBrowser.model(in: NWTXTRecord(["model": " "])) == nil)
+        #expect(DeviceModelBrowser.model(in: NWTXTRecord(["deviceid": "aa:bb:cc:dd:ee:ff"])) == nil)
+    }
+
+    @Test("deviceid 规范成台账那套 MAC 写法（补零 + 小写），否则对不上主键")
+    func deviceIDNormalisation() {
+        #expect(DeviceModelBrowser.deviceMAC(in: NWTXTRecord(["deviceid": "B6:33:66:14:DA:00"]))
+                == "b6:33:66:14:da:00")
+        #expect(DeviceModelBrowser.deviceMAC(in: NWTXTRecord(["deviceid": "b6:3:66:4:da:0"]))
+                == "b6:03:66:04:da:00")
+        #expect(DeviceModelBrowser.deviceMAC(in: NWTXTRecord(["deviceid": "not-a-mac"])) == nil)
+        #expect(DeviceModelBrowser.deviceMAC(in: NWTXTRecord([:])) == nil)
+    }
+
+    @Test("★ 只认 _device-info 会漏掉一大片——本机 iMac 就只在 _airplay 上广播型号")
+    func browsesMoreThanDeviceInfo() {
+        #expect(DeviceModelBrowser.serviceTypes.contains("_device-info._tcp"))
+        #expect(DeviceModelBrowser.serviceTypes.contains("_airplay._tcp"))
     }
 }
