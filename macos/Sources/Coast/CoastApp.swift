@@ -92,6 +92,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var tray: TrayController?
     private var state: AppState?
+    /// 「点空白让输入框失焦」的鼠标监听。持有着，进程活多久它挂多久。
+    private var defocusMonitor: Any?
 
     override init() {
         super.init()
@@ -105,6 +107,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
         // 窗口这时候可能还没建出来（WindowGroup 是在第一轮 runloop 之后才铺的）。
         DispatchQueue.main.async { WindowRestore.adopt() }
+
+        // 点输入框以外的任何地方都让输入框**失去焦点**（对所有窗口生效）。
+        // AppKit 的默认行为是焦点一直留在框里，点空白毫无反应 —— 桌面用户的
+        // 预期是「点别处 = 收起编辑」。实现：正在编辑时第一响应者是窗口的
+        // field editor（isFieldEditor 的 NSTextView），mouseDown 落点不在它
+        // 里面就收回第一响应者；事件照常放行 —— 点到的是另一个输入框/按钮时，
+        // AppKit 随后自会把焦点交给它，不受影响。
+        defocusMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { event in
+            if let window = event.window,
+               let editor = window.firstResponder as? NSTextView,
+               editor.isFieldEditor {
+                let location = editor.convert(event.locationInWindow, from: nil)
+                if !editor.bounds.contains(location) {
+                    window.makeFirstResponder(nil)
+                }
+            }
+            return event
+        }
     }
 
     /// 点 ✕ **不退出程序**，只隐藏窗口。
