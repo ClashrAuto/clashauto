@@ -101,3 +101,43 @@ extension DeviceTrafficTests {
         #expect(traffic.sample(ip: "10.0.0.2").downHistory.count == DeviceTraffic.historyLength)
     }
 }
+
+@Suite("本机流量的归属")
+struct LocalAttributionTests {
+
+    private func row(_ id: String, source: String, up: Int64, down: Int64) -> ConnectionRow {
+        ConnectionRow(id: id, host: "x.com", network: "tcp", type: "HTTP", process: "Safari",
+                      chain: "US1-HY2", upload: up, download: down,
+                      start: .distantPast, sourceIP: source)
+    }
+
+    @Test("★ 回环发出的连接归到本机那一行——否则全机器最忙的一台恒显示 0")
+    func loopbackFoldsIntoLocalRow() {
+        var traffic = DeviceTraffic()
+        traffic.observe([row("1", source: "127.0.0.1", up: 10, down: 90)], localIP: "192.168.1.5")
+        #expect(traffic.sample(ip: "192.168.1.5").rateDown == 90)
+        #expect(traffic.sample(ip: "127.0.0.1").rateDown == 0)
+    }
+
+    @Test("★ 开增强模式后本机流量的 sourceIP 是 TUN 的 198.18.x，一样要归到本机")
+    func tunAddressFoldsIntoLocalRow() {
+        var traffic = DeviceTraffic()
+        traffic.observe([row("1", source: "198.18.0.1", up: 5, down: 15)], localIP: "192.168.1.5")
+        #expect(traffic.sample(ip: "192.168.1.5").rateUp == 5)
+    }
+
+    @Test("局域网设备的流量不受影响，仍按各自的源 IP 归")
+    func lanDevicesUnaffected() {
+        var traffic = DeviceTraffic()
+        traffic.observe([row("1", source: "192.168.1.9", up: 1, down: 2)], localIP: "192.168.1.5")
+        #expect(traffic.sample(ip: "192.168.1.9").rateDown == 2)
+        #expect(traffic.sample(ip: "192.168.1.5").rateDown == 0)
+    }
+
+    @Test("不知道本机 IP 时按原样归（不猜）")
+    func withoutLocalIPUnchanged() {
+        var traffic = DeviceTraffic()
+        traffic.observe([row("1", source: "127.0.0.1", up: 0, down: 7)])
+        #expect(traffic.sample(ip: "127.0.0.1").rateDown == 7)
+    }
+}

@@ -298,7 +298,8 @@ public final class AppState {
             let rows = ConnectionRow.parse(connections)
             self?.connections = rows
             self?.connectionLedger.merge(rows)
-            self?.deviceTraffic.observe(rows)
+            // 本机自己发出的连接归到「本机」那一行 —— 否则全机器最忙的一台恒显示 0。
+            self?.deviceTraffic.observe(rows, localIP: DeviceStore.localLANAddress() ?? "")
             // 「用量最多」那一列要显示设备名，而设备名只有 AppState 认得（台账在它手上）。
             let proxied = self?.proxiedDeviceLabels ?? []
             self?.composition.observe(connections) { sourceIP, _ in

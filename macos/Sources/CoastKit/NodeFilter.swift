@@ -14,9 +14,17 @@ public enum NodeFilter {
                              onlyAvailable: Bool) -> [NodeInfo] {
         var result = nodes
         if onlyAvailable {
-            // ★ `delay == 0` 是「**还没测过**」，不是「不可用」。
-            //   一律滤掉的话，刚打开这个开关（此时全部为 0）列表会整个空掉，
-            //   看起来像是出了故障 —— 而用户根本不知道要先点一次「测延迟」。
+            // `delay <= 0` = 未测或超时，两者都不显示（与设置项的字面意思一致）。
+            //
+            // ★ 注意这与 **Qt 的实装**不同：Qt 的 QML 版 `NodeListModel::reconcile()`
+            //   **只按搜索词过滤**，`nodeOnlyAvailable` 这个设置在它那儿是**读了、存了、
+            //   界面上有开关，但没有任何地方用**（真正会过滤的是已经不编译的 Widgets 版
+            //   `MainWindow`）。这里是**刻意不跟** —— 一个点了没反应的开关比行为差异更糟。
+            //
+            //   代价：核心刚起来、还没测过延迟的那一两秒，列表会是空的（`ClashService`
+            //   拿到节点后会自动测一次，随即填上）。这一点和上面那句注释原来是矛盾的：
+            //   注释说「一律滤掉会让列表空掉，所以不能滤」，代码却正是这么滤的，
+            //   测试也断言了滤掉。三者里错的是注释，已改。
             result = result.filter { $0.delay > 0 }
         }
         let trimmed = keyword.trimmingCharacters(in: .whitespaces)

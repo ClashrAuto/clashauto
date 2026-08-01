@@ -41,13 +41,23 @@ public struct DeviceTraffic: Sendable {
     public func sample(ip: String) -> Sample { byIP[ip] ?? Sample() }
 
     /// 并入一拍 `/connections` 快照。
-    public mutating func observe(_ rows: [ConnectionRow]) {
+    ///
+    /// - Parameter localIP: 本机那一行在设备列表里用的 IP。**本机自己发出的连接
+    ///   （回环 / TUN 的 198.18.0.1 / 本机任一网卡）会归到它名下**。
+    ///
+    ///   ★ 不这么做的话，本机这台的速率与用量**恒为 0** —— 全机器最忙的一台反而
+    ///     永远显示没流量。Qt 那边同一处的注释写着：「以前这类全部落进『未归属』丢掉」。
+    ///     macOS 上这尤其普遍：本机的连接 sourceIP 多半是 127.0.0.1 或 TUN 地址，
+    ///     而设备行认的是它的局域网 IP，两者对不上。
+    public mutating func observe(_ rows: [ConnectionRow], localIP: String = "") {
         var rates: [String: (up: Int64, down: Int64)] = [:]
         var alive = Set<String>()
 
         for row in rows {
             guard !row.sourceIP.isEmpty else { continue }
             alive.insert(row.id)
+            let key = (!localIP.isEmpty && DeviceStore.isLocalMachineIP(row.sourceIP))
+                ? localIP : row.sourceIP
 
             let previous = lastSeen[row.id]
             // 首次见到的连接：它此前的量一次性计入（就是它的全部）。
@@ -58,10 +68,10 @@ public struct DeviceTraffic: Sendable {
             if deltaDown < 0 { deltaDown = row.download }
             lastSeen[row.id] = (row.upload, row.download)
 
-            var bucket = rates[row.sourceIP] ?? (0, 0)
+            var bucket = rates[key] ?? (0, 0)
             bucket.up += deltaUp
             bucket.down += deltaDown
-            rates[row.sourceIP] = bucket
+            rates[key] = bucket
         }
 
         // 断掉的连接不再累加，但要把它的记忆清掉 —— 留着的话 `lastSeen` 会一直涨，

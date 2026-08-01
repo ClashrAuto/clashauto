@@ -214,6 +214,47 @@ public final class DeviceStore: @unchecked Sendable {
     // MARK: - 工具
 
 
+    /// 本机自己的全部 IPv4（含回环与 TUN 的 198.18.0.1）。
+    ///
+    /// 用来判断「这条连接是本机自己发的」。缓存 30 秒：每条连接都要问一次，
+    /// 而网卡地址不会秒级变化（与 Qt `DeviceStore::isLocalMachineIp` 的缓存同期）。
+    public static func localMachineIPs() -> Set<String> {
+        if let cached = localIPCache, Date().timeIntervalSince(localIPCacheAt) < 30 {
+            return cached
+        }
+        var result: Set<String> = ["127.0.0.1", "::1"]
+        var head: UnsafeMutablePointer<ifaddrs>?
+        if getifaddrs(&head) == 0, let first = head {
+            defer { freeifaddrs(head) }
+            var cursor: UnsafeMutablePointer<ifaddrs>? = first
+            while let entry = cursor {
+                defer { cursor = entry.pointee.ifa_next }
+                guard let address = entry.pointee.ifa_addr,
+                      address.pointee.sa_family == UInt8(AF_INET) else { continue }
+                var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+                guard getnameinfo(address, socklen_t(address.pointee.sa_len),
+                                  &host, socklen_t(NI_MAXHOST), nil, 0, NI_NUMERICHOST) == 0
+                else { continue }
+                result.insert(String(cString: host))
+            }
+        }
+        localIPCache = result
+        localIPCacheAt = Date()
+        return result
+    }
+
+    private nonisolated(unsafe) static var localIPCache: Set<String>?
+    private nonisolated(unsafe) static var localIPCacheAt = Date.distantPast
+
+    /// 这条连接是不是本机自己发出的。回环、本机任一网卡、以及 TUN 的 198.18/15
+    /// （开增强模式后本机流量的 sourceIP 就是它）。
+    public static func isLocalMachineIP(_ ip: String) -> Bool {
+        guard !ip.isEmpty else { return false }
+        if ip.hasPrefix("127.") || ip == "::1" { return true }
+        if ip.hasPrefix("198.18.") || ip.hasPrefix("198.19.") { return true }
+        return localMachineIPs().contains(ip)
+    }
+
     /// 本机在局域网上的 IPv4 地址（给用户填到设备里的那个）。
     /// 取第一个非回环、非链路本地的 IPv4。
     public static func localLANAddress() -> String? {
