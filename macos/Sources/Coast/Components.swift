@@ -60,15 +60,24 @@ struct NavButton: View {
             }
             .frame(height: 40)
             .background {
-                // 右侧直角、只有左侧圆角：Qt 用「多铺一个圆角再让内容卡盖住」实现同一效果，
-                // 但 mac 的内容卡是半透明的（0.55），压不住 —— 负内距伸进去的那条会
-                // 透出来，看着就是高亮块越进了内容区。改成本来就不越界的不对称圆角。
-                UnevenRoundedRectangle(topLeadingRadius: theme.radius,
-                                       bottomLeadingRadius: theme.radius,
-                                       bottomTrailingRadius: 0,
-                                       topTrailingRadius: 0,
-                                       style: .continuous)
-                    .fill(isCurrent ? theme.card : (hovering ? theme.hover : .clear))
+                let fill = isCurrent ? theme.card : (hovering ? theme.hover : .clear)
+                if #available(macOS 26.0, *) {
+                    // macOS 26 上主内容**没有卡**（页面直接浮在玻璃上，见 MainView），
+                    // 「右侧直角贴卡」的理由不存在了 —— 高亮就是一颗独立的圆角块，
+                    // 四角都圆。
+                    RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
+                        .fill(fill)
+                } else {
+                    // 右侧直角、只有左侧圆角：Qt 用「多铺一个圆角再让内容卡盖住」实现同一
+                    // 效果，但 mac 的内容卡是半透明的（0.55），压不住 —— 负内距伸进去的
+                    // 那条会透出来，看着就是高亮块越进了内容区。改成本来就不越界的不对称圆角。
+                    UnevenRoundedRectangle(topLeadingRadius: theme.radius,
+                                           bottomLeadingRadius: theme.radius,
+                                           bottomTrailingRadius: 0,
+                                           topTrailingRadius: 0,
+                                           style: .continuous)
+                        .fill(fill)
+                }
             }
             .contentShape(Rectangle())
         }
