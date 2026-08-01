@@ -37,6 +37,11 @@ struct MainView: View {
                     .scrollEdgeEffectStyle(.soft, for: .all)
                     // 右侧仍让出 5（Qt 加在整列上的那条边距）。
                     .padding(.trailing, theme.inset)
+                    // 主内容列**越过标题栏安全区**、直起于窗顶下 10 ——
+                    // 红绿灯在左边压着侧栏，内容列上方那条安全区只是空带，
+                    // 让给它等于页头凭空低了一截。
+                    .padding(.top, 10)
+                    .ignoresSafeArea(.container, edges: .top)
             } else {
                 VStack(spacing: 0) {
                     Card { page }
