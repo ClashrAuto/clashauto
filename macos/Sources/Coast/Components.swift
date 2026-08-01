@@ -215,30 +215,52 @@ struct BreathingDot: View {
     @Environment(Theme.self) private var theme
     let isOn: Bool
 
-    @State private var pulse: Double = 0
-
-    private var ringColor: Color {
-        guard isOn else { return Color(white: 0.4, opacity: 0.15) }
-        return Color(red: (72 + 30 * pulse) / 255,
-                     green: (152 - 50 * pulse) / 255,
-                     blue: (248 - 146 * pulse) / 255,
-                     opacity: 0.5 - 0.35 * pulse)
-    }
-
     var body: some View {
         Circle()
             .fill(isOn ? theme.accent : theme.switchTrackOff)
             .frame(width: 12, height: 12)
-            .overlay(Circle().stroke(ringColor, lineWidth: 3))
-            .onAppear { start() }
-            .onChange(of: isOn) { _, _ in start() }
+            .overlay {
+                // ★ 开态和关态是**两个不同的视图**，不是同一个环换颜色。
+                //
+                //   原来是一个 `Circle().stroke(ringColor)`，`ringColor` 里按 `isOn` 分档，
+                //   脉动由 `withAnimation(.repeatForever)` 驱动一个 `pulse` 状态。
+                //   `repeatForever` 是条**永不结束**的动画：把 `pulse` 赋回 0 停不掉它
+                //   （连 `Transaction(disablesAnimations: true)` 也不行 —— 动画挂在
+                //   stroke 那个**颜色属性**上，不只挂在 `pulse` 上），而关开关时
+                //   「蓝 → 灰」这次颜色变化正好被它接管，于是环色在蓝灰之间无限自动往返：
+                //   开过一次以后，关掉了光晕还在一亮一暗。
+                //
+                //   拆成 if/else 之后两支的结构标识不同，关掉时脉动那支**整个从视图树上
+                //   消失**，它身上的动画随之作废；静态灰环是另一个视图，从来没有过动画。
+                if isOn {
+                    PulsingRing()
+                } else {
+                    Circle().stroke(Color(white: 0.4, opacity: 0.15), lineWidth: 3)
+                }
+            }
+    }
+}
+
+/// 开启态那圈脉动光晕。**独立成一个视图不是为了整洁**，是靠它被销毁来终止
+/// `repeatForever` —— 理由见 `BreathingDot` 里那段注释，别把它合回去。
+private struct PulsingRing: View {
+    @State private var pulse: Double = 0
+
+    /// Qt 那条 1s 循环 keyframes 的两端：蓝 → 更亮更淡的灰蓝。
+    private var ringColor: Color {
+        Color(red: (72 + 30 * pulse) / 255,
+              green: (152 - 50 * pulse) / 255,
+              blue: (248 - 146 * pulse) / 255,
+              opacity: 0.5 - 0.35 * pulse)
     }
 
-    private func start() {
-        pulse = 0
-        guard isOn else { return }
-        withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
-            pulse = 1
-        }
+    var body: some View {
+        Circle()
+            .stroke(ringColor, lineWidth: 3)
+            .onAppear {
+                withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
+                    pulse = 1
+                }
+            }
     }
 }
