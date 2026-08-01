@@ -599,11 +599,29 @@ final class Redirector: @unchecked Sendable {
         //
         // ★ `rdr` 之外还要这条 `route-to`：见上方方法注释 —— 转发流量被 rdr 改写目的之后，
         //   内核仍按「要转发出去」处理，只有显式 route-to 环回才真正送进本机监听。
+        // ★ **必须给这两条规则单独设状态超时**，否则被接管设备一忙就把 PF 的状态表打爆。
+        //
+        //   PF 的状态表是**全系统一张**、硬上限默认 10000 条（`pfctl -s memory`），而每条被重定向的
+        //   连接都要占一条。macOS 的默认超时又长得离谱：`tcp.closing 900s`、`tcp.closed 90s`、
+        //   `tcp.finwait 45s` —— 短命 HTTP 连接关完之后还要在表里躺一分钟以上。
+        //   真机实测（iMac 当网关、被接管设备 64 并发背靠背打）：状态数一路涨到 **10001 触顶**，
+        //   吞吐随之从 857 崩到 161 conn/s，而且**一轮比一轮低**（表来不及回收）。
+        //   打爆的后果还不止于网关：这张表是全机共用的，撑满之后 Mac 上**所有**新连接都会受影响。
+        //
+        //   只给我们自己 anchor 里的这两条规则设短超时（per-rule，不动 `set timeout` 那套全局值，
+        //   免得影响系统其它流量）。取值按「连接已经结束、只是等迟到的 FIN/RST」来定：
+        //   closed/finwait 5s、closing 10s 都远大于局域网 RTT。**established 一个字不动**
+        //   （默认 24h）—— 长连接（SSH、WebSocket、下载）必须留着。
+        //   同一台子改完复测：930 / 1006 / 966 conn/s，**不再逐轮劣化**，状态峰值 9673 不再触顶，
+        //   压力一停就迅速回落。
+        let tcpTimeouts = "(tcp.closed 5, tcp.finwait 5, tcp.closing 10)"
+        // DNS 是一来一回的短交互，UDP 状态没必要留满默认的 60s。
+        let udpTimeouts = "(udp.first 10, udp.single 10, udp.multiple 20)"
         for ip in pfDeviceIP4s {
             rules += "pass in quick on \(interface) route-to (lo0 127.0.0.1) inet proto tcp"
-                + " from \(ip) to 127.0.0.1 port \(pfRedirPort) keep state\n"
+                + " from \(ip) to 127.0.0.1 port \(pfRedirPort) keep state \(tcpTimeouts)\n"
             rules += "pass in quick on \(interface) route-to (lo0 127.0.0.1) inet proto udp"
-                + " from \(ip) to 127.0.0.1 port \(pfDnsPort) keep state\n"
+                + " from \(ip) to 127.0.0.1 port \(pfDnsPort) keep state \(udpTimeouts)\n"
         }
         return rules
     }
