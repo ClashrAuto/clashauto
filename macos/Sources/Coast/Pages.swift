@@ -282,7 +282,9 @@ struct NodeRow: View {
                 .font(.system(size: 12))
                 .foregroundStyle(theme.textSecondary)
                 .lineLimit(1)
-                .truncationMode(.middle)
+                // Qt 是 `ElideRight`。中间省略能同时保住「名字」和「→ 叶子」两端，
+                // 看着更划算 —— 但那是另一种取舍，这里按 Qt 来。
+                .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             // 药丸：半径 5、宽 = 文字 + 10、高 = 文字 + 6、**深色字压在实色底上**

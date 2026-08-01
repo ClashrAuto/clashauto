@@ -82,7 +82,10 @@ struct FooterSwitch: View {
                 BreathingDot(isOn: isOn)
                 Text(label)
                     .font(.system(size: 12))
-                    .foregroundStyle(isOn ? theme.textPrimary : theme.textMuted)
+                    // 文字**恒为 textPrimary**：状态只由圆点表达（Qt 就是这样，
+                    // 这行原来还写着「Qt 也只靠圆点区分」，代码却又把关掉的文字调灰了）。
+                    // 两处都表达同一件事时，浅色主题下的 #999999 只是让标签更难读。
+                    .foregroundStyle(theme.textPrimary)
                     .lineLimit(1).truncationMode(.tail)
                     // 长译文封顶 80（约 8~9 字符）再省略：既不溢出页脚，
                     // 也不把左边的日志和右边的模式挤没。
