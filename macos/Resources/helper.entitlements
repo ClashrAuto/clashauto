@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 特权 helper 的 hardened-runtime 权限。它以 root 跑，本身权限就大；
+         BPF(/dev/bpf*)、PF(/sbin/pfctl)、sysctl(ip.forwarding) 靠的是 root 身份，
+         不是 entitlement 管的东西，hardened runtime 也不拦这些系统调用，故无需为它们声明。
+         这里只放行 hardened runtime 会拦、而确实要用的网络能力（起核心等）。 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+</dict>
+</plist>

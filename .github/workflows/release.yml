@@ -877,9 +877,16 @@ jobs:
     # 只依赖 windows（release 由它创建，mac DMG 随后追加）；mac 构建与 linux 无关，
     # 不因 linux 失败被 skip。
     needs: [windows]
-    # ★ 只在主分支触发。外部签名仓库(integemjack/schat.build)会把公证好的 DMG 覆盖到
-    #   release 上，beta 也走这条就会拿测试版的包盖掉正式版 —— 所以测试版**不出 macOS DMG**。
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
+    # ★★ 已停用（2026-07-31）：macOS 只发 **Swift 版**，触发签名的活儿挪到了 `macos-swift`
+    #    job 里的 "Trigger signed macOS build" 那一步 —— 两条腿都往同一个 Release 传 macOS
+    #    包的话，app 内的一键更新（按扩展名挑第一个 .dmg）会挑到哪个纯看运气。
+    #
+    #    与旧版的关键差别：新那步会把**目标 release tag** 一并传给 schat.build。
+    #    早先只推一个空提交，对方只能自己猜发到哪个 release，于是 beta 分支的构建会把
+    #    签名 DMG 盖到正式版上 —— 这正是当初把 beta 的 mac 包整个停掉的原因。
+    #    保留整个 job 而不是删掉：要恢复 Qt 版发布时，把下面的 if 改回
+    #    `github.event_name == 'push' && (ref == master || ref == main)` 即可。
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Trigger macOS build via empty commit
@@ -906,3 +913,223 @@ jobs:
           git commit --allow-empty -m "trigger: build clashauto@${GITHUB_SHA} macOS"
           git push "$origin" "HEAD:${branch}" 2>&1 | mask
           echo "已向 ${branch} 推空提交，触发 macOS 签名构建：clashauto@${GITHUB_SHA}"
+
+  # ————————————————————————————————————————————————————————————————
+  # Swift 版 macOS 客户端（macos/）。**完全独立于上面的 Qt 流水线**：
+  # 不共用 env、不 needs 任何 job、也不参与 Release 发布，只产出 Actions artifact。
+  #
+  # 为什么不直接发到 Release：Qt 那条线已经通过外部签名仓库(integemjack/schat.build)
+  # 往同一个 Release 上传 macOS DMG，而 app 内的更新检查是**按扩展名挑资源**的
+  # （UpdateChecker.macAsset 取第一个 .dmg）。两个 macOS 包落在同一个 Release 上，
+  # 老版本会挑到哪个完全看运气。要发布必须先决定「谁是正牌 macOS 包」，
+  # 那是产品决定，不该由 CI 悄悄决定 —— 见 macos/PLAN.md 阶段 8。
+  macos-swift:
+    name: macOS (Swift) build + test
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          # swift-testing（Tests/ 里用的 @Test/#expect）要 Xcode 16+；
+          # 不固定版本，取 runner 上最新的那个即可。
+          latest="$(ls -d /Applications/Xcode*.app | sort -V | tail -n 1)"
+          echo "使用 $latest"
+          sudo xcode-select -s "$latest/Contents/Developer"
+          swift --version
+
+      - name: Resolve build version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 版本口径与 Qt 那条线保持一致：major.minor 取自 CMakeLists，构建号用提交数。
+          # 刻意复用同一套编号，免得同一个 commit 在两条线上出两个不同版本号。
+          base="$(sed -nE 's/.*project[[:space:]]*\([[:space:]]*[^ ]+[[:space:]]+VERSION[[:space:]]+([0-9]+(\.[0-9]+){1,3}).*/\1/p' clashauto-c++/CMakeLists.txt | head -n 1)"
+          major="$(echo "$base" | cut -d. -f1)"
+          minor="$(echo "$base" | cut -d. -f2)"
+          count="$(git rev-list --count HEAD)"
+          version="${major}.${minor}.${count}"
+          # 主分支 = 正式版，其余分支 = prerelease。tag 再缀短 sha，
+          # 防「两个分支各 +N 撞到同一个号」。口径与 windows/linux job 完全一致。
+          if [ "$GITHUB_REF" = "refs/heads/master" ] || [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            is_pre=false; tag="v${version}"
+          else
+            is_pre=true; tag="v${version}-beta.${GITHUB_SHA:0:7}"
+          fi
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "prerelease=${is_pre}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release version: $version tag=$tag prerelease=$is_pre"
+
+      - name: Build
+        working-directory: macos
+        run: swift build -c release
+
+      - name: Test
+        working-directory: macos
+        run: swift test
+
+      - name: Check i18n coverage
+        working-directory: macos
+        run: |
+          # 只报数不拦门：漏翻会回落成中文，是个质量问题而不是坏掉。
+          # 拿它当硬性门槛会让「加一句新文案」这种小改动被 11 种语言卡住。
+          python3 scripts/i18n_check.py
+
+      # 把 Developer ID 证书导进一个用完即弃的钥匙串。**secret 没配就退回 ad-hoc** ——
+      # 这样 fork 也能构建出包（只是装不了免密 helper），而不是整条流水线红掉。
+      # 做法照搬 integemjack/schat.build 里已经跑通的那套。
+      - name: Import Developer ID cert
+        id: signcert
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PW: ${{ secrets.MACOS_CERT_PW }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_P12:-}" ]; then
+            echo "::notice::MACOS_CERT_P12 未配置 —— 用 ad-hoc 签名（此包装不了免密 helper）"
+            echo "identity=-" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          KC="$RUNNER_TEMP/sign.keychain-db"; KPW="$(openssl rand -base64 18)"
+          security create-keychain -p "$KPW" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KPW" "$KC"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "${CERT_PW:-}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KPW" "$KC" >/dev/null
+          # 把临时钥匙串挂进搜索列表，否则 codesign 找不到这个身份
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | sed 's/"//g')
+          IDENTITY=$(security find-identity -v -p codesigning "$KC" | grep -m1 "Developer ID Application" | sed -E 's/.*"(.*)".*/\1/')
+          rm -f "$RUNNER_TEMP/cert.p12"
+          [ -n "$IDENTITY" ] || { echo "导入的证书里没有 Developer ID Application 身份"; exit 1; }
+          echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
+
+      - name: Package Coast.app (universal)
+        working-directory: macos
+        run: |
+          bash scripts/make_app.sh \
+            --version "${{ steps.ver.outputs.version }}" \
+            --universal \
+            --sign "${{ steps.signcert.outputs.identity }}"
+
+      - name: Verify bundle
+        working-directory: macos
+        run: |
+          set -euo pipefail
+          # 通用二进制两个架构都要在（regression.sh 不查这个，单独验）
+          lipo -info Coast.app/Contents/MacOS/Coast
+          lipo -info Coast.app/Contents/MacOS/com.yuehongsun.coast.helper
+          codesign --verify --deep --strict Coast.app
+          # 打包产物的全套自检钩子（paths/topo/helper/sysproxy）。--no-build 复用上一步
+          # 刚打好的包，与本地 `bash scripts/regression.sh` 同一套逻辑，不让 CI 和本地漂移。
+          # 脚本把「环境验不了」（如 ad-hoc 装不了 helper）判为 SKIP，只有真失败才退非 0。
+          bash scripts/regression.sh --no-build
+
+      - name: Package .zip / .dmg + notarize
+        working-directory: macos
+        env:
+          SIGN_IDENTITY: ${{ steps.signcert.outputs.identity }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          ZIP="out/Coast-${VERSION}-macos-universal.zip"
+          DMG="out/Coast-${VERSION}-macos-universal.dmg"
+          # 更新用 zip 必须用 ditto：普通 zip 不保留 bundle 的符号链接与扩展属性，
+          # 解出来的 .app 签名当场失效。
+          ditto -c -k --keepParent Coast.app "$ZIP"
+          # hdiutil 偶发「resource busy」，重试几次比整条流水线红掉划算
+          for attempt in 1 2 3 4; do
+            hdiutil detach "/Volumes/Coast" -force >/dev/null 2>&1 || true
+            hdiutil create -volname "Coast" -srcfolder Coast.app -ov -format UDZO "$DMG" && break
+            echo "hdiutil create 失败（第 $attempt/4 次），8 秒后重试"; sleep 8
+          done
+          [ -f "$DMG" ] || { echo "ERROR: dmg 没生成"; exit 1; }
+
+          # 公证 + 装订。**只在真签且有公证凭据时做**；一旦开做就必须成功 ——
+          # 政策是「release 里绝不放未公证的包」，所以这里失败即整步失败、artifact 不上传，
+          # 而不是悄悄发一个用户双击会被 Gatekeeper 拦下的东西。
+          if [ -n "${SIGN_IDENTITY:-}" ] && [ "$SIGN_IDENTITY" != "-" ] && [ -n "${NOTARY_KEY:-}" ]; then
+            echo "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/nkey.p8"
+            xcrun notarytool submit "$DMG" \
+              --key "$RUNNER_TEMP/nkey.p8" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER" \
+              --wait --timeout 45m
+            xcrun stapler staple "$DMG"
+            xcrun stapler validate "$DMG"
+            rm -f "$RUNNER_TEMP/nkey.p8"
+            echo "公证 + 装订完成"
+          else
+            echo "::notice::未真签或未配公证凭据 —— 跳过公证（此包会被 Gatekeeper 拦下，仅供开发验证）"
+          fi
+          ls -la out
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Coast-swift-macos-universal
+          path: macos/out/*
+          if-no-files-found: error
+
+      - name: Release notes
+        if: github.event_name == 'push'
+        run: printf '%s\n' "${COMMIT_MSG}" > macos/out/release-notes.md
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+
+      # ★ 不在这里发 Release。签名与公证由外部仓库 integemjack/schat.build 做
+      #   （本仓库的 CI 拿不到 Developer ID 私钥，也不该拿到）。这里只把**未签名**的产物
+      #   留成 Actions artifact 供排查，然后触发对方去签、去传。
+      #
+      #   触发时必须带上**目标 release tag**：早先只推一个空提交，对方只能自己猜发到哪个
+      #   release，于是 beta 分支的构建会把签名 DMG 盖到正式版的 release 上 —— 这正是当初
+      #   把 beta 的 mac 包整个停掉的原因。把 tag 显式传过去，beta 和正式版就各回各家。
+      - name: Trigger signed macOS build (integemjack/schat.build)
+        if: github.event_name == 'push'
+        env:
+          SCHAT_TOKEN: ${{ secrets.SCHAT_BUILD_TOKEN }}
+          SCHAT_REPO: ${{ secrets.SCHAT_BUILD_REPO }}
+          SCHAT_BRANCH: ${{ secrets.SCHAT_BUILD_BRANCH }}
+          TARGET_TAG: ${{ steps.ver.outputs.tag }}
+          TARGET_PRERELEASE: ${{ steps.ver.outputs.prerelease }}
+          TARGET_VERSION: ${{ steps.ver.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${SCHAT_TOKEN:-}" ] || [ -z "${SCHAT_REPO:-}" ]; then
+            echo "::warning::SCHAT_BUILD_TOKEN/REPO 未配置，跳过 macOS 签名构建触发"
+            exit 0
+          fi
+          branch="${SCHAT_BRANCH:-clashauto-mac}"
+          tmp="$(mktemp -d)"
+          origin="https://x-access-token:${SCHAT_TOKEN}@github.com/${SCHAT_REPO}.git"
+          mask() { sed 's#x-access-token:[^@]*@#x-access-token:***@#g'; }
+          git clone --depth 1 --branch "$branch" "$origin" "$tmp/repo" 2>&1 | mask
+          cd "$tmp/repo"
+          git config user.name "clashauto-ci"
+          git config user.email "ci@clashauto.local"
+          # 参数走**提交说明**而不是文件：对方分支上除了 workflow 没有别的内容，
+          # 改文件会污染它的历史；而 commit message 在 on:push 里用
+          # `github.event.head_commit.message` 就能原样读到。
+          # 键值一行一个，好解析、也好在 Actions 日志里一眼看清这次要发到哪。
+          git commit --allow-empty -m "trigger: clashauto macOS (swift)" \
+            -m "source-repo: ${GITHUB_REPOSITORY}" \
+            -m "source-sha: ${GITHUB_SHA}" \
+            -m "source-ref: ${GITHUB_REF_NAME}" \
+            -m "product: coast-swift" \
+            -m "release-tag: ${TARGET_TAG}" \
+            -m "prerelease: ${TARGET_PRERELEASE}" \
+            -m "version: ${TARGET_VERSION}"
+          git push "$origin" "HEAD:${branch}" 2>&1 | mask
+          echo "已触发签名构建 → ${SCHAT_REPO}@${branch}"
+          echo "  源: clashauto@${GITHUB_SHA} (${GITHUB_REF_NAME})"
+          echo "  目标 release: ${TARGET_TAG} (prerelease=${TARGET_PRERELEASE})"

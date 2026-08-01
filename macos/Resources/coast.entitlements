@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- 主程序的 hardened-runtime 权限。公证要求开 hardened runtime，它默认会拦掉
+         下面这些能力，得逐条声明放行。 -->
+    <!-- 出站：REST 轮询核心、下载内核、查更新。 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- 入站：保守留一手；目前 app 侧不直接监听端口。 -->
+    <key>com.apple.security.network.server</key>
+    <true/>
+</dict>
+</plist>

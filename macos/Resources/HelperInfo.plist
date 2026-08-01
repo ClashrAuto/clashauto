@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- SPM 产出的 helper 是**裸 Mach-O 而不是 bundle**，没地方放 Info.plist；
+         靠链接期 -sectcreate __TEXT __info_plist 把这份内容嵌进二进制。
+         少了它，getVersion 读不到 CFBundleVersion，SMAppService 也认不出这个 daemon。 -->
+    <key>CFBundleIdentifier</key>
+    <string>com.yuehongsun.coast.helper</string>
+    <key>CFBundleName</key>
+    <string>Coast Helper</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+</dict>
+</plist>
