@@ -130,6 +130,21 @@ struct NDPPacketTests {
         #expect(NDPPacket.ipv6Source(dad) == nil)
     }
 
+    @Test("v6 字节 ↔ 串 往返 + 可路由分类（现学设备 v6 用）")
+    func routableAndString() {
+        // ipv6String 是 ipv6Bytes 的逆
+        let g = NDPPacket.ipv6Bytes("240e:3a1:7ed1:bbc0:f5df:e637:a8bd:fa4a")!
+        #expect(NDPPacket.ipv6String(g) == "240e:3a1:7ed1:bbc0:f5df:e637:a8bd:fa4a")
+        #expect(NDPPacket.ipv6String(NDPPacket.ipv6Bytes("fe80::1")!) == "fe80::1")
+        #expect(NDPPacket.ipv6String([1, 2, 3]) == nil)   // 长度不对
+        // 可路由：全局 2000::/3、ULA fc00::/7 算；链路本地/组播不算
+        #expect(NDPPacket.isRoutableV6(g))                                        // 240e = 全局
+        #expect(NDPPacket.isRoutableV6(NDPPacket.ipv6Bytes("fd00:abcd::1")!))     // ULA
+        #expect(!NDPPacket.isRoutableV6(NDPPacket.ipv6Bytes("fe80::9cd3:f4ff:fe1b:276c")!))  // 链路本地
+        #expect(!NDPPacket.isRoutableV6(NDPPacket.ipv6Bytes("ff02::1")!))          // 组播
+        #expect(!NDPPacket.isRoutableV6([0, 0]))                                   // 长度不对
+    }
+
     @Test("RA/NA 识别：投毒 NA 是 NA、NS 不是")
     func routerAdvertOrNA() {
         let device = ARPPacket.MAC("dd:dd:dd:dd:dd:dd")!

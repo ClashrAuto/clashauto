@@ -49,6 +49,27 @@ public enum NDPPacket {
         return withUnsafeBytes(of: &addr) { Array($0.bindMemory(to: UInt8.self)) }
     }
 
+    /// 16 字节 → 规范化 v6 串（`inet_ntop`，压缩形式）。长度不对返回 nil。
+    /// 用于把从线上学到的设备 v6 源地址拼进 PF 规则 —— `inet_ntop` 的产物必为合法字面量，
+    /// 天然无注入风险。
+    public static func ipv6String(_ bytes: [UInt8]) -> String? {
+        guard bytes.count == 16 else { return nil }
+        var addr = in6_addr()
+        withUnsafeMutableBytes(of: &addr) { raw in for i in 0..<16 { raw[i] = bytes[i] } }
+        var buf = [CChar](repeating: 0, count: Int(INET6_ADDRSTRLEN))
+        guard inet_ntop(AF_INET6, &addr, &buf, socklen_t(INET6_ADDRSTRLEN)) != nil else { return nil }
+        return String(cString: buf)
+    }
+
+    /// 可路由 v6：全局单播 `2000::/3` 或唯一本地 `fc00::/7`。链路本地、组播、未指定都不算 ——
+    /// 只有可路由源地址才值得进 PF rdr（LL/组播不出网）。
+    public static func isRoutableV6(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count == 16 else { return false }
+        let global = (bytes[0] & 0xE0) == 0x20
+        let ula = (bytes[0] & 0xFE) == 0xFC
+        return global || ula
+    }
+
     // MARK: - 便捷构造（投毒 / 复原）
 
     /// 周期性**投毒** NA：告诉设备「路由器链路本地地址 `routerLL6` 的 MAC 是本机（`selfMAC`）」。
