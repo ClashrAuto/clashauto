@@ -30,14 +30,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # core_prefixes：打包集成的内核产物名前缀（fork ClashrAuto/clash 的正式版通道），
+          # 逗号分隔按优先级排列。x64 优先 -compatible（v1 基线，普通 amd64 是 GOAMD64=v3，
+          # 老 CPU 直接非法指令崩），与应用内 CoreRelease.h 的 assetPrefixes 一字不差。
           - arch: x64
             cmake_arch: x64
             qt_arch: win64_msvc2022_64
-            clash_core: clash-windows-amd64.exe
+            core_prefixes: coast-windows-amd64-compatible-,coast-windows-amd64-v1-
           - arch: arm64
             cmake_arch: ARM64
             qt_arch: win64_msvc2022_arm64_cross_compiled
-            clash_core: clash-windows-arm64.exe
+            core_prefixes: coast-windows-arm64-
 
     steps:
       - name: Checkout
@@ -224,6 +227,41 @@ jobs:
             Write-Host "::warning::未见 sqldrivers\qsqlite.dll（上网历史/常用域名将不可用）"
           }
 
+      - name: Bundle latest stable core
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 打包默认集成最新**正式版**内核到包根 core.exe；首次运行由
+          # CoreController::seedBundledCore() 落位到 userDir\command\core.exe（缺了才补，
+          # 绝不覆盖），之后的版本管理仍归应用内下载/更新。挑选规则与应用内 CoreRelease.h
+          # 一字不差：走 /releases 全量列表（不能用 /releases/latest——fork 从上游继承了
+          # 一堆零资产空 tag，latest 常正好落在那上面）、跳过 draft/prerelease、
+          # 必须真带本平台产物才认。下载失败**打包当场失败**——默认集成的包缺内核是静默劣化。
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" }
+          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/ClashrAuto/clash/releases?per_page=20" -Headers $headers
+          $asset = $null
+          foreach ($r in $releases) {
+            if ($r.draft -or $r.prerelease) { continue }
+            foreach ($p in "${{ matrix.core_prefixes }}".Split(',')) {
+              $asset = @($r.assets | Where-Object { $_.name.StartsWith($p) -and $_.name.EndsWith(".zip") })[0]
+              if ($asset) { break }
+            }
+            if ($asset) { break }
+          }
+          if (-not $asset) { throw "正式版通道里没有 ${{ matrix.core_prefixes }} 产物" }
+          Write-Host "集成内核: $($asset.name)"
+          $tmp = Join-Path $env:RUNNER_TEMP "core-bundle"
+          New-Item -ItemType Directory -Force $tmp | Out-Null
+          # 下载直链不带 Authorization：它 302 到对象存储，多带一层凭据可能被拒
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "$tmp\core.zip"
+          Expand-Archive -Path "$tmp\core.zip" -DestinationPath "$tmp\x" -Force
+          $exe = Get-ChildItem "$tmp\x" -Recurse -Filter *.exe | Select-Object -First 1
+          if (-not $exe) { throw "内核 zip 里没有 exe" }
+          Copy-Item $exe.FullName "$env:STAGE_DIR\core.exe" -Force
+          if (-not (Test-Path "$env:STAGE_DIR\core.exe")) { throw "core.exe 未落到包根" }
+
       - name: Create portable zip
         shell: pwsh
         run: |
@@ -323,6 +361,11 @@ jobs:
 
   macos:
     name: macOS universal (x86_64 + arm64)
+    # ★★ 已停用（2026-08-01）：macOS 只发 **Swift 版**（macos-swift job）。这个 Qt 版
+    #    mac 构建的产物只上传 Actions artifact、不进 Release（DMG 上传早已停用，见下方
+    #    trigger-mac 的注释），每次 push 纯烧 5 分钟 macOS runner。与 trigger-mac 同样
+    #    留壳不删：要恢复 Qt 版 mac 包时删掉这行 if 即可。
+    if: false
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -565,14 +608,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # core_prefixes：打包集成的内核产物名前缀（含义见 windows job 矩阵的注释）
           - arch: x64
             runner: ubuntu-22.04
             deb_arch: amd64
-            clash_core: clash-linux-amd64
+            core_prefixes: coast-linux-amd64-compatible-,coast-linux-amd64-v1-
           - arch: arm64
             runner: ubuntu-24.04-arm
             deb_arch: arm64
-            clash_core: clash-linux-arm64
+            core_prefixes: coast-linux-arm64-
 
     steps:
       - name: Checkout
@@ -730,7 +774,41 @@ jobs:
           # 上网历史库（src/HistoryStore）用 QSQLITE 驱动插件；缺了不会崩，但历史会静默不记录
           test -e "$app_dir/plugins/sqldrivers/libqsqlite.so" \
             || echo "::warning::未见 plugins/sqldrivers/libqsqlite.so（上网历史/常用域名将不可用）"
-          # 内核不再随包分发：不校验 command/clash 下的核心是否存在
+
+      - name: Bundle latest stable core
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CORE_PREFIXES: ${{ matrix.core_prefixes }}
+        run: |
+          set -euo pipefail
+          # 打包默认集成最新**正式版**内核到包根 core（.deb 落 /opt/coast/core）；首次运行由
+          # CoreController::seedBundledCore() 落位到 ~/.local/share/Coast/command/core（缺了
+          # 才补，绝不覆盖）。挑选规则与应用内 CoreRelease.h 一字不差：/releases 全量列表
+          # （latest 会落到 fork 从上游继承的零资产空 tag 上）、跳过 draft/prerelease。
+          # 下载失败**打包当场失败**——默认集成的包缺内核是静默劣化。
+          curl -fsSL --retry 3 -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
+            'https://api.github.com/repos/ClashrAuto/clash/releases?per_page=20' -o /tmp/core-releases.json
+          url="$(python3 - /tmp/core-releases.json <<'PY'
+          import json, os, sys
+          releases = json.load(open(sys.argv[1]))
+          for release in releases:
+              if release.get("draft") or release.get("prerelease"):
+                  continue
+              for prefix in os.environ["CORE_PREFIXES"].split(","):
+                  for asset in release.get("assets", []):
+                      name = asset.get("name", "")
+                      if name.startswith(prefix) and name.endswith(".gz"):
+                          print(asset["browser_download_url"])
+                          sys.exit(0)
+          sys.exit(1)
+          PY
+          )" || { echo "正式版通道里没有 $CORE_PREFIXES 产物" >&2; exit 1; }
+          echo "集成内核: $(basename "$url")"
+          # 下载直链不带 Authorization：它 302 到对象存储，多带一层凭据可能被拒
+          curl -fsSL --retry 3 "$url" | gunzip > "$STAGE_DIR/core"
+          test -s "$STAGE_DIR/core"
+          chmod 755 "$STAGE_DIR/core"
 
       - name: Create portable tar.gz
         shell: bash
@@ -926,6 +1004,10 @@ jobs:
   macos-swift:
     name: macOS (Swift) build + test
     runs-on: macos-15
+    # 硬超时:回归脚本的自检会真的拉起 app,任何一步挂住都不该吃掉整台
+    # runner 几小时(实测 sysproxy 自检挂过 65 分钟,整个 run 被迫手动取消,
+    # 连带 DMG 签名被跳过)。正常全程 ~10 分钟,30 分钟富余充足。
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -1013,6 +1095,10 @@ jobs:
 
       - name: Package Coast.app (universal)
         working-directory: macos
+        env:
+          # make_app.sh 默认集成最新正式版内核，要打 GitHub API 挑产物；Actions 共享
+          # 出口 IP，匿名限流（60 次/时）几乎必中 —— 必须带 token。
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           bash scripts/make_app.sh \
             --version "${{ steps.ver.outputs.version }}" \
@@ -1023,14 +1109,24 @@ jobs:
         working-directory: macos
         run: |
           set -euo pipefail
-          # 通用二进制两个架构都要在（regression.sh 不查这个，单独验）
-          lipo -info Coast.app/Contents/MacOS/Coast
-          lipo -info Coast.app/Contents/MacOS/com.yuehongsun.coast.helper
+          # 只做打包产物的**结构**校验——每项毫秒级、零挂死风险：
+          #   • universal 两架构齐全（缺一半的包在另一半机器上直接打不开）
+          #   • 签名封存完整（--deep --strict：浅校验在内层二进制签坏时照样报 OK）
+          #   • 种子资源 / 集成内核 / helper 布局在位（缺了要等用户首启才炸，CI 就该拦住）
+          # ★ 不在 CI 跑 scripts/regression.sh：它是本地开发工具。swift test 和 i18n
+          #   上面已各有独立步骤，再跑一遍纯重复；其自检钩子在 runner 上不是 SKIP 就是
+          #   无意义（topo 验的是 runner 的网关，helper 注册 ad-hoc 必 SKIP），sysproxy
+          #   的授权弹窗还把 Verify bundle 吊死过一个多小时。
+          lipo -archs Coast.app/Contents/MacOS/Coast | grep -q x86_64
+          lipo -archs Coast.app/Contents/MacOS/Coast | grep -q arm64
+          lipo -archs Coast.app/Contents/MacOS/com.yuehongsun.coast.helper | grep -q arm64
           codesign --verify --deep --strict Coast.app
-          # 打包产物的全套自检钩子（paths/topo/helper/sysproxy）。--no-build 复用上一步
-          # 刚打好的包，与本地 `bash scripts/regression.sh` 同一套逻辑，不让 CI 和本地漂移。
-          # 脚本把「环境验不了」（如 ad-hoc 装不了 helper）判为 SKIP，只有真失败才退非 0。
-          bash scripts/regression.sh --no-build
+          test -f Coast.app/Contents/Library/LaunchDaemons/com.yuehongsun.coast.helper.plist
+          test -x Coast.app/Contents/MacOS/com.yuehongsun.coast.helper
+          test -f Coast.app/Contents/Resources/bundle/config/config.yaml
+          test -f Coast.app/Contents/Resources/bundle/config/Country.mmdb
+          test -x Coast.app/Contents/Resources/core
+          echo "bundle 结构 OK"
 
       - name: Package .zip / .dmg + notarize
         working-directory: macos

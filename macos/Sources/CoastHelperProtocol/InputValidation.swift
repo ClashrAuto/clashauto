@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// helper 收到的外部输入的校验。放共享层(而非 helper 内部)的两个理由:
@@ -25,5 +26,17 @@ public enum InputValidation {
     public static func isSanePath(_ path: String) -> Bool {
         guard path.hasPrefix("/"), !path.isEmpty else { return false }
         return !path.split(separator: "/").contains("..")
+    }
+
+    /// 严格的 IPv6 字面量校验（**不接受区标 `%en0`**）。
+    ///
+    /// 为什么严:设备 v6 源地址会被原样拼进 PF `rdr ... inet6 ... from <v6>` 规则文本喂给 pfctl
+    /// （helper 以 root 跑）。和 `isValidInterface` 同理，带空格/换行的串能改写或另起 PF 规则,
+    /// 这里是那条注入路径的纵深防御。`inet_pton` 通过 = 是合法字面量,同时 `%`/空白等注入字符
+    /// 必然让它失败。区标另挡:PF 的 `from` 不接受区标,带 `%` 的地址会让整条规则语法错。
+    public static func isValidIPv6(_ text: String) -> Bool {
+        guard !text.isEmpty, text.count <= 45, !text.contains("%") else { return false }
+        var addr = in6_addr()
+        return text.withCString { inet_pton(AF_INET6, $0, &addr) } == 1
     }
 }

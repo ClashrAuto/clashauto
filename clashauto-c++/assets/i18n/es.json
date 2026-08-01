@@ -437,5 +437,7 @@
   "正在应用…": "Aplicando…",
   "检测到局域网内有异常代理行为": "Se detectó actividad de proxy sospechosa en la red local",
   "被争抢": "En disputa",
-  "另一台设备也在把这台设备的流量劫走": "Otra máquina también está secuestrando el tráfico de este dispositivo"
+  "另一台设备也在把这台设备的流量劫走": "Otra máquina también está secuestrando el tráfico de este dispositivo",
+  "本网络的 IPv6 也已一并接管。": "El tráfico IPv6 de esta red también se está gestionando.",
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "No se encontró un router IPv6 en esta red; solo se gestiona IPv4."
 }

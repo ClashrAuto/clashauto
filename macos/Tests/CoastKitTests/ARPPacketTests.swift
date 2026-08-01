@@ -55,6 +55,35 @@ struct ARPPacketTests {
         #expect(Array(frame[32..<38]) == device.bytes)
     }
 
+    // 手拼一帧 ARP 请求（who-has targetIP，tell senderIP/senderMAC），供解析测试。
+    private func makeRequest(senderMAC: ARPPacket.MAC, senderIP: [UInt8], targetIP: [UInt8]) -> [UInt8] {
+        var f = [UInt8](repeating: 0, count: 42)
+        for i in 0..<6 { f[i] = 0xff; f[6 + i] = senderMAC.bytes[i] }   // 以太：dst 广播、src 设备
+        f[12] = 0x08; f[13] = 0x06                                       // EtherType ARP
+        f[14] = 0x00; f[15] = 0x01; f[16] = 0x08; f[17] = 0x00           // htype 以太 / ptype IPv4
+        f[18] = 6; f[19] = 4; f[20] = 0x00; f[21] = 0x01                 // hlen/plen / op=request
+        for i in 0..<6 { f[22 + i] = senderMAC.bytes[i] }               // sha
+        for i in 0..<4 { f[28 + i] = senderIP[i] }                      // spa
+        for i in 0..<4 { f[38 + i] = targetIP[i] }                      // tpa
+        return f
+    }
+
+    @Test("★ 解析 who-has 网关的 ARP 请求（v4 抢答用）")
+    func parseRequest() {
+        let device = ARPPacket.MAC("dd:dd:dd:dd:dd:dd")!
+        let req = makeRequest(senderMAC: device, senderIP: [192, 168, 31, 168], targetIP: [192, 168, 31, 1])
+        // 问的正是网关 → 解析出请求方 IP/MAC
+        let r = ARPPacket.parseRequest(req, targetIP: [192, 168, 31, 1])
+        #expect(r?.senderIP == [192, 168, 31, 168])
+        #expect(r?.senderMAC == device)
+        // 问的不是网关 → nil
+        #expect(ARPPacket.parseRequest(req, targetIP: [192, 168, 31, 9]) == nil)
+        // 一帧 ARP 应答（op=2）不是请求 → nil
+        let reply = ARPPacket.reply(senderMAC: device, senderIP: [192, 168, 31, 1],
+                                    targetMAC: device, targetIP: [192, 168, 31, 168])
+        #expect(ARPPacket.parseRequest(reply, targetIP: [192, 168, 31, 1]) == nil)
+    }
+
     @Test("★ 复原帧：sender = 真网关 MAC，把设备的 ARP 缓存改回去")
     func restoreFrameUsesRealGateway() {
         // 这是整个功能的命门：复原发的是「网关 IP → 真网关 MAC」，

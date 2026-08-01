@@ -66,6 +66,12 @@ public final class ConfigBuilder: @unchecked Sendable {
         // 转过来之后它拿到 fake-ip，域名规则才匹配得上。
         yaml = YAMLSurgery.setNestedScalar(yaml, section: "dns", key: "listen",
                                            value: "0.0.0.0:" + String(DeviceStore.dnsPort))
+        // 顶层 ipv6:true —— 让核心**接受并拨出** IPv6 连接。透明网关会把被接管设备的 v6 TCP
+        // 经 PF rdr 送进 redir 口(见 Redirector 的 inet6 规则);ipv6:false 时核心会直接丢弃这些
+        // v6 连接,整条 v6 接管等于白做。dns.ipv6 仍保持 plugin.yaml 里的 false —— AAAA 回空 →
+        // 域名流量自然回落 v4(已被 v4 rdr 走 fake-ip 代理),只有字面量 v6 / 设备自带 v6 解析器
+        // 拿到的真实 AAAA 才走 v6 redir。这样既补齐 v6、又不动已验证的 v4 DNS/fake-ip 路径。
+        yaml = YAMLSurgery.setScalar(yaml, key: "ipv6", value: "true")
         yaml = YAMLSurgery.setNestedScalar(yaml, section: "tun", key: "enable",
                                            value: tunEnabled ? "true" : "false")
         yaml = Self.ensureProxyServerNameserver(yaml)

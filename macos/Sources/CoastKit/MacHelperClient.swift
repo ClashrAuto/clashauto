@@ -309,10 +309,14 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
 
     public func startRedirect(devices: [(ip: String, mac: String)], interface: String,
                               gatewayIP: String, gatewayMAC: String,
-                              redirPort: Int, dnsPort: Int) async throws {
+                              redirPort: Int, dnsPort: Int,
+                              routerLL6: String = "", routerMAC6: String = "",
+                              deviceV6s: [String] = []) async throws {
         // IP 与 MAC 用两个逗号串平行传，下标一一对应（helper 侧 zip 回去）
         let ips = devices.map(\.ip).joined(separator: ",")
         let macs = devices.map(\.mac).joined(separator: ",")
+        // v6 源地址是扁平集合（PF 按源匹配，与 MAC 无需对齐）；空 = 无 v6。
+        let v6s = deviceV6s.joined(separator: ",")
         // 建一条**活着的**连接并留住它 —— 见 `redirectConnection` 的说明。
         redirectConnection?.invalidate()
         let connection = makeConnection()
@@ -334,7 +338,9 @@ public actor MacHelperClient: PrivilegedCoreLauncher {
             helper.startRedirect(deviceIPsCommaSep: ips, deviceMACsCommaSep: macs,
                                  interface: interface,
                                  gatewayIP: gatewayIP, gatewayMAC: gatewayMAC,
-                                 redirPort: redirPort, dnsPort: dnsPort) { ok, error in
+                                 redirPort: redirPort, dnsPort: dnsPort,
+                                 routerLL6: routerLL6, routerMAC6: routerMAC6,
+                                 deviceV6sCommaSep: v6s) { ok, error in
                 done(ok ? .success(true) : .failure(HelperError.remote(error)))
             }
         }

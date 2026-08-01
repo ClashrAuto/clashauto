@@ -8,7 +8,10 @@ import Observation
 public final class CoreProcess {
 
     public enum StartFailure: Error, Sendable, Equatable {
-        /// 核心二进制不在。**不预装内核**是刻意的：引导用户去「设置 → 系统」下载。
+        /// 核心二进制不在。打包的 .app 默认集成最新正式版内核（`make_app.sh` 放进
+        /// Contents/Resources/core，`start()` 首次运行落位），所以正式包基本走不到这里；
+        /// 开发期（`swift run`）和 `--no-core` 的包没有这份资源 —— 引导用户去
+        /// 「设置 → 系统」下载。
         case coreMissing(path: String)
         case configMissing(path: String)
         case launchFailed(String)
@@ -64,6 +67,10 @@ public final class CoreProcess {
     public func start(tunEnabled: Bool, fullConfigPath: URL) async -> Result<Void, StartFailure> {
         guard !isRunning else { return .success(()) }
         stopRequested = false
+
+        // 打包时集成的内核首次运行落到用户目录 —— 全新安装开箱即用。
+        // 必须在取 coreExecutable **之前**：它的「扁平优先、回退老路径」判定依赖文件是否存在。
+        Self.seedCoreIfMissing()
 
         let exe = AppPaths.coreExecutable
         guard FileManager.default.fileExists(atPath: exe.path) else {
@@ -288,6 +295,35 @@ public final class CoreProcess {
             try? FileManager.default.copyItem(at: seed, to: target)
             AppPaths.makeWritable(target)
         }
+    }
+
+    // MARK: - 内核种子
+
+    /// 首次运行把打包时集成的内核放到 `command/core`。
+    ///
+    /// `make_app.sh` 默认把最新**正式版**内核放进 `Contents/Resources/core`（随 .app 一起
+    /// 签名），这里只做「缺了才补」：**绝不覆盖**已装的内核 —— 用户手动升级过（或切了
+    /// 测试版通道）的内核被一次启动静默回滚是最难查的那种坑。集成只是让全新安装
+    /// 开箱即用，之后的版本管理仍归「设置 → 系统」的下载/更新。
+    ///
+    /// 开发期（`swift run`）没有打包资源，`Resources.asset` 返回 nil，安静跳过。
+    /// 参数可注入是给单测用的；产品代码一律用默认值。
+    nonisolated public static func seedCoreIfMissing(
+        from bundled: URL? = Resources.asset("core"),
+        installedAt existing: URL = AppPaths.coreExecutable,
+        to target: URL = AppPaths.userDir.appendingPathComponent("command/core")
+    ) {
+        guard let bundled,
+              !FileManager.default.isExecutableFile(atPath: existing.path) else { return }
+        try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: target)
+        guard (try? FileManager.default.copyItem(at: bundled, to: target)) != nil else { return }
+        // 0755：不给执行位内核起不来,报错只是一句含糊的「启动失败」（同 CoreDownloader.install）。
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+        // .app 若带隔离标记（从 DMG 拖出来的都带）,拷出的副本会继承 —— 摘掉,
+        // 否则首次 exec 会被 Gatekeeper 拦下,表现为「启动失败」且日志里毫无线索。
+        removexattr(target.path, "com.apple.quarantine", 0)
     }
 
     // MARK: - GeoIP 种子

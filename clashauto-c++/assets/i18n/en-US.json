@@ -438,5 +438,7 @@
   "正在应用…": "Applying…",
   "检测到局域网内有异常代理行为": "Suspicious proxy activity detected on the local network",
   "被争抢": "Contended",
-  "另一台设备也在把这台设备的流量劫走": "Another machine is also hijacking this device's traffic"
+  "另一台设备也在把这台设备的流量劫走": "Another machine is also hijacking this device's traffic",
+  "本网络的 IPv6 也已一并接管。": "This network's IPv6 traffic is being handled too.",
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "No IPv6 router found on this network; only IPv4 is handled."
 }

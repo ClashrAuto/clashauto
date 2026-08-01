@@ -206,39 +206,84 @@ struct UpdateBadge: View {
     }
 }
 
-/// 页脚开关左侧那颗呼吸圆点。对齐 `qml/FooterSwitch.qml`：12×12 本体 + 3px 外环，
-/// 启用时外环在蓝↔灰之间以 1s 周期脉动，停用时是静态灰。
+/// 页脚开关左侧那颗状态圆点：12×12 本体 + 外环。
+/// 启用时外环**一圈圈向外扩散并淡出**（见 `PulsingRing`），停用时是静态灰环。
 ///
 /// 圆点是这排按钮里**唯一**表达开关状态的东西（文字色只跟着变一档），
-/// 所以它的动效不是装饰：一眼扫过去，脉动的那颗就是开着的。
+/// 所以它的动效不是装饰：一眼扫过去，在往外发散的那颗就是开着的。
 struct BreathingDot: View {
     @Environment(Theme.self) private var theme
     let isOn: Bool
-
-    @State private var pulse: Double = 0
-
-    private var ringColor: Color {
-        guard isOn else { return Color(white: 0.4, opacity: 0.15) }
-        return Color(red: (72 + 30 * pulse) / 255,
-                     green: (152 - 50 * pulse) / 255,
-                     blue: (248 - 146 * pulse) / 255,
-                     opacity: 0.5 - 0.35 * pulse)
-    }
 
     var body: some View {
         Circle()
             .fill(isOn ? theme.accent : theme.switchTrackOff)
             .frame(width: 12, height: 12)
-            .overlay(Circle().stroke(ringColor, lineWidth: 3))
-            .onAppear { start() }
-            .onChange(of: isOn) { _, _ in start() }
+            .overlay {
+                // ★ 开态和关态是**两个不同的视图**，不是同一个环换颜色。
+                //
+                //   原来是一个 `Circle().stroke(ringColor)`，`ringColor` 里按 `isOn` 分档，
+                //   脉动由 `withAnimation(.repeatForever)` 驱动一个 `pulse` 状态。
+                //   `repeatForever` 是条**永不结束**的动画：把 `pulse` 赋回 0 停不掉它
+                //   （连 `Transaction(disablesAnimations: true)` 也不行 —— 动画挂在
+                //   stroke 那个**颜色属性**上，不只挂在 `pulse` 上），而关开关时
+                //   「蓝 → 灰」这次颜色变化正好被它接管，于是环色在蓝灰之间无限自动往返：
+                //   开过一次以后，关掉了光晕还在一亮一暗。
+                //
+                //   拆成 if/else 之后两支的结构标识不同，关掉时脉动那支**整个从视图树上
+                //   消失**，它身上的动画随之作废；静态灰环是另一个视图，从来没有过动画。
+                if isOn {
+                    PulsingRing()
+                } else {
+                    Circle().stroke(Color(white: 0.4, opacity: 0.15), lineWidth: 3)
+                }
+            }
     }
+}
 
-    private func start() {
-        pulse = 0
-        guard isOn else { return }
-        withAnimation(.easeInOut(duration: 0.5).repeatForever(autoreverses: true)) {
-            pulse = 1
-        }
+/// 开启态那圈光晕：从圆点边缘**向外扩散**并淡出，一轮一轮地发出去。
+///
+/// ★ 不是「原地换颜色」。早先那版是一个定尺寸的 3px 环在蓝↔灰之间来回，
+///   一亮一暗读起来是**闪烁**，而不是「有东西在往外发散」。
+///
+/// ★ 也不能用 `autoreverses: true`：那会让环扩出去再缩回来，缩回去的那半程
+///   同样是在闪。扩散必须是单向的 —— 到头就消失，从头再来。
+///
+/// 三段相位而不是两段，是为了**没有起跳的那一下**：第 0 段在圆点边缘、
+/// 完全透明，所以每轮重置（瞬时）时看不见任何东西冒出来；第 1 段快速浮现，
+/// 第 2 段一边继续张开一边淡尽。两段的话重置那一帧会突然亮出一个环，
+/// 那正是我们要去掉的「闪」。
+///
+/// **独立成一个视图不是为了整洁**，是靠它被销毁来终止那条永不结束的循环动画
+/// —— 理由见 `BreathingDot` 里那段注释，别把它合回去。
+private struct PulsingRing: View {
+    @Environment(Theme.self) private var theme
+
+    /// (缩放, 不透明度)。1.0 = 正好贴着圆点边缘（半径 6）。
+    ///
+    /// 最大只到 1.8：`scaleEffect` 连描边一起放大，1.8 时外缘落在半径
+    /// ≈ 6×1.8 + 1.8 ≈ 12.6 —— 而标签文字从圆心 12 处开始（圆点半径 6 + HStack 间距 6）。
+    /// 再大就压到字上去了（2.05 实测能探到 15）。
+    private static let phases: [(scale: CGFloat, opacity: Double)] = [
+        (1.00, 0.00),   // 起点：贴着圆点、看不见
+        (1.30, 0.55),   // 浮现
+        (1.80, 0.00),   // 张开到最大、淡尽
+    ]
+
+    var body: some View {
+        Circle()
+            .stroke(theme.accent, lineWidth: 2)
+            .phaseAnimator(Array(Self.phases.indices)) { ring, index in
+                ring
+                    .scaleEffect(Self.phases[index].scale)
+                    .opacity(Self.phases[index].opacity)
+            } animation: { index in
+                switch index {
+                // 回到第 0 段是**重置**，必须瞬时：给了时长就成了「缩回去」。
+                case 0: .linear(duration: 0)
+                case 1: .easeOut(duration: 0.35)
+                default: .easeOut(duration: 1.05)
+                }
+            }
     }
 }

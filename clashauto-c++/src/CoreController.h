@@ -55,6 +55,7 @@ private:
     void stopProxy();
     void reloadConfig();
     void emitStatus();
+    void seedBundledCore(); // 打包集成的内核首次运行落位（缺了才补，绝不覆盖已装的）
 
 #if defined(Q_OS_MACOS)
     // 懒创建并预授权一个 system.services.systemconfiguration.network 权限的 AuthorizationRef，

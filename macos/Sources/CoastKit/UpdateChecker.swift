@@ -115,15 +115,31 @@ public struct UpdateChecker: Sendable {
     /// 内核最新版的版本号 + 更新说明。更新窗的「内核」页要展示说明正文，
     /// 而角标只要版本号 —— 两者共用这一次请求，别为了一段说明再打一遍 GitHub
     /// （匿名调用每小时只有 60 次）。
+    ///
+    /// 发布源与 `CoreDownloader` 同一套规则（对齐 Qt `CoreRelease.h`）：
+    /// fork ClashrAuto/clash 的 /releases 全量列表按通道挑，且必须带 darwin 产物才认 ——
+    /// 不能用 /releases/latest，fork 从上游继承了一堆零资产空 tag，latest 常落在那上面。
+    /// 返回的 tag 是**产物名里嵌的版本号**（beta 的 release tag 是 Prerelease-<分支>，
+    /// 拿它和本地内核版本没法比）。
     public func latestCoreRelease() async throws -> (tag: String, notes: String)? {
-        let url = URL(string: "https://api.github.com/repos/MetaCubeX/mihomo/releases/latest")!
+        let url = URL(string: CoreDownloader.releasesURL)!
         var request = URLRequest(url: url)
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 20
         let (data, _) = try await session.data(for: request)
-        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        guard let tag = object?["tag_name"] as? String, !tag.isEmpty else { return nil }
-        return (tag, object?["body"] as? String ?? "")
+        guard let list = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let pick = CoreDownloader.pick(releases: list, wantBeta: includePrerelease)
+        else { return nil }
+        return (pick.version, pick.notes)
+    }
+
+    /// 内核「有无新版」= 「和本地不一样」，**不是**「更大」（对齐 Qt `CoreRelease::hasUpdate`）。
+    /// 两个原因：① 从测试版切回正式版时版本号是变小的，比大小会把用户钉死在测试版上；
+    /// ② 用户机器上还留着上游 mihomo（v1.19.x）时它比 fork 的 v1.10.x「大」，
+    /// 比大小会判成「已是最新」，永远提示不了换 fork 内核。
+    public static func coreHasUpdate(remote: String, local: String) -> Bool {
+        !remote.isEmpty && !local.isEmpty && remote != local
     }
 
     /// 语义化版本比较：`remote` 是否比 `local` 新。

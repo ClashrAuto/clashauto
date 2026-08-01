@@ -85,6 +85,60 @@ public struct ArpWatch: Sendable {
         }
         return alerts.sorted { $0.id < $1.id }
     }
+
+    // MARK: - IPv6（NDP）监视
+
+    /// v6 版的一次检查输入。判据同 v4，只是绑定来自**邻居表**（`ndp -an`）而非 ARP 表：
+    ///
+    /// - **路由器被冒充**：v6 默认路由器的链路本地地址被绑到了别的 MAC（v6 侧的中间人）。
+    /// - **设备被争抢**：我们代理中的设备的某个 v6 地址被绑到了第三方 MAC。
+    ///
+    /// `proxiedV6` 是「设备 v6 → 设备真实 MAC」的**基线**：由调用方在**观察到干净绑定时**逐步
+    /// 攒起来（见 AppState 的 v6Baseline），而不是每轮从当前邻居表现取 —— 否则地址一旦被投毒，
+    /// 当前表里它已经指向攻击者，就再也判不出「本该是设备的」。这与 v4 用 DeviceStore 里存的
+    /// lastIP 当锚点是同一个道理。
+    public struct SnapshotV6: Sendable {
+        public var neighbors: [String: String]   // v6 → MAC（规范化小写）
+        public var routerLL: String
+        public var routerMAC: String
+        public var localMACs: Set<String>
+        public var proxiedV6: [String: String]   // v6 → 设备真实 MAC（基线）
+
+        public init(neighbors: [String: String], routerLL: String, routerMAC: String,
+                    localMACs: Set<String>, proxiedV6: [String: String]) {
+            self.neighbors = neighbors
+            self.routerLL = routerLL
+            self.routerMAC = routerMAC
+            self.localMACs = localMACs
+            self.proxiedV6 = proxiedV6
+        }
+    }
+
+    /// 纯函数：给定一份 v6 快照，算出当下成立的告警（与 `evaluate` 同结构，共用 `Alert`/节流/留存）。
+    public func evaluateV6(_ snapshot: SnapshotV6) -> [Alert] {
+        var alerts: [Alert] = []
+        let normalizedLocal = Set(snapshot.localMACs.map { $0.lowercased() })
+
+        // 1) 路由器 LL 被冒充（不能把「是本机自己」当欺骗，同 v4 的理由）。
+        if !snapshot.routerLL.isEmpty, !snapshot.routerMAC.isEmpty,
+           let current = snapshot.neighbors[snapshot.routerLL]?.lowercased(),
+           current != snapshot.routerMAC.lowercased(),
+           !normalizedLocal.contains(current) {
+            alerts.append(Alert(kind: .gatewaySpoofed, offenderMAC: current,
+                                subjectIP: snapshot.routerLL,
+                                expectedMAC: snapshot.routerMAC.lowercased()))
+        }
+
+        // 2) 代理设备的某个 v6 被别人争抢。
+        for (v6, trueMAC) in snapshot.proxiedV6 {
+            guard let current = snapshot.neighbors[v6]?.lowercased() else { continue }
+            let expected = trueMAC.lowercased()
+            guard current != expected, !normalizedLocal.contains(current) else { continue }
+            alerts.append(Alert(kind: .deviceContended, offenderMAC: current,
+                                subjectIP: v6, expectedMAC: expected))
+        }
+        return alerts.sorted { $0.id < $1.id }
+    }
 }
 
 /// 告警的去重节流。

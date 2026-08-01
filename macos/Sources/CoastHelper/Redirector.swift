@@ -18,6 +18,37 @@ final class Redirector: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var bpfFD: Int32 = -1
 
+    // —— 被动抢答设备 NS（仅 v6 启用时）——
+    // 设备网关邻居条目老化后会发 NUD **单播** NS 来本机复核（它缓存的是「路由器 LL 在本机」）。
+    // 收到就回一条 solicited NA 抢在真路由器前把条目翻回 REACHABLE。收包全在 `queue` 上，与
+    // start/stop/timer 串行，无需额外加锁。**不开混杂**：单播 NS 目的就是本机 MAC，非混杂也收得到，
+    // 而混杂会让本机自己的协议栈把我们发的欺骗帧学进缓存 → 自投毒（见 Qt L2Endpoint_mac 的论证）。
+    private var bpfReadSource: DispatchSourceRead?
+    private var bpfReadBuf: UnsafeMutableRawBufferPointer?
+    // 抢答时记下每台设备的链路本地地址（NS 源）：复原时优先单播 solicited 回它（更快落 REACHABLE）。
+    private var deviceLLByMAC: [String: [UInt8]] = [:]
+    // 反制真网关/真路由器解毒帧（v4 ARP + v6 RA/NA）的**统一**重投节流（uptime 纳秒；0=没反制过）。
+    private var lastReassertNanos: UInt64 = 0
+
+    // —— 唤醒沿 boost（v4+v6 统一）——
+    // 某设备空闲一阵后又发帧（ARP/IPv6）→ 它的网关 ARP/邻居 条目多半刚老化、正在重解析 → 进一段
+    // 50ms×8 的高频重投窗口，抢在真网关/真路由器的应答前把「网关在本机」钉回。治「空闲后首次访问
+    // 先漏到真网关」。
+    private var boostTimer: DispatchSourceTimer?
+    private var boostRemaining = 0
+    private var lastSeenByMAC: [String: UInt64] = [:]   // 设备 MAC 串 → 上次见到其帧的 uptime 纳秒
+    private static let kBoostTicks = 8
+    private static let kWakeIdleNanos: UInt64 = 10_000_000_000   // 空闲 >10s 判为唤醒沿
+
+    // —— PF 规则的可重建状态 ——
+    // v6 设备源地址常在接管**之后**才出现在链路上（`ndp -an` 那一刻手机往往还没在本机邻居表里，
+    // 真机实测确认过）。所以除了启动时那份，收包路径还会从被投毒设备**转发来的 v6 帧**里现学
+    // 全局/ULA 源地址，动态补进 `inet6 from <v6>` 规则。存下重建 anchor 所需的一切。
+    private var pfDeviceIP4s: [String] = []
+    private var pfRedirPort = 0
+    private var pfDnsPort = 0
+    private var pfV6set: Set<String> = []   // 当前所有 v6 源（启动发现 ∪ 线上现学），去重
+
     // 当前接管的会话状态（复原时要原样用回去）。
     private var deviceIPs: [[UInt8]] = []
     private var deviceMACs: [ARPPacket.MAC] = []
@@ -28,6 +59,16 @@ final class Redirector: @unchecked Sendable {
     private var pfInstalled = false
     private var forwardingWasOn = false
     private var active = false
+
+    // —— IPv6 会话状态 ——
+    // v6 拓扑齐全（路由器 LL + 路由器 MAC 都解析到）时才启用。任一缺失 → `v6Active=false`,
+    // 整段 v6 逻辑跳过（不改 ip6.forwarding、不装 inet6 规则、不发 NDP），行为与只做 v4 一致。
+    // 为什么两样都要:能投毒(只需 routerLL6)却复原不了(缺 routerMAC6)是最坏情况 —— 设备会一直
+    // 把本机当 v6 网关、v6 断网。宁可不接管 v6,也绝不接管一个还不回去的。
+    private var routerLL6: [UInt8] = []            // 路由器链路本地地址（16 字节；NDP target）
+    private var routerMAC6 = ARPPacket.MAC.broadcast
+    private var v6Active = false
+    private var forwarding6WasOn = false
 
     static let anchorName = "coast.redirect"
 
@@ -40,7 +81,9 @@ final class Redirector: @unchecked Sendable {
     func start(deviceIPs deviceIPStrings: [String], deviceMACs deviceMACStrings: [String],
                interface: String,
                gatewayIP gatewayIPString: String, gatewayMAC gatewayMACString: String,
-               redirPort: Int, dnsPort: Int) -> String? {
+               redirPort: Int, dnsPort: Int,
+               routerLL6 routerLL6String: String, routerMAC6 routerMAC6String: String,
+               deviceV6s deviceV6Strings: [String]) -> String? {
         queue.sync {
             stopLocked()   // 幂等：换设备列表时先把上一轮干净收掉
 
@@ -64,6 +107,20 @@ final class Redirector: @unchecked Sendable {
             }
             guard !ips.isEmpty else { return "没有有效的设备（IP/MAC 都要能解析）" }
 
+            // —— 解析 v6 拓扑 ——：路由器 LL + 路由器 MAC 都齐才启用 v6（见 v6Active 说明）。
+            //    routerLL6 必须是**链路本地**（fe80::/10）—— 设备的默认路由下一跳就是它,写别的
+            //    地址设备不会拿来当默认路由器。任一不满足 → v6 静默停用,只做 v4(不报错)。
+            let ll6 = NDPPacket.ipv6Bytes(routerLL6String) ?? []
+            let rmac6 = ARPPacket.MAC(routerMAC6String)
+            let ll6IsLinkLocal = ll6.count == 16 && ll6[0] == 0xFE && (ll6[1] & 0xC0) == 0x80
+            self.v6Active = ll6IsLinkLocal && rmac6 != nil
+            self.routerLL6 = v6Active ? ll6 : []
+            self.routerMAC6 = rmac6 ?? ARPPacket.MAC.broadcast
+            // PF `from <v6>` 会拼进规则文本 → 每个都过 isValidIPv6（挡注入 + 丢掉解析不了的）。
+            let v6sForPF = v6Active
+                ? deviceV6Strings.filter { InputValidation.isValidIPv6($0) }
+                : []
+
             self.interface = interface
             self.gatewayIP = gwIP
             self.gatewayMAC = gwMAC
@@ -72,16 +129,25 @@ final class Redirector: @unchecked Sendable {
             self.deviceMACs = macs   // 真实 MAC，欺骗与复原都**单播**到它，不碰其它设备
 
             // 1) 开内核转发。记下原值，复原时**只在原本是关的时候才关回去** ——
-            //    用户可能自己开着 forwarding 干别的，我们不该擅自关掉。
+            //    用户可能自己开着 forwarding 干别的，我们不该擅自关掉。v6 同理，且只在启用 v6 时才碰。
             forwardingWasOn = Self.ipForwarding()
             if !forwardingWasOn, !Self.setIPForwarding(true) {
                 return "开启 ip.forwarding 失败"
+            }
+            if v6Active {
+                forwarding6WasOn = Self.ip6Forwarding()
+                if !forwarding6WasOn, !Self.setIP6Forwarding(true) {
+                    if !forwardingWasOn { _ = Self.setIPForwarding(false) }
+                    return "开启 ip6.forwarding 失败"
+                }
             }
 
             // 2) 装 PF anchor。**用实际接管的这批 IP**（ips，已过滤掉 MAC 解析失败的），
             //    不是原始入参 —— 否则会给一台我们并不欺骗、流量根本不会到本机的设备装 rdr 规则。
             let ipStringsForPF = ips.map { $0.map(String.init).joined(separator: ".") }
-            if let error = installPF(deviceIPs: ipStringsForPF, redirPort: redirPort, dnsPort: dnsPort) {
+            if let error = installPF(deviceIPs: ipStringsForPF, deviceV6s: v6sForPF,
+                                     redirPort: redirPort, dnsPort: dnsPort) {
+                if v6Active, !forwarding6WasOn { _ = Self.setIP6Forwarding(false) }
                 if !forwardingWasOn { _ = Self.setIPForwarding(false) }
                 return error
             }
@@ -90,23 +156,32 @@ final class Redirector: @unchecked Sendable {
             // 3) 打开 BPF，起欺骗定时器。失败同样回滚前两步。
             guard openBPF(interface: interface) else {
                 uninstallPF()
+                if v6Active, !forwarding6WasOn { _ = Self.setIP6Forwarding(false) }
                 if !forwardingWasOn { _ = Self.setIPForwarding(false) }
                 return "打开 BPF 失败"
             }
 
             active = true
+            // 挂收包源做抢答/反制/学习（v4 的 ARP、v6 的 NDP 都要）。放在 active=true 之后、发第一轮
+            // 欺骗之前都行 —— 它盯着同一个 bpfFD。预筛只放 ARP/IPv6，IPv4 数据帧不进用户态。
+            startBPFReader()
             // 落一份崩溃恢复记录。**内核状态活得比进程久** —— PF anchor 和 ip.forwarding
             // 是内核里的东西，helper 被 SIGKILL 掉时它们原样留着，而新拉起的实例
             // `active == false`，`stop()` 会直接提前返回，于是这两样**永远回滚不了**。
             // 后果不是「功能失效」而是「rdr 规则继续把流量重定向到一个没人监听的端口」——
             // 正是这套设计极力避免的那种设备断网。
-            Self.writeCrashRecord(forwardingWasOn: forwardingWasOn)
+            Self.writeCrashRecord(forwardingWasOn: forwardingWasOn,
+                                  forwarding6WasOn: v6Active ? forwarding6WasOn : nil)
             let source = DispatchSource.makeTimerSource(queue: queue)
-            source.schedule(deadline: .now(), repeating: 1.0)  // 每秒重发，压过设备的正常 ARP 学习
-            source.setEventHandler { [weak self] in self?.sendSpoof() }
+            source.schedule(deadline: .now(), repeating: 1.0)  // 每秒重发，压过设备的正常 ARP/NDP 学习
+            source.setEventHandler { [weak self] in
+                self?.sendSpoof()
+                self?.sendNDPSpoof()   // v6 未启用时自身 no-op
+            }
             source.resume()
             timer = source
-            sendSpoof()   // 立即发一轮，不等第一个 tick
+            sendSpoof()      // 立即发一轮，不等第一个 tick
+            sendNDPSpoof()
             return nil
         }
     }
@@ -125,9 +200,15 @@ final class Redirector: @unchecked Sendable {
             ?? "/var/db/com.yuehongsun.coast.helper.redirect"
     }
 
-    private static func writeCrashRecord(forwardingWasOn: Bool) {
-        try? (forwardingWasOn ? "1" : "0").write(
-            toFile: crashRecordPath, atomically: true, encoding: .utf8)
+    /// 记录格式是两行 `v4=<0/1>` / `v6=<0/1>`。`forwarding6WasOn == nil` 表示这次没启用 v6
+    /// （不写 `v6=` 行 → 恢复时不碰 ip6.forwarding）。
+    ///
+    /// 兼容旧格式:早于 v6 支持的记录是**单个字符** `"1"`/`"0"`,`recoverFromCrashIfNeeded` 里
+    /// 找不到 `v4=` 时会退回按整串解读。旧记录必然没有 v6（功能是新加的），无需为它写 `v6=`。
+    private static func writeCrashRecord(forwardingWasOn: Bool, forwarding6WasOn: Bool?) {
+        var text = "v4=\(forwardingWasOn ? 1 : 0)"
+        if let v6 = forwarding6WasOn { text += "\nv6=\(v6 ? 1 : 0)" }
+        try? text.write(toFile: crashRecordPath, atomically: true, encoding: .utf8)
     }
 
     private static func clearCrashRecord() {
@@ -144,12 +225,25 @@ final class Redirector: @unchecked Sendable {
     /// 而我们已经不知道当时接管的是哪几台、真网关 MAC 是什么，无从定向复原。
     static func recoverFromCrashIfNeeded(log: (String) -> Void) {
         guard let record = try? String(contentsOfFile: crashRecordPath, encoding: .utf8) else { return }
-        let forwardingWasOn = record.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+        // 解析两行 `v4=`/`v6=`；找不到 `v4=` 则退回旧的单字符格式（整串 == "1"）。
+        var fields: [String: String] = [:]
+        for line in record.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
+            let parts = line.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 { fields[String(parts[0]).trimmingCharacters(in: .whitespaces)] =
+                String(parts[1]).trimmingCharacters(in: .whitespaces) }
+        }
+        let trimmed = record.trimmingCharacters(in: .whitespacesAndNewlines)
+        let forwardingWasOn = (fields["v4"] ?? trimmed) == "1"
+        // v6 行缺失（旧记录 / 上次没启用 v6）→ 保持 nil，不去碰 ip6.forwarding。
+        let forwarding6WasOn: Bool? = fields["v6"].map { $0 == "1" }
+
         log("检测到上次接管未正常收尾(helper 疑似崩溃/被强杀)，正在回滚内核状态")
-        _ = runPfctlStatic(["-a", anchorName, "-F", "all"])
+        _ = runPfctlStatic(["-a", anchorName, "-F", "all"])   // 一并清掉 v4+v6 rdr 规则
         if !forwardingWasOn { _ = setIPForwarding(false) }
+        if let v6WasOn = forwarding6WasOn, !v6WasOn { _ = setIP6Forwarding(false) }
         clearCrashRecord()
-        log("已清空 PF anchor \(anchorName);ip.forwarding 恢复为 \(forwardingWasOn ? "1(原本就开着)" : "0")")
+        let v6Note = forwarding6WasOn.map { "；ip6.forwarding 恢复为 \($0 ? "1(原本就开着)" : "0")" } ?? ""
+        log("已清空 PF anchor \(anchorName);ip.forwarding 恢复为 \(forwardingWasOn ? "1(原本就开着)" : "0")\(v6Note)")
     }
 
     /// 静态版 pfctl —— 恢复发生在任何 Redirector 实例产生之前。
@@ -174,13 +268,18 @@ final class Redirector: @unchecked Sendable {
     private func stopLocked() {
         guard active else {
             // 没在跑也要保证 BPF 关掉（start 半途失败可能留下它）
+            teardownBPFReader()
             if bpfFD >= 0 { close(bpfFD); bpfFD = -1 }
             return
         }
         timer?.cancel(); timer = nil
+        boostTimer?.cancel(); boostTimer = nil; boostRemaining = 0
+        // 先停收包源，再动 bpfFD —— 收包源盯着这个 fd，必须在 close 前取消，否则会对已关的 fd 触发。
+        teardownBPFReader()
 
-        // ★ 复原 ARP：给每台设备发「网关 IP → 真网关 MAC」。发三遍加冗余 ——
-        //   丢一个包就意味着一台设备断网十几分钟，这里的重发绝对值得。
+        // ★ 复原 ARP（+ v6 时复原 NDP）：给每台设备把网关条目改回**真网关 MAC**。发三遍加冗余 ——
+        //   丢一个包就意味着一台设备断网十几分钟，这里的重发绝对值得。ARP 与 NDP 复原在同一个循环里、
+        //   同一个 bpfFD 关闭之前发完 —— 顺序不重要，两族地址各走各的邻居缓存。
         if bpfFD >= 0 {
             for _ in 0..<3 {
                 // deviceIPs 与 deviceMACs 下标对齐（start 里保证），直接 zip 单播给每台设备本人
@@ -189,18 +288,41 @@ final class Redirector: @unchecked Sendable {
                                                 targetMAC: mac, targetIP: ip)
                     _ = frame.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
                 }
+                if v6Active {
+                    for mac in deviceMACs {
+                        // 抢答过该设备 NS → 知道它的 LL → 单播 solicited 复原（更快落 REACHABLE）；
+                        // 否则退回组播 override 复原。两者都把 TLLA 换回真路由器 MAC。
+                        let frame: [UInt8]
+                        if let ll = deviceLLByMAC[mac.text] {
+                            frame = NDPPacket.restoreUnicast(deviceMAC: mac, selfMAC: selfMAC,
+                                                             deviceIP6: ll, routerLL6: routerLL6,
+                                                             routerMAC6: routerMAC6)
+                        } else {
+                            frame = NDPPacket.restore(deviceMAC: mac, selfMAC: selfMAC,
+                                                      routerLL6: routerLL6, routerMAC6: routerMAC6)
+                        }
+                        _ = frame.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+                    }
+                }
                 usleep(50_000)
             }
             close(bpfFD); bpfFD = -1
         }
 
         if pfInstalled { uninstallPF(); pfInstalled = false }
-        // forwarding 只回滚我们开的那一次
+        // forwarding 只回滚我们开的那一次（v6 同理，且只在这次启用过 v6 时才碰）
         if !forwardingWasOn { _ = Self.setIPForwarding(false) }
+        if v6Active, !forwarding6WasOn { _ = Self.setIP6Forwarding(false) }
         Self.clearCrashRecord()   // 正常收尾了，不必再让下次启动去恢复
 
         active = false
+        v6Active = false
         deviceIPs = []; deviceMACs = []
+        routerLL6 = []
+        deviceLLByMAC = [:]
+        lastSeenByMAC = [:]
+        lastReassertNanos = 0
+        pfDeviceIP4s = []; pfV6set = []; pfRedirPort = 0; pfDnsPort = 0
     }
 
     // MARK: - ARP 欺骗
@@ -214,6 +336,40 @@ final class Redirector: @unchecked Sendable {
                                         targetMAC: mac, targetIP: ip)
             _ = frame.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
         }
+    }
+
+    // MARK: - NDP 欺骗（IPv6）
+
+    /// `sendSpoof` 的 v6 对应物：给每台设备发 NDP 邻居通告，宣称「路由器链路本地地址在本机 MAC」。
+    ///
+    /// L2 单播到设备 MAC（只此设备收得到）、L3 组播 `ff02::1`（设备是成员必处理）—— 组合起来等价于
+    /// 「只欺骗这一台」，与 v4 单播 ARP 同精神。**只需设备 MAC + 路由器 LL/MAC**，不依赖设备自己的
+    /// v6 地址（那份只用来写 PF rdr 的源匹配）。v6 未启用（`v6Active==false`）时整段 no-op。
+    private func sendNDPSpoof() {
+        guard bpfFD >= 0, v6Active else { return }
+        for mac in deviceMACs {
+            let frame = NDPPacket.poison(deviceMAC: mac, selfMAC: selfMAC, routerLL6: routerLL6)
+            _ = frame.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+        }
+    }
+
+    /// 进入一段高频重投窗口（50ms × kBoostTicks），v4+v6 一起投，抢在真网关/真路由器前钉回。
+    /// 幂等：已在 boost 时只续期。全在 `queue` 上，与收包/1s tick 串行。
+    private func boostAll() {
+        guard bpfFD >= 0 else { return }
+        sendSpoof(); sendNDPSpoof()    // 立刻先投一轮（v6 未启用时后者 no-op）
+        boostRemaining = Self.kBoostTicks
+        guard boostTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.sendSpoof(); self.sendNDPSpoof()
+            self.boostRemaining -= 1
+            if self.boostRemaining <= 0 { self.boostTimer?.cancel(); self.boostTimer = nil }
+        }
+        t.resume()
+        boostTimer = t
     }
 
     // MARK: - BPF
@@ -233,30 +389,190 @@ final class Redirector: @unchecked Sendable {
                 close(fd); continue
             }
             var enable: UInt32 = 1
+            var disable: UInt32 = 0
             _ = ioctl(fd, COAST_BIOCSHDRCMPLT, &enable)  // 我们自己填以太源地址，别让内核覆盖
+            _ = ioctl(fd, COAST_BIOCIMMEDIATE, &enable)  // 立即返回，不等缓冲填满（抢答要快）
+            _ = ioctl(fd, COAST_BIOCSSEESENT, &disable)  // 别回显自己发出的帧（省得处理自己的 NA）
+            _ = fcntl(fd, F_SETFL, O_NONBLOCK)           // 非阻塞：收包源误触时 read 不挂住
             bpfFD = fd
             return true
         }
         return false
     }
 
+    // MARK: - 被动抢答/反制/学习（收包路径，v4+v6 共用）
+
+    /// 起收包源：按 BIOCGBLEN 分配读缓冲，挂一个读事件源到 `queue`。有设备接管就挂（v4 也要）。
+    private func startBPFReader() {
+        guard bpfFD >= 0, bpfReadSource == nil else { return }
+        var blen: Int32 = 0
+        if ioctl(bpfFD, COAST_BIOCGBLEN, &blen) < 0 || blen <= 0 { blen = 32768 }
+        bpfReadBuf = UnsafeMutableRawBufferPointer.allocate(byteCount: Int(blen),
+                                                            alignment: MemoryLayout<UInt64>.alignment)
+        let source = DispatchSource.makeReadSource(fileDescriptor: bpfFD, queue: queue)
+        source.setEventHandler { [weak self] in self?.drainBPF() }
+        source.resume()
+        bpfReadSource = source
+    }
+
+    /// 停收包源、释放读缓冲。必须在 `close(bpfFD)` **之前**调（源盯着这个 fd）。幂等。
+    private func teardownBPFReader() {
+        bpfReadSource?.cancel()
+        bpfReadSource = nil
+        bpfReadBuf?.deallocate()
+        bpfReadBuf = nil
+    }
+
+    /// 排空一次 BPF 读缓冲：按 bpf_hdr + BPF_WORDALIGN 逐帧走，交给 `handleCapturedFrame`。
+    private func drainBPF() {
+        guard bpfFD >= 0, let buf = bpfReadBuf, let base = buf.baseAddress else { return }
+        let n = read(bpfFD, base, buf.count)
+        guard n > 0 else { return }
+        var p = 0
+        while p + 18 <= n {   // 至少放得下一个 bpf_hdr（mac 上约 18 字节）
+            let rec = base.advanced(by: p)
+            let caplen = Int(coast_bpf_caplen(rec))
+            let hdrlen = Int(coast_bpf_hdrlen(rec))
+            let frameStart = p + hdrlen
+            guard hdrlen > 0, caplen > 0, frameStart + caplen <= n else { break }
+            // 预筛：只放行 **ARP(0x0806) 与 IPv6(0x86DD)** —— 抢答/反制/学习要看的都在这两类里。
+            // IPv4 数据帧（流量大头）不拷贝、不处理。裸指针看两字节，避开每包一次堆分配；没有内核
+            // 源 MAC 过滤时，这层用户态预筛把无关帧成本降到近零。设备唤醒时必会 ARP 重解析网关，
+            // 所以「唤醒沿」这个信号靠 ARP 就够，不必抓 IPv4 数据帧。
+            let ethBase = base.advanced(by: frameStart).assumingMemoryBound(to: UInt8.self)
+            let isARP = ethBase[12] == 0x08 && ethBase[13] == 0x06
+            let isV6 = ethBase[12] == 0x86 && ethBase[13] == 0xDD
+            if caplen >= 14, isARP || isV6 {
+                let frame = Array(UnsafeRawBufferPointer(start: base.advanced(by: frameStart), count: caplen)
+                                    .bindMemory(to: UInt8.self))
+                handleCapturedFrame(frame)
+            }
+            let advance = Int(coast_bpf_wordalign(Int32(hdrlen + caplen)))
+            guard advance > 0 else { break }   // 防呆：对齐算出 0 会死循环
+            p += advance
+        }
+    }
+
+    /// 一帧 ARP 或 IPv6（drainBPF 已按以太类型预筛）。v4 与 v6 统一处理，关心的情况——
+    ///   ① 真网关/真路由器发的解毒帧（v4 的 ARP、v6 的 RA/NA）→ 立刻重投盖回（统一节流）；
+    ///   ② 唤醒沿：被接管设备空闲后又发帧 → 进 boost（v4+v6 一起）；
+    ///   ③ 抢答：设备问「网关在哪」（v4 who-has / v6 NS）→ 抢先应答本机；
+    ///   ④ 现学：设备转发来的普通 v6 帧 → 学它的可路由源地址补 PF rdr。
+    private func handleCapturedFrame(_ frame: [UInt8]) {
+        guard bpfFD >= 0, frame.count >= 14 else { return }
+        let isARP = frame[12] == 0x08 && frame[13] == 0x06
+        guard let srcMACBytes = NDPPacket.ethSource(frame) else { return }
+
+        // ① 反制解毒帧（不是设备流量，先于 victim 判定处理）。
+        //    v4：真网关自己广播的 who-has / 免费 ARP，携带「网关在真 MAC」→ 设备一收就解毒。
+        //    v6：真路由器的 RA/NA。两者都走统一的 reassertAll（含 50ms 节流）。
+        if isARP {
+            if srcMACBytes == gatewayMAC.bytes { reassertAll(); return }
+        } else if NDPPacket.isRouterAdvertOrNA(frame), v6Active, srcMACBytes == routerMAC6.bytes {
+            reassertAll(); return
+        }
+
+        // 以下都只认**我们正在接管的设备**发来的帧。
+        guard deviceMACs.contains(where: { $0.bytes == srcMACBytes }) else { return }
+        let devMAC = ARPPacket.MAC(bytes: srcMACBytes)
+
+        // ② 统一唤醒沿：设备空闲 >10s 后又发**任一**帧（ARP/IPv6）→ 邻居/ARP 条目多半刚老化、
+        //    正在重解析网关 → 进 boost（v4+v6 一起），抢在真网关/真路由器前钉回。
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let last = lastSeenByMAC[devMAC.text], now &- last > Self.kWakeIdleNanos { boostAll() }
+        lastSeenByMAC[devMAC.text] = now
+
+        // ③ 抢答设备的网关解析。
+        if isARP {
+            answerDeviceArp(frame, deviceMAC: devMAC)   // v4：who-has 网关 → 回「网关在本机」
+            return
+        }
+        // v6 NS（复核路由器 LL）。NS 源是设备 LL（不可路由），不会落到 ④ 的学习里。
+        if v6Active, NDPPacket.isNeighborSolicitation(frame),
+           let target = NDPPacket.nsTarget(frame), target == routerLL6,
+           let deviceIP6 = NDPPacket.ipv6Source(frame) {
+            deviceLLByMAC[devMAC.text] = deviceIP6   // NS 源即设备 LL，复原时单播回它
+            let na = NDPPacket.solicitedNA(deviceMAC: devMAC, selfMAC: selfMAC,
+                                           deviceIP6: deviceIP6, routerLL6: routerLL6)
+            // 连发两帧压过真路由器对同一 NS 的应答（同 Qt 抢答的短促连发，成本可忽略）。
+            _ = na.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+            _ = na.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+            return
+        }
+
+        // ④ 现学：普通 v6 帧的**可路由**源地址进 rdr，让它的 v6 也走代理而非退回普通转发。
+        //    （真机实测：ndp 那一刻常查不到设备 v6，只有等它经本机发帧才学得到——见 pfV6set 说明。）
+        if v6Active, let s6 = NDPPacket.ipv6Source(frame), NDPPacket.isRoutableV6(s6),
+           let str = NDPPacket.ipv6String(s6) {
+            learnDeviceV6(str)   // 幂等，只有新地址才真的重灌 anchor
+        }
+    }
+
+    /// v4 抢答：设备广播「who-has 网关 IP」→ 抢先回一条「网关 IP 在本机 MAC」单播给它，
+    /// 压过真网关的应答。只对**问的正是我们冒充的网关**的请求应答。
+    private func answerDeviceArp(_ frame: [UInt8], deviceMAC: ARPPacket.MAC) {
+        guard let req = ARPPacket.parseRequest(frame, targetIP: gatewayIP) else { return }
+        // 单播回**已校验的**设备（eth 源），target IP 用请求里的 spa。
+        let reply = ARPPacket.reply(senderMAC: selfMAC, senderIP: gatewayIP,
+                                    targetMAC: deviceMAC, targetIP: req.senderIP)
+        _ = reply.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+        _ = reply.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+    }
+
+    /// 统一反制：真网关/真路由器解毒 → 立刻给所有设备重投一轮（v4 + v6），把「网关在本机」盖回。
+    /// 单一 50ms 节流，防真网关短时连发多条时放大成风暴。
+    private func reassertAll() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now &- lastReassertNanos > 50_000_000 else { return }
+        lastReassertNanos = now
+        sendSpoof()        // v4 ARP
+        sendNDPSpoof()     // v6 NDP（v6Active 时才实际发）
+    }
+
     // MARK: - PF
 
     /// 把规则写进一个专用 anchor，只影响这些源 IP，绝不动用户既有的 PF 配置。
-    private func installPF(deviceIPs: [String], redirPort: Int, dnsPort: Int) -> String? {
-        var rules = ""
-        for ip in deviceIPs {
-            // TCP 全部重定向到 redir 口；UDP :53 单独重定向到 DNS 口（域名要走 fake-ip）
-            rules += "rdr pass on \(interface) inet proto tcp from \(ip) to any -> 127.0.0.1 port \(redirPort)\n"
-            rules += "rdr pass on \(interface) inet proto udp from \(ip) to any port 53 -> 127.0.0.1 port \(dnsPort)\n"
-        }
-        // 经 stdin 灌进 anchor：pfctl -a <anchor> -f -
-        guard runPfctl(["-a", Self.anchorName, "-f", "-"], stdin: rules) else {
+    ///
+    /// `deviceV6s`：被接管设备的**全局/ULA** v6 源地址（可空 = 无 v6 或没发现任何 v6 地址）。
+    /// v6 只重定向 **TCP**：v4 那条 `udp port 53 → dns` 是为了让域名走 fake-ip；v6 的 DNS 走向
+    /// 更杂（设备常有独立的 v6 解析器），且核心的 DNS 只监听 v4（`dns.listen: 0.0.0.0`），
+    /// 硬把 v6 的 :53 重定向到 `::1` 会打到一个没人监听的口。所以 v6 的 DNS 让设备照旧自己解析
+    /// —— 拿到真实 AAAA 后走 v6 TCP，仍被这条 rdr 收进核心（按 IP/GEOIP 规则代理，只是域名匹配
+    /// 退化成按 IP 匹配，不影响是否代理）。**这是有意的取舍,不是遗漏。**
+    private func installPF(deviceIPs: [String], deviceV6s: [String],
+                          redirPort: Int, dnsPort: Int) -> String? {
+        // 存下重建 anchor 需要的一切（收包路径现学到新 v6 源时要照这份重灌）。
+        pfDeviceIP4s = deviceIPs
+        pfRedirPort = redirPort
+        pfDnsPort = dnsPort
+        pfV6set = Set(deviceV6s)
+        guard runPfctl(["-a", Self.anchorName, "-f", "-"], stdin: anchorRulesText()) else {
             return "pfctl 装规则失败"
         }
         // 确保 PF 本身是开的（-E 引用计数，卸载时 -X 对应）。已开时 -E 也安全。
         _ = runPfctl(["-E"], stdin: nil)
         return nil
+    }
+
+    /// 按当前 PF 状态（v4 设备 + v6 源集合 + 端口）生成 anchor 规则文本。
+    private func anchorRulesText() -> String {
+        var rules = ""
+        for ip in pfDeviceIP4s {
+            // TCP 全部重定向到 redir 口；UDP :53 单独重定向到 DNS 口（域名要走 fake-ip）
+            rules += "rdr pass on \(interface) inet proto tcp from \(ip) to any -> 127.0.0.1 port \(pfRedirPort)\n"
+            rules += "rdr pass on \(interface) inet proto udp from \(ip) to any port 53 -> 127.0.0.1 port \(pfDnsPort)\n"
+        }
+        for v6 in pfV6set.sorted() {   // 排序让规则文本稳定、可复现
+            // 目的用 `::1`（核心的 redir 监听在所有接口上，含 v6 环回）。只 TCP,理由见上。
+            rules += "rdr pass on \(interface) inet6 proto tcp from \(v6) to any -> ::1 port \(pfRedirPort)\n"
+        }
+        return rules
+    }
+
+    /// 现学到一个新的设备 v6 源 → 重灌 anchor（幂等：只在集合真变了时才动 pfctl）。在 `queue` 上跑。
+    private func learnDeviceV6(_ v6: String) {
+        guard pfInstalled, pfV6set.insert(v6).inserted else { return }
+        _ = runPfctl(["-a", Self.anchorName, "-f", "-"], stdin: anchorRulesText())
     }
 
     private func uninstallPF() {
@@ -294,6 +610,17 @@ final class Redirector: @unchecked Sendable {
     static func setIPForwarding(_ on: Bool) -> Bool {
         var value: Int32 = on ? 1 : 0
         return sysctlbyname("net.inet.ip.forwarding", nil, nil, &value, MemoryLayout<Int32>.size) == 0
+    }
+
+    static func ip6Forwarding() -> Bool {
+        var value: Int32 = 0
+        var size = MemoryLayout<Int32>.size
+        return sysctlbyname("net.inet6.ip6.forwarding", &value, &size, nil, 0) == 0 && value == 1
+    }
+
+    static func setIP6Forwarding(_ on: Bool) -> Bool {
+        var value: Int32 = on ? 1 : 0
+        return sysctlbyname("net.inet6.ip6.forwarding", nil, nil, &value, MemoryLayout<Int32>.size) == 0
     }
 
     // MARK: - 网卡 MAC
