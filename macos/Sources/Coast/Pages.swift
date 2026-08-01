@@ -532,7 +532,7 @@ struct TodayTrafficCard: View {
         return ForEach(state.todayTop.prefix(5)) { item in
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 8) {
-                    Text(item.key)
+                    Text(item.label)
                         .font(.system(size: 11)).foregroundStyle(theme.textSecondary)
                         .lineLimit(1).truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)

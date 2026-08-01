@@ -42,7 +42,16 @@ public final class HistoryStore: @unchecked Sendable {
     public struct GroupTotal: Sendable, Identifiable {
         public let key: String
         public let bytes: Int64
+        /// 界面上显示的名字。设备取台账里的名字；**空 key 三种维度含义不同，各给一句人话**
+        /// （Qt `HistoryStore::topGroups` 的 `label`）。
+        public let label: String
         public var id: String { key }
+
+        public init(key: String, bytes: Int64, label: String? = nil) {
+            self.key = key
+            self.bytes = bytes
+            self.label = label ?? key
+        }
     }
 
     /// 统计口径：全部流量，还是只算走了代理的（chain 既不是 DIRECT 也不是 REJECT）。
@@ -239,8 +248,22 @@ public final class HistoryStore: @unchecked Sendable {
     }
 
     /// 今日 Top N（按进程或域名）。
-    public func todayTop(dimension: Dimension, scope: Scope = .proxyOnly, limit: Int = 5) -> [GroupTotal] {
-        guard let database else { return [] }
+    /// 今日按维度分组的前 N 名。
+    ///
+    /// 与 Qt `topGroups()` 对齐的三件事，原来一件都没做：
+    ///
+    ///   1. **算上在途连接**。只查库的话，一个还没断的大下载在榜上完全看不见 ——
+    ///      而「今天谁跑得最多」多半问的就是它。
+    ///   2. **空 key 不丢，给名字**。原来 SQL 里写着 `\(column) != ''` 直接滤掉：
+    ///      macOS 上绝大多数连接**没有 mac**（只有走透明代理的局域网设备才有），
+    ///      于是「设备」这一维几乎永远是空的，而真相是那些流量都是本机的。
+    ///      三种维度的「空」含义不同：设备 = 本机/未归属、进程 = 其它设备（进程名只有
+    ///      本机连接才有）、域名 = 未知域名。
+    ///   3. **设备维度显示台账里的名字**，不是一串 MAC。`deviceNames` 由调用方喂进来
+    ///      （历史库不认识台账）。
+    @MainActor
+    public func todayTop(dimension: Dimension, scope: Scope = .proxyOnly, limit: Int = 5,
+                         deviceNames: [String: String] = [:]) -> [GroupTotal] {
         let column: String
         switch dimension {
         case .process: column = "process"
@@ -248,15 +271,63 @@ public final class HistoryStore: @unchecked Sendable {
         case .device: column = "mac"
         }
         let (start, end) = Self.todayRange()
-        var result: [GroupTotal] = []
-        database.query("""
+        var aggregate: [String: Int64] = [:]
+
+        database?.query("""
             SELECT \(column), SUM(up + down) AS bytes FROM conn
-            WHERE ended_at >= ? AND ended_at < ? AND \(column) != '' \(Self.scopeClause(scope))
-            GROUP BY \(column) ORDER BY bytes DESC LIMIT ?
-            """, [.int(start), .int(end), .int(Int64(limit))]) { row in
-            result.append(GroupTotal(key: row.text(0), bytes: row.int(1)))
+            WHERE ended_at >= ? AND ended_at < ? \(Self.scopeClause(scope))
+            GROUP BY \(column)
+            """, [.int(start), .int(end)]) { row in
+            aggregate[row.text(0), default: 0] += row.int(1)
         }
-        return result
+
+        // 在途的那些（还没落库）。锁着读一份快照就走，别在锁里做排序/格式化。
+        lock.lock()
+        let inFlight = live.values.map(\.record)
+        let map = deviceMap
+        lock.unlock()
+        for record in inFlight {
+            guard scope == .all || Self.isProxied(record.chain) else { continue }
+            let key: String
+            switch dimension {
+            case .process: key = record.process
+            case .host: key = record.host.isEmpty ? record.destIP : record.host
+            case .device: key = map[record.sourceIP] ?? ""
+            }
+            aggregate[key, default: 0] += record.up + record.down
+        }
+
+        var totals: [GroupTotal] = []
+        for (key, bytes) in aggregate where bytes > 0 {
+            let label = Self.label(for: key, dimension: dimension, deviceNames: deviceNames)
+            totals.append(GroupTotal(key: key, bytes: bytes, label: label))
+        }
+        // 字节相同时按 key 定序 —— 字典遍历顺序不定，否则两行会来回换位置。
+        totals.sort { $0.bytes == $1.bytes ? $0.key < $1.key : $0.bytes > $1.bytes }
+        return Array(totals.prefix(limit))
+    }
+
+    /// 标 `@MainActor` 是因为 `.t` 走的是主线程上的 `I18n` 单例；这几句是**给人看的名字**，
+    /// 必须跟着语言走（而不是永远中文）。
+    @MainActor
+    static func label(for key: String, dimension: Dimension,
+                      deviceNames: [String: String]) -> String {
+        switch dimension {
+        case .device:
+            if let name = deviceNames[key], !name.isEmpty { return name }
+            return key.isEmpty ? "本机 / 未归属".t : key
+        case .process:
+            // 进程名只有本机发起的连接才有 —— 局域网设备的进程在别人机器上。
+            return key.isEmpty ? "其它设备".t : key
+        case .host:
+            return key.isEmpty ? "未知域名".t : key
+        }
+    }
+
+    /// chain 算不算「走了代理」。与 `scopeClause` 是同一个判据的两种写法
+    /// （SQL 里一份、内存里一份），改一个必须改另一个。
+    static func isProxied(_ chain: String) -> Bool {
+        !chain.isEmpty && chain != "DIRECT" && chain != "REJECT"
     }
 
     public func todayTotal(scope: Scope = .proxyOnly) -> Int64 {

@@ -39,6 +39,7 @@ private func connection(id: String, host: String = "", destIP: String = "1.2.3.4
 }
 
 @Suite("历史库：连接生命周期")
+@MainActor
 struct HistoryLifecycleTests {
 
     @Test("连接还在时不落库，消失了才落一条")
@@ -101,6 +102,7 @@ struct HistoryLifecycleTests {
 }
 
 @Suite("历史库：统计口径")
+@MainActor
 struct HistoryAggregationTests {
 
     @Test("proxyOnly 排除 DIRECT/REJECT，也排除 chain 为空的")
@@ -202,5 +204,45 @@ struct HistoryTimeTests {
         #expect(HistoryStore.parseStart("2026-07-31T10:00:00Z") != nil)
         #expect(HistoryStore.parseStart("") == nil)
         #expect(HistoryStore.parseStart("不是时间") == nil)
+    }
+}
+
+@Suite("今日 Top 的分组与命名")
+@MainActor
+struct TodayTopLabelTests {
+
+    @Test("★ 空 key 不丢，三种维度各给一句人话（原来 SQL 里直接 != '' 滤掉了）")
+    func emptyKeysGetNames() {
+        #expect(HistoryStore.label(for: "", dimension: .device, deviceNames: [:])
+                == "本机 / 未归属")
+        #expect(HistoryStore.label(for: "", dimension: .process, deviceNames: [:])
+                == "其它设备")
+        #expect(HistoryStore.label(for: "", dimension: .host, deviceNames: [:])
+                == "未知域名")
+    }
+
+    @Test("★ 设备维度显示台账里的名字，不是一串 MAC")
+    func deviceUsesLedgerName() {
+        let names = ["aa:bb:cc:dd:ee:ff": "客厅电视"]
+        #expect(HistoryStore.label(for: "aa:bb:cc:dd:ee:ff", dimension: .device,
+                                   deviceNames: names) == "客厅电视")
+        // 台账里没有备注名就回落到 MAC —— 有个 MAC 也比空着强
+        #expect(HistoryStore.label(for: "11:22:33:44:55:66", dimension: .device,
+                                   deviceNames: names) == "11:22:33:44:55:66")
+    }
+
+    @Test("进程/域名维度原样显示")
+    func othersPassThrough() {
+        #expect(HistoryStore.label(for: "Safari", dimension: .process, deviceNames: [:]) == "Safari")
+        #expect(HistoryStore.label(for: "apple.com", dimension: .host, deviceNames: [:])
+                == "apple.com")
+    }
+
+    @Test("isProxied 与 SQL 里的 scopeClause 是同一个判据")
+    func proxiedMatchesSQL() {
+        #expect(HistoryStore.isProxied("US1-HY2"))
+        #expect(!HistoryStore.isProxied("DIRECT"))
+        #expect(!HistoryStore.isProxied("REJECT"))
+        #expect(!HistoryStore.isProxied(""))
     }
 }

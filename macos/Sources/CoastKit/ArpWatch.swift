@@ -111,3 +111,58 @@ public final class ArpAlertThrottle: @unchecked Sendable {
         return out
     }
 }
+
+/// 告警的**留存**：一条威胁一旦出现，就在横幅里待到「连续 TTL 没再观察到」为止；
+/// 展示次序按**首次出现时间**（先来的在上），与 Qt `DevicesController::m_secAlerts`
+/// + `sweepSecurityAlerts()` 同一套。
+///
+/// 为什么不能「这一轮没检测到就立刻撤掉」（Swift 原来的做法）：
+/// ARP 争抢的表现恰恰就是绑定来回翻 —— 这一拍是攻击者的 MAC、下一拍又翻回真 MAC。
+/// 即时撤销会让横幅**每隔几秒闪一次**，用户看到的是界面在抽搐，而不是「你正被攻击」。
+///
+/// 次序按首次出现时间而不是 id：新告警插在**末尾**，已经在看的那几条不会往下跳。
+public final class ArpAlertRetention: @unchecked Sendable {
+
+    /// 与 Qt 的 `kSecTtlMs` 同值：150 秒没再观察到就判定已停止。
+    public static let defaultTTL: TimeInterval = 150
+
+    private struct Entry {
+        var alert: ArpWatch.Alert
+        var first: Date
+        var last: Date
+    }
+
+    private var entries: [String: Entry] = [:]
+    private let ttl: TimeInterval
+    private let lock = NSLock()
+
+    public init(ttl: TimeInterval = ArpAlertRetention.defaultTTL) { self.ttl = ttl }
+
+    /// 喂进本轮实际观察到的告警，返回**当前应当展示**的那些（含仍在 TTL 内的旧告警），
+    /// 按首次出现时间升序、同刻按 id 兜底。
+    public func absorb(_ alerts: [ArpWatch.Alert], now: Date = Date()) -> [ArpWatch.Alert] {
+        lock.lock()
+        defer { lock.unlock() }
+        for alert in alerts {
+            if var entry = entries[alert.id] {
+                entry.alert = alert
+                entry.last = now
+                entries[alert.id] = entry
+            } else {
+                entries[alert.id] = Entry(alert: alert, first: now, last: now)
+            }
+        }
+        entries = entries.filter { now.timeIntervalSince($0.value.last) <= ttl }
+        return entries.values
+            .sorted { $0.first == $1.first ? $0.alert.id < $1.alert.id : $0.first < $1.first }
+            .map(\.alert)
+    }
+
+    /// 用户点「忽略」时清空。威胁若仍在，下一轮会重新加入 —— 但通知去重表还在，不会又弹一次
+    /// （与 Qt 的 `dismissSecurityAlerts()` 一致）。
+    public func clear() {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.removeAll()
+    }
+}

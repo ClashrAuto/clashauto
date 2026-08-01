@@ -134,3 +134,58 @@ struct ArpWatchSourceTests {
         }
     }
 }
+
+@Suite("告警留存（TTL + 首次出现定序）")
+struct ArpAlertRetentionTests {
+
+    private func alert(_ ip: String) -> ArpWatch.Alert {
+        ArpWatch.Alert(kind: .deviceContended, offenderMAC: "aa:bb:cc:dd:ee:ff",
+                       subjectIP: ip, expectedMAC: "11:22:33:44:55:66")
+    }
+
+    @Test("★ 这一轮没观察到不等于已经停止——ARP 争抢的表现就是绑定来回翻")
+    func survivesAGap() {
+        let retention = ArpAlertRetention(ttl: 150)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        _ = retention.absorb([alert("192.168.1.5")], now: t0)
+        // 下一拍没检测到：横幅不该立刻撤掉（否则每隔几秒闪一次）
+        let still = retention.absorb([], now: t0.addingTimeInterval(10))
+        #expect(still.map(\.subjectIP) == ["192.168.1.5"])
+    }
+
+    @Test("超过 TTL 才判定已停止")
+    func expiresAfterTTL() {
+        let retention = ArpAlertRetention(ttl: 150)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        _ = retention.absorb([alert("192.168.1.5")], now: t0)
+        #expect(retention.absorb([], now: t0.addingTimeInterval(151)).isEmpty)
+    }
+
+    @Test("★ 按首次出现时间排——新告警插在末尾，正在看的那几条不会往下跳")
+    func orderedByFirstSeen() {
+        let retention = ArpAlertRetention(ttl: 150)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        // 先出现的是 .9（id 字典序更靠后），后出现的是 .5
+        _ = retention.absorb([alert("192.168.1.9")], now: t0)
+        let out = retention.absorb([alert("192.168.1.9"), alert("192.168.1.5")],
+                                   now: t0.addingTimeInterval(5))
+        #expect(out.map(\.subjectIP) == ["192.168.1.9", "192.168.1.5"])
+    }
+
+    @Test("重新观察到会续命，不会在 TTL 到点时被误撤")
+    func refreshExtends() {
+        let retention = ArpAlertRetention(ttl: 150)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        _ = retention.absorb([alert("192.168.1.5")], now: t0)
+        _ = retention.absorb([alert("192.168.1.5")], now: t0.addingTimeInterval(140))
+        #expect(retention.absorb([], now: t0.addingTimeInterval(200)).count == 1)
+    }
+
+    @Test("清空后立刻为空（用户点了「忽略」）")
+    func clearEmpties() {
+        let retention = ArpAlertRetention(ttl: 150)
+        _ = retention.absorb([alert("192.168.1.5")])
+        retention.clear()
+        #expect(retention.absorb([]).isEmpty)
+    }
+}

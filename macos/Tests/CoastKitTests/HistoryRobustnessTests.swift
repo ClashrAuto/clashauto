@@ -22,6 +22,7 @@ private func conn(id: String, host: String, up: Any = 0, down: Any = 100,
 }
 
 @Suite("历史库:恶意/畸形 JSON 健壮性")
+@MainActor
 struct HistoryRobustnessTests {
 
     @Test("★ SQL 注入 payload 作为 host —— 原样存入,库不被破坏,可原样查回")

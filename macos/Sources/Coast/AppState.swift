@@ -128,6 +128,9 @@ public final class AppState {
     public private(set) var securityAlerts: [ArpWatch.Alert] = []
     private let arpWatch = ArpWatch()
     private let arpThrottle = ArpAlertThrottle()
+    /// 告警留存：一条威胁出现后在横幅里待到连续 150 秒没再观察到为止（Qt 的 `kSecTtlMs`）。
+    /// 直接用每轮的检测结果替换的话，横幅会随 ARP 绑定来回翻而每隔几秒闪一次。
+    private let arpRetention = ArpAlertRetention()
 
     // MARK: 日志
 
@@ -451,7 +454,9 @@ public final class AppState {
                                          localMACs: LanTopology.localMACs(),
                                          proxiedDevices: proxied)
         let alerts = arpWatch.evaluate(snapshot)
-        securityAlerts = alerts
+        securityAlerts = arpRetention.absorb(alerts)
+        // 通知仍只对**本轮真的观察到**的那些发 —— 留存是给界面看的，不该让 TTL 内的
+        // 旧告警反复触发通知。
         for alert in arpThrottle.filter(alerts) {
             switch alert.kind {
             case .gatewaySpoofed:
@@ -483,7 +488,11 @@ public final class AppState {
     private func refreshTodayTraffic() {
         let scope: HistoryStore.Scope = trafficProxyOnly ? .proxyOnly : .all
         todayHourly = history.todayHourly(scope: scope)
-        todayTop = history.todayTop(dimension: trafficDimension, scope: scope)
+        // 设备维度要显示台账里的名字而不是一串 MAC —— 历史库不认识台账，喂给它。
+        let names = Dictionary(devices.all().map { ($0.mac, $0.alias) },
+                               uniquingKeysWith: { first, _ in first })
+        todayTop = history.todayTop(dimension: trafficDimension, scope: scope,
+                                    deviceNames: names)
         todayTotal = history.todayTotal(scope: scope)
     }
 
