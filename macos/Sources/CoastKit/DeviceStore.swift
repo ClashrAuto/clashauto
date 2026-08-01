@@ -58,6 +58,11 @@ public final class DeviceStore: @unchecked Sendable {
         /// 落库而不是只放内存：设备暂时不在邻居表里（睡眠、刚重启）时，
         /// 规则不能因此凭空消失 —— 那会让它在恢复的一瞬间直连出去。
         public var lastIP = ""
+        /// 用户手动指定的设备类型（覆盖按主机名/厂商的自动识别）。空 = 自动。
+        ///
+        /// 自动识别是拿主机名和厂商猜的，猜错很常见（一堆设备的厂商都是 "Apple"）。
+        /// 让用户改一次并记住，比每次看着错图标强。
+        public var typeOverride = ""
         public var firstSeen = Date()
 
         public var id: String { mac }
@@ -93,8 +98,24 @@ public final class DeviceStore: @unchecked Sendable {
               policy_mode TEXT NOT NULL DEFAULT 'follow',
               policy_target TEXT NOT NULL DEFAULT '',
               last_ip TEXT NOT NULL DEFAULT '',
-              first_seen INTEGER NOT NULL DEFAULT 0)
+              first_seen INTEGER NOT NULL DEFAULT 0,
+              type_override TEXT NOT NULL DEFAULT '')
             """)
+        // 老库补列。`ALTER TABLE ... ADD COLUMN` 在列已存在时会报错，
+        // 而 SQLite 没有 `ADD COLUMN IF NOT EXISTS` —— 直接执行、忽略失败即可
+        // （比先查 `PRAGMA table_info` 再判断少一次往返，语义一样）。
+        //
+        // ★ `last_ip` 也在这儿补：它是 8e3463a 把 `password` 列改名过来的，**当时没写迁移**。
+        //   改名前建的库里那一列还叫 `password`，于是之后每一条
+        //   `SELECT … last_ip …` / `INSERT … last_ip …` 都以「no such column」失败 ——
+        //   台账整个哑掉：备注名存不下、代理开关记不住、策略选了等于没选，
+        //   界面上却一点报错都没有（`save()` 只是返回 false，没人看它）。
+        //   本机的库正是这种，`device` 表一条记录都写不进去。
+        //   旧 `password` 的值是设备密码、与 IP 毫无关系，**不搬**，只补空列。
+        for column in ["last_ip TEXT NOT NULL DEFAULT ''",
+                       "type_override TEXT NOT NULL DEFAULT ''"] {
+            database.exec("ALTER TABLE device ADD COLUMN \(column)")
+        }
         // 生成配置时只查「开着代理的」，给它一条索引。
         database.exec("CREATE INDEX IF NOT EXISTS device_proxy ON device(proxy_enabled)")
     }
@@ -104,7 +125,8 @@ public final class DeviceStore: @unchecked Sendable {
     public func all() -> [Device] {
         var result: [Device] = []
         database?.query("""
-            SELECT mac, alias, proxy_enabled, policy_mode, policy_target, last_ip, first_seen
+            SELECT mac, alias, proxy_enabled, policy_mode, policy_target, last_ip, first_seen,
+                   type_override
             FROM device ORDER BY mac
             """) { row in
             var device = Device(mac: row.text(0))
@@ -114,6 +136,7 @@ public final class DeviceStore: @unchecked Sendable {
             device.policyTarget = row.text(4)
             device.lastIP = row.text(5)
             device.firstSeen = Date(timeIntervalSince1970: Double(row.int(6)))
+            device.typeOverride = row.text(7)
             result.append(device)
         }
         return result
@@ -127,20 +150,23 @@ public final class DeviceStore: @unchecked Sendable {
     public func save(_ device: Device) -> Bool {
         guard let database else { return false }
         return database.run("""
-            INSERT INTO device (mac, alias, proxy_enabled, policy_mode, policy_target, last_ip, first_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO device (mac, alias, proxy_enabled, policy_mode, policy_target, last_ip,
+                                first_seen, type_override)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(mac) DO UPDATE SET
               alias = excluded.alias,
               proxy_enabled = excluded.proxy_enabled,
               policy_mode = excluded.policy_mode,
               policy_target = excluded.policy_target,
-              last_ip = excluded.last_ip
+              last_ip = excluded.last_ip,
+              type_override = excluded.type_override
             """, [
             .text(device.mac), .text(device.alias),
             .int(device.proxyEnabled ? 1 : 0),
             .text(device.policyMode.rawValue), .text(device.policyTarget),
             .text(device.lastIP),
             .int(Int64(device.firstSeen.timeIntervalSince1970)),
+            .text(device.typeOverride),
         ])
     }
 

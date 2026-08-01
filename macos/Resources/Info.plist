@@ -22,5 +22,11 @@
     <true/>
     <!-- 托盘常驻应用：关掉窗口不等于退出，但仍要出现在 Dock 与 Cmd-Tab 里
          （Qt 版就是这个行为）。所以**不设** LSUIElement。 -->
+    <!-- 不参与 macOS 的窗口恢复。窗口位置我们自己存（`WindowRestore` 的固定 autosave 名，
+         对齐 Qt 的 `restoreWindowPos`），系统那套只会添乱：更新 / 设备详情 / 连接这三个
+         「点出来的」窗会被原样摆回来 —— 实测启动后只剩一个**空白的「设备详情」**、
+         主界面根本没建出来（`adopt()` 还把它当成了主窗，主窗的位置也记到了这个空壳上）。 -->
+    <key>NSQuitAlwaysKeepsWindows</key>
+    <false/>
 </dict>
 </plist>

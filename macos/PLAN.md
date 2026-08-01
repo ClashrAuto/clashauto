@@ -2588,3 +2588,66 @@ Swift 侧此前是把这条消息**塞在概览条下面**当一行常驻文字�
 详情窗没有 helper 时说了假话、离线设备被标成「其它网络」、以及这条浮动提示。
 
 `swift test` 308 全绿；`i18n_check.py` 252/252。
+
+---
+
+## 续四十二（2026-08-01）设备类型覆盖 + 两个把界面整个弄没的窗口 bug
+
+### 1. 详情窗的「类型」行（Qt 有、Swift 整个缺）
+
+对着 `onActivated:` 这一线索往下查，`DeviceDetailWindow.qml:305–320` 有一行 Swift 从来没有：
+64 宽的 12px `textMuted`「类型」标签 + 150 宽的 `ThemedCombo`，12 个选项
+（`unknown` 显示成「自动识别」，其余是手机/平板/电脑/…）。自动识别是拿主机名与厂商猜的，
+一屋子设备的厂商全是 "Apple"，认错了却改不了，只能一直看着错图标。
+
+已补齐，并按 Qt `DeviceStore::effectiveType()` 的口径让**详情窗头像、副标题、设备列表行**
+都以「手动指定优先，否则自动识别」取类型。`device` 表加了 `type_override` 列。
+
+### 2. ★ `last_ip` 改名没写迁移 —— 台账整个哑掉
+
+补列时发现的：`8e3463a` 把 `device` 表的 `password` 列改名成 `last_ip`，**没写迁移**。
+改名之前建的库里那一列还叫 `password`，于是之后每一条 `SELECT … last_ip …` /
+`INSERT … last_ip …` 都以「no such column」失败 —— 备注名存不下、代理开关记不住、
+策略选了等于没选，而 `save()` 只是返回 false，**界面上一点提示都没有**。
+本机的库正是这种：`device` 表一条都写不进去，我在详情窗里改类型、改备注名、
+选策略，全部「点了没反应」。
+
+补列 + 两条回归测试（旧 schema 的库照样能读写；类型覆盖往返）。
+`SQLite.swift` 全程不报错这件事本身也记一笔 —— 这类失败只能靠测试兜。
+
+### 3. ★ 启动后主界面**根本不存在**，而且再也打不开
+
+改完之后重启验证，撞上一个更大的：启动后只有一个 600×720 的**空白「设备详情」**窗，
+主窗一个都没有。托盘的「控制面板」和点 Dock 图标都救不回来 —— 它们走
+`mainWindow?.makeKeyAndOrderFront`，而 `mainWindow` 是 nil，等于什么都没做。
+**在 HEAD（未改动的树）上同样复现**，与本轮改动无关；清空三个 preference 域、
+`Saved Application State` 全空，照样复现，也就不是系统的窗口恢复。
+
+修的是「保证能开出来」，三条一起：
+
+- 主窗从 `WindowGroup` 换成 **`Window(id: "coast.main")`**。`Window` scene 会在「窗口」
+  菜单里留一条打开它的菜单项（`WindowGroup` 没有），这是 AppKit 侧唯一不经 View 就能
+  开窗的入口 —— 而这时候恰恰一个 View 都没有。顺带也就没有「开出第二个主窗」的问题了
+  （`discardDuplicateMainWindows` 那套本来就是给 `WindowGroup` 擦屁股的）。
+- `adopt()` 找不到主窗就走 `openMainWindow()` 现开一个，再认领一次（挂 autosave 名与 ✕ 拦截器）；
+  认主窗时**跳过**三个附属窗（原来按 `canBecomeMain` 找第一个，抓到的正是那个空详情窗，
+  于是主窗的位置也被记到了空壳上：`NSWindow Frame CoastMainWindow` 被写成 420×420）。
+- 三个附属窗（更新/详情/连接）标 `isRestorable = false` + `NSQuitAlwaysKeepsWindows=false`，
+  它们是**点出来的**窗，不该被摆回来。
+
+### 4. 点 Dock 图标判据错了
+
+`applicationShouldHandleReopen` 原来看 AppKit 传的 `hasVisibleWindows`：详情窗开着时它是
+true，于是点 Dock 图标什么也不发生 —— 主窗明明隐藏着。判据改成「**主窗**可不可见」。
+
+### 5. 台账改动的即时刷新
+
+详情窗是独立窗口，改完备注名/类型/策略，设备页那份 `ledger` 快照要等下一轮扫描（几秒）
+才更新，中间像是「点了没反应」。加了 `AppState.ledgerRevision` 这个可观察信号，
+写台账的四处都发它；设备页 `onChange` 重读。顺带修好设备页开关代理时没刷新
+历史库 IP→MAC 映射的问题。
+
+截图验证：主窗恢复到 1340,693 900×510、设备列表里 192.168.31.155 那行变成打印机图标；
+详情窗 600×720，「类型」行在「备注名」下面，下拉 12 项，选「打印机」后头像/副标题/列表同步变；
+✕ 隐藏主窗 → 点 Dock 图标 → 主窗回来（详情窗开着也回得来）。
+`swift test` 310 全绿；`i18n_check.py` 253/253；`settings_persist_check.py` 7/7。

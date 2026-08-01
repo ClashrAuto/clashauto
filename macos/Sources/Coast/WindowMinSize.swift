@@ -52,9 +52,27 @@ struct WindowMinSize: NSViewRepresentable {
     }
 }
 
+/// 让承载这个视图的窗口**不参与 macOS 的窗口恢复**。
+///
+/// 更新 / 设备详情 / 连接三个窗都是「点出来的」——它们的内容来自当下的选中项或一次检查结果。
+/// 系统恢复不管这些，进程上次是被杀掉的话，下次启动就把空壳摆出来（实测：启动后只剩一个
+/// 空白的「设备详情」，主界面根本没建）。主窗不用它：主窗本来就该每次都在。
+struct NonRestorableWindow: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { view.window?.isRestorable = false }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 extension View {
     /// 对齐 Qt 的 `minimumWidth` / `minimumHeight`。
     func windowMinSize(width: CGFloat, height: CGFloat) -> some View {
         background(WindowMinSize(width: width, height: height))
+    }
+
+    func nonRestorableWindow() -> some View {
+        background(NonRestorableWindow())
     }
 }

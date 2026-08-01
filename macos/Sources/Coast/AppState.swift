@@ -212,6 +212,18 @@ public final class AppState {
         }
     }
 
+    /// 台账改动的版本号。加一次 = 「设备表变了，谁在显示它谁就重读」。
+    ///
+    /// 详情窗是**独立窗口**，它改了备注名/类型/策略，设备页那份 `ledger` 快照并不知道 ——
+    /// 原来要等下一轮扫描（几秒）列表里的图标才跟着变，中间那几秒像是「点了没反应」。
+    /// `DeviceStore` 是普通的 SQL 层、不可观察，所以由这里出一个可观察的信号。
+    public private(set) var ledgerRevision = 0
+
+    public func ledgerDidChange() {
+        ledgerRevision &+= 1
+        refreshHistoryDeviceMap()
+    }
+
     /// 把台账里的 IP→MAC 映射喂给历史库 —— 它在**落盘那一刻**把连接归到设备头上。
     /// 设备开关变动或扫描完一轮时调一次即可，不必每拍。
     public func refreshHistoryDeviceMap() {

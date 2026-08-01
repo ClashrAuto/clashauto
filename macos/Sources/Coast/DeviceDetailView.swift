@@ -15,6 +15,11 @@ struct DeviceDetailView: View {
     /// 当前选中的设备。没有选中时给一句空态，而不是整窗空白。
     private var selected: AppState.SelectedDevice? { state.selectedDevice }
     private var discovered: LanBrowser.Device { selected?.discovered ?? LanBrowser.Device(mac: "", ip: "", interface: "") }
+    /// 生效的类型：用户手动指定过就用它，否则用自动识别的结果。
+    private var typeKey: String {
+        let override = record?.typeOverride ?? ""
+        return override.isEmpty ? discovered.typeKey : override
+    }
     private var online: Bool { selected?.online ?? false }
     private var rejection: RedirectTargets.Rejection? { selected?.rejection }
     private var mac: String { discovered.mac }
@@ -60,6 +65,7 @@ struct DeviceDetailView: View {
                 notices
                 infoGrid
                 aliasRow
+                typeRow
                 trafficCard
                 recentDaysBlock
                 policyRow
@@ -76,10 +82,10 @@ struct DeviceDetailView: View {
     private var header: some View {
         HStack(spacing: 10) {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(theme.deviceColor(discovered.typeKey))
+                .fill(theme.deviceColor(typeKey))
                 .frame(width: 48, height: 48)
                 .overlay {
-                    Image(systemName: theme.deviceSymbol(discovered.typeKey))
+                    Image(systemName: theme.deviceSymbol(typeKey))
                         .font(.system(size: 26))
                         .foregroundStyle(.white)
                 }
@@ -89,7 +95,7 @@ struct DeviceDetailView: View {
                     .font(.system(size: 18))
                     .foregroundStyle(theme.textPrimary)
                     .lineLimit(1).truncationMode(.tail)
-                Text(Self.typeName(discovered.typeKey) + "  ·  "
+                Text(Self.typeName(typeKey) + "  ·  "
                      + (online ? "在线".t : "离线".t))
                     .font(.system(size: 12))
                     .foregroundStyle(theme.textMuted)
@@ -208,8 +214,50 @@ struct DeviceDetailView: View {
             ThemedField(text: $alias, placeholder: "为该设备起个名字".t, width: nil)
                 .frame(height: 28)
                 // 每敲一个字都写库太浪费；与 Qt 的 `onEditingFinished` 一样，离焦才落。
-                .onSubmit { state.devices.setAlias(mac: mac, alias) }
+                .onSubmit {
+                    state.devices.setAlias(mac: mac, alias)
+                    state.ledgerDidChange()
+                }
         }
+    }
+
+    // MARK: 类型（手动覆盖自动识别）
+
+    /// 类型覆盖下拉。**Qt 有、Swift 一直没有** —— 自动识别是拿主机名与厂商猜的，
+    /// 猜错很常见（一屋子设备的厂商都是 "Apple"），认错了却改不了只能一直看着错图标。
+    /// `unknown` = 自动识别，其余为手动指定；选完立刻落库。
+    private var typeRow: some View {
+        HStack(spacing: 8) {
+            Text("类型".t).font(.system(size: 12)).foregroundStyle(theme.textMuted)
+                .lineLimit(1)
+                .frame(width: 64, alignment: .leading)
+            ThemedCombo(options: Self.typeKeys.map(Self.typeOverrideName),
+                        selection: Binding(
+                            get: {
+                                let key = record?.typeOverride ?? ""
+                                return Self.typeKeys.firstIndex(of: key.isEmpty ? "unknown" : key) ?? 0
+                            },
+                            set: { setTypeOverride(Self.typeKeys[$0]) }),
+                        width: 150)
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// 顺序与 `qml/DeviceDetailWindow.qml` 的 `typeKeys` 完全一致。
+    static let typeKeys = ["unknown", "phone", "tablet", "computer", "router",
+                           "tvbox", "speaker", "printer", "camera", "game", "nas", "iot"]
+
+    @MainActor
+    static func typeOverrideName(_ key: String) -> String {
+        key == "unknown" ? "自动识别".t : typeName(key)
+    }
+
+    private func setTypeOverride(_ key: String) {
+        var record = recordOrDefault
+        // `unknown` 存空串 —— 台账里「空」就是「跟着自动识别走」，不占一个魔法值。
+        record.typeOverride = key == "unknown" ? "" : key
+        _ = state.devices.save(record)
+        state.ledgerDidChange()
     }
 
     // MARK: 实时流量卡
@@ -432,7 +480,7 @@ struct DeviceDetailView: View {
     private func toggleProxy() {
         guard canToggle else { return }
         _ = state.devices.setProxyEnabled(mac: mac, !proxyEnabled, ip: discovered.ip)
-        state.refreshHistoryDeviceMap()
+        state.ledgerDidChange()
         Task { await state.controller.rebuildConfig() }
     }
 
@@ -442,6 +490,7 @@ struct DeviceDetailView: View {
         record.policyTarget = target
         // 台账里还没有就顺手建一条 —— 用户选了策略，那条记录本来就该存在了。
         _ = state.devices.save(record)
+        state.ledgerDidChange()
         Task { await state.controller.rebuildConfig() }
     }
 

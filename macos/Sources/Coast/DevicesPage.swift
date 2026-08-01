@@ -116,6 +116,12 @@ struct DevicesPage: View {
         var online = true
         var id: String { discovered.mac }
         var proxyEnabled: Bool { record?.proxyEnabled ?? false }
+        /// 生效类型 = 用户手动指定优先，否则自动识别（对齐 Qt `DeviceStore::effectiveType()`）。
+        /// 详情窗改完类型，列表里的色块图标要立刻跟着变。
+        var typeKey: String {
+            let override = record?.typeOverride ?? ""
+            return override.isEmpty ? discovered.typeKey : override
+        }
     }
 
     var body: some View {
@@ -131,6 +137,8 @@ struct DevicesPage: View {
             proxyBanner
         }
         .task { await scan() }
+        // 详情窗改完台账后立刻重读（否则列表要等下一轮扫描才更新图标/名字）
+        .onChange(of: state.ledgerRevision) { _, _ in reloadLedger() }
 
             noticeBar
         }
@@ -456,7 +464,9 @@ struct DevicesPage: View {
 
     private func setProxy(row: Row, enabled: Bool) {
         _ = state.devices.setProxyEnabled(mac: row.discovered.mac, enabled, ip: row.discovered.ip)
-        reloadLedger()
+        // 走统一信号：本页重读快照的同时，历史库的 IP→MAC 映射也跟着更新
+        // （原来这里只重读了本页，映射要等下一轮扫描才对得上）。
+        state.ledgerDidChange()
         if enabled { openDetail(row) }   // 刚开启就把详情打开（策略在里面选）
         Task { await state.controller.rebuildConfig() }
     }
@@ -601,10 +611,10 @@ private struct DeviceRow: View {
     /// 头像是这一行里**最先被看到**的东西 —— 一屏十几台设备时，先认出的是色块。
     private var avatar: some View {
         RoundedRectangle(cornerRadius: 8, style: .continuous)
-            .fill(theme.deviceColor(row.discovered.typeKey))
+            .fill(theme.deviceColor(row.typeKey))
             .frame(width: 34, height: 34)
             .overlay {
-                Image(systemName: theme.deviceSymbol(row.discovered.typeKey))
+                Image(systemName: theme.deviceSymbol(row.typeKey))
                     .font(.system(size: 18)).foregroundStyle(.white)
             }
             .overlay(alignment: .bottomTrailing) {

@@ -36,6 +36,53 @@ struct DeviceStoreTests {
         #expect(loaded?.policyTarget == "🚀 节点选择")
     }
 
+    @Test("★ 旧库（列还叫 password）也得能用——改名没写迁移，台账曾整个哑掉")
+    func migratesRenamedColumn() {
+        let directory = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("coast-dev-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // 8e3463a 之前的表结构：第六列叫 `password`，没有 `last_ip`、没有 `type_override`。
+        let old = try! SQLiteDatabase(path: SQLitePaths.databasePath(configDir: directory))
+        old.exec("""
+            CREATE TABLE device (
+              mac TEXT PRIMARY KEY,
+              alias TEXT NOT NULL DEFAULT '',
+              proxy_enabled INTEGER NOT NULL DEFAULT 0,
+              policy_mode TEXT NOT NULL DEFAULT 'follow',
+              policy_target TEXT NOT NULL DEFAULT '',
+              password TEXT NOT NULL DEFAULT '',
+              first_seen INTEGER NOT NULL DEFAULT 0)
+            """)
+        old.close()
+
+        // 补列没做的话，下面每一句 SQL 都会以「no such column: last_ip」失败，
+        // 而 `save()` 只返回 false —— 用户看到的是「改了没反应」。
+        let store = DeviceStore(configDir: directory)
+        var device = DeviceStore.Device(mac: "aa:bb:cc:dd:ee:ff")
+        device.alias = "打印机"
+        device.lastIP = "192.168.1.9"
+        device.typeOverride = "printer"
+        #expect(store.save(device))
+        let loaded = store.device(mac: "aa:bb:cc:dd:ee:ff")
+        #expect(loaded?.alias == "打印机")
+        #expect(loaded?.lastIP == "192.168.1.9")
+        #expect(loaded?.typeOverride == "printer")
+    }
+
+    @Test("类型覆盖往返——空串=自动识别")
+    func typeOverrideRoundTrip() {
+        let temp = TempDevices()
+        var device = DeviceStore.Device(mac: "11:22:33:44:55:66")
+        device.typeOverride = "nas"
+        #expect(temp.store.save(device))
+        #expect(temp.store.device(mac: "11:22:33:44:55:66")?.typeOverride == "nas")
+        device.typeOverride = ""
+        #expect(temp.store.save(device))
+        #expect(temp.store.device(mac: "11:22:33:44:55:66")?.typeOverride == "")
+    }
+
     @Test("★ 空 IP 不覆盖已有地址——设备这轮没扫到不代表它换了地址")
     func emptyIPDoesNotClobber() {
         let temp = TempDevices()

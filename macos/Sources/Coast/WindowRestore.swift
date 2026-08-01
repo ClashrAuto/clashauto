@@ -41,8 +41,12 @@ enum WindowRestore {
     @MainActor
     static func adopt() {
         purgeLeakedKeys()
+        closeRestoredAuxiliaryWindows()
 
-        guard let window = NSApplication.shared.windows.first(where: { $0.canBecomeMain }) else {
+        guard let window = NSApplication.shared.windows
+            .first(where: { $0.canBecomeMain && !isAuxiliary($0) })
+        else {
+            openMainWindow()
             return
         }
         mainWindow = window
@@ -74,6 +78,29 @@ enum WindowRestore {
         window.delegate = guardian
     }
 
+    /// 三个按需打开的附属窗（更新 / 设备详情 / 连接）的 scene id 前缀。
+    /// SwiftUI 会把 `Window(id:)` 的 id 原样写进 `NSWindow.identifier`。
+    private static let auxiliaryPrefix = "coast."
+
+    static func isAuxiliary(_ window: NSWindow) -> Bool {
+        guard let id = window.identifier?.rawValue else { return false }
+        return id.hasPrefix(auxiliaryPrefix) && id != MainWindowID.value
+    }
+
+    /// 启动时把系统「恢复」出来的附属窗关掉。
+    ///
+    /// 这三个窗是**点出来的**：详情窗要有选中的设备、更新窗要有检查结果。macOS 的窗口恢复
+    /// 不管这些，进程被杀之后下次启动照样把它们摆出来 —— 于是开机先看到一个**空白的
+    /// 「设备详情」**。更糟的是 `adopt()` 原来按 `canBecomeMain` 认主窗，第一个恰好是它，
+    /// 主窗的 autosave 名和位置就都记到了这个空壳上（实测：启动后**只剩**一个 420×420
+    /// 的空详情窗，主界面根本不存在）。
+    /// 关掉 + `isRestorable = false`（见 `NonRestorableWindow`）两头堵。
+    private static func closeRestoredAuxiliaryWindows() {
+        for window in NSApplication.shared.windows where isAuxiliary(window) {
+            window.close()
+        }
+    }
+
     /// 把窗口摆到当前屏**可用区**的右下角（已扣除菜单栏与程序坞）。
     /// 与 Qt 的 `restoreWindowPos` 在「没有历史位置」时的落点一致。
     private static func placeBottomRight(_ window: NSWindow) {
@@ -83,10 +110,47 @@ enum WindowRestore {
                                       y: visible.minY))
     }
 
+    /// 主窗此刻是不是看得见。点 Dock 图标该不该把它拉回来，看的是这个。
+    static var mainWindowIsVisible: Bool { mainWindow?.isVisible ?? false }
+
+    /// 兜底：主窗一个都没有时，把它**开出来**。
+    ///
+    /// ★ 实测启动后可能一个主窗都没有（只剩一个空白的「设备详情」）。这时托盘的
+    ///   「控制面板」和点 Dock 图标都救不回来 —— 它们走的是
+    ///   `mainWindow?.makeKeyAndOrderFront`，而 `mainWindow` 是 nil，等于什么都没做，
+    ///   **界面再也打不开**，只剩一个够不着的托盘进程。
+    ///
+    ///   `openWindow(id:)` 只在 View 里拿得到，而这里恰恰一个 View 都没有。所以走
+    ///   AppKit 侧唯一的入口：主窗改成 `Window(id:)` 之后，SwiftUI 会在「窗口」菜单里
+    ///   放一条打开它的菜单项（`Window` scene 才有，`WindowGroup` 没有 —— 这也是把主窗
+    ///   从 `WindowGroup` 换成 `Window` 的原因之一，顺带也就没有「开出第二个主窗」的问题了）。
+    private static func openMainWindow() {
+        guard !openingMainWindow else { return }
+        guard let item = mainWindowMenuItem(), let action = item.action else { return }
+        openingMainWindow = true
+        NSApplication.shared.sendAction(action, to: item.target, from: item)
+        // 窗口下一拍才建出来，再认领一次（autosave 名、✕ 拦截器都还没挂上）。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            openingMainWindow = false
+            adopt()
+        }
+    }
+
+    /// 「窗口」菜单里那条打开主窗的项。标题就是 scene 的标题（`Window("Coast", id:)`），
+    /// 不随语言变 —— 这也是主窗标题**不**用 `.t` 的原因。
+    private static func mainWindowMenuItem() -> NSMenuItem? {
+        guard let menu = NSApplication.shared.windowsMenu else { return nil }
+        return menu.items.first { $0.title == "Coast" && $0.action != nil }
+    }
+
+    private static var openingMainWindow = false
+
     /// 把主窗拉回前台。窗口只是被隐藏过，所以这里总能拿到它。
     static func showMainWindow() {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        // 隐藏过的窗口直接拉回来；一个都没有（见 `openMainWindow` 的说明）就现开一个。
+        if mainWindow == nil { adopt() }
         mainWindow?.makeKeyAndOrderFront(nil)
         // 兜底：万一还是多出来一个，延后一拍收掉（主路径靠
         // `applicationShouldHandleReopen` 返回 false 拦住）。

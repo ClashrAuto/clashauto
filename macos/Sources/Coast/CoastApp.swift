@@ -11,7 +11,7 @@ struct CoastApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Coast") {
+        Window("Coast", id: MainWindowID.value) {
             RootView()
                 .frame(minWidth: 640, minHeight: 430)
                 .windowMinSize(width: 640, height: 430)      // Qt: Main.qml 的 minimumWidth/Height
@@ -33,6 +33,7 @@ struct CoastApp: App {
         Window("Coast 更新".t, id: UpdateWindowID.value) {
             UpdateWindowRoot()
                 .windowMinSize(width: 460, height: 420)      // Qt: UpdateWindow.qml
+                .nonRestorableWindow()
         }
         .defaultSize(width: 600, height: 560)
         .keyboardShortcut(nil)
@@ -43,6 +44,7 @@ struct CoastApp: App {
         Window("设备详情".t, id: DeviceDetailWindowID.value) {
             DeviceDetailWindowRoot()
                 .windowMinSize(width: 420, height: 420)      // Qt: DeviceDetailWindow.qml
+                .nonRestorableWindow()
         }
         .defaultSize(width: 600, height: 720)
 
@@ -51,6 +53,7 @@ struct CoastApp: App {
         Window("连接".t, id: ConnectionsWindowID.value) {
             ConnectionsWindowRoot()
                 .windowMinSize(width: 480, height: 320)      // Qt: ConnectionsWindow.qml
+                .nonRestorableWindow()
         }
         .defaultSize(width: 720, height: 480)
     }
@@ -114,7 +117,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 返回 true 的话，SwiftUI 的 `WindowGroup` 会**再建一个**主窗 ——
     /// 实测重开之后屏幕上是两个 Coast 窗，一个在原位、一个在左上角。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { showMainWindow() }
+        // ★ 判据是**主窗**可不可见，不是「有没有窗」。原来看 `flag`（AppKit 传的
+        //   hasVisibleWindows）：详情窗或连接窗开着时它就是 true，于是点 Dock 图标
+        //   什么也不发生 —— 主窗明明是隐藏着的，用户却以为点坏了。
+        if !WindowRestore.mainWindowIsVisible { showMainWindow() }
         return false
     }
 
@@ -171,6 +177,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 /// 连接窗的 scene id。
+enum MainWindowID { static let value = "coast.main" }
+
 enum ConnectionsWindowID { static let value = "coast.connections" }
 
 /// 连接窗的根视图。**不能用 `@State` 接** `sharedForWindows`，理由见 `UpdateWindowRoot`。
