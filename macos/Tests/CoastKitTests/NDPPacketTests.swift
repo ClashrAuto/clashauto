@@ -93,6 +93,74 @@ struct NDPPacketTests {
         #expect(Array(frame[Self.naTarget..<Self.naTarget + 16]) == routerLL)
     }
 
+    // 手拼一个设备发来的 NUD 单播 NS（以太 + IPv6 + NS头 + target），供解析测试用。
+    private func makeNS(deviceMAC: ARPPacket.MAC, selfMAC: ARPPacket.MAC,
+                        deviceLL: [UInt8], target: [UInt8]) -> [UInt8] {
+        var f = [UInt8](repeating: 0, count: 78)
+        // 以太：dst = 本机（单播到我们），src = 设备
+        for i in 0..<6 { f[i] = selfMAC.bytes[i]; f[6 + i] = deviceMAC.bytes[i] }
+        f[12] = 0x86; f[13] = 0xDD
+        // IPv6：next-header 58、src = 设备 LL
+        f[14] = 0x60; f[20] = 58; f[21] = 255
+        for i in 0..<16 { f[22 + i] = deviceLL[i] }
+        // ICMPv6 NS：type 135，target 在偏移 8
+        f[54] = 135
+        for i in 0..<16 { f[62 + i] = target[i] }
+        return f
+    }
+
+    @Test("NS 解析：识别 + 取 target / 源地址 / 源 MAC")
+    func nsParse() {
+        let device = ARPPacket.MAC("dd:dd:dd:dd:dd:dd")!
+        let selfMAC = ARPPacket.MAC("aa:aa:aa:aa:aa:aa")!
+        let deviceLL = NDPPacket.ipv6Bytes("fe80::d00d")!
+        let routerLL = NDPPacket.ipv6Bytes("fe80::1")!
+        let ns = makeNS(deviceMAC: device, selfMAC: selfMAC, deviceLL: deviceLL, target: routerLL)
+
+        #expect(NDPPacket.isNeighborSolicitation(ns))
+        #expect(NDPPacket.nsTarget(ns) == routerLL)
+        #expect(NDPPacket.ipv6Source(ns) == deviceLL)
+        #expect(NDPPacket.ethSource(ns) == device.bytes)
+        // 一条 NA 不该被当成 NS
+        let na = NDPPacket.poison(deviceMAC: device, selfMAC: selfMAC, routerLL6: routerLL)
+        #expect(!NDPPacket.isNeighborSolicitation(na))
+        // DAD 的 NS（源 ::）→ 源地址返回 nil（无法单播回它）
+        let dad = makeNS(deviceMAC: device, selfMAC: selfMAC,
+                         deviceLL: [UInt8](repeating: 0, count: 16), target: routerLL)
+        #expect(NDPPacket.ipv6Source(dad) == nil)
+    }
+
+    @Test("★ 抢答 NA：单播回设备 LL、含 Solicited、TLLA = 本机")
+    func solicitedAnswer() {
+        let device = ARPPacket.MAC("dd:dd:dd:dd:dd:dd")!
+        let selfMAC = ARPPacket.MAC("aa:aa:aa:aa:aa:aa")!
+        let deviceLL = NDPPacket.ipv6Bytes("fe80::d00d")!
+        let routerLL = NDPPacket.ipv6Bytes("fe80::1")!
+        let na = NDPPacket.solicitedNA(deviceMAC: device, selfMAC: selfMAC,
+                                       deviceIP6: deviceLL, routerLL6: routerLL)
+        #expect(Array(na[0..<6]) == device.bytes)                          // L2 单播回设备
+        #expect(Array(na[Self.ip6Dst..<Self.ip6Dst + 16]) == deviceLL)     // L3 单播回设备 LL（非组播）
+        #expect(Array(na[Self.naTarget..<Self.naTarget + 16]) == routerLL) // target = 路由器 LL
+        #expect(Array(na[Self.naTLLA..<Self.naTLLA + 6]) == selfMAC.bytes) // TLLA = 本机
+        // 标志：Router|Solicited|Override（单播 solicited 合法，直接翻 REACHABLE）
+        let expected = NDPPacket.flagRouter | NDPPacket.flagSolicited | NDPPacket.flagOverride
+        #expect(na[Self.icmp + 4] == expected)
+    }
+
+    @Test("★ 单播复原：TLLA = 真路由器，单播回设备 LL")
+    func restoreUnicast() {
+        let device = ARPPacket.MAC("dd:dd:dd:dd:dd:dd")!
+        let selfMAC = ARPPacket.MAC("aa:aa:aa:aa:aa:aa")!
+        let routerMAC = ARPPacket.MAC("cc:cc:cc:cc:cc:cc")!
+        let deviceLL = NDPPacket.ipv6Bytes("fe80::d00d")!
+        let routerLL = NDPPacket.ipv6Bytes("fe80::1")!
+        let na = NDPPacket.restoreUnicast(deviceMAC: device, selfMAC: selfMAC, deviceIP6: deviceLL,
+                                          routerLL6: routerLL, routerMAC6: routerMAC)
+        #expect(Array(na[Self.ip6Dst..<Self.ip6Dst + 16]) == deviceLL)     // 单播回设备
+        #expect(Array(na[Self.naTLLA..<Self.naTLLA + 6]) == routerMAC.bytes)  // 改回真路由器
+        #expect(na[Self.icmp + 4] & NDPPacket.flagSolicited != 0)          // 单播 → 带 Solicited
+    }
+
     @Test("ICMPv6 校验和正确（含伪首部）：整包重算应为 0")
     func checksumValid() {
         // 反码校验和的性质：把已填好校验和字段的报文连同伪首部整体重算，结果为 0。

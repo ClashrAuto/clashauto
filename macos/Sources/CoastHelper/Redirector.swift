@@ -18,6 +18,16 @@ final class Redirector: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var bpfFD: Int32 = -1
 
+    // —— 被动抢答设备 NS（仅 v6 启用时）——
+    // 设备网关邻居条目老化后会发 NUD **单播** NS 来本机复核（它缓存的是「路由器 LL 在本机」）。
+    // 收到就回一条 solicited NA 抢在真路由器前把条目翻回 REACHABLE。收包全在 `queue` 上，与
+    // start/stop/timer 串行，无需额外加锁。**不开混杂**：单播 NS 目的就是本机 MAC，非混杂也收得到，
+    // 而混杂会让本机自己的协议栈把我们发的欺骗帧学进缓存 → 自投毒（见 Qt L2Endpoint_mac 的论证）。
+    private var bpfReadSource: DispatchSourceRead?
+    private var bpfReadBuf: UnsafeMutableRawBufferPointer?
+    // 抢答时记下每台设备的链路本地地址（NS 源）：复原时优先单播 solicited 回它（更快落 REACHABLE）。
+    private var deviceLLByMAC: [String: [UInt8]] = [:]
+
     // 当前接管的会话状态（复原时要原样用回去）。
     private var deviceIPs: [[UInt8]] = []
     private var deviceMACs: [ARPPacket.MAC] = []
@@ -131,6 +141,9 @@ final class Redirector: @unchecked Sendable {
             }
 
             active = true
+            // 挂收包源抢答设备 NS（仅 v6）。放在 active=true 之后、发第一轮欺骗之前都行 ——
+            // 它盯着同一个 bpfFD，收到 NUD NS 就回 solicited NA。v4-only 时不挂，零收包开销。
+            if v6Active { startBPFReader() }
             // 落一份崩溃恢复记录。**内核状态活得比进程久** —— PF anchor 和 ip.forwarding
             // 是内核里的东西，helper 被 SIGKILL 掉时它们原样留着，而新拉起的实例
             // `active == false`，`stop()` 会直接提前返回，于是这两样**永远回滚不了**。
@@ -234,10 +247,13 @@ final class Redirector: @unchecked Sendable {
     private func stopLocked() {
         guard active else {
             // 没在跑也要保证 BPF 关掉（start 半途失败可能留下它）
+            teardownBPFReader()
             if bpfFD >= 0 { close(bpfFD); bpfFD = -1 }
             return
         }
         timer?.cancel(); timer = nil
+        // 先停收包源，再动 bpfFD —— 收包源盯着这个 fd，必须在 close 前取消，否则会对已关的 fd 触发。
+        teardownBPFReader()
 
         // ★ 复原 ARP（+ v6 时复原 NDP）：给每台设备把网关条目改回**真网关 MAC**。发三遍加冗余 ——
         //   丢一个包就意味着一台设备断网十几分钟，这里的重发绝对值得。ARP 与 NDP 复原在同一个循环里、
@@ -252,8 +268,17 @@ final class Redirector: @unchecked Sendable {
                 }
                 if v6Active {
                     for mac in deviceMACs {
-                        let frame = NDPPacket.restore(deviceMAC: mac, selfMAC: selfMAC,
+                        // 抢答过该设备 NS → 知道它的 LL → 单播 solicited 复原（更快落 REACHABLE）；
+                        // 否则退回组播 override 复原。两者都把 TLLA 换回真路由器 MAC。
+                        let frame: [UInt8]
+                        if let ll = deviceLLByMAC[mac.text] {
+                            frame = NDPPacket.restoreUnicast(deviceMAC: mac, selfMAC: selfMAC,
+                                                             deviceIP6: ll, routerLL6: routerLL6,
+                                                             routerMAC6: routerMAC6)
+                        } else {
+                            frame = NDPPacket.restore(deviceMAC: mac, selfMAC: selfMAC,
                                                       routerLL6: routerLL6, routerMAC6: routerMAC6)
+                        }
                         _ = frame.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
                     }
                 }
@@ -272,6 +297,7 @@ final class Redirector: @unchecked Sendable {
         v6Active = false
         deviceIPs = []; deviceMACs = []
         routerLL6 = []
+        deviceLLByMAC = [:]
     }
 
     // MARK: - ARP 欺骗
@@ -319,11 +345,77 @@ final class Redirector: @unchecked Sendable {
                 close(fd); continue
             }
             var enable: UInt32 = 1
+            var disable: UInt32 = 0
             _ = ioctl(fd, COAST_BIOCSHDRCMPLT, &enable)  // 我们自己填以太源地址，别让内核覆盖
+            _ = ioctl(fd, COAST_BIOCIMMEDIATE, &enable)  // 立即返回，不等缓冲填满（抢答要快）
+            _ = ioctl(fd, COAST_BIOCSSEESENT, &disable)  // 别回显自己发出的帧（省得处理自己的 NA）
+            _ = fcntl(fd, F_SETFL, O_NONBLOCK)           // 非阻塞：收包源误触时 read 不挂住
             bpfFD = fd
             return true
         }
         return false
+    }
+
+    // MARK: - 被动抢答设备 NS（收包路径，仅 v6 启用时挂）
+
+    /// 起收包源：按 BIOCGBLEN 分配读缓冲，挂一个读事件源到 `queue`。只在 v6 启用时调。
+    private func startBPFReader() {
+        guard bpfFD >= 0, bpfReadSource == nil else { return }
+        var blen: Int32 = 0
+        if ioctl(bpfFD, COAST_BIOCGBLEN, &blen) < 0 || blen <= 0 { blen = 32768 }
+        bpfReadBuf = UnsafeMutableRawBufferPointer.allocate(byteCount: Int(blen),
+                                                            alignment: MemoryLayout<UInt64>.alignment)
+        let source = DispatchSource.makeReadSource(fileDescriptor: bpfFD, queue: queue)
+        source.setEventHandler { [weak self] in self?.drainBPF() }
+        source.resume()
+        bpfReadSource = source
+    }
+
+    /// 停收包源、释放读缓冲。必须在 `close(bpfFD)` **之前**调（源盯着这个 fd）。幂等。
+    private func teardownBPFReader() {
+        bpfReadSource?.cancel()
+        bpfReadSource = nil
+        bpfReadBuf?.deallocate()
+        bpfReadBuf = nil
+    }
+
+    /// 排空一次 BPF 读缓冲：按 bpf_hdr + BPF_WORDALIGN 逐帧走，交给 `handleCapturedFrame`。
+    private func drainBPF() {
+        guard bpfFD >= 0, v6Active, let buf = bpfReadBuf, let base = buf.baseAddress else { return }
+        let n = read(bpfFD, base, buf.count)
+        guard n > 0 else { return }
+        var p = 0
+        while p + 18 <= n {   // 至少放得下一个 bpf_hdr（mac 上约 18 字节）
+            let rec = base.advanced(by: p)
+            let caplen = Int(coast_bpf_caplen(rec))
+            let hdrlen = Int(coast_bpf_hdrlen(rec))
+            let frameStart = p + hdrlen
+            guard hdrlen > 0, caplen > 0, frameStart + caplen <= n else { break }
+            let frame = Array(UnsafeRawBufferPointer(start: base.advanced(by: frameStart), count: caplen)
+                                .bindMemory(to: UInt8.self))
+            handleCapturedFrame(frame)
+            let advance = Int(coast_bpf_wordalign(Int32(hdrlen + caplen)))
+            guard advance > 0 else { break }   // 防呆：对齐算出 0 会死循环
+            p += advance
+        }
+    }
+
+    /// 一帧：若是设备发来复核我们冒充的路由器 LL 的 NS → 抢答一条 solicited NA，并记下它的 LL。
+    private func handleCapturedFrame(_ frame: [UInt8]) {
+        guard v6Active, bpfFD >= 0 else { return }
+        guard NDPPacket.isNeighborSolicitation(frame),
+              let target = NDPPacket.nsTarget(frame), target == routerLL6,
+              let srcMACBytes = NDPPacket.ethSource(frame),
+              let deviceIP6 = NDPPacket.ipv6Source(frame) else { return }
+        // 只抢答**我们正在接管的设备**发来的 NS（别替陌生主机应答，那不是我们的事）。
+        guard deviceMACs.contains(where: { $0.bytes == srcMACBytes }) else { return }
+        let devMAC = ARPPacket.MAC(bytes: srcMACBytes)
+        deviceLLByMAC[devMAC.text] = deviceIP6   // NS 源即设备 LL，复原时单播回它
+        let na = NDPPacket.solicitedNA(deviceMAC: devMAC, selfMAC: selfMAC,
+                                       deviceIP6: deviceIP6, routerLL6: routerLL6)
+        // 连发两帧压过真路由器对同一 NS 的应答（同 Qt 抢答的短促连发，成本可忽略）。
+        _ = na.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+        _ = na.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
     }
 
     // MARK: - PF
