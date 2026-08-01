@@ -41,6 +41,18 @@ public enum ARPPacket {
         return out
     }
 
+    /// 解析一帧 ARP **请求**：若是「who-has `targetIP`」的请求，返回请求方的 (senderIP, senderMAC)。
+    /// 不是 ARP 请求、或问的不是 `targetIP` 就返回 nil。用于 v4 抢答（设备问「网关在哪」→ 抢先回本机）。
+    ///
+    /// 偏移：以太(14) + ARP。op 在 20（请求=1），sha 在 22，spa 在 28，tha 在 32，tpa 在 38。
+    public static func parseRequest(_ frame: [UInt8], targetIP: [UInt8]) -> (senderIP: [UInt8], senderMAC: MAC)? {
+        guard frame.count >= 42, targetIP.count == 4 else { return nil }
+        guard frame[12] == 0x08, frame[13] == 0x06 else { return nil }   // EtherType = ARP
+        guard frame[20] == 0x00, frame[21] == 0x01 else { return nil }   // op == request(1)
+        guard Array(frame[38..<42]) == targetIP else { return nil }      // 目标协议地址 == targetIP
+        return (senderIP: Array(frame[28..<32]), senderMAC: MAC(bytes: Array(frame[22..<28])))
+    }
+
     /// 构造一个**ARP 应答**的完整以太网帧（14 字节以太头 + 28 字节 ARP）。
     ///
     /// 用途是**主动 ARP**（gratuitous-style reply）：不等对方问，直接告诉目标设备

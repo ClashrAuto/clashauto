@@ -27,15 +27,16 @@ final class Redirector: @unchecked Sendable {
     private var bpfReadBuf: UnsafeMutableRawBufferPointer?
     // 抢答时记下每台设备的链路本地地址（NS 源）：复原时优先单播 solicited 回它（更快落 REACHABLE）。
     private var deviceLLByMAC: [String: [UInt8]] = [:]
-    // 反制真路由器 RA/NA 的重投节流（uptime 纳秒；0 = 还没反制过）。
+    // 反制真网关/真路由器解毒帧（v4 ARP + v6 RA/NA）的**统一**重投节流（uptime 纳秒；0=没反制过）。
     private var lastReassertNanos: UInt64 = 0
 
-    // —— 唤醒沿 boost ——
-    // 某设备空闲一阵后又发 v6 帧 → 它的网关邻居条目多半刚老化、正在重解析 → 进一段 50ms×8 的
-    // 高频重投窗口，抢在真路由器的应答前把「网关在本机」钉回。治「空闲后首次访问先漏到真路由器」。
+    // —— 唤醒沿 boost（v4+v6 统一）——
+    // 某设备空闲一阵后又发帧（ARP/IPv6）→ 它的网关 ARP/邻居 条目多半刚老化、正在重解析 → 进一段
+    // 50ms×8 的高频重投窗口，抢在真网关/真路由器的应答前把「网关在本机」钉回。治「空闲后首次访问
+    // 先漏到真网关」。
     private var boostTimer: DispatchSourceTimer?
     private var boostRemaining = 0
-    private var lastSeenByMAC: [String: UInt64] = [:]   // 设备 MAC 串 → 上次见到其 v6 帧的 uptime 纳秒
+    private var lastSeenByMAC: [String: UInt64] = [:]   // 设备 MAC 串 → 上次见到其帧的 uptime 纳秒
     private static let kBoostTicks = 8
     private static let kWakeIdleNanos: UInt64 = 10_000_000_000   // 空闲 >10s 判为唤醒沿
 
@@ -161,9 +162,9 @@ final class Redirector: @unchecked Sendable {
             }
 
             active = true
-            // 挂收包源抢答设备 NS（仅 v6）。放在 active=true 之后、发第一轮欺骗之前都行 ——
-            // 它盯着同一个 bpfFD，收到 NUD NS 就回 solicited NA。v4-only 时不挂，零收包开销。
-            if v6Active { startBPFReader() }
+            // 挂收包源做抢答/反制/学习（v4 的 ARP、v6 的 NDP 都要）。放在 active=true 之后、发第一轮
+            // 欺骗之前都行 —— 它盯着同一个 bpfFD。预筛只放 ARP/IPv6，IPv4 数据帧不进用户态。
+            startBPFReader()
             // 落一份崩溃恢复记录。**内核状态活得比进程久** —— PF anchor 和 ip.forwarding
             // 是内核里的东西，helper 被 SIGKILL 掉时它们原样留着，而新拉起的实例
             // `active == false`，`stop()` 会直接提前返回，于是这两样**永远回滚不了**。
@@ -320,6 +321,7 @@ final class Redirector: @unchecked Sendable {
         routerLL6 = []
         deviceLLByMAC = [:]
         lastSeenByMAC = [:]
+        lastReassertNanos = 0
         pfDeviceIP4s = []; pfV6set = []; pfRedirPort = 0; pfDnsPort = 0
     }
 
@@ -351,18 +353,18 @@ final class Redirector: @unchecked Sendable {
         }
     }
 
-    /// 进入一段高频重投窗口（50ms × kBoostTicks），抢在真路由器前钉回。幂等：已在 boost 时只续期。
-    /// 全在 `queue` 上，与收包/1s tick 串行。
-    private func startBoost() {
-        guard v6Active, bpfFD >= 0 else { return }
-        sendNDPSpoof()                 // 立刻先投一轮
+    /// 进入一段高频重投窗口（50ms × kBoostTicks），v4+v6 一起投，抢在真网关/真路由器前钉回。
+    /// 幂等：已在 boost 时只续期。全在 `queue` 上，与收包/1s tick 串行。
+    private func boostAll() {
+        guard bpfFD >= 0 else { return }
+        sendSpoof(); sendNDPSpoof()    // 立刻先投一轮（v6 未启用时后者 no-op）
         boostRemaining = Self.kBoostTicks
         guard boostTimer == nil else { return }
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
         t.setEventHandler { [weak self] in
             guard let self else { return }
-            self.sendNDPSpoof()
+            self.sendSpoof(); self.sendNDPSpoof()
             self.boostRemaining -= 1
             if self.boostRemaining <= 0 { self.boostTimer?.cancel(); self.boostTimer = nil }
         }
@@ -398,9 +400,9 @@ final class Redirector: @unchecked Sendable {
         return false
     }
 
-    // MARK: - 被动抢答设备 NS（收包路径，仅 v6 启用时挂）
+    // MARK: - 被动抢答/反制/学习（收包路径，v4+v6 共用）
 
-    /// 起收包源：按 BIOCGBLEN 分配读缓冲，挂一个读事件源到 `queue`。只在 v6 启用时调。
+    /// 起收包源：按 BIOCGBLEN 分配读缓冲，挂一个读事件源到 `queue`。有设备接管就挂（v4 也要）。
     private func startBPFReader() {
         guard bpfFD >= 0, bpfReadSource == nil else { return }
         var blen: Int32 = 0
@@ -423,7 +425,7 @@ final class Redirector: @unchecked Sendable {
 
     /// 排空一次 BPF 读缓冲：按 bpf_hdr + BPF_WORDALIGN 逐帧走，交给 `handleCapturedFrame`。
     private func drainBPF() {
-        guard bpfFD >= 0, v6Active, let buf = bpfReadBuf, let base = buf.baseAddress else { return }
+        guard bpfFD >= 0, let buf = bpfReadBuf, let base = buf.baseAddress else { return }
         let n = read(bpfFD, base, buf.count)
         guard n > 0 else { return }
         var p = 0
@@ -433,10 +435,14 @@ final class Redirector: @unchecked Sendable {
             let hdrlen = Int(coast_bpf_hdrlen(rec))
             let frameStart = p + hdrlen
             guard hdrlen > 0, caplen > 0, frameStart + caplen <= n else { break }
-            // 预筛：只有 IPv6 帧（以太类型 0x86DD）才拷贝+处理。裸指针看两字节，避开每包一次堆分配 ——
-            // 没有内核源 MAC 过滤时，这层用户态预筛把 ARP/IPv4 等无关帧的成本降到近零。
+            // 预筛：只放行 **ARP(0x0806) 与 IPv6(0x86DD)** —— 抢答/反制/学习要看的都在这两类里。
+            // IPv4 数据帧（流量大头）不拷贝、不处理。裸指针看两字节，避开每包一次堆分配；没有内核
+            // 源 MAC 过滤时，这层用户态预筛把无关帧成本降到近零。设备唤醒时必会 ARP 重解析网关，
+            // 所以「唤醒沿」这个信号靠 ARP 就够，不必抓 IPv4 数据帧。
             let ethBase = base.advanced(by: frameStart).assumingMemoryBound(to: UInt8.self)
-            if caplen >= 14, ethBase[12] == 0x86, ethBase[13] == 0xDD {
+            let isARP = ethBase[12] == 0x08 && ethBase[13] == 0x06
+            let isV6 = ethBase[12] == 0x86 && ethBase[13] == 0xDD
+            if caplen >= 14, isARP || isV6 {
                 let frame = Array(UnsafeRawBufferPointer(start: base.advanced(by: frameStart), count: caplen)
                                     .bindMemory(to: UInt8.self))
                 handleCapturedFrame(frame)
@@ -447,40 +453,44 @@ final class Redirector: @unchecked Sendable {
         }
     }
 
-    /// 一帧 IPv6（drainBPF 已按以太类型 0x86DD 预筛）。三种关心的情况——
-    ///   ① 真路由器发的 RA/NA（会把设备解毒）→ 立刻重投盖回（节流 50ms，防真路由器连发时风暴）；
-    ///   ② 被接管设备发来复核我们冒充的路由器 LL 的 NS → 抢答 solicited NA，并记下它的 LL；
-    ///   ③ 被接管设备转发来的普通 v6 帧 → 从中现学它的全局/ULA 源地址，动态补 PF rdr 规则。
+    /// 一帧 ARP 或 IPv6（drainBPF 已按以太类型预筛）。v4 与 v6 统一处理，关心的情况——
+    ///   ① 真网关/真路由器发的解毒帧（v4 的 ARP、v6 的 RA/NA）→ 立刻重投盖回（统一节流）；
+    ///   ② 唤醒沿：被接管设备空闲后又发帧 → 进 boost（v4+v6 一起）；
+    ///   ③ 抢答：设备问「网关在哪」（v4 who-has / v6 NS）→ 抢先应答本机；
+    ///   ④ 现学：设备转发来的普通 v6 帧 → 学它的可路由源地址补 PF rdr。
     private func handleCapturedFrame(_ frame: [UInt8]) {
-        guard v6Active, bpfFD >= 0 else { return }
+        guard bpfFD >= 0, frame.count >= 14 else { return }
+        let isARP = frame[12] == 0x08 && frame[13] == 0x06
+        guard let srcMACBytes = NDPPacket.ethSource(frame) else { return }
 
-        // ① 反制：真路由器（以太源 = 真路由器 MAC）的 RA/NA 会把设备的网关条目解毒回真 MAC。
-        if NDPPacket.isRouterAdvertOrNA(frame), let src = NDPPacket.ethSource(frame),
-           src == routerMAC6.bytes {
-            let now = DispatchTime.now().uptimeNanoseconds
-            if now &- lastReassertNanos > 50_000_000 {   // 50ms 节流
-                lastReassertNanos = now
-                sendNDPSpoof()                            // 给所有设备重投一轮，盖回本机 MAC
-            }
-            return
+        // ① 反制解毒帧（不是设备流量，先于 victim 判定处理）。
+        //    v4：真网关自己广播的 who-has / 免费 ARP，携带「网关在真 MAC」→ 设备一收就解毒。
+        //    v6：真路由器的 RA/NA。两者都走统一的 reassertAll（含 50ms 节流）。
+        if isARP {
+            if srcMACBytes == gatewayMAC.bytes { reassertAll(); return }
+        } else if NDPPacket.isRouterAdvertOrNA(frame), v6Active, srcMACBytes == routerMAC6.bytes {
+            reassertAll(); return
         }
 
-        // 以下几种都只认**我们正在接管的设备**发来的帧。
-        guard let srcMACBytes = NDPPacket.ethSource(frame),
-              deviceMACs.contains(where: { $0.bytes == srcMACBytes }) else { return }
+        // 以下都只认**我们正在接管的设备**发来的帧。
+        guard deviceMACs.contains(where: { $0.bytes == srcMACBytes }) else { return }
+        let devMAC = ARPPacket.MAC(bytes: srcMACBytes)
 
-        // 唤醒沿：该设备空闲 >10s 后又发 v6 帧 → 邻居条目多半刚老化、正在重解析网关 → 进 boost，
-        // 抢在真路由器应答前钉回（治「空闲后首次访问先漏到真路由器」）。每帧只一次时钟读 + 一次查改。
-        let devKey = ARPPacket.MAC(bytes: srcMACBytes).text
+        // ② 统一唤醒沿：设备空闲 >10s 后又发**任一**帧（ARP/IPv6）→ 邻居/ARP 条目多半刚老化、
+        //    正在重解析网关 → 进 boost（v4+v6 一起），抢在真网关/真路由器前钉回。
         let now = DispatchTime.now().uptimeNanoseconds
-        if let last = lastSeenByMAC[devKey], now &- last > Self.kWakeIdleNanos { startBoost() }
-        lastSeenByMAC[devKey] = now
+        if let last = lastSeenByMAC[devMAC.text], now &- last > Self.kWakeIdleNanos { boostAll() }
+        lastSeenByMAC[devMAC.text] = now
 
-        // ② 抢答设备 NS（复核路由器 LL）。NS 源是设备 LL（不可路由），不会落到 ③ 的学习里。
-        if NDPPacket.isNeighborSolicitation(frame),
+        // ③ 抢答设备的网关解析。
+        if isARP {
+            answerDeviceArp(frame, deviceMAC: devMAC)   // v4：who-has 网关 → 回「网关在本机」
+            return
+        }
+        // v6 NS（复核路由器 LL）。NS 源是设备 LL（不可路由），不会落到 ④ 的学习里。
+        if v6Active, NDPPacket.isNeighborSolicitation(frame),
            let target = NDPPacket.nsTarget(frame), target == routerLL6,
            let deviceIP6 = NDPPacket.ipv6Source(frame) {
-            let devMAC = ARPPacket.MAC(bytes: srcMACBytes)
             deviceLLByMAC[devMAC.text] = deviceIP6   // NS 源即设备 LL，复原时单播回它
             let na = NDPPacket.solicitedNA(deviceMAC: devMAC, selfMAC: selfMAC,
                                            deviceIP6: deviceIP6, routerLL6: routerLL6)
@@ -490,12 +500,33 @@ final class Redirector: @unchecked Sendable {
             return
         }
 
-        // ③ 现学：普通 v6 帧的**可路由**源地址进 rdr，让它的 v6 也走代理而非退回普通转发。
+        // ④ 现学：普通 v6 帧的**可路由**源地址进 rdr，让它的 v6 也走代理而非退回普通转发。
         //    （真机实测：ndp 那一刻常查不到设备 v6，只有等它经本机发帧才学得到——见 pfV6set 说明。）
-        if let s6 = NDPPacket.ipv6Source(frame), NDPPacket.isRoutableV6(s6),
+        if v6Active, let s6 = NDPPacket.ipv6Source(frame), NDPPacket.isRoutableV6(s6),
            let str = NDPPacket.ipv6String(s6) {
             learnDeviceV6(str)   // 幂等，只有新地址才真的重灌 anchor
         }
+    }
+
+    /// v4 抢答：设备广播「who-has 网关 IP」→ 抢先回一条「网关 IP 在本机 MAC」单播给它，
+    /// 压过真网关的应答。只对**问的正是我们冒充的网关**的请求应答。
+    private func answerDeviceArp(_ frame: [UInt8], deviceMAC: ARPPacket.MAC) {
+        guard let req = ARPPacket.parseRequest(frame, targetIP: gatewayIP) else { return }
+        // 单播回**已校验的**设备（eth 源），target IP 用请求里的 spa。
+        let reply = ARPPacket.reply(senderMAC: selfMAC, senderIP: gatewayIP,
+                                    targetMAC: deviceMAC, targetIP: req.senderIP)
+        _ = reply.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+        _ = reply.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
+    }
+
+    /// 统一反制：真网关/真路由器解毒 → 立刻给所有设备重投一轮（v4 + v6），把「网关在本机」盖回。
+    /// 单一 50ms 节流，防真网关短时连发多条时放大成风暴。
+    private func reassertAll() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now &- lastReassertNanos > 50_000_000 else { return }
+        lastReassertNanos = now
+        sendSpoof()        // v4 ARP
+        sendNDPSpoof()     // v6 NDP（v6Active 时才实际发）
     }
 
     // MARK: - PF
