@@ -74,8 +74,9 @@ struct MainView: View {
     /// 平时灰；程序有新版 → 右上角 "new" 角标，内核有新版 → "core" 角标；
     /// **任一有更新，版本文字本身转红**（全 UI 不加粗，靠颜色说话）。
     ///
-    /// 点它打开更新窗 —— 与 Qt 相同（那边是独立顶层窗，这里是 sheet，
-    /// 沿用本项目对 `ConnectionsWindow` / `RuleEditorWindow` 的既有做法）。
+    /// 点它打开更新窗 —— 与 Qt 一样是**独立顶层窗**（`Window(id:)` scene）。
+    /// （早期这里是 sheet，因为 600×560 比主窗还高被裁掉了底部动作行，已改掉；
+    /// 这句注释一直没跟上，顺手更正。）
     private var versionRow: some View {
         Button {
             openWindow(id: UpdateWindowID.value)
@@ -122,8 +123,9 @@ struct MainView: View {
 
     private var footer: some View {
         HStack(spacing: 5) {
+            // Qt 这个图标是 14（比旁边 12 的日志文字大一档），原来写成了 12。
             Image(systemName: "terminal")
-                .font(.system(size: 12))
+                .font(.system(size: 14))
                 .foregroundStyle(theme.textMuted)
 
             Text(state.lastLog)

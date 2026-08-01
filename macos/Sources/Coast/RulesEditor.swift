@@ -213,6 +213,9 @@ private struct SearchableValueField: View {
 
     @FocusState private var focused: Bool
 
+    /// 菜单最多列这么多项。上千项的 NSMenu 会把主线程卡住。
+    private static let menuCap = 200
+
     private var filtered: [String] {
         let needle = text.lowercased()
         guard !needle.isEmpty else { return choices }
@@ -231,8 +234,18 @@ private struct SearchableValueField: View {
             if !choices.isEmpty {
                 Menu {
                     // 候选可能上千条（系统进程），全塞进菜单会卡住主线程。
-                    ForEach(filtered.prefix(200), id: \.self) { choice in
+                    ForEach(filtered.prefix(Self.menuCap), id: \.self) { choice in
                         Button(choice) { text = choice }
+                    }
+                    // 截断**必须说出来**。Qt 那边的候选是一个能滚的 220px 列表、不截断，
+                    // 这里换成了原生菜单（NSMenu 塞上千项会卡），那就得让用户知道
+                    // 「下面还有」——不然他看到的是一份看着完整、其实少了一大半的列表。
+                    // 用与规则表同一句文案，不另造一条要翻 12 遍的新串。
+                    if filtered.count > Self.menuCap {
+                        Divider()
+                        Button(String(format: "共 %d 条，显示前 %d 条".t,
+                                      filtered.count, Self.menuCap)) {}
+                            .disabled(true)
                     }
                 } label: {
                     Text("▾").font(.system(size: 12)).foregroundStyle(theme.textMuted)
