@@ -55,15 +55,26 @@ struct BandwidthChart: View {
                     if !minimal {
                         grid(in: geo.size)
                     }
-                    // 底纹模式下线下有一层淡填充；独立成图时**只有线**。
+                    // 底纹模式下**先画刻度**（压在填充之下），再填充、再画线，
+                    // 最后把刻度文字画在最上面 —— 与 Qt 的绘制顺序一致，
+                    // 否则文字会被那层填充糊掉。
                     if minimal {
-                        areaPath(in: geo.size, phase: phase)
-                            .fill(LinearGradient(colors: [lineColor.opacity(0.22), .clear],
-                                                 startPoint: .top, endPoint: .bottom))
+                        minimalTicks(in: geo.size)
+                        // 平铺一层淡填充（Qt 是 `rgba(lc, 0.16)` 的**实色**，不是渐变）：
+                        // 只有一条细线的话，在卡片底纹这个尺度上几乎看不见。
+                        areaPath(in: geo.size, phase: phase).fill(lineColor.opacity(0.16))
                     }
                     linePath(in: geo.size, phase: phase)
-                        .stroke(lineColor.opacity(0.70),
-                                style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+                        // 线宽与透明度**两种模式不同**（Qt：`minimal ? 2.0 : 3.0`、
+                        // `minimal ? 0.55 : 0.70`）—— 底纹要压得住卡片上的数字，
+                        // 原来两处都按独立成图那一档画，线又粗又实，抢了标题的注意力。
+                        .stroke(lineColor.opacity(minimal ? 0.55 : 0.70),
+                                style: StrokeStyle(lineWidth: minimal ? 2 : 3,
+                                                   lineCap: .round, lineJoin: .round))
+
+                    if minimal {
+                        minimalTickLabels(in: geo.size)
+                    }
 
                     if !minimal, !title.isEmpty {
                         Text(title)
@@ -77,6 +88,38 @@ struct BandwidthChart: View {
             }
         }
         .onChange(of: tick) { _, _ in lastPush = Date() }
+    }
+
+    /// 底纹模式的刻度：**必须按曲线的实际高度定位**，不能沿用「整高四等分」——
+    /// `headroom` 只让曲线占下面一截，等分线会全部对不上曲线，刻度就成了骗人的
+    /// （Qt 在这处专门写了这句）。顶到卡片标题那一带（y < 18）的那一档不画。
+    private func minimalTickY(in size: CGSize) -> [(y: CGFloat, value: Double)] {
+        [1.0, 0.75, 0.5, 0.25].compactMap { (fraction: Double) -> (y: CGFloat, value: Double)? in
+            let y = CGFloat((Double(size.height) - Double(size.height) * headroom * fraction)
+                .rounded()) + 0.5
+            return y < 18 ? nil : (y: y, value: scale * fraction)
+        }
+    }
+
+    private func minimalTicks(in size: CGSize) -> some View {
+        ForEach(minimalTickY(in: size), id: \.y) { tick in
+            Path { path in
+                path.move(to: CGPoint(x: 0, y: tick.y))
+                path.addLine(to: CGPoint(x: size.width, y: tick.y))
+            }
+            .stroke(lineColor.opacity(0.13), lineWidth: 1)
+        }
+    }
+
+    /// 刻度文字最后画：压在曲线之上才不会被填充盖掉。贴右边缘 6、坐在刻度线上方 3。
+    private func minimalTickLabels(in size: CGSize) -> some View {
+        ForEach(minimalTickY(in: size), id: \.y) { tick in
+            Text(Formatting.rate(Int64(tick.value)))
+                .font(.system(size: 9))
+                .foregroundStyle(theme.dark ? Color(hex: 0x9A_9A_9A) : Color(hex: 0x7A_7A_7A))
+                .frame(width: size.width - 6, alignment: .trailing)
+                .offset(y: tick.y - 3 - 6)
+        }
     }
 
     /// 四分网格 + 右侧速度刻度（max / ¾ / ½ / ¼）。

@@ -8,7 +8,11 @@ import SwiftUI
 /// 和『最近 40 秒』挨在一起看，也省下了整整一屏的竖向空间」。
 ///
 /// 曲线用 `headroom = 0.62` 压在下半部，免得冲到标题和数值上。
-/// **不画网格与刻度** —— Qt 的 `minimal` 模式明确说那是噪音（见 `BandwidthChart`）。
+///
+/// ★ 刻度这件事以前记反了：Qt 的 `minimal` **属性注释**写着「右侧刻度、左上标题全是噪音，
+///   minimal 时一概不画」，但它的**代码**在 minimal 分支里另画了一套 —— 四条按曲线实际高度
+///   （而不是整高四等分）定位的淡线 + 9px 的速率标注。注释与代码不一致时以代码为准：
+///   那段代码旁边还专门写了「等分线会全部对不上曲线，刻度就成了骗人的」。
 struct TrafficCard: View {
     @Environment(Theme.self) private var theme
 
@@ -29,8 +33,7 @@ struct TrafficCard: View {
             // 背景那条曲线走 `BandwidthChart` 的**底纹模式**：网格、右侧刻度、标题一概不画
             // —— 它们压在卡片的数字底下只会打架（Qt 的 `minimal` 就是这个意思）。
             //
-            // 原来这里自己画了一份，还多画了四条带速率标注的网格线 —— 那是 Qt 明确说
-            // **不要**的东西；顺带也就没有那条「整条连续左滑」的滚动。现在共用同一个组件。
+            // 原来这里自己画了一份，顺带也就没有那条「整条连续左滑」的滚动。现在共用同一个组件。
             BandwidthChart(samples: samples,
                            lineColor: lineColor,
                            tick: tick,
