@@ -9,10 +9,15 @@
 #     开发期那条 #filePath 回退路径在用户机器上不存在。
 #
 # 用法：
-#   bash scripts/make_app.sh [--version 1.2.3] [--universal] [--sign <identity>]
+#   bash scripts/make_app.sh [--version 1.2.3] [--universal] [--sign <identity>] [--no-core]
 #
 # 默认只构建本机架构并做 ad-hoc 签名（`-`）。发布用的签名+公证在外部仓库
 # integemjack/schat.build 完成，见仓库根 CLAUDE.md。
+#
+# 默认**集成最新正式版内核**（fork ClashrAuto/clash 的 coast-darwin-* 产物）到
+# Contents/Resources/core，首次运行由 CoreProcess.seedCoreIfMissing() 落到用户目录 ——
+# 全新安装开箱即用。离线/回归自检用 --no-core 跳过（正式包不该缺内核）。
+# API 有匿名限流（60 次/时，CI 共享出口 IP 极易中招）：设 GITHUB_TOKEN 可提额。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -38,12 +43,14 @@ default_version() {
 VERSION=""
 UNIVERSAL=0
 SIGN_IDENTITY="-"
+BUNDLE_CORE=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --version) VERSION="$2"; shift 2 ;;
         --universal) UNIVERSAL=1; shift ;;
         --sign) SIGN_IDENTITY="$2"; shift 2 ;;
+        --no-core) BUNDLE_CORE=0; shift ;;
         *) echo "未知参数: $1" >&2; exit 2 ;;
     esac
 done
@@ -93,6 +100,68 @@ if [[ -f "$ASSETS/icon.icns" ]]; then
     /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist" 2>/dev/null || true
 fi
 
+# 内核：默认集成最新**正式版**（fork ClashrAuto/clash 的 coast-darwin-* 产物）。
+# 挑选规则与 CoreDownloader.pick 一字不差：走 /releases 全量列表而不是 /releases/latest
+# （fork 从上游继承了一堆零资产空 tag，latest 常正好落在那上面）、跳过 draft/prerelease、
+# 该 release 必须真带 darwin 产物才认；Intel 优先 -compatible（v1 基线，普通 amd64 是
+# GOAMD64=v3，老 Mac 直接非法指令崩）。下载失败**打包失败**——「默认集成」的包缺了
+# 内核是静默劣化，宁可当场断。
+if [[ $BUNDLE_CORE -eq 1 ]]; then
+    echo "==> 集成最新正式版内核"
+    CORE_TMP="$(mktemp -d)"
+    trap 'rm -rf "$CORE_TMP"' EXIT
+    AUTH=()
+    [[ -n "${GITHUB_TOKEN:-}" ]] && AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    curl -fsSL --retry 3 ${AUTH[@]+"${AUTH[@]}"} -H 'Accept: application/vnd.github+json' \
+        'https://api.github.com/repos/ClashrAuto/clash/releases?per_page=20' \
+        -o "$CORE_TMP/releases.json" || {
+        echo "!! 拉取发布列表失败（403 多半是 GitHub 匿名限流，60 次/时按出口 IP 算）。" >&2
+        echo "   设 GITHUB_TOKEN 提额重试，或确属离线场景时用 --no-core 跳过。" >&2
+        exit 1
+    }
+
+    pick_core_url() {  # 参数 = 产物名前缀（按优先级）；release 优先、前缀次之，同 Qt CoreRelease::pick
+        python3 - "$CORE_TMP/releases.json" "$@" <<'PY'
+import json, sys
+releases = json.load(open(sys.argv[1]))
+for release in releases:  # 列表新→旧：第一个带本平台产物的正式版就是答案
+    if release.get("draft") or release.get("prerelease"):
+        continue
+    for prefix in sys.argv[2:]:
+        for asset in release.get("assets", []):
+            name = asset.get("name", "")
+            if name.startswith(prefix) and name.endswith(".gz"):
+                print(asset["browser_download_url"])
+                sys.exit(0)
+sys.exit(1)
+PY
+    }
+
+    fetch_core() {  # $1 = 输出文件，其余 = 前缀
+        local out="$1"; shift
+        local url
+        url="$(pick_core_url "$@")" || { echo "!! 正式版通道里没有 $* 产物（见 $CORE_TMP/releases.json）" >&2; return 1; }
+        echo "    $(basename "$url")"
+        curl -fsSL --retry 3 "$url" | gunzip > "$out"
+        [[ -s "$out" ]] || { echo "!! 内核下载/解压出来是空的: $url" >&2; return 1; }
+        chmod 755 "$out"
+    }
+
+    if [[ $UNIVERSAL -eq 1 ]]; then
+        # Go 二进制可以直接 lipo —— 和 .app 的两架构对齐，哪半跑就用哪半。
+        fetch_core "$CORE_TMP/core-arm64" "coast-darwin-arm64-"
+        fetch_core "$CORE_TMP/core-amd64" "coast-darwin-amd64-compatible-" "coast-darwin-amd64-v1-"
+        lipo -create "$CORE_TMP/core-arm64" "$CORE_TMP/core-amd64" -output "$APP/Contents/Resources/core"
+    elif [[ "$(uname -m)" == "arm64" ]]; then
+        fetch_core "$APP/Contents/Resources/core" "coast-darwin-arm64-"
+    else
+        fetch_core "$APP/Contents/Resources/core" "coast-darwin-amd64-compatible-" "coast-darwin-amd64-v1-"
+    fi
+    chmod 755 "$APP/Contents/Resources/core"
+else
+    echo "==> 跳过内核集成（--no-core）—— 首次运行需在「设置 → 系统」手动下载"
+fi
+
 # 签名顺序有讲究：**先内层后外层**。先签 helper，再签整个 .app ——
 # 反过来的话签完 app 再动里面的二进制会当场破坏外层签名。
 #
@@ -115,7 +184,16 @@ if [[ "$SIGN_IDENTITY" != "-" ]]; then
     APP_ENT=(--entitlements "$ROOT/Resources/coast.entitlements")
 fi
 
-# 先内层后外层。helper 单独用它自己的 entitlements。
+# 先内层后外层。打包集成的内核也是 Mach-O —— 公证会扫到 bundle 里**每一个**可执行文件，
+# 漏签它整个 .app 都过不了 notarytool。
+if [[ -f "$APP/Contents/Resources/core" ]]; then
+    codesign --force --sign "$SIGN_IDENTITY" \
+        --identifier "com.yuehongsun.coast.core" \
+        --options runtime ${TIMESTAMP_FLAG[@]+"${TIMESTAMP_FLAG[@]}"} \
+        "$APP/Contents/Resources/core"
+fi
+
+# helper 单独用它自己的 entitlements。
 codesign --force --sign "$SIGN_IDENTITY" \
     --identifier "com.yuehongsun.coast.helper" \
     --options runtime ${TIMESTAMP_FLAG[@]+"${TIMESTAMP_FLAG[@]}"} \
@@ -139,6 +217,8 @@ cat <<EOF
 完成：$APP
 
 注意：
+  • 内核：$([[ $BUNDLE_CORE -eq 1 ]] && echo "已集成最新正式版（Contents/Resources/core），首次运行自动落位" \
+      || echo "未集成（--no-core），首次运行需在「设置 → 系统」手动下载")
   • ad-hoc 签名（-）**装不了免密 helper** —— SMAppService 要求 helper 与主程序同属一个
     Team ID，且客户端要满足 HelperConstants.clientCodeRequirement 里那条
     "certificate leaf[subject.OU] = 6AXTRT5TV4"。本地只能验到「注册被拒」这一步。

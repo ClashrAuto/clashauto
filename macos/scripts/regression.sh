@@ -81,7 +81,9 @@ fi
 # —— 2. 打包 ——
 if [[ $BUILD -eq 1 ]]; then
     echo "== 打包 =="
-    if bash scripts/make_app.sh --version 0.0.0-regress >/tmp/coast-pkg.log 2>&1; then
+    # --no-core：回归自检要离线可跑、可重复 —— 别让一次 GitHub 限流把整轮自检拖死。
+    # 「默认集成内核」本身由正式打包路径（不带该参数的 make_app.sh）覆盖。
+    if bash scripts/make_app.sh --version 0.0.0-regress --no-core >/tmp/coast-pkg.log 2>&1; then
         line "make_app.sh" "PASS"; ((pass++))
     else
         line "make_app.sh" "FAIL (见 /tmp/coast-pkg.log)"; ((fail++))
