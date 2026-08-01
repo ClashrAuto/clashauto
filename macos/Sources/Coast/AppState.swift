@@ -266,9 +266,11 @@ public final class AppState {
     /// 从此再也不触发；而末位的值经常连着好几拍都是 0，比值也认不出「来了新的一拍」。
     public private(set) var pollTick: UInt64 = 0
 
-    /// 带宽图的采样序列。只留最近 60 拍（约 1 分钟），图上也就画这么多。
+    /// 带宽图的采样序列。长度与图上的点数一致（`BandwidthChart.pointCount` = 42，
+    /// 即 40 个可见 + 2 个富余）—— **横轴就是「最近 40 秒」，与 Qt 相同**。
+    /// 原来留 60 拍，同样的宽度里塞 60 秒，一次尖峰看起来比 Qt 窄一截。
     public private(set) var bandwidthSamples: [(up: Double, down: Double)] = []
-    private static let bandwidthWindow = 60
+    private static let bandwidthWindow = BandwidthChart.pointCount
 
     public init() {
         let loaded = (try? AppConfigLoader.load()) ?? AppConfig()

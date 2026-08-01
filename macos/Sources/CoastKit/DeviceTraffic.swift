@@ -26,9 +26,10 @@ public struct DeviceTraffic: Sendable {
         public static let empty = Sample()
     }
 
-    /// 历史保留多少拍。40 拍 ≈ 40 秒，与状态页那张带宽图同量级；
+    /// 历史保留多少拍。**42 = 40 个可见 + 2 个富余**，与 `BandwidthChart.pointCount`
+    /// 和 QML 的 `maxPointer` 同值 —— 少一个点横轴的时间跨度就对不上。
     /// **必须有上限** —— 一台设备挂一晚上就是几万个点，而行里只画得下几十个。
-    public static let historyLength = 40
+    public static let historyLength = 42
 
     /// sourceIP → 采样。
     public private(set) var byIP: [String: Sample] = [:]

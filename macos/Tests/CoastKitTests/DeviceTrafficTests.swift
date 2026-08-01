@@ -188,3 +188,26 @@ struct RateNormalisationTests {
         #expect(traffic.sample(ip: "192.168.1.9").rateDown == 100)
     }
 }
+
+@Suite("曲线的点数上限")
+struct HistoryLengthTests {
+
+    @Test("★ 42 = 40 可见 + 2 富余，与 QML 的 maxPointer 同值——少一个横轴跨度就对不上")
+    func matchesQtPointCount() {
+        #expect(DeviceTraffic.historyLength == 42)
+    }
+
+    @Test("超过上限时丢最旧的，长度封死")
+    func trimsOldest() {
+        var traffic = DeviceTraffic()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        for tick in 0..<60 {
+            traffic.observe([ConnectionRow(id: "1", host: "x", network: "tcp", type: "",
+                                           process: "", chain: "P",
+                                           upload: 0, download: Int64(tick) * 100,
+                                           start: .distantPast, sourceIP: "192.168.1.9")],
+                            now: t0.addingTimeInterval(Double(tick)))
+        }
+        #expect(traffic.sample(ip: "192.168.1.9").downHistory.count == 42)
+    }
+}

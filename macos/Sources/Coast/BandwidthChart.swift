@@ -6,13 +6,30 @@ import SwiftUI
 /// 两种用法，与 QML 的 `minimal` 开关一一对应：
 /// - **独立成图**（设备详情窗的「实时流量」卡）：四分网格 + 右侧速度刻度（max/¾/½/¼）
 ///   + 左上标题，**只画折线、不填充**，背景是线色极淡的底（α0.03）；
-/// - **卡片底纹**（上传/下载卡）：网格、刻度、标题全是噪音，压在卡片的数字底下只会打架，
-///   所以一概不画，改成「一条线 + 线下的淡填充」—— 底纹要的是趋势的形状，不是能读数的图表。
+/// - **卡片底纹**（上传/下载卡）：不画背景底与左上标题，改成「一条更细更淡的线 +
+///   线下一层实色淡填充」，另配四条按**曲线实际高度**定位的刻度（不是整高四等分 ——
+///   `headroom` 压着曲线，等分线会全对不上）。
 struct BandwidthChart: View {
     @Environment(Theme.self) private var theme
 
     /// 最近若干拍的速率（字节/秒），越靠后越新。
     let samples: [Double]
+
+    /// 图上画多少个点。**40 个可见 + 2 个富余**（两端各一个，滑动时右侧不留缺口）——
+    /// 与 QML 的 `maxPointer: 42` 同值，横轴也就是「最近 40 秒」。
+    ///
+    /// ★ 这个数决定横轴的时间跨度。状态页原来喂 60 拍进来，同样的宽度里塞了 60 秒，
+    ///   一次流量尖峰看起来比 Qt 窄一截；而点数不足 42 时（刚启动那几十秒）
+    ///   Qt 是**预先填满**的（`Component.onCompleted` 塞 42 个 1.0），曲线一上来就贴着底边
+    ///   铺满整宽，Swift 这边则是从左边一小截慢慢长出来。两处都在这儿统一。
+    static let pointCount = 42
+
+    /// 补齐到 `pointCount`：不足的在**左边**补（旧的一侧），与 Qt 的预填充同效。
+    private var padded: [Double] {
+        let tail = samples.suffix(Self.pointCount)
+        guard tail.count < Self.pointCount else { return Array(tail) }
+        return Array(repeating: 1, count: Self.pointCount - tail.count) + tail
+    }
     var title = ""
     var lineColor: Color = .accentColor
     /// 采样节拍（`AppState.pollTick`）。每 +1 表示「刚进来一个新点」，
@@ -30,7 +47,7 @@ struct BandwidthChart: View {
     private var scale: Double {
         let base = 131_072.0        // 128 KB
         let step = 2_097_152.0      // 2 MB
-        let peak = samples.max() ?? 0
+        let peak = padded.max() ?? 0
         return peak > base ? (peak / step).rounded(.up) * step : base
     }
 
@@ -156,12 +173,13 @@ struct BandwidthChart: View {
     /// 折线的顶点。整条按 `dx * phase` 左移 —— 新点从右边缘外进入、匀速滑到位，
     /// 相位归零时正好接上下一拍。
     private func points(in size: CGSize, phase: Double) -> [CGPoint] {
-        guard samples.count > 1 else { return [] }
+        let values = padded
+        guard values.count > 1 else { return [] }
         let usable = size.height * headroom
         // 多留一格宽度给「滑进来的那一点」，否则最后一点滑到位时右边会空出一条缝。
-        let dx = size.width / CGFloat(samples.count - 2 > 0 ? samples.count - 2 : 1)
+        let dx = size.width / CGFloat(values.count - 2 > 0 ? values.count - 2 : 1)
         let shift = dx * CGFloat(phase)
-        return samples.enumerated().map { index, value in
+        return values.enumerated().map { index, value in
             CGPoint(x: CGFloat(index) * dx - shift,
                     y: size.height - usable * CGFloat(min(1, value / scale)))
         }
