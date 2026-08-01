@@ -334,7 +334,10 @@ struct SettingsPage: View {
                 }
                 ThemedField(text: $ruleFilter, placeholder: "搜索规则（类型/节点/值）".t, width: 220)
                 Spacer(minLength: 0)
-                Text(String(format: "共 %d 条".t, rules.count))
+                // 与 Qt 同一句：只有真的少显示了才说「显示前 M 条」。
+                Text(filteredRules.count < rules.count
+                     ? String(format: "共 %d 条，显示前 %d 条".t, rules.count, filteredRules.count)
+                     : String(format: "共 %d 条".t, rules.count))
                     .font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
             }
             .padding(.horizontal, 10)
@@ -367,9 +370,17 @@ struct SettingsPage: View {
         }
     }
 
+    /// 列表最多渲染这么多行。与 Qt 的 `SettingsController::reloadRules` 里那个 `cap = 400`
+    /// 同一个数 —— 一份完整规则集动辄几千条，全铺出来滚起来是卡的。
+    ///
+    /// 截断**必须说出来**（下面那行「共 N 条，显示前 M 条」）：不说的话，用户看到的是
+    /// 一份看起来完整、实际上少了一大半的列表，而且完全没有线索。
+    private static let ruleRenderCap = 400
+
+    /// 过滤 + 截断后的行。下标是**完整数组里的真实下标**，改第 12 行改的就是原数组第 12 条。
     private var filteredRules: [(Int, RulesStore.Rule)] {
         let needle = ruleFilter.trimmingCharacters(in: .whitespaces).lowercased()
-        return rules.enumerated().compactMap { index, rule in
+        let matched = rules.enumerated().compactMap { index, rule -> (Int, RulesStore.Rule)? in
             guard needle.isEmpty
                     || rule.type.lowercased().contains(needle)
                     || rule.node.lowercased().contains(needle)
@@ -377,6 +388,7 @@ struct SettingsPage: View {
             else { return nil }
             return (index, rule)
         }
+        return Array(matched.prefix(Self.ruleRenderCap))
     }
 
     /// 区域 / 规则表的一行：高 36、左右内缩 10、半径 3、`nodeRowBg`，内容左 10 右 6。

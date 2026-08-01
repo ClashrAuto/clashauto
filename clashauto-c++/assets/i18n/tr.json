@@ -423,6 +423,7 @@
   "＋ 添加": "＋ Ekle",
   "已打开发布页，请手动下载安装": "Sürüm sayfası açıldı — lütfen elle indirip kurun",
   "共 %d 条": "toplam %d",
+  "共 %d 条，显示前 %d 条": "toplam %d, ilk %d gösteriliyor",
   "共 %d 组": "%d grup",
   "已保存并重建配置": "Kaydedildi ve yapılandırma yeniden oluşturuldu",
   "程序更新": "Uygulama güncellemesi",

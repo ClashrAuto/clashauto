@@ -423,6 +423,7 @@
   "＋ 添加": "＋ Ajouter",
   "已打开发布页，请手动下载安装": "Page de version ouverte — téléchargez et installez manuellement",
   "共 %d 条": "%d au total",
+  "共 %d 条，显示前 %d 条": "%d au total, affichage des %d premiers",
   "共 %d 组": "%d groupes",
   "已保存并重建配置": "Enregistré et configuration reconstruite",
   "程序更新": "Mise à jour de l'app",
