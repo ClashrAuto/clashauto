@@ -361,6 +361,11 @@ jobs:
 
   macos:
     name: macOS universal (x86_64 + arm64)
+    # ★★ 已停用（2026-08-01）：macOS 只发 **Swift 版**（macos-swift job）。这个 Qt 版
+    #    mac 构建的产物只上传 Actions artifact、不进 Release（DMG 上传早已停用，见下方
+    #    trigger-mac 的注释），每次 push 纯烧 5 分钟 macOS runner。与 trigger-mac 同样
+    #    留壳不删：要恢复 Qt 版 mac 包时删掉这行 if 即可。
+    if: false
     runs-on: macos-14
     steps:
       - name: Checkout
