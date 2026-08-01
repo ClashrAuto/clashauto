@@ -30,6 +30,15 @@ final class Redirector: @unchecked Sendable {
     // 反制真路由器 RA/NA 的重投节流（uptime 纳秒；0 = 还没反制过）。
     private var lastReassertNanos: UInt64 = 0
 
+    // —— 唤醒沿 boost ——
+    // 某设备空闲一阵后又发 v6 帧 → 它的网关邻居条目多半刚老化、正在重解析 → 进一段 50ms×8 的
+    // 高频重投窗口，抢在真路由器的应答前把「网关在本机」钉回。治「空闲后首次访问先漏到真路由器」。
+    private var boostTimer: DispatchSourceTimer?
+    private var boostRemaining = 0
+    private var lastSeenByMAC: [String: UInt64] = [:]   // 设备 MAC 串 → 上次见到其 v6 帧的 uptime 纳秒
+    private static let kBoostTicks = 8
+    private static let kWakeIdleNanos: UInt64 = 10_000_000_000   // 空闲 >10s 判为唤醒沿
+
     // —— PF 规则的可重建状态 ——
     // v6 设备源地址常在接管**之后**才出现在链路上（`ndp -an` 那一刻手机往往还没在本机邻居表里，
     // 真机实测确认过）。所以除了启动时那份，收包路径还会从被投毒设备**转发来的 v6 帧**里现学
@@ -263,6 +272,7 @@ final class Redirector: @unchecked Sendable {
             return
         }
         timer?.cancel(); timer = nil
+        boostTimer?.cancel(); boostTimer = nil; boostRemaining = 0
         // 先停收包源，再动 bpfFD —— 收包源盯着这个 fd，必须在 close 前取消，否则会对已关的 fd 触发。
         teardownBPFReader()
 
@@ -309,6 +319,7 @@ final class Redirector: @unchecked Sendable {
         deviceIPs = []; deviceMACs = []
         routerLL6 = []
         deviceLLByMAC = [:]
+        lastSeenByMAC = [:]
         pfDeviceIP4s = []; pfV6set = []; pfRedirPort = 0; pfDnsPort = 0
     }
 
@@ -338,6 +349,25 @@ final class Redirector: @unchecked Sendable {
             let frame = NDPPacket.poison(deviceMAC: mac, selfMAC: selfMAC, routerLL6: routerLL6)
             _ = frame.withUnsafeBytes { write(bpfFD, $0.baseAddress, $0.count) }
         }
+    }
+
+    /// 进入一段高频重投窗口（50ms × kBoostTicks），抢在真路由器前钉回。幂等：已在 boost 时只续期。
+    /// 全在 `queue` 上，与收包/1s tick 串行。
+    private func startBoost() {
+        guard v6Active, bpfFD >= 0 else { return }
+        sendNDPSpoof()                 // 立刻先投一轮
+        boostRemaining = Self.kBoostTicks
+        guard boostTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.sendNDPSpoof()
+            self.boostRemaining -= 1
+            if self.boostRemaining <= 0 { self.boostTimer?.cancel(); self.boostTimer = nil }
+        }
+        t.resume()
+        boostTimer = t
     }
 
     // MARK: - BPF
@@ -435,9 +465,16 @@ final class Redirector: @unchecked Sendable {
             return
         }
 
-        // 以下两种都只认**我们正在接管的设备**发来的帧。
+        // 以下几种都只认**我们正在接管的设备**发来的帧。
         guard let srcMACBytes = NDPPacket.ethSource(frame),
               deviceMACs.contains(where: { $0.bytes == srcMACBytes }) else { return }
+
+        // 唤醒沿：该设备空闲 >10s 后又发 v6 帧 → 邻居条目多半刚老化、正在重解析网关 → 进 boost，
+        // 抢在真路由器应答前钉回（治「空闲后首次访问先漏到真路由器」）。每帧只一次时钟读 + 一次查改。
+        let devKey = ARPPacket.MAC(bytes: srcMACBytes).text
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let last = lastSeenByMAC[devKey], now &- last > Self.kWakeIdleNanos { startBoost() }
+        lastSeenByMAC[devKey] = now
 
         // ② 抢答设备 NS（复核路由器 LL）。NS 源是设备 LL（不可路由），不会落到 ③ 的学习里。
         if NDPPacket.isNeighborSolicitation(frame),
