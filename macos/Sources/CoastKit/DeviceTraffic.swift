@@ -35,6 +35,8 @@ public struct DeviceTraffic: Sendable {
 
     /// 连接 id → 上一拍看到的累计字节。
     private var lastSeen: [String: (up: Int64, down: Int64)] = [:]
+    /// 上一拍的时刻。速率要按实测间隔归一化（见 `observe`）。
+    private var lastObservedAt: Date?
 
     public init() {}
 
@@ -49,7 +51,11 @@ public struct DeviceTraffic: Sendable {
     ///     永远显示没流量。Qt 那边同一处的注释写着：「以前这类全部落进『未归属』丢掉」。
     ///     macOS 上这尤其普遍：本机的连接 sourceIP 多半是 127.0.0.1 或 TUN 地址，
     ///     而设备行认的是它的局域网 IP，两者对不上。
-    public mutating func observe(_ rows: [ConnectionRow], localIP: String = "") {
+    /// - Parameter now: 这一拍的时刻。速率按**实测的两拍间隔**归一化，
+    ///   而不是把「一拍的增量」直接当成「每秒」——轮询晚到时（系统忙、睡眠唤醒、
+    ///   核心卡住）攒了 3 秒的量会被报成 3 倍的速率。Qt 那边是 `delta * 1000 / dt`。
+    public mutating func observe(_ rows: [ConnectionRow], localIP: String = "",
+                                 now: Date = Date()) {
         var rates: [String: (up: Int64, down: Int64)] = [:]
         var alive = Set<String>()
 
@@ -84,10 +90,17 @@ public struct DeviceTraffic: Sendable {
             byIP[ip]?.rateUp = 0
             byIP[ip]?.rateDown = 0
         }
+        // 两拍间隔（秒）。第一拍没有上一拍可比，按标称的 1 秒算；
+        // 间隔离谱地小（同一拍被喂了两次）时也按 1 秒，避免除出一个天文数字。
+        let elapsed = lastObservedAt.map { now.timeIntervalSince($0) } ?? 1
+        let seconds = elapsed > 0.05 ? elapsed : 1
+        lastObservedAt = now
+
         for (ip, delta) in rates {
             var sample = byIP[ip] ?? Sample()
-            sample.rateUp = delta.up
-            sample.rateDown = delta.down
+            sample.rateUp = Int64(Double(delta.up) / seconds)
+            sample.rateDown = Int64(Double(delta.down) / seconds)
+            // **累计量用的是原始增量**，不除时间 —— 那是「一共跑了多少字节」，与间隔无关。
             sample.sessionUp += delta.up
             sample.sessionDown += delta.down
             byIP[ip] = sample

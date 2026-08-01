@@ -141,3 +141,50 @@ struct LocalAttributionTests {
         #expect(traffic.sample(ip: "127.0.0.1").rateDown == 7)
     }
 }
+
+@Suite("速率按实测间隔归一化")
+struct RateNormalisationTests {
+
+    private func row(_ id: String, up: Int64, down: Int64) -> ConnectionRow {
+        ConnectionRow(id: id, host: "x.com", network: "tcp", type: "HTTP", process: "",
+                      chain: "US1-HY2", upload: up, download: down,
+                      start: .distantPast, sourceIP: "192.168.1.9")
+    }
+
+    @Test("★ 轮询晚到时不把 3 秒的量报成 3 倍速率")
+    func lateTickDoesNotInflate() {
+        var traffic = DeviceTraffic()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        traffic.observe([row("1", up: 0, down: 0)], now: t0)
+        // 隔了 3 秒才回来，期间跑了 3000 字节 → 1000 B/s，不是 3000
+        traffic.observe([row("1", up: 0, down: 3_000)], now: t0.addingTimeInterval(3))
+        #expect(traffic.sample(ip: "192.168.1.9").rateDown == 1_000)
+    }
+
+    @Test("累计量不除时间——那是「一共跑了多少」，与间隔无关")
+    func sessionTotalsAreRaw() {
+        var traffic = DeviceTraffic()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        traffic.observe([row("1", up: 0, down: 0)], now: t0)
+        traffic.observe([row("1", up: 0, down: 3_000)], now: t0.addingTimeInterval(3))
+        #expect(traffic.sample(ip: "192.168.1.9").sessionDown == 3_000)
+    }
+
+    @Test("正常一秒一拍时与原来一致")
+    func oneSecondTickUnchanged() {
+        var traffic = DeviceTraffic()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        traffic.observe([row("1", up: 0, down: 0)], now: t0)
+        traffic.observe([row("1", up: 0, down: 500)], now: t0.addingTimeInterval(1))
+        #expect(traffic.sample(ip: "192.168.1.9").rateDown == 500)
+    }
+
+    @Test("同一拍被喂两次不会除出天文数字")
+    func zeroIntervalIsSafe() {
+        var traffic = DeviceTraffic()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        traffic.observe([row("1", up: 0, down: 0)], now: t0)
+        traffic.observe([row("1", up: 0, down: 100)], now: t0)
+        #expect(traffic.sample(ip: "192.168.1.9").rateDown == 100)
+    }
+}

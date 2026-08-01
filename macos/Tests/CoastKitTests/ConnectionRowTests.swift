@@ -71,6 +71,7 @@ struct ConnectionRowTests {
 }
 
 @Suite("连接行的设备标注")
+@MainActor
 struct ConnectionDeviceLabelTests {
 
     private func row(sourceIP: String) -> ConnectionRow {
@@ -84,10 +85,14 @@ struct ConnectionDeviceLabelTests {
     private let proxied = [(ip: "192.168.1.50", alias: "客厅电视"),
                            (ip: "192.168.1.51", alias: "")]
 
-    @Test("★ 本机发起的一律留空(每行都标「本机」只是噪音)")
-    func localIsBlank() {
-        #expect(ConnectionRow.deviceLabel(for: row(sourceIP: "127.0.0.1"), proxied: proxied) == "")
-        #expect(ConnectionRow.deviceLabel(for: row(sourceIP: "::1"), proxied: proxied) == "")
+    @Test("★ 回环显示「本机」——曾经写成留空，注释还说「与 Qt 一致」，而 Qt 写的是 tr(\"本机\")")
+    @MainActor
+    func loopbackIsThisMachine() {
+        // 这一列的意义正是把本机流量与局域网设备的流量分开；全空着等于对本机行没有信息。
+        #expect(ConnectionRow.deviceLabel(for: row(sourceIP: "127.0.0.1"), proxied: proxied)
+                == "本机")
+        #expect(ConnectionRow.deviceLabel(for: row(sourceIP: "::1"), proxied: proxied) == "本机")
+        // 源地址本身就没有 —— 没什么可说的，留空
         #expect(ConnectionRow.deviceLabel(for: row(sourceIP: ""), proxied: proxied) == "")
     }
 

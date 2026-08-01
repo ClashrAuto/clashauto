@@ -119,7 +119,10 @@ public final class AppState {
     /// 被代理设备的 (IP, 别名) 列表，供连接行标注发起设备。
     /// 每帧都查一次数据库太浪费，而这份名单只在设备开关变动时才会变。
     public var proxiedDeviceLabels: [(ip: String, alias: String)] {
-        devices.proxiedDevices().map { (ip: $0.lastIP, alias: $0.alias) }
+        // ★ **全部台账设备**，不只是「正在被代理」的那些 —— Qt 的 `deviceNameFor()`
+        //   是拿整张台账去匹配源 IP 的。只看代理中的话，一台认得出名字、但此刻没开代理的
+        //   设备，它的连接在列表里只会显示成一串 IP。
+        devices.all().filter { !$0.lastIP.isEmpty }.map { (ip: $0.lastIP, alias: $0.alias) }
     }
 
     // MARK: 局域网安全告警

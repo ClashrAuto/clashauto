@@ -81,23 +81,35 @@ public struct ConnectionRow: Sendable, Equatable, Identifiable {
 
     /// 这条连接的发起设备名。
     ///
-    /// 本机发起的一律留空（与 Qt 一致）：本机是默认情形，每行都标上「本机」只是噪音；
-    /// 局域网设备走透明代理时才有必要指明「这条是谁的流量」。
-    /// 查不到台账记录时退回 IP —— 有个 IP 也比空着强，至少还能对得上是哪台。
+    /// 口径逐条对齐 Qt 的 `QmlBridge::deviceNameFor()`：
+    ///
+    ///   1. 源 IP 命中台账里某台设备 → 用它的显示名；
+    ///   2. **回环（`127.0.0.1` / `::1`）→ 「本机」** —— 系统代理与 TUN 发出的连接
+    ///      源地址都是它；
+    ///   3. 都不是 → 原样显示 IP（有个 IP 也比空着强，至少对得上是哪台）。
+    ///
+    /// ★ 第 2 条原来是**留空**，注释还写着「与 Qt 一致」—— 而 Qt 明明写的是
+    ///   `return tr("本机")`。这一列的意义正是把本机流量和局域网设备的流量分开，
+    ///   全空着等于这一列对本机行没有信息。
     ///
     /// 写成纯函数：状态页有两张卡（最近连接 / 用量最多）都要用它，
     /// 各写一份的话迟早会漂移，而漂移了没有任何东西会报警。
+    @MainActor
     public static func deviceLabel(for row: ConnectionRow,
                                    proxied: [(ip: String, alias: String)]) -> String {
         deviceLabel(sourceIP: row.sourceIP, proxied: proxied)
     }
 
     /// 同上，直接给 IP 的版本 —— 「用量最多」那张榜是按 host 聚合的，手里没有 `ConnectionRow`。
+    @MainActor
     public static func deviceLabel(sourceIP ip: String,
                                    proxied: [(ip: String, alias: String)]) -> String {
-        guard !ip.isEmpty, !ip.hasPrefix("127."), ip != "::1" else { return "" }
-        guard let match = proxied.first(where: { $0.ip == ip }) else { return ip }
-        return match.alias.isEmpty ? ip : match.alias
+        guard !ip.isEmpty else { return "" }
+        if let match = proxied.first(where: { $0.ip == ip }) {
+            return match.alias.isEmpty ? ip : match.alias
+        }
+        if ip.hasPrefix("127.") || ip == "::1" { return "本机".t }
+        return ip
     }
 
     /// 最近建立的若干条。
