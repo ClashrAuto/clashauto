@@ -259,7 +259,8 @@ struct DevicesPage: View {
             Button {
                 Task { await scan() }
             } label: {
-                Image(systemName: "arrow.clockwise").font(.system(size: 15))
+                Text("\u{F064}") // refresh-line —— 与状态页延迟卡的刷新同一枚字形
+                    .font(.custom(IconFont.remix, size: 15))
                     .rotationEffect(.degrees(scanning ? 360 : 0))
                     .animation(scanning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
                                : .default, value: scanning)
@@ -306,7 +307,8 @@ struct DevicesPage: View {
     @ViewBuilder
     private var scanToggles: some View {
         SquareToggle(symbol: "circle.fill", on: onlineOnly) { onlineOnly.toggle() }
-        SquareToggle(symbol: "arrow.clockwise", on: false, accent: true, spinning: scanning) {
+        SquareToggle(symbol: "arrow.clockwise", remixGlyph: "\u{F064}",
+                     on: false, accent: true, spinning: scanning) {
             Task { await scan() }
         }
         .disabled(scanning)
@@ -832,6 +834,9 @@ struct SmallSwitch: View {
 struct SquareToggle: View {
     @Environment(Theme.self) private var theme
     let symbol: String
+    /// 走 remixicon 字体的码点，给了就**优先于** `symbol` —— 刷新钮要与
+    /// 状态页延迟卡用同一枚 refresh-line 字形。
+    var remixGlyph: String?
     let on: Bool
     var accent = false
     var spinning = false
@@ -839,17 +844,26 @@ struct SquareToggle: View {
 
     @State private var hovering = false
 
+    /// 图标本体（remix 字形优先，否则 SF），两个版本分支共用。
+    private var icon: some View {
+        Group {
+            if let remixGlyph {
+                Text(remixGlyph).font(.custom(IconFont.remix, size: accent ? 15 : 12))
+            } else {
+                Image(systemName: symbol).font(.system(size: accent ? 15 : 12))
+            }
+        }
+        .rotationEffect(.degrees(spinning ? 360 : 0))
+        .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                   : .default, value: spinning)
+        .frame(width: 28, height: 28)
+    }
+
     var body: some View {
         if #available(macOS 26.0, *) {
             // 26：液态玻璃圆钮，开启态是品牌色 tint 的玻璃（不再手画方角底+描边）。
             Button(action: action) {
-                Image(systemName: symbol)
-                    .font(.system(size: accent ? 15 : 12))
-                    .foregroundStyle(on ? .white : (accent ? theme.accent : theme.textMuted))
-                    .rotationEffect(.degrees(spinning ? 360 : 0))
-                    .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                               : .default, value: spinning)
-                    .frame(width: 28, height: 28)
+                icon
                     // 开启底衬在玻璃**里面**（glassEffect 的 .tint 实测发白看不出来）。
                     .background {
                         if on { Capsule().fill(theme.accent.opacity(0.8)) }
@@ -860,13 +874,8 @@ struct SquareToggle: View {
             .glassCapsule()
         } else {
             Button(action: action) {
-                Image(systemName: symbol)
-                    .font(.system(size: accent ? 15 : 12))
+                icon
                     .foregroundStyle(on ? .white : (accent ? theme.accent : theme.textMuted))
-                    .rotationEffect(.degrees(spinning ? 360 : 0))
-                    .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                               : .default, value: spinning)
-                    .frame(width: 28, height: 28)
                     .background {
                         RoundedRectangle(cornerRadius: 3, style: .continuous)
                             .fill(on ? theme.accent : (hovering ? theme.hover : theme.inputBg))

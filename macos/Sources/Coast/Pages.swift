@@ -181,12 +181,11 @@ struct NodesPage: View {
                     Spacer(minLength: 0)
                 }
 
-                // 测速：空闲 refresh-line、测速中持续旋转（Qt 换的是 loader-4-line 字形，
-                // 这里换 SF Symbol 的对应物）。
+                // 测速：refresh-line 字形（与状态页延迟卡的刷新同一枚），
+                // 测速中持续旋转。
                 Button { state.clash.startSpeedTestForValidNodes() } label: {
-                    Image(systemName: state.clash.speedTesting
-                          ? "arrow.triangle.2.circlepath" : "arrow.clockwise")
-                        .font(.system(size: 19))
+                    Text("\u{F064}") // refresh-line
+                        .font(.custom(IconFont.remix, size: 15))
                         .legacyTint(theme.accent)
                         .rotationEffect(.degrees(state.clash.speedTesting ? 360 : 0))
                         .animation(state.clash.speedTesting
