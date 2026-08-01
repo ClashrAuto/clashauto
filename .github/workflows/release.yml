@@ -999,6 +999,10 @@ jobs:
   macos-swift:
     name: macOS (Swift) build + test
     runs-on: macos-15
+    # 硬超时:回归脚本的自检会真的拉起 app,任何一步挂住都不该吃掉整台
+    # runner 几小时(实测 sysproxy 自检挂过 65 分钟,整个 run 被迫手动取消,
+    # 连带 DMG 签名被跳过)。正常全程 ~10 分钟,30 分钟富余充足。
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4

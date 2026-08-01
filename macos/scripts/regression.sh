@@ -102,7 +102,19 @@ echo "== 打包产物自检 =="
 #   下面的 $(...) 就同步吊死 —— CI 的 Verify bundle 曾因此一挂一个多小时,直奔 6 小时
 #   job 超时。macOS 没有 timeout(1),用随系统的 perl alarm:超时进程被 SIGALRM 杀掉、
 #   退出码非 0,按各钩子的 FAIL/SKIP 分支收场,而不是永远等下去。
-hook() { perl -e 'alarm shift @ARGV; exec @ARGV' 60 env "$@"; }
+# 60 秒看门狗。**必须从外部监督并 kill -9 整个进程组**,不能用
+# 「alarm 后 exec」那种写法 —— alarm 虽随 exec 继承,但 SIGALRM 能被
+# 目标进程忽略/吞掉:CI 上 sysproxy 自检的 Coast 就这么挂了 65 分钟
+# (作业被手动取消,清理时进程还活着)。SIGKILL 杀进程组没有这个洞。
+hook() { perl -e '
+    my $t = shift @ARGV;
+    my $pid = fork;
+    if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 }
+    local $SIG{ALRM} = sub { kill -9, $pid };
+    alarm $t;
+    waitpid $pid, 0;
+    exit(($? >> 8) || ($? & 127 ? 1 : 0));
+' 60 env "$@"; }
 
 # 路径/资源:必须从 .app 解析,退 0 即过。
 if out=$(hook COAST_PATHS_SELFTEST=1 "$APP" 2>&1) && ! grep -q "找不到" <<<"$out"; then
