@@ -32,10 +32,10 @@ struct MainView: View {
                 page
                     .safeAreaBar(edge: .bottom, spacing: 0) {
                         // 页脚成了「底部条」：内容从它底下穿过，本体仍旧透玻璃。
-                        // 右侧的 5 只给页脚留（Qt 那条列边距）——
+                        // 右侧留 7（列边距 5 再收 2）—— 只给页脚，
                         // **中间的主内容**占满整个内容区宽度，不跟着让。
                         footer.frame(height: theme.footerHeight)
-                            .padding(.trailing, theme.inset)
+                            .padding(.trailing, theme.inset + 2)
                     }
                     .scrollEdgeEffectStyle(.soft, for: .all)
                     // 主内容列**越过标题栏安全区**、顶到窗顶（距离 0）——
