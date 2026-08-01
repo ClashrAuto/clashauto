@@ -211,8 +211,9 @@ public final class AppState {
         // 关于页那行提示改写成「检查失败」—— 用户关心的主要是程序自身那条。
         // 注意 `try?` 作用在返回 `String?` 的抛出函数上会**压平**成一层 `String?` ——
         // 「网络失败」和「上游没给 tag」在这里合并成同一个 nil，两者的处置本来就一样。
+        // 内核用「不一样即可更新」而非「更大」（`coreHasUpdate` 的注释解释了为什么）。
         if let localCore = CoreVersion.local(), let remote = try? await checker.latestCoreTag() {
-            coreUpdateAvailable = UpdateChecker.isNewer(remote: remote, than: localCore)
+            coreUpdateAvailable = UpdateChecker.coreHasUpdate(remote: remote, local: localCore)
         } else {
             coreUpdateAvailable = false
         }
