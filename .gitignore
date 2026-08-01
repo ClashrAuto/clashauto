@@ -4,3 +4,5 @@ screenshots/
 clashauto-c++/build-qml/
 clashauto-c++/build-release/
 schat.build/
+clashauto-c++/tools/
+.DS_Store
