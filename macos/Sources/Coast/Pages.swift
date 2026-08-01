@@ -176,6 +176,7 @@ struct NodesPage: View {
                             .foregroundStyle(theme.textMuted)
                     }
                     .buttonStyle(.plain)
+                    .topBarGlass()
                     .padding(.leading, 4)
                     Spacer(minLength: 0)
                 }
@@ -194,6 +195,7 @@ struct NodesPage: View {
                                    value: state.clash.speedTesting)
                 }
                 .buttonStyle(.plain)
+                .topBarGlass()
                 .disabled(state.clash.speedTesting)
                 .help("测速".t)
 
@@ -208,6 +210,7 @@ struct NodesPage: View {
                         .foregroundStyle(theme.textMuted)
                 }
                 .buttonStyle(.plain)
+                .topBarGlass()
                 .padding(.trailing, 5)
                 .help("帮助".t)
         }
@@ -390,29 +393,48 @@ private struct LogTab: View {
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 13))
-                .foregroundStyle(isCurrent ? theme.accentStrong : theme.textSecondary)
-                .padding(.horizontal, 16)
-                .frame(height: 30)
-                .background {
-                    RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
-                        .fill(isCurrent ? theme.card : (hovering ? theme.hover : .clear))
-                }
-                // 底部强调条：QML 里宽度是 `parent.width - 20`，即左右各让 10。
-                .overlay(alignment: .bottom) {
-                    if isCurrent {
-                        RoundedRectangle(cornerRadius: 1, style: .continuous)
-                            .fill(theme.accent)
-                            .frame(height: 2)
-                            .padding(.horizontal, 10)
+        if #available(macOS 26.0, *) {
+            // 26：液态玻璃胶囊标签，选中段品牌色 tint（与设置页标签同语言），
+            // 不再画卡底和底部强调条。
+            Button(action: action) {
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isCurrent ? theme.textPrimary : theme.textSecondary)
+                    .padding(.horizontal, 16)
+                    .frame(height: 30)
+                    // 选中底衬在玻璃**里面**（glassEffect 的 .tint 实测发白看不出来）。
+                    .background {
+                        if isCurrent { Capsule().fill(theme.accent.opacity(0.45)) }
                     }
-                }
-                .contentShape(Rectangle())
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .glassCapsule()
+        } else {
+            Button(action: action) {
+                Text(title)
+                    .font(.system(size: 13))
+                    .foregroundStyle(isCurrent ? theme.accentStrong : theme.textSecondary)
+                    .padding(.horizontal, 16)
+                    .frame(height: 30)
+                    .background {
+                        RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
+                            .fill(isCurrent ? theme.card : (hovering ? theme.hover : .clear))
+                    }
+                    // 底部强调条：QML 里宽度是 `parent.width - 20`，即左右各让 10。
+                    .overlay(alignment: .bottom) {
+                        if isCurrent {
+                            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                                .fill(theme.accent)
+                                .frame(height: 2)
+                                .padding(.horizontal, 10)
+                        }
+                    }
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
     }
 }
 

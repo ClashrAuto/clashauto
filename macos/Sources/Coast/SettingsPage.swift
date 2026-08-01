@@ -99,11 +99,31 @@ struct SettingsPage: View {
 
             // 区域 / 规则页没有「应用」。QML 用的是**透明占位**而不是隐藏 ——
             // 隐藏会让它被布局移除、标签栏随之变宽，切标签时整条顶栏跳一下。
-            PillButton(title: "应用".t, primary: true, width: 82,
-                       enabled: tab == .system || tab == .filter) {
-                Task { await apply() }
+            if #available(macOS 26.0, *) {
+                // 26：液态玻璃主按钮 —— 玻璃内衬品牌色 Capsule + 白字
+                // （`.glassProminent` 的着色实测不可靠，发白）。
+                Button {
+                    Task { await apply() }
+                } label: {
+                    Text("应用".t)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .frame(width: 66, height: 30)
+                        .background(Capsule().fill(theme.accent))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .glassCapsule()
+                .disabled(!(tab == .system || tab == .filter))
+                .opacity(tab == .system || tab == .filter ? 1 : 0)
+            } else {
+                PillButton(title: "应用".t, primary: true, width: 82,
+                           enabled: tab == .system || tab == .filter) {
+                    Task { await apply() }
+                }
+                .opacity(tab == .system || tab == .filter ? 1 : 0)
             }
-            .opacity(tab == .system || tab == .filter ? 1 : 0)
         }
         .padding(.top, 10)
         .padding(.horizontal, 10)

@@ -353,20 +353,40 @@ struct SettingTab: View {
     let action: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 14))
-                .foregroundStyle(isCurrent ? theme.accent : theme.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(width: 84, height: 32)
-                .overlay(alignment: .bottom) {
-                    Rectangle()
-                        .fill(isCurrent ? theme.accent : .clear)
-                        .frame(height: 2)
-                }
-                .contentShape(Rectangle())
+        if #available(macOS 26.0, *) {
+            // 26：液态玻璃胶囊标签，选中段是品牌色 tint 的玻璃（与页脚模式段同款），
+            // 不再画底部那条 2px 下划线 —— 玻璃语言里选中态由底色说话。
+            Button(action: action) {
+                Text(title)
+                    .font(.system(size: 14))
+                    .foregroundStyle(isCurrent ? theme.textPrimary : theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: 84, height: 30)
+                    // 选中底衬在玻璃**里面**（glassEffect 的 .tint 实测发白看不出来）。
+                    .background {
+                        if isCurrent { Capsule().fill(theme.accent.opacity(0.45)) }
+                    }
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .glassCapsule()
+        } else {
+            Button(action: action) {
+                Text(title)
+                    .font(.system(size: 14))
+                    .foregroundStyle(isCurrent ? theme.accent : theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(width: 84, height: 32)
+                    .overlay(alignment: .bottom) {
+                        Rectangle()
+                            .fill(isCurrent ? theme.accent : .clear)
+                            .frame(height: 2)
+                    }
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 }

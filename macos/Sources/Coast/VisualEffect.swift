@@ -140,6 +140,21 @@ extension View {
     }
 }
 
+extension View {
+    /// 顶栏图标钮的液态玻璃底：26 上定尺寸 + 系统 glassEffect 胶囊；
+    /// 26 以下**什么都不加** —— 玻璃是 26 的设计语言，旧系统保持 Qt 的裸图标。
+    /// （区别于 `glassCapsule`：那个在旧系统会手画一个灰胶囊底。）
+    @ViewBuilder
+    func topBarGlass(size: CGFloat = 28, tinted: Color? = nil) -> some View {
+        if #available(macOS 26.0, *) {
+            frame(width: size, height: size)
+                .glassCapsule(tinted: tinted)
+        } else {
+            self
+        }
+    }
+}
+
 /// 液态玻璃分段控件：整组一层玻璃，段与段紧挨、没有各自的圆角。
 ///
 /// 从页脚的模式切换抽出来 —— 界面上凡是「一组、单选」的地方都该长这样，

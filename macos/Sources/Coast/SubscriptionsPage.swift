@@ -298,26 +298,50 @@ struct TextBtn: View {
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if let symbol {
-                    Image(systemName: symbol).font(.system(size: 15))
+        if #available(macOS 26.0, *) {
+            // 26：液态玻璃胶囊按钮。主按钮 = 玻璃里内衬一层品牌色 Capsule
+            // （页脚模式段验证过的画法）—— `.glassProminent`/`glassEffect(.tint)`
+            // 的着色实测不可靠（一个发白、一个把次按钮也染成实底蓝）。
+            Button(action: action) {
+                HStack(spacing: 6) {
+                    if let symbol {
+                        Image(systemName: symbol).font(.system(size: 15))
+                    }
+                    Text(label).font(.system(size: 13))
                 }
-                Text(label).font(.system(size: 13))
+                .foregroundStyle(primary ? .white : theme.textPrimary)
+                .fixedSize()
+                .padding(.horizontal, 12)
+                .frame(minHeight: 30)
+                .background {
+                    if primary { Capsule().fill(theme.accent) }
+                }
+                .contentShape(Capsule())
             }
-            .foregroundStyle(primary ? .white : theme.textSecondary)
-            .fixedSize()
-            .padding(.horizontal, 12)
-            .frame(minWidth: 84, minHeight: 30)
-            .background {
-                RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
-                    .fill(primary ? (hovering ? theme.accentStrong : theme.accent)
-                          : (hovering ? theme.hover : theme.metricBg))
+            .buttonStyle(.plain)
+            .glassCapsule()
+        } else {
+            Button(action: action) {
+                HStack(spacing: 6) {
+                    if let symbol {
+                        Image(systemName: symbol).font(.system(size: 15))
+                    }
+                    Text(label).font(.system(size: 13))
+                }
+                .foregroundStyle(primary ? .white : theme.textSecondary)
+                .fixedSize()
+                .padding(.horizontal, 12)
+                .frame(minWidth: 84, minHeight: 30)
+                .background {
+                    RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
+                        .fill(primary ? (hovering ? theme.accentStrong : theme.accent)
+                              : (hovering ? theme.hover : theme.metricBg))
+                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
     }
 }
 

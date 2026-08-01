@@ -33,40 +33,9 @@ struct DevicesPage: View {
     /// 只记 id 不删数据：告警来自每 30 秒一轮的巡检，删掉下一轮又会冒出来。
     /// 消掉的语义是「这条我看过了」，威胁本身还在（列表里仍然能通过设备状态看出来）。
     @State private var dismissedAlerts: Set<String> = []
-    @State private var exportMessage = ""
-
-    /// CSV 导出。用原生保存面板，落盘位置由用户定 —— 直接写到某个固定目录的话，
-    /// 用户既找不到，也可能根本没有那个目录的写权限。
-    private func exportCSV() {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "devices.csv"
-        panel.allowedContentTypes = [.commaSeparatedText]
-        panel.title = "导出设备列表".t
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-
-        // 只导出**我们真的有**的列。Qt 那边还有 type/model/totalDown/totalUp，
-        // 但 Swift 的设备台账里没有这些字段 —— 补几列空值出来只会让人以为数据丢了。
-        let text = CSV.render(
-            header: ["name", "ip", "mac", "vendor", "online", "proxied", "firstSeen"],
-            rows: allRows.map { row in
-                let record = row.record
-                return [
-                    record?.alias.isEmpty == false ? record!.alias : row.discovered.displayName,
-                    row.discovered.ip,
-                    row.discovered.mac,
-                    row.discovered.vendor,
-                    row.online ? "1" : "0",
-                    row.proxyEnabled ? "1" : "0",
-                    record.map { ISO8601DateFormatter().string(from: $0.firstSeen) } ?? "",
-                ]
-            })
-        do {
-            try text.write(to: url, atomically: true, encoding: .utf8)
-            exportMessage = String(format: "已导出到 %@".t, url.path)
-        } catch {
-            exportMessage = String(format: "导出失败：%@".t, error.localizedDescription)
-        }
-    }
+    /// 搜索框是否展开。同节点页：默认只有一颗放大镜钮，点开才出输入框
+    /// （✕ 清空并收起）—— 单行顶栏里常驻输入框会把左右两组挤到一起。
+    @State private var searchShown = false
 
     private let browser = LanBrowser()
 
@@ -146,14 +115,12 @@ struct DevicesPage: View {
     }
 
     var body: some View {
-        // 右下角浮动提示压在整页之上（Qt 的 `noticeBar`）。
-        ZStack(alignment: .bottomTrailing) {
-        // Qt 的设备页没有任何分隔线：概览条 / 搜索行 / 列表靠 10 的行距分开。
+        // Qt 的设备页没有任何分隔线：概览条 / 列表靠 10 的行距分开。
         VStack(spacing: 10) {
             if rows.isEmpty { emptyState } else { list }
             proxyBanner
         }
-        // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 搜索行 → 列表）——
+        // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 列表）——
         // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。26 上它和概览条
         // 一起进顶部导航栏（告警钉着不随滚动走，只会更醒目）。
         .pageHeaderBar(spacing: 10) {
@@ -165,94 +132,186 @@ struct DevicesPage: View {
         .task { await scan() }
         // 详情窗改完台账后立刻重读（否则列表要等下一轮扫描才更新图标/名字）
         .onChange(of: state.ledgerRevision) { _, _ in reloadLedger() }
-
-            noticeBar
-        }
-    }
-
-    /// 右下角浮动提示（导出成功 / 出错），自动消失。对齐 `qml/DevicesPage.qml` 的 `noticeBar`：
-    /// 距右下各 12、半径 5、黑底 78%、白色 12px 正文。
-    ///
-    /// **必须限宽 + 换行**：网关那类报错可以很长（Qt 注释举的例子是 Npcap 权限那条），
-    /// 单行的话会一路撑到窗口左边界外，长文案直接看不全。
-    ///
-    /// 停留 **6 秒**而不是三秒半 —— 两三行的报错三秒半读不完（Qt 的注释原话）。
-    @ViewBuilder
-    private var noticeBar: some View {
-        if !exportMessage.isEmpty {
-            Text(exportMessage)
-                .font(.system(size: 12))
-                .foregroundStyle(.white)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 320, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.black.opacity(0.78))
-                }
-                .padding(12)
-                .transition(.opacity)
-                .task(id: exportMessage) {
-                    try? await Task.sleep(for: .seconds(6))
-                    exportMessage = ""
-                }
-        }
     }
 
     /// 概览条。**逐元素对齐** `qml/DevicesPage.qml` 顶部那一行：
-    /// 设备(18) | 在线 N/M | 代理中 N | 今日 ↓x ↑y | ——— | 新设备提醒 + 34×18 开关 | 导出 | 网关 X。
-    /// 项间距 16；「在线 / 代理中 / 今日」都是**标签在前、数值在后**，两者都是 12px
-    /// —— 原来是「大号数值 + 小标签」，那是另一种读法（像仪表盘），Qt 是一行紧凑的状语。
+    /// 顶栏：**单行**。设备(18) | 在线 N/M | （搜索展开时的输入框，吃掉中间空间）|
+    /// 新设备提醒 + 34×18 开关 | 🔍 | 仅在线 | 重扫。
+    /// 「代理中 / 今日 / 导出 / 网关」已裁掉 —— 单行放不下，且都是低频信息：
+    /// 代理数在底部横幅（已接管 N 台）里有，今日流量状态页有。
+    /// 搜索同节点页：默认一颗放大镜钮，点开才展开成输入框（✕ 清空并收起）。
     private var header: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // 窄了就按优先级把次要项收起来（收起顺序：今日 → 网关 → 提醒文字 → 导出）。
-            //
-            // ★ 断点**不写死像素**，用 `ViewThatFits` 让它按真实排版挑第一个装得下的变体。
-            //   Qt 那边同样不写死，是拿各项自己的 `implicitWidth` 现算的，注释里讲了理由：
-            //   同一句话在 12 种语言里宽度能差一倍（德语的「新设备提醒」比中文长一大截），
-            //   写死的数字必然在某个语言上翻车。
-            //
-            //   不做自适应的后果是实测出来的：窗口拖到最小（640）时，「今日 ↓42.52 KB」
-            //   被压成三行竖排的碎字，「新设备提醒」更是**一个字一行**竖着排下来。
-            ViewThatFits(in: .horizontal) {
-                overviewBar(today: true, gateway: true, alertLabel: true, export: true)
-                overviewBar(today: false, gateway: true, alertLabel: true, export: true)
-                overviewBar(today: false, gateway: false, alertLabel: true, export: true)
-                overviewBar(today: false, gateway: false, alertLabel: false, export: true)
-                overviewBar(today: false, gateway: false, alertLabel: false, export: false)
-            }
-            .padding(.trailing, 10)
+        HStack(spacing: 16) {
+            Text("设备".t)
+                .lineLimit(1)
+                .font(.system(size: 18))
+                .foregroundStyle(theme.textPrimary)
+            stat("在线".t, "\(allRows.filter(\.online).count)/\(allRows.count)")
 
-            // 搜索 / 仅在线 / 重扫：一行三件，两个方钮都是 28×28。
-            HStack(spacing: 6) {
-                TextField("搜索设备 / IP / 厂商".t, text: $search)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.textPrimary)
-                    .padding(.horizontal, 8)
-                    .frame(height: 28)
-                    .background {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous).fill(theme.inputBg)
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .stroke(theme.inputBorder, lineWidth: 1)
-                    }
+            Spacer(minLength: 16)
 
-                SquareToggle(symbol: "circle.fill", on: onlineOnly) { onlineOnly.toggle() }
-                SquareToggle(symbol: "arrow.clockwise", on: false, accent: true, spinning: scanning) {
-                    Task { await scan() }
+            HStack(spacing: 5) {
+                Text("新设备提醒".t).font(.system(size: 11))
+                    .foregroundStyle(theme.textMuted).fixedSize()
+                // 34×18 的小开关（比设置页那颗 46×24 小一圈）—— Qt 这里就是两套尺寸。
+                SmallSwitch(isOn: state.config.newDeviceAlert) {
+                    state.setNewDeviceAlert(!state.config.newDeviceAlert)
                 }
-                .disabled(scanning)
             }
-            .padding(.trailing, 10)
 
+            searchControls
         }
-        // 右内距**不写在这里**：设备列表要一直铺到页面最右缘，它的滚动条才是贴着窗口右侧的。
-        // 上面几行各自补 10 回来（与 Qt 的做法完全一致）。
+        // 右内距在这一行自己补（设备列表仍铺到页面最右缘，滚动条贴窗口右侧）。
         .padding(.leading, 10)
+        .padding(.trailing, 10)
         .padding(.top, 10)
+    }
+
+    /// 液态玻璃形变要的命名空间（26 才用得上）。
+    @Namespace private var searchNS
+
+    /// 搜索 + 仅在线 + 重扫。
+    ///
+    /// 26：整组放进 `GlassEffectContainer`，搜索钮和展开的搜索框共享同一个
+    /// `glassEffectID` —— 点击时是**同一块玻璃**从按钮形态向左拉伸成输入框
+    /// （系统 Liquid Glass 形变），输入框本身也是玻璃，没有「藏按钮、换控件」。
+    /// 26 以下：按钮/输入框互换 + 平面输入底（旧系统没有这套形变）。
+    @ViewBuilder
+    private var searchControls: some View {
+        if #available(macOS 26.0, *) {
+            GlassEffectContainer(spacing: 2) {
+                HStack(spacing: 6) {
+                    Group {
+                        if searchShown {
+                            glassSearchField
+                                .glassEffect(.regular, in: .capsule)
+                                .glassEffectID("search", in: searchNS)
+                        } else {
+                            glassSearchButton
+                                .glassEffect(.regular, in: .capsule)
+                                .glassEffectID("search", in: searchNS)
+                        }
+                    }
+                    glassScanGroup
+                }
+            }
+        } else {
+            HStack(spacing: 6) {
+                if searchShown {
+                    legacySearchField
+                } else {
+                    SquareToggle(symbol: "magnifyingglass", on: false) {
+                        withAnimation(.snappy(duration: 0.22)) { searchShown = true }
+                    }
+                }
+                scanToggles
+            }
+        }
+    }
+
+    /// 26：玻璃胶囊里的搜索框（220×28），✕ 清空并收回按钮形态。
+    private var glassSearchField: some View {
+        ZStack(alignment: .trailing) {
+            TextField("搜索设备 / IP / 厂商".t, text: $search)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(theme.textPrimary)
+                .padding(.leading, 12)
+                .padding(.trailing, 26)
+            Button {
+                search = ""
+                withAnimation(.snappy(duration: 0.28)) { searchShown = false }
+            } label: {
+                Image(systemName: "xmark").font(.system(size: 13))
+                    .foregroundStyle(theme.textMuted)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 9)
+        }
+        .frame(width: 220, height: 28)
+    }
+
+    /// 26：收起态的放大镜钮（28×28，与旁边一组同尺寸）。图标用系统默认前景色。
+    private var glassSearchButton: some View {
+        Button {
+            withAnimation(.snappy(duration: 0.28)) { searchShown = true }
+        } label: {
+            Image(systemName: "magnifyingglass").font(.system(size: 12))
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 26：「仅在线 + 重扫」连体液态玻璃按钮组 —— 两段共一层玻璃、只有外侧是圆的
+    /// （页脚模式组同款画法），「仅在线」开启时段内衬品牌色。图标用系统默认前景色。
+    private var glassScanGroup: some View {
+        HStack(spacing: 0) {
+            Button { onlineOnly.toggle() } label: {
+                Image(systemName: "circle.fill").font(.system(size: 12))
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background {
+                if onlineOnly { Capsule().fill(theme.accent.opacity(0.45)) }
+            }
+            .help("仅显示在线设备".t)
+
+            Button {
+                Task { await scan() }
+            } label: {
+                Image(systemName: "arrow.clockwise").font(.system(size: 15))
+                    .rotationEffect(.degrees(scanning ? 360 : 0))
+                    .animation(scanning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                               : .default, value: scanning)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(scanning)
+            .help("重新扫描".t)
+        }
+        .glassCapsule()
+    }
+
+    /// 26 以下的平面搜索框（220×28，inputBg + 描边）。
+    private var legacySearchField: some View {
+        ZStack(alignment: .trailing) {
+            TextField("搜索设备 / IP / 厂商".t, text: $search)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .foregroundStyle(theme.textPrimary)
+                .padding(.leading, 8)
+                .padding(.trailing, 24)
+                .frame(width: 220, height: 28)
+                .background {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous).fill(theme.inputBg)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .stroke(theme.inputBorder, lineWidth: 1)
+                }
+            Button {
+                search = ""
+                withAnimation(.snappy(duration: 0.22)) { searchShown = false }
+            } label: {
+                Image(systemName: "xmark").font(.system(size: 14))
+                    .foregroundStyle(theme.textMuted)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 7)
+        }
+    }
+
+    /// 「仅在线」圆点 + 重扫，两个分支共用。
+    @ViewBuilder
+    private var scanToggles: some View {
+        SquareToggle(symbol: "circle.fill", on: onlineOnly) { onlineOnly.toggle() }
+        SquareToggle(symbol: "arrow.clockwise", on: false, accent: true, spinning: scanning) {
+            Task { await scan() }
+        }
+        .disabled(scanning)
     }
 
     /// 选中并打开详情窗。窗口已经开着时只是换内容（`selectedDevice` 一变它就跟着重画）。
@@ -284,71 +343,6 @@ struct DevicesPage: View {
             .max { $0.start < $1.start }?
             .host ?? ""
     }
-
-    /// 概览条的一个变体。**逐元素对齐** `qml/DevicesPage.qml` 顶部那一行：
-    /// 设备(18) | 在线 N/M | 代理中 N | 今日 ↓x ↑y | ——— | 新设备提醒 + 34×18 开关 | 导出 | 网关 X，
-    /// 项间距 16；「在线 / 代理中 / 今日」都是**标签在前、数值在后**，两者都是 12px。
-    ///
-    /// 中间那个 `Spacer` 要给 `minLength` —— `ViewThatFits` 比的是各变体的**理想宽**，
-    /// 而 `Spacer()` 的理想宽是 0、怎么都「装得下」，第一个变体就会被无脑选中。
-    private func overviewBar(today: Bool, gateway: Bool,
-                             alertLabel: Bool, export: Bool) -> some View {
-        HStack(spacing: 16) {
-            Text("设备".t)
-                .lineLimit(1)
-                .font(.system(size: 18))
-                .foregroundStyle(theme.textPrimary)
-            stat("在线".t, "\(allRows.filter(\.online).count)/\(allRows.count)")
-            stat("代理中".t, "\(enabledCount)", valueColor: theme.accent)
-
-            // 全部设备**今日**累计上/下行。实时总速率状态页已经有一份（而且更完整 ——
-            // 那是核心的全局速率，不受「能不能归属到某台设备」影响）；这里该回答的是
-            // 「今天这个网络一共用了多少」。
-            if today {
-                HStack(spacing: 8) {
-                    Text("今日".t).font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
-                    Text("↓ " + Formatting.bytes(todayTotals.down))
-                        .font(.system(size: 12)).foregroundStyle(Color(hex: 0x5B_B4_4B))
-                    Text("↑ " + Formatting.bytes(todayTotals.up))
-                        .font(.system(size: 12)).foregroundStyle(Color(hex: 0xB1_4A_4A))
-                }
-                .fixedSize()
-            }
-
-            Spacer(minLength: 16)
-
-            HStack(spacing: 5) {
-                if alertLabel {
-                    Text("新设备提醒".t).font(.system(size: 11))
-                        .foregroundStyle(theme.textMuted).fixedSize()
-                }
-                // 34×18 的小开关（比设置页那颗 46×24 小一圈）—— Qt 这里就是两套尺寸。
-                SmallSwitch(isOn: state.config.newDeviceAlert) {
-                    state.setNewDeviceAlert(!state.config.newDeviceAlert)
-                }
-            }
-
-            // 「导出」在 Qt 里是一段**品牌色文字**，不是按钮 —— 它是个低频动作，
-            // 做成按钮会和旁边的开关抢注意力。
-            if export {
-                Button { exportCSV() } label: {
-                    Text("导出".t).font(.system(size: 11)).foregroundStyle(theme.accent)
-                }
-                .buttonStyle(.plain)
-                .fixedSize()
-            }
-
-            if gateway {
-                Text("网关 ".t + (gatewayIP.isEmpty ? "-" : gatewayIP))
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textMuted)
-                    .fixedSize()
-            }
-        }
-    }
-
-    /// 今日全网上/下行。几条 SUM 聚合，不必每帧算 —— 跟着扫描那一拍刷新即可。
-    @State private var todayTotals: (up: Int64, down: Int64) = (0, 0)
 
     /// 只看在线设备。
     @State private var onlineOnly = false
@@ -486,8 +480,6 @@ struct DevicesPage: View {
         // 每轮扫描后交给 AppState 判断有没有没见过的设备（首轮只记基线、不提醒）
         state.noticeDevices(discovered.map(\.mac))
         reloadLedger()
-        // 今日全网上/下行是几条 SUM 聚合，跟着扫描那一拍刷新即可，不必每帧算。
-        todayTotals = state.history.todayUpDown(scope: .all)
         todayByDevice = state.history.todayByDevice()
     }
 
@@ -867,26 +859,46 @@ struct SquareToggle: View {
     @State private var hovering = false
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: accent ? 15 : 12))
-                .foregroundStyle(on ? .white : (accent ? theme.accent : theme.textMuted))
-                .rotationEffect(.degrees(spinning ? 360 : 0))
-                .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                           : .default, value: spinning)
-                .frame(width: 28, height: 28)
-                .background {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .fill(on ? theme.accent : (hovering ? theme.hover : theme.inputBg))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .stroke(on ? theme.accent : theme.inputBorder, lineWidth: 1)
-                }
-                .contentShape(Rectangle())
+        if #available(macOS 26.0, *) {
+            // 26：液态玻璃圆钮，开启态是品牌色 tint 的玻璃（不再手画方角底+描边）。
+            Button(action: action) {
+                Image(systemName: symbol)
+                    .font(.system(size: accent ? 15 : 12))
+                    .foregroundStyle(on ? .white : (accent ? theme.accent : theme.textMuted))
+                    .rotationEffect(.degrees(spinning ? 360 : 0))
+                    .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                               : .default, value: spinning)
+                    .frame(width: 28, height: 28)
+                    // 开启底衬在玻璃**里面**（glassEffect 的 .tint 实测发白看不出来）。
+                    .background {
+                        if on { Capsule().fill(theme.accent.opacity(0.8)) }
+                    }
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .glassCapsule()
+        } else {
+            Button(action: action) {
+                Image(systemName: symbol)
+                    .font(.system(size: accent ? 15 : 12))
+                    .foregroundStyle(on ? .white : (accent ? theme.accent : theme.textMuted))
+                    .rotationEffect(.degrees(spinning ? 360 : 0))
+                    .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
+                               : .default, value: spinning)
+                    .frame(width: 28, height: 28)
+                    .background {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(on ? theme.accent : (hovering ? theme.hover : theme.inputBg))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .stroke(on ? theme.accent : theme.inputBorder, lineWidth: 1)
+                    }
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
     }
 }
 
