@@ -55,6 +55,7 @@ if [ -n "$WZ" ]; then
   [ ! -e win/opengl32sw.dll ]      && ok "无 opengl32sw.dll（瘦身 ~20MB 生效）" || bad "opengl32sw.dll 还在（瘦身没生效）"
   [ ! -e win/d3dcompiler_47.dll ]  && ok "无 d3dcompiler_47.dll（~4MB）"        || bad "d3dcompiler_47.dll 还在"
   [ -f win/Qt6Quick.dll ]          && ok "Qt6Quick.dll 已部署"                  || bad "缺 Qt6Quick.dll（QML 运行时没打进去）"
+  [ -f win/core.exe ]              && ok "core.exe 已集成（打包默认带正式版内核）" || bad "缺 core.exe（打包应默认集成内核）"
 else bad "没找到 windows x64 便携 zip"; fi
 
 sec "macOS DMG — Coast.app + com.yuehongsun.coast（best-effort，7z 解 DMG）"
@@ -76,6 +77,9 @@ if [ -n "$DMG" ]; then
     [ -e "$APP/Contents/MacOS/Coast" ] && ok "Contents/MacOS/Coast" || bad "缺 MacOS/Coast"
     [ -e "$APP/Contents/MacOS/com.yuehongsun.coast.helper" ] && ok "helper = com.yuehongsun.coast.helper" || skip "没见到 helper 可执行（7z 可能没解全）"
     [ ! -e "$APP/Contents/Clashr-Auto" ] && ok "无 Contents/Clashr-Auto（自包含）" || bad "仍塞了 Contents/Clashr-Auto"
+    # 内核集成是 make_app.sh 的默认行为；外部签名仓库若自己组装 .app 可能没带——
+    # 7z 对 DMG 的解包也不完整，所以缺失只 skip 提示人工核对，不判失败。
+    [ -e "$APP/Contents/Resources/core" ] && ok "Resources/core 内核已集成" || skip "未见 Resources/core（7z 可能没解全；或外部签名包未走 make_app.sh——请人工核对）"
   fi
 else bad "没找到 macos universal dmg"; fi
 
@@ -88,6 +92,7 @@ if [ -n "$DEB" ]; then
   grep -q '/usr/share/applications/coast.desktop' deb-contents.txt && ok "coast.desktop 桌面项"               || bad "缺 coast.desktop"
   grep -q 'clashauto-c++' deb-contents.txt && bad "deb 仍含 clashauto-c++ 子目录" || ok "无 clashauto-c++ 子目录"
   grep -q 'Clashr-Auto'   deb-contents.txt && bad "deb 仍含 Clashr-Auto"        || ok "无 Clashr-Auto"
+  grep -q '/opt/coast/core$' deb-contents.txt && ok "/opt/coast/core 内核已集成（打包默认带正式版内核）" || bad "缺 /opt/coast/core（打包应默认集成内核）"
 else bad "没找到 linux x86_64 .deb"; fi
 
 sec "Linux 无头运行冒烟（装 .deb + Xvfb 真跑 Coast）"
@@ -139,6 +144,7 @@ if [ -n "$TG" ]; then
   tar tzf "$TG" > tar-list.txt 2>/dev/null
   grep -q '^ClashAuto/coast$' tar-list.txt && ok "tar 内 ClashAuto/coast（扁平，二进制在包根）" || bad "tar 布局不对（期望 ClashAuto/coast）"
   grep -q 'clashauto-c++' tar-list.txt && bad "tar 仍含 clashauto-c++" || ok "tar 无 clashauto-c++ 子目录"
+  grep -q '^ClashAuto/core$' tar-list.txt && ok "tar 内已集成内核 ClashAuto/core" || bad "tar 缺 core（打包应默认集成内核）"
 else skip "没找到 linux x86_64 便携 tar.gz"; fi
 
 sec "汇总"

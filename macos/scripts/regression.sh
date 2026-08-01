@@ -81,7 +81,9 @@ fi
 # —— 2. 打包 ——
 if [[ $BUILD -eq 1 ]]; then
     echo "== 打包 =="
-    if bash scripts/make_app.sh --version 0.0.0-regress >/tmp/coast-pkg.log 2>&1; then
+    # --no-core：回归自检要离线可跑、可重复 —— 别让一次 GitHub 限流把整轮自检拖死。
+    # 「默认集成内核」本身由正式打包路径（不带该参数的 make_app.sh）覆盖。
+    if bash scripts/make_app.sh --version 0.0.0-regress --no-core >/tmp/coast-pkg.log 2>&1; then
         line "make_app.sh" "PASS"; ((pass++))
     else
         line "make_app.sh" "FAIL (见 /tmp/coast-pkg.log)"; ((fail++))
@@ -96,15 +98,33 @@ APP=./Coast.app/Contents/MacOS/Coast
 # 每个钩子:跑它,按退出码 + 输出判 PASS/FAIL/SKIP。
 echo "== 打包产物自检 =="
 
+# ★ 每个钩子都套超时。任何一个钩子挂住(最典型:授权弹窗在无人值守环境弹出去没人点),
+#   下面的 $(...) 就同步吊死 —— CI 的 Verify bundle 曾因此一挂一个多小时,直奔 6 小时
+#   job 超时。macOS 没有 timeout(1),用随系统的 perl alarm:超时进程被 SIGALRM 杀掉、
+#   退出码非 0,按各钩子的 FAIL/SKIP 分支收场,而不是永远等下去。
+# 60 秒看门狗。**必须从外部监督并 kill -9 整个进程组**,不能用
+# 「alarm 后 exec」那种写法 —— alarm 虽随 exec 继承,但 SIGALRM 能被
+# 目标进程忽略/吞掉:CI 上 sysproxy 自检的 Coast 就这么挂了 65 分钟
+# (作业被手动取消,清理时进程还活着)。SIGKILL 杀进程组没有这个洞。
+hook() { perl -e '
+    my $t = shift @ARGV;
+    my $pid = fork;
+    if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 }
+    local $SIG{ALRM} = sub { kill -9, $pid };
+    alarm $t;
+    waitpid $pid, 0;
+    exit(($? >> 8) || ($? & 127 ? 1 : 0));
+' 60 env "$@"; }
+
 # 路径/资源:必须从 .app 解析,退 0 即过。
-if out=$(COAST_PATHS_SELFTEST=1 "$APP" 2>&1) && ! grep -q "找不到" <<<"$out"; then
+if out=$(hook COAST_PATHS_SELFTEST=1 "$APP" 2>&1) && ! grep -q "找不到" <<<"$out"; then
     line "paths (种子资源)" "PASS"; ((pass++))
 else
     line "paths (种子资源)" "FAIL"; ((fail++)); echo "$out" | sed 's/^/      /'
 fi
 
 # 默认网关三要素:取到即过;取不到多半是没连网(SKIP,不算 bug)。
-if out=$(COAST_TOPO_SELFTEST=1 "$APP" 2>&1) && grep -q "三要素齐全" <<<"$out"; then
+if out=$(hook COAST_TOPO_SELFTEST=1 "$APP" 2>&1) && grep -q "三要素齐全" <<<"$out"; then
     line "topo (网关三要素)" "PASS"; ((pass++))
 else
     line "topo (网关三要素)" "SKIP (无默认网关?未联网)"; ((skip++))
@@ -112,7 +132,7 @@ fi
 
 # helper 布局:plist + 可执行在位、且 SMAppService 状态不是 notFound 即算包对了。
 # 「注册被拒」在 ad-hoc 下是预期(需正式证书),算 SKIP 不算 FAIL。
-out=$(COAST_HELPER_SELFTEST=1 "$APP" 2>&1)
+out=$(hook COAST_HELPER_SELFTEST=1 "$APP" 2>&1)
 if grep -q "daemon plist 存在: true" <<<"$out" && grep -q "helper 可执行:     true" <<<"$out"; then
     if grep -qE "状态: (enabled|requiresApproval)" <<<"$out"; then
         line "helper (布局+注册)" "PASS"; ((pass++))
@@ -125,7 +145,8 @@ fi
 
 # 系统代理机制:经 SCPreferences 写系统代理。ad-hoc 无免密授权时会失败——
 # 这是环境限制(SKIP),不是 bug;正式签名 + 真实桌面会话下才验得了。
-if out=$(COAST_SYSPROXY_SELFTEST=1 "$APP" 2>&1) && grep -q "^PASS" <<<"$out"; then
+# (无 TTY 时自检自己会禁掉授权弹窗立即失败 → SKIP;有 TTY 才可能弹密码框真验。)
+if out=$(hook COAST_SYSPROXY_SELFTEST=1 "$APP" 2>&1) && grep -q "^PASS" <<<"$out"; then
     line "sysproxy (机制)" "PASS"; ((pass++))
 else
     line "sysproxy (机制)" "SKIP (需授权/正式签名,开发机验不了)"; ((skip++))

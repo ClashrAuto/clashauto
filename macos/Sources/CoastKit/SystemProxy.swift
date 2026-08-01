@@ -33,6 +33,13 @@ public final class SystemProxy: @unchecked Sendable {
     /// 改端口都不再弹。这正是替代 networksetup 的目的。
     private var authorization: AuthorizationRef?
 
+    /// 是否允许授权弹密码框。GUI 下保持默认（弹一次正是想要的）。
+    /// **无人值守环境必须关掉**：`AuthorizationCopyRights` 的密码框弹出去没人点，
+    /// 调用就永远不返回 —— CI 的打包自检曾因此把 Verify bundle 吊死一个多小时。
+    /// 关掉后无缓存授权时立刻返回 `errAuthorizationInteractionNotAllowed`，
+    /// 调用方按「环境验不了」处理，而不是挂死。
+    public var allowAuthorizationPrompt = true
+
     public init() {}
 
     deinit {
@@ -119,7 +126,9 @@ public final class SystemProxy: @unchecked Sendable {
             var item = AuthorizationItem(name: name, valueLength: 0, value: nil, flags: 0)
             return withUnsafeMutablePointer(to: &item) { itemPointer in
                 var rights = AuthorizationRights(count: 1, items: itemPointer)
-                let flags: AuthorizationFlags = [.interactionAllowed, .preAuthorize, .extendRights]
+                let flags: AuthorizationFlags = allowAuthorizationPrompt
+                    ? [.interactionAllowed, .preAuthorize, .extendRights]
+                    : [.preAuthorize, .extendRights]
                 return AuthorizationCopyRights(created, &rights, nil, flags, nil)
             }
         }
@@ -142,6 +151,10 @@ public final class SystemProxy: @unchecked Sendable {
     /// 机制在这台机器上到底通不通。不建 GUI、不起核心。
     public static func selfTest(host: String = "127.0.0.1", port: Int = 7890) -> (ok: Bool, message: String) {
         let proxy = SystemProxy()
+        // 无 TTY = 无人值守（CI/无头机）：不许弹授权框 —— 弹出去没人点，自检进程就永远
+        // 不退出，上层 regression.sh 的 $(...) 同步等着，一等就是几小时（CI 实翻过车）。
+        // 有人在终端上跑时保持原样：弹一次密码框，真验一遍机制。
+        proxy.allowAuthorizationPrompt = isatty(fileno(stdin)) == 1
         let before = currentHTTPProxy()
         do {
             try proxy.enable(host: host, port: port)

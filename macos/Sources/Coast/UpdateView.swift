@@ -279,7 +279,8 @@ struct UpdateView: View {
         // ★ 查询/下载阶段**不停核心**（用户的网还靠它跑着；下载本身不走代理，
         //   只有「国内加速」镜像开关）。拿到产物后才停核 → 替换 → 重启。
         let wasRunning = state.controller.isCoreRunning
-        let downloader = CoreDownloader(useMirror: state.config.mirror)
+        let downloader = CoreDownloader(useMirror: state.config.mirror,
+                                        includePrerelease: state.config.receiveBeta)
         do {
             let downloaded = try await downloader.fetchAndExtract { step in
                 Task { @MainActor in apply(step) }
@@ -290,7 +291,7 @@ struct UpdateView: View {
             // 停了才装的，装失败也要拉回来 —— 别让一次更新失败断了网。
             if wasRunning { await state.controller.startCore() }
             try installResult.get()
-            status = String(format: "内核已更新到 %@".t, downloaded.tag)
+            status = String(format: "内核已更新到 %@".t, downloaded.version)
             coreLocalVersion = CoreVersion.local()
         } catch {
             status = String(format: "内核更新失败：%@".t, "\(error)")
