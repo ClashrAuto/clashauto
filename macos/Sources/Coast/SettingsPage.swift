@@ -66,7 +66,8 @@ struct SettingsPage: View {
                     .foregroundStyle(theme.textMuted)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .padding(.horizontal, 10)
+                    .padding(.trailing, 10)
+                    .padding(.leading, pageLeadingInset)
             }
 
             switch tab {
@@ -134,7 +135,8 @@ struct SettingsPage: View {
             }
         }
         .padding(.top, 10)
-        .padding(.horizontal, 10)
+        .padding(.trailing, 10)
+        .padding(.leading, pageLeadingInset)
     }
 
     // MARK: TAB 0 系统
@@ -268,7 +270,8 @@ struct SettingsPage: View {
                     }
                 }
             }
-            .padding(.horizontal, 10)
+            .padding(.trailing, 10)
+            .padding(.leading, pageLeadingInset)
             // QML 末尾那个 `Item { Layout.preferredHeight: 0 }`：列 spacing 10 即末卡距底距离。
             .padding(.bottom, 10)
         }
@@ -300,7 +303,8 @@ struct SettingsPage: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 10)
+        .padding(.trailing, 10)
+        .padding(.leading, pageLeadingInset)
         .padding(.bottom, 10)
     }
 
@@ -323,7 +327,8 @@ struct SettingsPage: View {
                 Text(String(format: "共 %d 组".t, areas.count))
                     .font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
             }
-            .padding(.horizontal, 10)
+            .padding(.trailing, 10)
+            .padding(.leading, pageLeadingInset)
 
             ScrollView {
                 LazyVStack(spacing: 4) {
@@ -367,7 +372,8 @@ struct SettingsPage: View {
                      : String(format: "共 %d 条".t, rules.count))
                     .font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
             }
-            .padding(.horizontal, 10)
+            .padding(.trailing, 10)
+            .padding(.leading, pageLeadingInset)
 
             ScrollView {
                 LazyVStack(spacing: 4) {
@@ -426,7 +432,8 @@ struct SettingsPage: View {
             .frame(height: 36)
             .background(theme.nodeRowBg)
             .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
-            .padding(.horizontal, 10)
+            .padding(.trailing, 10)
+            .padding(.leading, pageLeadingInset)
     }
 
     // MARK: 落盘

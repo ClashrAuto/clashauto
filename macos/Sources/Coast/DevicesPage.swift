@@ -160,7 +160,8 @@ struct DevicesPage: View {
             searchControls
         }
         // 右内距在这一行自己补（设备列表仍铺到页面最右缘，滚动条贴窗口右侧）。
-        .padding(.leading, 10)
+        // 26 上左缘贴边（pageLeadingInset = 0）。
+        .padding(.leading, pageLeadingInset)
         .padding(.trailing, 10)
         .padding(.top, 10)
     }

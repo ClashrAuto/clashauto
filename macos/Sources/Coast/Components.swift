@@ -27,6 +27,12 @@ struct Card<Content: View>: View {
     }
 }
 
+/// 26 上主内容（中间那一片）左缘**贴住侧栏边**（0）；26 以下保留 Qt 的 10。
+/// 页脚不适用 —— 它保留右侧 5 的列边距（见 MainView）。
+var pageLeadingInset: CGFloat {
+    if #available(macOS 26.0, *) { 0 } else { 10 }
+}
+
 extension View {
     /// 页面顶栏的挂载方式。
     ///

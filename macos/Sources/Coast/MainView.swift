@@ -32,15 +32,14 @@ struct MainView: View {
                 page
                     .safeAreaBar(edge: .bottom, spacing: 0) {
                         // 页脚成了「底部条」：内容从它底下穿过，本体仍旧透玻璃。
+                        // 右侧的 5 只给页脚留（Qt 那条列边距）——
+                        // **中间的主内容**占满整个内容区宽度，不跟着让。
                         footer.frame(height: theme.footerHeight)
+                            .padding(.trailing, theme.inset)
                     }
                     .scrollEdgeEffectStyle(.soft, for: .all)
-                    // 右侧仍让出 5（Qt 加在整列上的那条边距）。
-                    .padding(.trailing, theme.inset)
-                    // 主内容列**越过标题栏安全区**、直起于窗顶下 10 ——
-                    // 红绿灯在左边压着侧栏，内容列上方那条安全区只是空带，
-                    // 让给它等于页头凭空低了一截。
-                    .padding(.top, 10)
+                    // 主内容列**越过标题栏安全区**、顶到窗顶（距离 0）——
+                    // 红绿灯在左边压着侧栏，各页顶部导航栏与它同一条带。
                     .ignoresSafeArea(.container, edges: .top)
             } else {
                 VStack(spacing: 0) {
@@ -62,6 +61,16 @@ struct MainView: View {
 
     // MARK: 侧栏
 
+    /// 26 上导航项右侧的留白（与左侧 20 对称）；26 以下贴内容卡、不留。
+    private var navTrailingInset: CGFloat {
+        if #available(macOS 26.0, *) { 20 } else { 0 }
+    }
+
+    /// 侧栏整列的顶距：Qt 是 16；26 上标题栏加高后减 10。
+    private var sidebarTopInset: CGFloat {
+        if #available(macOS 26.0, *) { 6 } else { 16 }
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
             logo
@@ -74,6 +83,9 @@ struct MainView: View {
                     state.currentPage = page
                 }
                 .padding(.leading, 20)
+                // 26：右侧留和左侧一样的 20 —— 高亮是四角全圆的独立胶囊（见
+                // NavButton），两侧等距才像悬浮的一颗；26 以下右缘要贴内容卡，不留。
+                .padding(.trailing, navTrailingInset)
                 .padding(.top, page == .status ? 0 : 5)
             }
 
@@ -81,7 +93,8 @@ struct MainView: View {
             versionRow
                 .padding(.bottom, 5)
         }
-        .padding(.top, 16)
+        // 26：logo 顶距在 Qt 的 16 基础上减 10（标题栏加高后原值显得空）。
+        .padding(.top, sidebarTopInset)
     }
 
     private var logo: some View {

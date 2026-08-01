@@ -57,6 +57,19 @@ struct WindowConfigurator: NSViewRepresentable {
         // 阴影要保留：非不透明窗口若不显式开启，macOS 会连投影一起去掉，
         // 窗口边缘会糊在桌面上，看不出这是一个独立的窗。
         window.hasShadow = true
+
+        if #available(macOS 26.0, *) {
+            // 26：标题栏加高到与页面顶部导航栏一带同高（≈ 顶距 10 + 栏高 28 那一带）。
+            // 做法是挂一个**空的** NSToolbar —— 这是把标题栏抬到统一工具栏高度、
+            // 让红绿灯在其中垂直居中的受支持写法；transparent 保证不画任何工具栏底。
+            window.titlebarAppearsTransparent = true
+            if window.toolbar == nil {
+                let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
+                toolbar.showsBaselineSeparator = false
+                window.toolbar = toolbar
+            }
+            window.toolbarStyle = .unified
+        }
     }
 }
 

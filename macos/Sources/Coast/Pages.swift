@@ -80,7 +80,8 @@ struct StatusPage: View {
             }
             // 页面内距对齐 Qt：左/上/下 10，**右边不留** —— 滚动条要贴页面右缘，
             // 而不是悬在离边 10 的空中；内容列自己收窄 10 补回来。
-            .padding(.leading, 10)
+            // （26 上左缘贴边：pageLeadingInset = 0。）
+            .padding(.leading, pageLeadingInset)
             .padding(.vertical, 10)
             .padding(.trailing, 10)
         }
@@ -125,8 +126,11 @@ struct NodesPage: View {
     var body: some View {
         content
             .pageHeaderBar(spacing: 8) { topBar }
-            // Qt: `anchors.margins: 10`，各页自管内距（StackLayout 那边是 0）。
-            .padding(10)
+            // Qt: `anchors.margins: 10`，各页自管内距（StackLayout 那边是 0）；
+            // 26 上左缘贴边（pageLeadingInset = 0）。
+            .padding(.vertical, 10)
+            .padding(.trailing, 10)
+            .padding(.leading, pageLeadingInset)
     }
 
     /// 顶栏固定 30 高（搜索框 28，展开时不撑高整行）、间距 6 —— 与 Qt 逐项一致。
@@ -385,7 +389,8 @@ struct LogsPage: View {
                     Spacer(minLength: 0)
                 }
                 .padding(.top, 10)
-                .padding(.horizontal, 10)
+                .padding(.trailing, 10)
+                .padding(.leading, pageLeadingInset)
             }
     }
 }

@@ -64,7 +64,8 @@ struct SubscriptionsPage: View {
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textMuted)
                     .lineLimit(2)
-                    .padding(.horizontal, 10)
+                    .padding(.trailing, 10)
+                    .padding(.leading, pageLeadingInset)
                     .padding(.bottom, 6)
             }
         }
@@ -120,7 +121,8 @@ struct SubscriptionsPage: View {
             .disabled(busy || summaries.isEmpty)
         }
         .padding(.top, 10)
-        .padding(.horizontal, 10)
+        .padding(.trailing, 10)
+        .padding(.leading, pageLeadingInset)
     }
 
     // MARK: 订阅卡（高 108，左右内缩 10；卡内左 12 右 10 上下 8，行距 3）
@@ -189,7 +191,8 @@ struct SubscriptionsPage: View {
         .frame(height: 108)
         .background(theme.metricBg)
         .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
-        .padding(.horizontal, 10)
+        .padding(.trailing, 10)
+        .padding(.leading, pageLeadingInset)
     }
 
     private func metaText(_ summary: SubscriptionSummary) -> String {
