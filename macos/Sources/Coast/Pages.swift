@@ -32,24 +32,27 @@ struct StatusPage: View {
                 // 其余行之间就会被撑出不均匀的空隙（实测第二、三行之间空了近 100pt）。
                 // 两个 HStack 各自定高，间距完全可控，也更贴近 Qt 的 GridLayout 行为
                 // （那边每张卡都写死 Layout.preferredHeight）。
-                HStack(spacing: 10) {
+                // 每行 `alignment: .top` + 两张卡同一个定高：HStack 默认是**垂直居中**，
+                // 一旦两张卡实高有出入（内容撑高/撑矮一点），就会上下错位 —— 顶对齐 +
+                // 定高把「同行同高、顶边齐平」定死，与 Qt GridLayout 的行为一致。
+                HStack(alignment: .top, spacing: 10) {
                     // ★ 这里必须是**速率**。Qt 用的是 `bridge.upText`，那是
                     //   `speedText(up)`（带 `/s`）。原来写的是 `Formatting.bytes(...)`，
                     //   于是把「1.2 MB/s」显示成了「1.2 MB」—— 一个把速率读成总量的错。
-                    TrafficCard(symbol: "arrow.up.square", title: "上传".t,
+                    TrafficCard(glyph: "\u{F24A}", title: "上传".t, // upload-2-line
                                 value: state.upText,
                                 accent: theme.uploadAccent,
                                 lineColor: theme.uploadLine,
                                 samples: state.bandwidthSamples.map(\.up),
                                 tick: state.pollTick)
-                    TrafficCard(symbol: "arrow.down.square", title: "下载".t,
+                    TrafficCard(glyph: "\u{EC54}", title: "下载".t, // download-2-line
                                 value: state.downText,
                                 accent: theme.downloadAccent,
                                 lineColor: theme.downloadLine,
                                 samples: state.bandwidthSamples.map(\.down),
                                 tick: state.pollTick)
                 }
-                HStack(spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
                     ConnectionsCard(recent: recentRows,
                                     onOpenAll: { openWindow(id: ConnectionsWindowID.value) },
                                     onClearAll: { state.closeAllConnections() },
@@ -58,7 +61,7 @@ struct StatusPage: View {
                     LatencyCard(monitor: state.latency)
                         .frame(height: 268)
                 }
-                HStack(spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
                     CompositionCard().frame(height: 268)
                     TodayTrafficCard().frame(height: 268)
                 }
@@ -478,8 +481,8 @@ struct TodayTrafficCard: View {
             // 口径用分段而不是勾选框 —— 「全部」和「仅代理」是两个并列的视角，
             // 勾选框把「全部」变成了「没勾上的那个」，读起来是另一回事。
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "chart.bar")
-                    .font(.system(size: 28)).foregroundStyle(theme.cardIcon)
+                Text("\u{EA96}") // bar-chart-2-line（对齐 Qt）
+                    .font(.custom(IconFont.remix, size: 28)).foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("今日流量".t).font(.system(size: 13)).foregroundStyle(theme.todayAccent)
                         .lineLimit(1)
@@ -602,8 +605,8 @@ struct CompositionCard: View {
         let divisor = max(comp.totalBytes, 1)
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "arrow.left.arrow.right.circle")
-                    .font(.system(size: 28)).foregroundStyle(theme.cardIcon)
+                Text("\u{ECAD}") // exchange-line（对齐 Qt）
+                    .font(.custom(IconFont.remix, size: 28)).foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("总流量".t).font(.system(size: 13)).foregroundStyle(theme.directDot)
                         .lineLimit(1)

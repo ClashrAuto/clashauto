@@ -24,8 +24,8 @@ struct LatencyCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "timer")
-                    .font(.system(size: 28))
+                Text("\u{F215}") // timer-line（对齐 Qt）
+                    .font(.custom(IconFont.remix, size: 28))
                     .foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
@@ -44,22 +44,25 @@ struct LatencyCard: View {
                         .foregroundStyle(theme.latencyColor(reading.directMs))
                 }
                 Spacer()
-                // 手动重测：四项一起再来一轮（平时 10s 自动一轮）
+            }
+            // 手动重测：四项一起再来一轮（平时 10s 自动一轮）。
+            // Qt 同款：卡片右上角一个**裸的** refresh 字形，探测中置灰并旋转 ——
+            // 原来套着玻璃胶囊悬在头部右侧中央，比头部还高，两张卡顶不齐。
+            .overlay(alignment: .topTrailing) {
                 Button {
                     Task { await monitor.probe() }
                 } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12))
-                        .foregroundStyle(theme.accent)
-                        .padding(6)
+                    Text("\u{F064}") // refresh-line
+                        .font(.custom(IconFont.remix, size: 15))
+                        .foregroundStyle(monitor.probing ? theme.textMuted : theme.accent)
                         .rotationEffect(.degrees(monitor.probing ? 360 : 0))
                         .animation(monitor.probing
                                    ? .linear(duration: 0.9).repeatForever(autoreverses: false)
                                    : .default,
                                    value: monitor.probing)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .glassCapsule()
                 .disabled(monitor.probing)
                 .help("重新测一轮".t)
             }

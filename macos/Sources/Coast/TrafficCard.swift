@@ -16,7 +16,8 @@ import SwiftUI
 struct TrafficCard: View {
     @Environment(Theme.self) private var theme
 
-    let symbol: String
+    /// Remix 码点（`IconFont.remix`，对齐 Qt `MetricCard.glyph`）。
+    let glyph: String
     let title: String
     let value: String
     /// 标题与数值的颜色（Qt 的 `accentColor`）。
@@ -45,9 +46,9 @@ struct TrafficCard: View {
             // 且窗口越高字越往下漂。尺寸逐项照抄 `qml/MetricCard.qml`：
             // 左内距 14 / 右 10 / 间距 12、图标 28、标题 13、数值 24，标题与数值同为品牌色。
             HStack(spacing: 12) {
-                Image(systemName: symbol)
-                    .font(.system(size: 28))
-                    .foregroundStyle(theme.dark ? Color(hex: 0xAA_AA_AA) : Color(hex: 0x88_88_88))
+                Text(glyph)
+                    .font(.custom(IconFont.remix, size: 28))
+                    .foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title).font(.system(size: 13)).foregroundStyle(accent)
                         .lineLimit(1).truncationMode(.tail)

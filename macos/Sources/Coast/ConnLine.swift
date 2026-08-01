@@ -83,50 +83,54 @@ struct ConnectionsCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "link")
-                    .font(.system(size: 28))
+                Text("\u{EEB8}") // pulse（对齐 Qt，沿用原卡图标）
+                    .font(.custom(IconFont.remix, size: 28))
                     .foregroundStyle(theme.cardIcon)
                 VStack(alignment: .leading, spacing: 2) {
-                    // 按钮组**紧贴标题右侧**，不是甩到卡片最右 —— 对齐 Qt。
-                    // 甩到最右的话，标题和它之间隔着一整片空白，读起来像两件不相干的东西。
-                    HStack(spacing: 6) {
-                        // ★ **必须 `lineLimit(1)`**。SwiftUI 的 `Text` 默认会换行，而
-                        //   QML 的 `Text` 默认**不换行**（没写 `wrapMode` 就是单行）。
-                        //   德文的「Verbindungen」在 640 宽下被折成了「Verbindun / gen」，
-                        //   把下面那个大号数字整体顶下去，与右边的延迟卡错开一行 ——
-                        //   截图才看得出来。其余几张卡的标题同理。
-                        Text("连接".t)
-                            .lineLimit(1)
-                            .font(.system(size: 13))
-                            .foregroundStyle(theme.accent)
-                        // 两个动作是一组，用融合玻璃：形状上连成一片，
-                        // 比原来「手画一个底 + 中间画一条线」更贴系统。
-                        GlassGroup(spacing: 2) {
-                            Button(action: onOpenAll) {
-                                Image(systemName: "eye").font(.system(size: 12))
-                                    .foregroundStyle(theme.textPrimary)
-                                    .padding(.horizontal, 7).padding(.vertical, 3)
-                            }
-                            .buttonStyle(.plain)
-                            .glassCapsule()
-                            .help("查看全部连接".t)
-                            Button(action: onClearAll) {
-                                // 垃圾桶用危险色 —— 这是不可撤销的批量断开，
-                                // 和旁边的「查看」不该长得一样。
-                                Image(systemName: "trash").font(.system(size: 12))
-                                    .foregroundStyle(theme.danger)
-                                    .padding(.horizontal, 7).padding(.vertical, 3)
-                            }
-                            .buttonStyle(.plain)
-                            .glassCapsule()
-                            .help("全部断开".t)
-                        }
-                    }
+                    // ★ **必须 `lineLimit(1)`**。SwiftUI 的 `Text` 默认会换行，而
+                    //   QML 的 `Text` 默认**不换行**（没写 `wrapMode` 就是单行）。
+                    //   德文的「Verbindungen」在 640 宽下被折成了「Verbindun / gen」，
+                    //   把下面那个大号数字整体顶下去，与右边的延迟卡错开一行 ——
+                    //   截图才看得出来。其余几张卡的标题同理。
+                    Text("连接".t)
+                        .lineLimit(1)
+                        .font(.system(size: 13))
+                        .foregroundStyle(theme.accent)
                     Text(String(state.connectionsCount))
                         .font(.system(size: 24, weight: .regular))
                         .foregroundStyle(theme.accent)
                 }
                 Spacer()
+            }
+            // 按钮组压在卡片**右上角**（Qt：`Layout.alignment: AlignTop` 的 52×22 深色小条）。
+            // 原来它内嵌在标题行里、还各套一层玻璃胶囊 —— 把标题行撑高，
+            // 整张卡的头部比右边的延迟卡矮半截，两张卡顶不齐。
+            .overlay(alignment: .topTrailing) {
+                HStack(spacing: 0) {
+                    Button(action: onOpenAll) {
+                        Text("\u{ECB5}") // eye-line
+                            .font(.custom(IconFont.remix, size: 14))
+                            .foregroundStyle(.white)
+                            .frame(width: 26, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("查看全部连接".t)
+                    Rectangle().fill(.white.opacity(0.15)).frame(width: 1, height: 22)
+                    Button(action: onClearAll) {
+                        // 垃圾桶用危险色 —— 这是不可撤销的批量断开，
+                        // 和旁边的「查看」不该长得一样。
+                        Text("\u{EC2A}") // delete-bin-line
+                            .font(.custom(IconFont.remix, size: 14))
+                            .foregroundStyle(Color(hex: 0xFF_6B_6B))
+                            .frame(width: 25, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("全部断开".t)
+                }
+                .background(RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(.black.opacity(0.32)))
             }
 
             Divider().overlay(theme.divider)
