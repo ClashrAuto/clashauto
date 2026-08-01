@@ -623,6 +623,37 @@ final class Redirector: @unchecked Sendable {
             rules += "pass in quick on \(interface) route-to (lo0 127.0.0.1) inet proto udp"
                 + " from \(ip) to 127.0.0.1 port \(pfDnsPort) keep state \(udpTimeouts)\n"
         }
+        // ★ **挡掉被接管设备的 QUIC（UDP/443）**，否则「已代理」是句假话。
+        //
+        //   macOS 这条腿只重定向 TCP 和 UDP:53 —— 核心的 `redir` 入站本来就只有 TCP，
+        //   而管 UDP 的 `tproxy` 入站是 Linux 专属（darwin 上直接返回 "not supported"）。
+        //   于是设备其余的 UDP 走的是**普通内核转发**：真机实测（被接管设备发 UDP:9000）
+        //   包在 en1 上原样进出、源地址还是设备自己，而核心的 /connections **一条都没有**。
+        //   后果不是"慢一点"，是两件实打实的事：
+        //     · **每设备策略对这些流量完全失效** —— 设成「禁网」的设备，它的 QUIC 照跑；
+        //     · 流量带着设备的真实源地址直接出网，绕过了用户以为已经生效的代理。
+        //   而今天的 Web 有很大一块是 HTTP/3（QUIC）—— 这不是边角流量。
+        //
+        //   在核心能接管 darwin 的透明 UDP 之前，正确做法是**不让它悄悄漏过去**：挡掉之后
+        //   客户端判定 QUIC 不可用并**回落到 TCP**（浏览器的既定行为），而 TCP 那条是真正
+        //   经代理的 —— 于是「已代理」重新成立。
+        //
+        //   ⚠️ **回落不是立即的，别照抄 `return` 的字面语义**：本想用 `block return` 回一个
+        //   ICMP 端口不可达让客户端秒判，真机实测**没有这回事** —— 规则确实命中
+        //   （`pfctl -s rules -v` 的 Packets 在涨），但 en1 上抓不到任何 ICMP，设备侧的
+        //   connected UDP socket 等满 2002ms 超时而不是 ECONNREFUSED。macOS 的 pf 对
+        //   **转发**流量不生成 ICMP 不可达（只对发给本机的才会）。`return` 留着无害
+        //   （目的地真是本机时它有用），但实际效果等同 `drop`。
+        //   ⇒ 代价是**每个新目的主机首次 QUIC 要多等一次客户端超时**（浏览器随后会把该主机
+        //   记成「QUIC 不可用」，不会每条连接都付），换来的是策略真正生效、流量不再裸奔。
+        //
+        //   **只挡 443，不挡其它 UDP**：QUIC 有明确的 TCP 回落路径，挡了只损失一点首连延迟；
+        //   而 NTP/WebRTC/游戏那些没有回落，一刀切会直接弄坏它们。它们仍走转发（仍不受策略
+        //   约束，这个洞留着 —— 要补得靠真正的 UDP 接管，见上）。
+        for ip in pfDeviceIP4s {
+            rules += "block return in quick on \(interface) inet proto udp"
+                + " from \(ip) to any port 443\n"
+        }
         return rules
     }
 
