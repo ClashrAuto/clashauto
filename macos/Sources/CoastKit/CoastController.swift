@@ -191,9 +191,29 @@ public final class CoastController {
     ///   rdr 到一个没人监听的端口上（connection refused，比超时更刺眼），窗口有多长就断多久。
     ///   稳态 5s 一次是为了省；一旦出现第一次失败，说明八成真出事了，改用 1s 间隔连查。
     ///   于是检测窗口从 5×3=15s 收到约 5+1+1=7s，而稳态的探测频率一点没变。
-    private static let kProbeIntervalSeconds: Double = 5
+    ///
+    /// ★ **「连接被拒」要当场判死，不要凑够三次**（真机压测实测收窄的关键）：
+    ///   `kProbeFailsToDeclareDead = 3` 的理由是「单次超时可能只是核心在忙」——但那个理由
+    ///   **只对超时成立**。`URLError.cannotConnectToHost` 是本地回环上的 TCP 连接被拒，
+    ///   意味着**那个端口根本没有监听者**：一个忙到超时的核心仍然 listen 着，只有死掉的才拒连。
+    ///   把这两类混为一谈，等于让确定的坏消息陪着不确定的一起多等两拍。
+    ///   同时把稳态间隔 5s → 2s：一次本地回环 GET 而已，两秒一次的开销可以忽略。
+    ///   真机实测（Mac 网关、三设备各 8 并发在跑时 `kill -9` 掉 root 核心）：
+    ///   改之前设备侧**中断 6.1 秒**（探针 t=31.0 起连续失败、t=37.1 才恢复）；
+    ///   按新策略最坏是 2s（稳态间隔）+ 一次判死，检测部分从 ~5~7s 收到 ~2s。
+    ///   **注意这只是收窄，不是消除** —— 要真正做到近乎零，得让 helper 用 SIGCHLD
+    ///   主动把核心死亡推给 app（需要新的 XPC 事件通道），那是另一件事。
+    private static let kProbeIntervalSeconds: Double = 2
     private static let kProbeRetryIntervalSeconds: Double = 1
     private static let kProbeFailsToDeclareDead = 3
+
+    /// 这次失败是不是「端口没人监听」——是就不必再等，核心已经不在了。
+    private static func isConnectionRefused(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        // cannotConnectToHost = 对端明确拒绝（回环上即 ECONNREFUSED）；
+        // cannotFindHost / networkConnectionLost 之类不算，那些在回环上另有原因。
+        return urlError.code == .cannotConnectToHost
+    }
 
     private func startCoreLivenessProbe() {
         guard coreProbeTask == nil else { return }
@@ -216,9 +236,14 @@ public final class CoastController {
                     consecutiveFailures = 0
                 } catch {
                     consecutiveFailures += 1
-                    if consecutiveFailures >= Self.kProbeFailsToDeclareDead {
+                    // 连接被拒 = 端口上没有监听者 = 核心已经不在，不用再等够三次（见上方论证）。
+                    let refused = Self.isConnectionRefused(error)
+                    if refused || consecutiveFailures >= Self.kProbeFailsToDeclareDead {
+                        let reason = refused
+                            ? "核心 REST 端口拒绝连接（无监听者），判定为意外退出"
+                            : "核心 REST 连续 \(Self.kProbeFailsToDeclareDead) 次无响应，判定为意外退出"
                         consecutiveFailures = 0
-                        self.log("核心 REST 连续 \(Self.kProbeFailsToDeclareDead) 次无响应，判定为意外退出")
+                        self.log(reason)
                         await self.handleUnexpectedCoreExit()
                     }
                 }
