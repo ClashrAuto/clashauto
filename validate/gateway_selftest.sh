@@ -15,12 +15,27 @@ TAP="cst0"
 LOCALMAC="02:00:00:00:00:01"     # Coast 用户态栈 netif 的 MAC（= 静态邻居目标）
 VICTIM_IP="10.9.9.1"             # TAP 侧内核 IP（= 被劫持设备 IP）
 SERVER_IP="192.0.2.10"           # 目标服务器（TEST-NET-1，不可路由；经 /32 路由进 TAP）
-SOCKS_PORT="7899"
 
 fail() { echo "SELFTEST-HARNESS: FAIL — $*" >&2; exit 1; }
 [ "$(id -u)" = "0" ] || fail "需要 root"
 [ -e /dev/net/tun ] || fail "无 /dev/net/tun"
 [ -x "$BIN" ] || fail "找不到可执行文件: $BIN"
+
+# ── 假 SOCKS 的监听口：动态挑空闲的，**绝不能写死 7899** ────────────────────────
+# 7899 正是 Coast 网关自己的 SOCKS 监听口。在**真网关机**上跑这个门禁（恰恰是最该跑它的
+# 地方——那里有真核心、真设备台账）必然撞车：假 SOCKS 绑不上 → NetStack 转而拨到**真核心** →
+# 15s 超时 → FAIL。基线恒红的门禁等于没有门禁，只会训练人无视它。实测（Pi，真核心占着
+# 7899）就是这个下场：NETSTACK ACCEPT 一路正常，纯粹卡在假 SOCKS 起不来。
+pick_free_port() {
+  local used p
+  used="$(ss -lnt 2>/dev/null | tail -n +2 | awk '{print $4}' | sed 's/.*://')"
+  for p in $(seq 17899 17999); do
+    printf '%s\n' "$used" | grep -qx "$p" || { printf '%s\n' "$p"; return 0; }
+  done
+  return 1
+}
+SOCKS_PORT="$(pick_free_port)" || fail "17899-17999 无空闲端口可给假 SOCKS"
+echo "SELFTEST-HARNESS: 假 SOCKS 端口 = $SOCKS_PORT（动态挑选，避开真核心的 7899）"
 
 # ── NDP RA 解析自测（纯逻辑，不碰网络，毫秒级）─────────────────────────────
 # runNdpRaSelfTest 早就写好、也有 COAST_NDP_RA_SELFTEST 钩子，但**从来没被任何发布验证

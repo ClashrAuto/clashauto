@@ -121,11 +121,15 @@ public:
         : QObject(parent), m_expectUser(expectUser)
     {
         connect(&m_server, &QTcpServer::newConnection, this, &FakeSocks::onConn);
-        if (!m_server.listen(QHostAddress::LocalHost, port))
-            std::fprintf(stderr, "SELFTEST: 假 SOCKS 监听 %u 失败\n", port);
+        m_listening = m_server.listen(QHostAddress::LocalHost, port);
+        if (!m_listening)
+            std::fprintf(stderr, "SELFTEST: 假 SOCKS 监听 %u 失败: %s\n", port,
+                         m_server.errorString().toLatin1().constData());
         else
             std::fprintf(stderr, "SELFTEST: 假 SOCKS 就绪于 127.0.0.1:%u\n", port);
     }
+
+    bool listening() const { return m_listening; }
 
 private:
     struct Conn { int phase = 0; QByteArray buf; QString user; };
@@ -170,6 +174,14 @@ private:
         // phase 2: CONNECT [05,01,00,atyp,addr,port]
         if (c->phase == 2) {
             if (c->buf.size() < 4) return;
+            // ★ 必须校验命令字。UDP ASSOCIATE(0x03) 与 CONNECT(0x01) 在字节上完全同形，此前这里
+            //   只读 atyp、不看 cmd —— 于是 TAP 内核侧的背景 UDP（mDNS 之类，日志里的 proto=17）
+            //   经 handleUdpFrame → Socks5Udp::associate 拨进来，就被当成 CONNECT 记一分。而
+            //   associate 的用户名取自 devices 表(dev.socksUser)，**不走** TCP 那条 userForIp 管线，
+            //   所以「每设备身份」这条断言可以在 TCP 路径彻底断掉的情况下照样 PASS —— 实测如此
+            //   （注入 user=QString() 后仍报 PASS，且全程 0 条 NETSTACK ACCEPT）。
+            //   更糟的是它跑在 curl 之前：先判 PASS → 500ms 后退出 → curl 拿到空，判定还成了随机竞态。
+            const int cmd = quint8(c->buf[1]);
             const int atyp = quint8(c->buf[3]);
             int need = 4 + 2; // + port
             if (atyp == 0x01) need += 4;
@@ -180,6 +192,13 @@ private:
             c->buf.remove(0, need);
             const char ok[10] = {0x05, 0, 0, 0x01, 0, 0, 0, 0, 0, 0};
             s->write(ok, 10);
+            if (cmd != 0x01) {
+                // 非 CONNECT（几乎必是 UDP ASSOCIATE）：照常回 ok 别把对端吊死，但**不计入判定**。
+                // 本自测的契约是 TCP 那条路，UDP 有它自己的验证手段。
+                c->phase = 3;
+                std::fprintf(stderr, "SELFTEST: 忽略非 CONNECT 命令 cmd=0x%02x（不计入判定）\n", cmd);
+                return;
+            }
             // 回一段 HTTP 标记，供外部 curl 确认回程通路。
             const QByteArray body = "COAST_SELFTEST_OK\n";
             s->write("HTTP/1.0 200 OK\r\nContent-Length: "
@@ -199,6 +218,7 @@ private:
 
     QTcpServer m_server;
     QString m_expectUser;
+    bool m_listening = false;
 };
 
 QByteArray envOr(const char *key, const QByteArray &def)
@@ -225,8 +245,15 @@ int runGatewaySelfTest()
         return 3;
     }
 
+    // 假 SOCKS 绑不上就**立刻**退出，且用与「数据面失败」不同的退出码(3=夹具/环境问题)。
+    // 否则 NetStack 会照拨 127.0.0.1:socksPort —— 那儿蹲着的多半是**真核心** —— 然后 15s 超时
+    // 退 1，与「转发逻辑真的坏了」一模一样。夹具没起来却报成被测对象有问题，是最费时间的假红。
     auto *socks = new FakeSocks(socksPort, expectUser, qApp);
-    Q_UNUSED(socks);
+    if (!socks->listening()) {
+        std::fprintf(stderr, "SELFTEST: 夹具未就绪（端口 %u 被占）——这不是转发逻辑的问题\n",
+                     socksPort);
+        return 3;
+    }
 
     QString err;
     IL2Endpoint *ep = nullptr;
