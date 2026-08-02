@@ -354,12 +354,15 @@ void GatewayWorker::syncTproxyDevices()
 {
     if (!m_datapath.tproxy || !m_tproxy.isInstalled())
         return;
-    QStringList ips;
+    QStringList ips, macs;
     ips.reserve(m_victimMacStr.size());
-    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it)
-        ips.append(it.key()); // 这张表是 ip → mac
+    macs.reserve(m_victimMacStr.size());
+    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it) {
+        ips.append(it.key());       // 这张表是 ip → mac
+        macs.append(it.value());    // v6 兜底丢弃按 MAC 匹配（tproxy 下不学设备 v6 地址）
+    }
     QString err;
-    if (!m_tproxy.syncDevices(ips, &err))
+    if (!m_tproxy.syncDevices(ips, macs, &err))
         emit deviceError(QString(), QStringLiteral("TPROXY 设备集合更新失败: ") + err);
 }
 

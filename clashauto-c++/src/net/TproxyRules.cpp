@@ -166,9 +166,20 @@ bool TproxyRules::install(const Spec &spec, QString *err)
 
     // 记下并打开转发（只在需要时打开，remove() 还原——不擅自改变用户的系统设置）。
     m_savedIpForward = sysctlRead(QStringLiteral("net.ipv4.ip_forward"));
-    m_savedIp6Forward = sysctlRead(QStringLiteral("net.ipv6.conf.all.forwarding"));
     sysctlWrite(QStringLiteral("net.ipv4.ip_forward"), QStringLiteral("1"));
-    sysctlWrite(QStringLiteral("net.ipv6.conf.all.forwarding"), QStringLiteral("1"));
+    // ★ **故意不打开 IPv6 转发**，而且下面还有一条 v6 兜底丢弃链。
+    //
+    // 这条 tproxy 规则集目前只覆盖 IPv4。第一版这里跟着 v4 一起把 ipv6 forwarding 也打开了，
+    // 于是出现一个**安全洞**：NdpSpoofer 照常把设备的 v6 默认路由指到本机，内核老老实实转发，
+    // 而 nft 里一条 v6 规则都没有 —— 结果是**被代理设备的 IPv6 完全绕过网关**：不进 TPROXY、
+    // 不受每设备策略约束、连「禁网」都形同虚设。真机实测（设备设为 reject）：
+    //     curl -4 www.baidu.com → http=000（被拦，符合预期）
+    //     curl -6 www.baidu.com → http=200（畅通无阻）
+    // lwIP 那条路是**处理 v6 的**（NdpSpoofer + NetStack::addDeviceV6），所以这是 tproxy 独有的回归。
+    //
+    // 在 v6 规则补齐之前，正确的取向是 fail-closed：宁可让被代理设备的 v6 不通，也不能让它
+    // 绕过策略出去。双栈客户端有 Happy Eyeballs，v6 不通会自动回落 v4，影响可控；
+    // 而"策略被静默绕过"是不可接受的。
     if (m_spec.dnsPort != 0) {
         // route_localnet：允许把包路由到 127.0.0.0/8。DNS 劫持那条 dnat 到回环，没有它内核会把
         // 改写后的包当 martian 丢掉。
@@ -208,6 +219,13 @@ table inet %1 {
   set proxied {
     type ipv4_addr
     flags interval
+  }
+  set victimmacs {
+    type ether_addr
+  }
+  chain v6guard {
+    type filter hook forward priority filter - 30; policy accept;
+    ether saddr @victimmacs meta nfproto ipv6 counter drop
   }
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
@@ -255,7 +273,7 @@ table inet %1 {
     return true;
 }
 
-bool TproxyRules::syncDevices(const QStringList &ipv4, QString *err)
+bool TproxyRules::syncDevices(const QStringList &ipv4, const QStringList &macs, QString *err)
 {
     if (!m_installed) {
         if (err)
@@ -264,10 +282,15 @@ bool TproxyRules::syncDevices(const QStringList &ipv4, QString *err)
     }
     // 整体替换而不是逐个增删：调用方给的是「当前应当被代理的全集」，逐个 diff 既容易漏、
     // 也会在中间态出现「刚删掉又加回来」的抖动（那一瞬间设备会断一下）。
-    QString script = QStringLiteral("flush set inet %1 proxied\n").arg(QString::fromLatin1(kTable));
+    QString script = QStringLiteral("flush set inet %1 proxied\nflush set inet %1 victimmacs\n")
+                         .arg(QString::fromLatin1(kTable));
     if (!ipv4.isEmpty()) {
         script += QStringLiteral("add element inet %1 proxied { %2 }\n")
                       .arg(QString::fromLatin1(kTable), ipv4.join(QStringLiteral(", ")));
+    }
+    if (!macs.isEmpty()) {
+        script += QStringLiteral("add element inet %1 victimmacs { %2 }\n")
+                      .arg(QString::fromLatin1(kTable), macs.join(QStringLiteral(", ")));
     }
     return applyNft(script, err);
 }
@@ -285,10 +308,8 @@ void TproxyRules::remove()
     run(QStringLiteral("ip"), {QStringLiteral("route"), QStringLiteral("flush"),
                                QStringLiteral("table"), table});
     sysctlWrite(QStringLiteral("net.ipv4.ip_forward"), m_savedIpForward);
-    sysctlWrite(QStringLiteral("net.ipv6.conf.all.forwarding"), m_savedIp6Forward);
     sysctlWrite(QStringLiteral("net.ipv4.conf.all.route_localnet"), m_savedRouteLocalnet);
     m_savedIpForward.clear();
-    m_savedIp6Forward.clear();
     m_savedRouteLocalnet.clear();
     m_installed = false;
 }
@@ -336,18 +357,21 @@ int runTproxyRulesSelfTest()
     const bool hasTproxy = dump.contains(QStringLiteral("tproxy"));
     const bool hasDnsNat = dump.contains(QStringLiteral("dnat ip to 127.0.0.1:17853"));
     const bool hasRawGuard = dump.contains(QStringLiteral("127.0.0.0/8"));
+    const bool hasV6Guard = dump.contains(QStringLiteral("nfproto ipv6"));
     const bool hasFwdChain = dump.contains(QStringLiteral("forward_accept"));
-    if (!hasTproxy || !hasDnsNat || !hasFwdChain || !hasRawGuard) {
+    if (!hasTproxy || !hasDnsNat || !hasFwdChain || !hasRawGuard || !hasV6Guard) {
         say("TPROXY-SELFTEST: FAIL 规则不完整 —— tproxy=%s",
             QString::number(hasTproxy) + " dnsnat=" + QString::number(hasDnsNat)
                 + " forward=" + QString::number(hasFwdChain)
-                + " rawguard=" + QString::number(hasRawGuard));
+                + " rawguard=" + QString::number(hasRawGuard)
+                + " v6guard=" + QString::number(hasV6Guard));
         say("\n%s\n", dump);
         r.remove();
         return 1;
     }
 
-    if (!r.syncDevices({QStringLiteral("192.0.2.10"), QStringLiteral("192.0.2.11")}, &err)) {
+    if (!r.syncDevices({QStringLiteral("192.0.2.10"), QStringLiteral("192.0.2.11")},
+                       {QStringLiteral("02:00:00:00:00:aa")}, &err)) {
         say("TPROXY-SELFTEST: FAIL 设备集合写入失败 —— %s\n", err);
         r.remove();
         return 1;
@@ -359,7 +383,7 @@ int runTproxyRulesSelfTest()
         return 1;
     }
     // 换成只剩一台：验证「整体替换」而不是只增不减。
-    if (!r.syncDevices({QStringLiteral("192.0.2.11")}, &err)
+    if (!r.syncDevices({QStringLiteral("192.0.2.11")}, {}, &err)
         || TproxyRules::dumpRuleset().contains(QStringLiteral("192.0.2.10"))) {
         say("TPROXY-SELFTEST: FAIL 设备移除没生效\n");
         r.remove();
@@ -393,7 +417,7 @@ bool TproxyRules::install(const Spec &, QString *err)
         *err = QStringLiteral("TPROXY 仅 Linux 可用");
     return false;
 }
-bool TproxyRules::syncDevices(const QStringList &, QString *err)
+bool TproxyRules::syncDevices(const QStringList &, const QStringList &, QString *err)
 {
     if (err)
         *err = QStringLiteral("TPROXY 仅 Linux 可用");

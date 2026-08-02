@@ -72,7 +72,9 @@ public:
     /// 更新「被代理设备」集合（nft set 的元素）。ip 为设备的 IPv4 文本地址。
     /// 只有集合里的设备走 TPROXY，其余照常由内核转发（等价于「没开代理的设备」）。
     /// 运行时增删即时生效，不需要重装规则、更不需要重启核心——实测过。
-    bool syncDevices(const QStringList &ipv4, QString *err = nullptr);
+    /// macs 是同一批设备的 MAC（形如 aa:bb:cc:dd:ee:ff）。**必须一起给**：v6 兜底丢弃链按 MAC
+    /// 匹配（tproxy 下不学设备的 v6 地址，MAC 才是稳定的抓手），漏了它 = IPv6 绕过策略。
+    bool syncDevices(const QStringList &ipv4, const QStringList &macs, QString *err = nullptr);
 
     /// 拆除。幂等。析构时自动调用。
     void remove();
@@ -92,7 +94,6 @@ private:
     bool m_installed = false;
     // ip_forward 原值，remove() 时还原（我们只在需要时打开，不擅自改变用户的系统设置）。
     QString m_savedIpForward;
-    QString m_savedIp6Forward;
     // route_localnet 原值（只有开了 DNS 劫持才会动它；见 install/remove 里的说明）。
     QString m_savedRouteLocalnet;
 };
