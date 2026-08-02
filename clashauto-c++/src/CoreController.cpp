@@ -15,7 +15,13 @@
 #include <QSettings>
 #include <QSysInfo>
 #include <QDateTime>
+#include <QThread>
 #include <QTimer>
+
+#if defined(Q_OS_UNIX)
+#include <csignal>
+#include <sys/types.h>
+#endif
 
 #if defined(Q_OS_WIN)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -506,16 +512,90 @@ void CoreController::startCore()
     // but not defined: -token」→ 打印用法并以退出码 2 结束，导致核心起不来。
     m_core.setArguments({"-d", m_config.userDir, "-f", cfg});
     m_core.setWorkingDirectory(QFileInfo(exe).absolutePath());
+    reapOrphanCore(); // ★ 先收掉上一次崩溃遗留的核心，否则新核心绑不上端口（见该函数说明）
     m_core.start();
     if (!m_core.waitForStarted(3000)) {
         emit logUpdated(tr("启动 Clash 核心失败: %1").arg(m_core.errorString()));
     } else {
+        writeCorePid(qint64(m_core.processId()));
         emit logUpdated("Start clash is OK!");
         if (m_proxyEnabled) {
             startProxy();
         }
     }
     emitStatus();
+}
+
+// 记下我们拉起的核心 pid。崩溃后下一次启动靠它把遗留进程收掉（见 reapOrphanCore）。
+void CoreController::writeCorePid(qint64 pid) const
+{
+    QFile f(QDir(m_config.userDir).filePath("core.pid"));
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        f.write(QByteArray::number(pid));
+}
+
+// ★ 收掉上一次遗留的核心 —— 不做这件事，**app 崩过一次之后被代理设备会彻底断网**。
+//
+// 链条是这样的（真机一步步验出来的，不是推测）：
+//   1. app 被 SIGKILL（崩溃/强杀）时来不及停核心，而核心是它的子进程 → 变成孤儿被 init 收养，
+//      **继续活着并占着 9191/7890/7899/1053**（Linux 上实测 pid 存活、`ss` 里端口仍归它）；
+//   2. 用户重新打开 app，我们起一个新核心；mihomo 绑不上端口时**并不退出** ——
+//      它每个 listener 记一条 "address already in use" 然后照常运行；
+//   3. 于是 `QProcess` 状态是 Running、`isRunning()` 为真、劫持照常上，
+//      而这个新核心**一个端口都没监听**：设备的流量进了 lwIP，出站拨 SOCKS 无人应答。
+//   实测就是 **100% 失败**（31911 条全是 read 错误：连接被接下、随即断），
+//   而且孤儿死掉之后新核心也不会回头重试绑定，坏到重启为止。
+//
+// 判据必须严：只收「pid 文件里记着的那个」且「确实是我们这份核心可执行文件」的进程 ——
+// pid 会被系统复用，光按 pid 杀可能误伤无辜进程。Linux/macOS 用 /proc 或 ps 核对可执行路径。
+void CoreController::reapOrphanCore()
+{
+    QFile f(QDir(m_config.userDir).filePath("core.pid"));
+    if (!f.open(QIODevice::ReadOnly))
+        return;
+    const qint64 pid = f.readAll().trimmed().toLongLong();
+    f.close();
+    if (pid <= 0)
+        return;
+
+#if defined(Q_OS_UNIX)
+    // 核对可执行路径：pid 复用时不能误杀。/proc 没有（macOS）就退回 `ps -p <pid> -o comm=`。
+    const QString exe = QFileInfo(m_config.clashExecutable()).canonicalFilePath();
+    QString actual = QFileInfo(QStringLiteral("/proc/%1/exe").arg(pid)).canonicalFilePath();
+    if (actual.isEmpty()) {
+        QProcess ps;
+        ps.start("ps", {"-p", QString::number(pid), "-o", "comm="});
+        ps.waitForFinished(1000);
+        const QString comm = QString::fromUtf8(ps.readAllStandardOutput()).trimmed();
+        if (comm.isEmpty() || !exe.endsWith(comm))
+            return; // 进程不在，或不是我们的核心
+    } else if (!exe.isEmpty() && actual != exe) {
+        return; // pid 被别人复用了
+    }
+    emit logUpdated(tr("发现上次遗留的内核进程 %1，先收掉再启动").arg(pid));
+    ::kill(pid_t(pid), SIGKILL);
+    // 等它真的消失再往下走，否则新核心照样绑不上端口。
+    for (int i = 0; i < 20 && ::kill(pid_t(pid), 0) == 0; ++i)
+        QThread::msleep(50);
+#elif defined(Q_OS_WIN)
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, FALSE, DWORD(pid));
+    if (!h)
+        return; // 进程已经不在
+    wchar_t buf[MAX_PATH] = {};
+    DWORD n = MAX_PATH;
+    const bool gotPath = QueryFullProcessImageNameW(h, 0, buf, &n) != 0;
+    const QString actual = gotPath ? QFileInfo(QString::fromWCharArray(buf, int(n))).canonicalFilePath()
+                                   : QString();
+    const QString exe = QFileInfo(m_config.clashExecutable()).canonicalFilePath();
+    if (!actual.isEmpty() && !exe.isEmpty() && actual != exe) {
+        CloseHandle(h); // pid 被复用，不是我们的核心
+        return;
+    }
+    emit logUpdated(tr("发现上次遗留的内核进程 %1，先收掉再启动").arg(pid));
+    TerminateProcess(h, 1);
+    WaitForSingleObject(h, 1000);
+    CloseHandle(h);
+#endif
 }
 
 void CoreController::stopCore()

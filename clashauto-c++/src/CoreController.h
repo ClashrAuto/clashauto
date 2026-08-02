@@ -56,6 +56,8 @@ private:
     void reloadConfig();
     void emitStatus();
     void seedBundledCore(); // 打包集成的内核首次运行落位（缺了才补，绝不覆盖已装的）
+    void writeCorePid(qint64 pid) const; // 记下自己拉起的核心 pid，供下次启动收孤儿
+    void reapOrphanCore();               // 收掉上次崩溃遗留的核心（否则新核心绑不上端口）
 
 #if defined(Q_OS_MACOS)
     // 懒创建并预授权一个 system.services.systemconfiguration.network 权限的 AuthorizationRef，
