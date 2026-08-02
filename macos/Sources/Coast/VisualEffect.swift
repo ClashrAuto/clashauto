@@ -59,67 +59,79 @@ struct WindowConfigurator: NSViewRepresentable {
         window.hasShadow = true
 
         if #available(macOS 26.0, *) {
-            TitleBar.unify(window)
+            // 26：标题栏加高到与页面顶部导航栏一带同高（≈ 顶距 10 + 栏高 28 那一带）。
+            // 做法是挂一个**空的** NSToolbar —— 这是把标题栏抬到统一工具栏高度、
+            // 让红绿灯在其中垂直居中的受支持写法；transparent 保证不画任何工具栏底。
+            //
+            // 只有**主窗**需要：它的页面顶栏就钉在这条带子里。附属窗（连接窗）的顶栏浮在
+            // 标题栏**下面**，带子空着当拖动区，保持标准高度即可 —— 见 ConnectionsView。
+            window.titlebarAppearsTransparent = true
+            if window.toolbar == nil {
+                let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
+                toolbar.showsBaselineSeparator = false
+                window.toolbar = toolbar
+            }
+            window.toolbarStyle = .unified
         }
     }
 }
 
-/// 标题栏与「页面顶栏」并成同一条带子。
+/// 让**附属窗**能进全屏。
 ///
-/// 做法是挂一个**空的** NSToolbar + `.unified` —— 这是把标题栏抬到统一工具栏高度、
-/// 让红绿灯在其中垂直居中的受支持写法；transparent 保证不画任何工具栏底。
-/// 抽出来是因为主窗和连接窗都要（各自的顶栏都钉在这条带子里），
-/// 两处各写一遍迟早会在样式或顺序上漂移。
-enum TitleBar {
-    @available(macOS 26.0, *)
-    static func unify(_ window: NSWindow, hidesTitle: Bool = false) {
-        // 兜底补一位。正常路径上这一位来自 scene 的 `.windowStyle(.hiddenTitleBar)`
-        // —— **少了它这整套都不成立**：内容区会从标题栏**下面**才开始，
-        // `ignoresSafeArea(.top)` 无处可去，钉在顶部的 bar 被不透明的标题栏整个盖住。
-        // 实测就是「窗口顶部一条白带、顶栏不见了」，而且从 AppKit 侧补这一位**救不回来**
-        // （补上了照样是白带）—— 所以 hiddenTitleBar 是必须的，这句只是保险。
-        window.styleMask.insert(.fullSizeContentView)
-        window.titlebarAppearsTransparent = true
-        // 顶栏自己就是这个窗口的「标题」，系统再画一遍标题文字只会和它叠在一起。
-        if hidesTitle { window.titleVisibility = .hidden }
-        if window.toolbar == nil {
-            let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
-            toolbar.showsBaselineSeparator = false
-            window.toolbar = toolbar
-        }
-        window.toolbarStyle = .unified
-    }
-}
+/// ★ SwiftUI 给次级 `Window` scene 的 collectionBehavior 是
+///   `[.auxiliary, .fullScreenAuxiliary]`（实测 131328）。`fullScreenAuxiliary` 的语义是
+///   「可以**跟着别的窗**一起待在全屏空间里」，**它自己进不去** —— 于是绿灯点下去只是
+///   zoom（铺满可用区），永远进不了全屏。主窗那份是 `[.primary, .fullScreenPrimary]`
+///   （65664），所以主窗一直好用，这个坑只在附属窗上。
+///
+/// ★ **设一次不够**：SwiftUI 会在窗口建好之后把它改回去。实测设完立刻读回是 131200
+///   （aux 位已摘、primary 已加），6 秒后又变回 131328。所以挂上 `didUpdateNotification`
+///   一直盯着 —— 那个通知在窗口活跃时每轮事件循环都来，而这里只是两次位测试，命中才写。
+struct FullScreenCapableWindow: NSViewRepresentable {
 
-/// 给**附属窗**（连接窗这类）把标题栏抬到与它自己那条顶栏同高。
-///
-/// 它只补 scene 修饰符补不了的那一半：`.windowStyle(.hiddenTitleBar)` 负责
-/// 「透明 + 内容铺满 + 不画标题」，但**不改带子的高度** —— 不挂那个空 toolbar 的话
-/// 带子仍是标准的 28，红绿灯中心落在 14，而顶栏控件中心在 24，两边差着 10 明显不齐。
-/// 挂上之后带子约 50、红绿灯中心 25，正好和 38 高的顶栏对上。
-///
-/// 26 以下什么都不动（那时没有这条 Liquid Glass 的带子可对）。
-struct UnifiedTitleBarWindow: NSViewRepresentable {
+    final class Coordinator {
+        var token: NSObjectProtocol?
+        deinit { if let token { NotificationCenter.default.removeObserver(token) } }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        DispatchQueue.main.async { configure(view.window) }
+        DispatchQueue.main.async { attach(view.window, context.coordinator) }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async { configure(nsView.window) }
+        DispatchQueue.main.async { attach(nsView.window, context.coordinator) }
     }
 
-    private func configure(_ window: NSWindow?) {
+    private func attach(_ window: NSWindow?, _ coordinator: Coordinator) {
         guard let window else { return }
-        if #available(macOS 26.0, *) { TitleBar.unify(window, hidesTitle: true) }
+        Self.makePrimary(window)
+        guard coordinator.token == nil else { return }
+        coordinator.token = NotificationCenter.default.addObserver(
+            forName: NSWindow.didUpdateNotification, object: window, queue: .main
+        ) { note in
+            guard let updated = note.object as? NSWindow else { return }
+            MainActor.assumeIsolated { Self.makePrimary(updated) }
+        }
+    }
+
+    @MainActor
+    private static func makePrimary(_ window: NSWindow) {
+        let behavior = window.collectionBehavior
+        guard !behavior.contains(.fullScreenPrimary) || behavior.contains(.fullScreenAuxiliary)
+        else { return }
+        window.collectionBehavior.remove(.fullScreenAuxiliary)
+        window.collectionBehavior.insert(.fullScreenPrimary)
     }
 }
 
 extension View {
-    /// 标题栏抬到与本页顶栏同高，并隐藏系统标题文字（26 以下无效果）。
-    func unifiedTitleBar() -> some View {
-        background(UnifiedTitleBarWindow().frame(width: 0, height: 0))
+    /// 让承载它的窗口能进全屏（附属窗默认不能，见 `FullScreenCapableWindow`）。
+    func allowsFullScreen() -> some View {
+        background(FullScreenCapableWindow().frame(width: 0, height: 0))
     }
 }
 
@@ -262,4 +274,3 @@ struct GlassSegmented<Value: Hashable>: View {
         .glassCapsule()
     }
 }
-

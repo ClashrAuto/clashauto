@@ -45,15 +45,20 @@ struct ConnectionsView: View {
     @ViewBuilder
     private var content: some View {
         if #available(macOS 26.0, *) {
-            // 26：顶栏**钉进标题栏那条带子**（`safeAreaBar` + 整列越过顶部安全区），
-            // 于是它距窗顶为 0、和红绿灯同一带；标题栏本身由 `unifiedTitleBar()` 抬到
-            // 同高，系统标题文字隐去 —— 顶栏自己就是这个窗口的标题。
-            // 列表从这条带子底下穿过，由系统 scroll edge effect 渐隐（与主窗一个机制）。
+            // 26：顶栏钉在标题栏**下面**（`safeAreaBar` 挂在安全区上沿），
+            // 列表从它底下穿过、由系统 scroll edge effect 渐隐。
+            //
+            // ★ 顶栏**不能**放进标题栏那条带子里（早先那版是 `ignoresSafeArea(.top)`
+            //   把整列顶上去 + 空 toolbar 抬高带子）。看着是漂亮，但**窗口拖不动了**：
+            //   标题栏那条带子是 macOS 唯一的拖动区，被 Online/Offline 和搜索框占满之后
+            //   点哪儿都是控件，没有一处能按住拖。附属窗又没有主窗那个
+            //   `isMovableByWindowBackground`（见 `WindowRestore`）—— 于是这个窗只能靠
+            //   系统的窗口菜单挪。带子空着才是对的。
             list
                 .safeAreaBar(edge: .top, spacing: 0) { header }
                 .scrollEdgeEffectStyle(.soft, for: .all)
-                .ignoresSafeArea(.container, edges: .top)
-                .unifiedTitleBar()
+                // 附属窗默认进不了全屏，得自己把 collectionBehavior 换成 primary。
+                .allowsFullScreen()
                 // 整窗玻璃，和主窗同一层材质；行自带一层 `.regularMaterial`（见 `row`），
                 // 两层材质叠出「卡片浮在玻璃上」的分层。
                 .windowGlass(.sidebar)
@@ -74,59 +79,41 @@ struct ConnectionsView: View {
 
     // MARK: 顶栏
 
-    /// 钉在标题栏那条带子里的顶栏。
+    /// 钉在标题栏下面的顶栏。左 20 / 右 10；上下各 8 让它和标题栏、列表都不贴着。
     ///
-    /// 上内距 10：加上 28 的控件高正好 38，红绿灯在这条带子里的中心落在 25 附近，
-    /// 控件中心 24 —— 两边看着是一排的。
+    /// 左内距回到 20 了 —— 顶栏搬出标题栏之后，左边不再有红绿灯要让。
     private var header: some View {
         HStack(spacing: 10) {
             segmentedToggles
             searchBox
         }
-        .padding(.top, 10)
+        .padding(.vertical, 8)
         .padding(.leading, ConnectionsView.headerLeadingInset)
         .padding(.trailing, 10)
     }
 
-    /// 顶栏左内距。
-    ///
-    /// ★ 红绿灯就在这条带子的左端，量出来右缘在窗口左边缘往里 **78**（三颗 14 的按钮，
-    ///   起点 20、间距 20）。所以「左边留 20」只能是**从红绿灯右侧算起**的 20 ——
-    ///   从窗口边缘算的话第一颗控件会被红绿灯整个压住（实测截图：「Online (0)」
-    ///   的 nline 被三颗灯盖掉）。
-    private static let headerLeadingInset: CGFloat = 78 + 20
+    private static let headerLeadingInset: CGFloat = 20
 
-    /// 分段按钮组：离线段左端**塞到在线段底下 3px**，中间无缝、只外侧圆角。
-    /// 两段各自是独立开关（可以同时开），不是二选一。
-    ///
-    /// ★ 用 `HStack(spacing: -3)` 让两段**自己量自己**，不要去算文字宽度。
-    ///   先前的写法是用 `NSString.size(withAttributes:)` 量一遍再把和式写死给 `ZStack`，
-    ///   结果量出来比 SwiftUI 实际排版**偏窄** —— 截图上「Offline (0)」的计数被裁掉了，
-    ///   只剩「Offline」。负间距 + `zIndex` 就能同时拿到「重叠 3px」和「在线段盖在上面」，
-    ///   一个数都不用量。
+    /// Online / Offline 两个筛选开关。两段各自独立（可以同时开），不是二选一。
     @ViewBuilder
     private var segmentedToggles: some View {
         if #available(macOS 26.0, *) {
-            // **一颗玻璃胶囊，里面两个按钮** —— 与页脚的模式切换、日志页的标签同一套
-            //   （`glassCapsule()` 罩整组，段自己只画选中底）。
+            // **一颗玻璃胶囊，里面两个按钮**：`glassCapsule()` 罩整组，段自己什么底都不画。
             //
-            // ★ 走过两条死路，都别再试：
-            //   1. `.buttonStyle(.glass)`（不管外面套 `GlassEffectContainer` 还是
-            //      `ControlGroup`）—— 那个样式**每颗自己画一个胶囊**，谁也拼不到一起，
-            //      渲染出来永远是「中间带缝的两颗独立胶囊」。
-            //   2. 段的选中底用 `Capsule()` —— 两段同时开时就是两颗药丸并排，
-            //      中间那道缝正是「看着像两个按钮」的来源。
+            // ★ 开/关只用**文字颜色**表达，不加底色。玻璃本身就是这一组的形，再往里塞
+            //   一块色底等于在玻璃上贴纸 —— 折射、高光全被那块不透明的底盖掉，
+            //   液态玻璃的质感就没了。关态压到 `.secondary`（浅一档），开态 `.primary`。
             //
-            //   所以选中底用 `UnevenRoundedRectangle`：**只有外侧那一头是圆的**，
-            //   朝里的一头切平。两段都开时两块底严丝合缝连成一条，只有整组的外缘是圆的
-            //   —— 这才是「一个胶囊里的两个按钮」。（NavButton 里用的是同一招。）
+            // ★ 也别再试 `.buttonStyle(.glass)`（不管外面套 `GlassEffectContainer` 还是
+            //   `ControlGroup`）：那个样式**每颗自己画一个胶囊**，谁也拼不到一起，
+            //   渲染出来永远是「中间带缝的两颗独立胶囊」。两条都走过了。
             //
-            //   两段仍各是独立开关（可以同时开、也可以同时关），不是三选一。
+            //   两段各是独立开关（可以同时开、也可以同时关），不是三选一。
             HStack(spacing: 0) {
                 filterSegment(title: "Online (\(state.connectionLedger.onlineCount))",
-                              on: showOnline, outerEdge: .leading) { showOnline.toggle() }
+                              on: showOnline) { showOnline.toggle() }
                 filterSegment(title: "Offline (\(state.connectionLedger.offlineCount))",
-                              on: showOffline, outerEdge: .trailing) { showOffline.toggle() }
+                              on: showOffline) { showOffline.toggle() }
             }
             .glassCapsule()
         } else {
@@ -134,37 +121,29 @@ struct ConnectionsView: View {
         }
     }
 
-    /// 组里的一段。`outerEdge` 说明它靠哪一头 —— 只有那一头的两个角是圆的。
+    /// 组里的一段：只有文字，开态 `.primary`、关态 `.secondary`。
     @available(macOS 26.0, *)
     private func filterSegment(title: String, on: Bool,
-                               outerEdge: HorizontalEdge,
                                action: @escaping () -> Void) -> some View {
-        // 圆角取半个高，才和外层胶囊的弧度对得上；小了会在外缘露出一圈直角。
-        let radius = toolbarHeight / 2
-        let leading = outerEdge == .leading ? radius : 0
-        let trailing = outerEdge == .trailing ? radius : 0
-        return Button(action: action) {
+        Button(action: action) {
             Text(title)
                 .font(.system(size: 12))
                 .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 .fixedSize()
                 .padding(.horizontal, 12)
                 .frame(height: toolbarHeight)
-                .background {
-                    if on {
-                        UnevenRoundedRectangle(topLeadingRadius: leading,
-                                               bottomLeadingRadius: leading,
-                                               bottomTrailingRadius: trailing,
-                                               topTrailingRadius: trailing,
-                                               style: .continuous)
-                            .fill(.tint.opacity(0.35))
-                    }
-                }
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 
+    /// 26 以下沿用 Qt 的画法：离线段左端**塞到在线段底下 3px**，中间无缝、只外侧圆角。
+    ///
+    /// ★ 用 `HStack(spacing: -3)` 让两段**自己量自己**，不要去算文字宽度。
+    ///   先前的写法是用 `NSString.size(withAttributes:)` 量一遍再把和式写死给 `ZStack`，
+    ///   结果量出来比 SwiftUI 实际排版**偏窄** —— 截图上「Offline (0)」的计数被裁掉了，
+    ///   只剩「Offline」。负间距 + `zIndex` 就能同时拿到「重叠 3px」和「在线段盖在上面」，
+    ///   一个数都不用量。
     private var legacySegmentedToggles: some View {
         HStack(spacing: -3) {
             segment(title: "Online (\(state.connectionLedger.onlineCount))",
