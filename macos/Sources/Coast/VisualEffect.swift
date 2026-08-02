@@ -59,17 +59,67 @@ struct WindowConfigurator: NSViewRepresentable {
         window.hasShadow = true
 
         if #available(macOS 26.0, *) {
-            // 26：标题栏加高到与页面顶部导航栏一带同高（≈ 顶距 10 + 栏高 28 那一带）。
-            // 做法是挂一个**空的** NSToolbar —— 这是把标题栏抬到统一工具栏高度、
-            // 让红绿灯在其中垂直居中的受支持写法；transparent 保证不画任何工具栏底。
-            window.titlebarAppearsTransparent = true
-            if window.toolbar == nil {
-                let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
-                toolbar.showsBaselineSeparator = false
-                window.toolbar = toolbar
-            }
-            window.toolbarStyle = .unified
+            TitleBar.unify(window)
         }
+    }
+}
+
+/// 标题栏与「页面顶栏」并成同一条带子。
+///
+/// 做法是挂一个**空的** NSToolbar + `.unified` —— 这是把标题栏抬到统一工具栏高度、
+/// 让红绿灯在其中垂直居中的受支持写法；transparent 保证不画任何工具栏底。
+/// 抽出来是因为主窗和连接窗都要（各自的顶栏都钉在这条带子里），
+/// 两处各写一遍迟早会在样式或顺序上漂移。
+enum TitleBar {
+    @available(macOS 26.0, *)
+    static func unify(_ window: NSWindow, hidesTitle: Bool = false) {
+        // 兜底补一位。正常路径上这一位来自 scene 的 `.windowStyle(.hiddenTitleBar)`
+        // —— **少了它这整套都不成立**：内容区会从标题栏**下面**才开始，
+        // `ignoresSafeArea(.top)` 无处可去，钉在顶部的 bar 被不透明的标题栏整个盖住。
+        // 实测就是「窗口顶部一条白带、顶栏不见了」，而且从 AppKit 侧补这一位**救不回来**
+        // （补上了照样是白带）—— 所以 hiddenTitleBar 是必须的，这句只是保险。
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
+        // 顶栏自己就是这个窗口的「标题」，系统再画一遍标题文字只会和它叠在一起。
+        if hidesTitle { window.titleVisibility = .hidden }
+        if window.toolbar == nil {
+            let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
+            toolbar.showsBaselineSeparator = false
+            window.toolbar = toolbar
+        }
+        window.toolbarStyle = .unified
+    }
+}
+
+/// 给**附属窗**（连接窗这类）把标题栏抬到与它自己那条顶栏同高。
+///
+/// 它只补 scene 修饰符补不了的那一半：`.windowStyle(.hiddenTitleBar)` 负责
+/// 「透明 + 内容铺满 + 不画标题」，但**不改带子的高度** —— 不挂那个空 toolbar 的话
+/// 带子仍是标准的 28，红绿灯中心落在 14，而顶栏控件中心在 24，两边差着 10 明显不齐。
+/// 挂上之后带子约 50、红绿灯中心 25，正好和 38 高的顶栏对上。
+///
+/// 26 以下什么都不动（那时没有这条 Liquid Glass 的带子可对）。
+struct UnifiedTitleBarWindow: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { configure(view.window) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { configure(nsView.window) }
+    }
+
+    private func configure(_ window: NSWindow?) {
+        guard let window else { return }
+        if #available(macOS 26.0, *) { TitleBar.unify(window, hidesTitle: true) }
+    }
+}
+
+extension View {
+    /// 标题栏抬到与本页顶栏同高，并隐藏系统标题文字（26 以下无效果）。
+    func unifiedTitleBar() -> some View {
+        background(UnifiedTitleBarWindow().frame(width: 0, height: 0))
     }
 }
 
@@ -212,3 +262,4 @@ struct GlassSegmented<Value: Hashable>: View {
         .glassCapsule()
     }
 }
+

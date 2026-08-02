@@ -1,9 +1,14 @@
 import CoastKit
 import SwiftUI
 
-/// 全部连接。**逐元素对齐** `qml/ConnectionsWindow.qml`：
-/// 720×480、顶栏 Online(N)/Offline(N) 分段 + Search、卡片列表
-/// （● 圆点 + `[type] host` + 进程/出口链/下载/上传四枚徽标 + ✕ 删除）。
+/// 全部连接。**功能**逐项对齐 `qml/ConnectionsWindow.qml`：720×480、
+/// Online(N)/Offline(N) 两个独立开关 + 搜索、卡片列表（● 圆点 + `[type] host` +
+/// 进程/出口链/下载/上传四枚徽标 + ✕ 删除 + 右键「添加规则」）。
+///
+/// **观感则按 mac 来，不照抄 Qt 的画法**（26 起）：顶栏钉进标题栏那条带子、
+/// 分段与搜索是液态玻璃、整窗透玻璃、行是浮在上面的材质卡片。Qt 那套
+/// 「蓝灰实色方块 + Search 前缀标签 + 1px 竖线」是 web 时代的样子，在 mac 上很扎眼。
+/// 26 以下没有这套材质，仍走原来的 Qt 画法（见各处的 `legacy*`）。
 ///
 /// **独立顶层窗**，与 Qt 一致（720×480，最小 480×320）。做成 sheet 的话主窗被拖到
 /// 最小宽（640）时它会横向溢出 —— 实测左边的「Online (0)」被切掉半截。
@@ -16,47 +21,80 @@ struct ConnectionsView: View {
     /// 右键「添加规则」用本行地址预填 value —— 与 Qt 的 `openForValue` 同义。
     @State private var addingRule: RuleDraft?
 
-    /// 顶栏统一高度：两颗分段按钮与搜索框一致。
-    private let toolbarHeight: CGFloat = 26
+    /// 顶栏统一高度：两颗分段按钮与搜索框一致。26 以下沿用 Qt 的 26；
+    /// 26 上给 28 —— 与全 app 的玻璃控件（页脚开关、日志页标签）同高。
+    private var toolbarHeight: CGFloat {
+        if #available(macOS 26.0, *) { 28 } else { 26 }
+    }
 
     private var rows: [ConnectionLedger.Entry] {
         state.connectionLedger.filtered(online: showOnline, offline: showOffline, query: query)
     }
 
     var body: some View {
-        VStack(spacing: 5) {
-            toolbar
-                .padding(.top, 5)
-                .padding(.horizontal, 5)
-
-            ScrollView {
-                LazyVStack(spacing: 1) {
-                    ForEach(rows) { entry in
-                        row(entry)
-                    }
-                }
+        content
+            .frame(minWidth: 480, minHeight: 320)
+            // 每次打开清空账本，避免上次会话的离线连接残留（与 Qt 的 onVisibleChanged 一致）。
+            .task { state.resetConnectionLedger() }
+            .sheet(item: $addingRule) { draft in
+                RuleEditorSheet(draft: draft) { saved in save(rule: saved) }
+                    .environment(state).environment(theme)
             }
-            .padding(.horizontal, 5)
-            .padding(.bottom, 5)
-        }
-        .frame(minWidth: 480, minHeight: 320)
-        .background(theme.card)
-        // 每次打开清空账本，避免上次会话的离线连接残留（与 Qt 的 onVisibleChanged 一致）。
-        .task { state.resetConnectionLedger() }
-        .sheet(item: $addingRule) { draft in
-            RuleEditorSheet(draft: draft) { saved in save(rule: saved) }
-                .environment(state).environment(theme)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if #available(macOS 26.0, *) {
+            // 26：顶栏**钉进标题栏那条带子**（`safeAreaBar` + 整列越过顶部安全区），
+            // 于是它距窗顶为 0、和红绿灯同一带；标题栏本身由 `unifiedTitleBar()` 抬到
+            // 同高，系统标题文字隐去 —— 顶栏自己就是这个窗口的标题。
+            // 列表从这条带子底下穿过，由系统 scroll edge effect 渐隐（与主窗一个机制）。
+            list
+                .safeAreaBar(edge: .top, spacing: 0) { header }
+                .scrollEdgeEffectStyle(.soft, for: .all)
+                .ignoresSafeArea(.container, edges: .top)
+                .unifiedTitleBar()
+                // 整窗玻璃，和主窗同一层材质；行自带一层 `.regularMaterial`（见 `row`），
+                // 两层材质叠出「卡片浮在玻璃上」的分层。
+                .windowGlass(.sidebar)
+        } else {
+            VStack(spacing: 5) {
+                HStack(spacing: 10) {
+                    segmentedToggles
+                    searchBox
+                }
+                .padding(.top, 5)
+                .padding(.leading, ConnectionsView.headerLeadingInset)
+                .padding(.trailing, 5)
+                list
+            }
+            .background(theme.card)
         }
     }
 
     // MARK: 顶栏
 
-    private var toolbar: some View {
+    /// 钉在标题栏那条带子里的顶栏。
+    ///
+    /// 上内距 10：加上 28 的控件高正好 38，红绿灯在这条带子里的中心落在 25 附近，
+    /// 控件中心 24 —— 两边看着是一排的。
+    private var header: some View {
         HStack(spacing: 10) {
             segmentedToggles
             searchBox
         }
+        .padding(.top, 10)
+        .padding(.leading, ConnectionsView.headerLeadingInset)
+        .padding(.trailing, 10)
     }
+
+    /// 顶栏左内距。
+    ///
+    /// ★ 红绿灯就在这条带子的左端，量出来右缘在窗口左边缘往里 **78**（三颗 14 的按钮，
+    ///   起点 20、间距 20）。所以「左边留 20」只能是**从红绿灯右侧算起**的 20 ——
+    ///   从窗口边缘算的话第一颗控件会被红绿灯整个压住（实测截图：「Online (0)」
+    ///   的 nline 被三颗灯盖掉）。
+    private static let headerLeadingInset: CGFloat = 78 + 20
 
     /// 分段按钮组：离线段左端**塞到在线段底下 3px**，中间无缝、只外侧圆角。
     /// 两段各自是独立开关（可以同时开），不是二选一。
@@ -66,7 +104,40 @@ struct ConnectionsView: View {
     ///   结果量出来比 SwiftUI 实际排版**偏窄** —— 截图上「Offline (0)」的计数被裁掉了，
     ///   只剩「Offline」。负间距 + `zIndex` 就能同时拿到「重叠 3px」和「在线段盖在上面」，
     ///   一个数都不用量。
+    @ViewBuilder
     private var segmentedToggles: some View {
+        if #available(macOS 26.0, *) {
+            // ★ 用**系统自己的**液态玻璃按钮组，不是手画的胶囊：
+            //   `Toggle` + `.toggleStyle(.button)` + `.buttonStyle(.glass)` —— 开态的
+            //   填充、按下的形变、无障碍语义全交给系统。手画那版（一层 glassCapsule
+            //   套两个 plain Button，选中态自己描 `.tint.opacity(0.35)`）只是长得像，
+            //   开态既不是系统的 prominent 填充，按下也没有玻璃的形变。
+            //
+            //   `GlassEffectContainer` 让间距小于 spacing 的相邻玻璃**融成一片** ——
+            //   这才是「一组」而不是「两颗各自的按钮」。两段仍各是独立开关
+            //   （可以同时开、也可以同时关），所以是两个 Toggle 而不是三选一的分段控件。
+            GlassEffectContainer(spacing: 6) {
+                HStack(spacing: 4) {
+                    Toggle(isOn: $showOnline) {
+                        Text("Online (\(state.connectionLedger.onlineCount))")
+                            .font(.system(size: 12))
+                    }
+                    Toggle(isOn: $showOffline) {
+                        Text("Offline (\(state.connectionLedger.offlineCount))")
+                            .font(.system(size: 12))
+                    }
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.glass)
+                .buttonBorderShape(.capsule)
+                .controlSize(.large)
+            }
+        } else {
+            legacySegmentedToggles
+        }
+    }
+
+    private var legacySegmentedToggles: some View {
         HStack(spacing: -3) {
             segment(title: "Online (\(state.connectionLedger.onlineCount))",
                     on: showOnline, extraWidth: 24)
@@ -97,8 +168,37 @@ struct ConnectionsView: View {
             .contentShape(Rectangle())
     }
 
-    /// Search：整块圆角，左侧「Search」前缀标签 + 一条 1px 竖线 + 输入框。
+    @ViewBuilder
     private var searchBox: some View {
+        if #available(macOS 26.0, *) {
+            // 26：一颗玻璃胶囊 + 放大镜 + 清空钮，也就是系统各处搜索框的样子。
+            // Qt 那个「Search 前缀标签 + 1px 竖线」是 web 时代的画法，mac 上没人这么做。
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                TextField("Search", text: $query)   // i18n-ignore: 与 Qt 一致保留英文
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                if !query.isEmpty {
+                    Button { query = "" } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .frame(height: toolbarHeight)
+            .glassCapsule()
+        } else {
+            legacySearchBox
+        }
+    }
+
+    /// Search：整块圆角，左侧「Search」前缀标签 + 一条 1px 竖线 + 输入框。
+    private var legacySearchBox: some View {
         HStack(spacing: 0) {
             Text("Search")
                 .font(.system(size: 12))
@@ -124,6 +224,32 @@ struct ConnectionsView: View {
         .overlay {
             RoundedRectangle(cornerRadius: 3, style: .continuous)
                 .stroke(theme.dark ? Color(hex: 0x33_33_33) : Color(hex: 0xCC_CC_CC), lineWidth: 1)
+        }
+    }
+
+    // MARK: 列表
+
+    /// ★ 内距全部加在**滚动内容**上，不加在 `ScrollView` 外面：26 上顶栏是
+    ///   `safeAreaBar`，列表要从它底下穿过去再由系统边缘效果渐隐。外面垫一圈的话，
+    ///   列表会在离顶栏还有一段的地方被自己的边界硬切一刀（节点页踩过同一个坑）。
+    private var list: some View {
+        ScrollView {
+            LazyVStack(spacing: 1) {
+                ForEach(rows) { entry in
+                    row(entry)
+                }
+            }
+            .padding(.horizontal, 5)
+            .padding(.bottom, 5)
+        }
+        .overlay {
+            // Qt 那边空着就是一片空白。这里补一句 —— 「一条连接都没有」和「窗口坏了」
+            // 在一片空白面前长得一模一样。
+            if rows.isEmpty {
+                Text("暂无连接".t)
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textMuted)
+            }
         }
     }
 
@@ -164,7 +290,16 @@ struct ConnectionsView: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 42)
-        .background(theme.dark ? Color(hex: 0x22_22_22) : Color(hex: 0xEE_EE_EE))
+        // 26：行浮在整窗玻璃上，得自己有一层材质才立得住 —— Qt 那个 `#eeeeee`
+        // 压在浅色玻璃上几乎看不见（实测：行和背景糊成一片，只剩几枚徽标在飘）。
+        // 26 以下窗口本来就是实底卡片色，沿用 Qt 的两个字面量。
+        .background {
+            if #available(macOS 26.0, *) {
+                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(.regularMaterial)
+            } else {
+                (theme.dark ? Color(hex: 0x22_22_22) : Color(hex: 0xEE_EE_EE))
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .contextMenu {
             Button("添加规则".t) {
