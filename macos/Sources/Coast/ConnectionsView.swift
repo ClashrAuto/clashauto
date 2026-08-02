@@ -26,7 +26,7 @@ struct ConnectionsView: View {
     /// 液态玻璃形变要的命名空间：钮和输入框共享一个 `glassEffectID`，
     /// 点开时是**同一块玻璃**拉长成输入框，不是「藏钮、换控件」。
     @Namespace private var searchNS
-    /// 本窗是否在全屏。只影响标题的左内距 —— 全屏没有红绿灯要让（见 `titleLeadingInset`）。
+    /// 本窗是否在全屏。两处要用：全屏不显示标题，以及顶部安全区要不要越过（见 `content`）。
     @State private var isFullScreen = false
 
     /// 顶栏控件高度：分段按钮与搜索框一致。26 以下沿用 Qt 的 26。
@@ -82,15 +82,32 @@ struct ConnectionsView: View {
             //   两边就在一条水平线上。
             //   全屏时系统把标题栏整个收走，安全区归零，这一条也就跟着没了 ——
             //   顶栏直接顶到屏幕上沿，不留空带。
-            list
-                .safeAreaBar(edge: .top, spacing: 0) { header }
-                .scrollEdgeEffectStyle(.soft, for: .all)
-                .ignoresSafeArea(.container, edges: .top)
-                // 附属窗默认进不了全屏，得自己把 collectionBehavior 换成 primary。
-                .allowsFullScreen()
-                // 整窗玻璃，和主窗同一层材质；行自带一层 `.regularMaterial`（见 `row`），
-                // 两层材质叠出「卡片浮在玻璃上」的分层。
-                .windowGlass(.sidebar)
+            Group {
+                if isFullScreen {
+                    // ★ 全屏走**竖排**，不用 `safeAreaBar`。
+                    //
+                    //   全屏时 `safeAreaBar` 给滚动区留的内距对不上顶栏的实高：顶栏占
+                    //   0…50，而首行卡片的顶边实测落在 **29** —— 上面 21 整个钻到顶栏
+                    //   底下去了（窗口模式下是正好 50，没问题）。追这个内距是在跟
+                    //   SwiftUI 的安全区算术较劲，而全屏本来就没有标题栏要盖 ——
+                    //   顶栏和列表直接上下排就行，位置是确定的。
+                    //   代价只是全屏时列表不再从顶栏底下穿过渐隐。
+                    VStack(spacing: 0) {
+                        header
+                        list
+                    }
+                } else {
+                    list
+                        .safeAreaBar(edge: .top, spacing: 0) { header }
+                        .ignoresSafeArea(.container, edges: .top)
+                }
+            }
+            .scrollEdgeEffectStyle(.soft, for: .all)
+            // 附属窗默认进不了全屏，得自己把 collectionBehavior 换成 primary。
+            .allowsFullScreen()
+            // 整窗玻璃，和主窗同一层材质；行自带一层 `.regularMaterial`（见 `row`），
+            // 两层材质叠出「卡片浮在玻璃上」的分层。
+            .windowGlass(.sidebar)
         } else {
             VStack(spacing: 5) {
                 HStack(spacing: 10) {
@@ -123,12 +140,17 @@ struct ConnectionsView: View {
             //   起点 20、间距 20），再留 12 的呼吸。
             // ★ 只有它可压缩（其余都 `fixedSize`）——窗口拖到最小宽 480 且搜索展开时，
             //   总宽超出，让标题先截断，不能去挤按钮上的字。
-            Text("连接管理器".t)
-                .font(.system(size: 15))
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .padding(.leading, titleLeadingInset)
+            // ★ **全屏时整个不显示**：全屏只有一扇窗，没有「这是哪个窗」的问题，
+            //   标题就成了纯装饰；而且那时既没有红绿灯、也没有别的窗跟它抢，
+            //   左边留一片空更清爽。
+            if !isFullScreen {
+                Text("连接管理器".t)
+                    .font(.system(size: 15))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .padding(.leading, Self.titleLeadingInset)
+            }
             Spacer(minLength: 8)
             segmentedToggles
             searchControls
@@ -137,9 +159,8 @@ struct ConnectionsView: View {
         .padding(.trailing, 10)
     }
 
-    /// 标题左内距：窗口模式要让开红绿灯（右缘在窗口左缘往里 78）+ 12 的呼吸；
-    /// **全屏时没有红绿灯**，那 90 就成了一段没来由的空白 —— 收到 10。
-    private var titleLeadingInset: CGFloat { isFullScreen ? 10 : 78 + 12 }
+    /// 红绿灯右缘（78）+ 12 的呼吸。
+    private static let titleLeadingInset: CGFloat = 78 + 12
 
     /// Online / Offline 两个筛选开关。两段各自独立（可以同时开），不是二选一。
     @ViewBuilder
