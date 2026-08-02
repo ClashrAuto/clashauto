@@ -309,6 +309,16 @@ void DevicesController::ensureGatewayConfigured()
         s.prefix6 = n.prefix6;
         specs.append(s);
     }
+    // 数据面模式必须在 configure() **之前**设好：configureLocal 是按当前模式决定建不建 lwIP 的。
+    LanGateway::DatapathSpec dp;
+    dp.tproxy = m_core && m_core->gatewayTproxy();
+    dp.tproxyPort = DeviceStore::kTproxyPort;
+    // dnsPort 暂留 0 = 不劫持 DNS。核心的 DNS 监听现在绑在 127.0.0.1:1053,而 nat redirect 的
+    // 目的地会变成入口网卡的本机 IP,绑回环的监听收不到——要么把它改绑 0.0.0.0（会把 DNS 暴露到
+    // 局域网,得先想清楚），要么开 route_localnet。这一步先不做,于是 tproxy 模式下设备用自己的
+    // DNS：**流量照样被按 IP 代理,但域名类规则（DOMAIN/GEOSITE）会失配**。见提交信息。
+    dp.dnsPort = 0;
+    m_gateway->setDatapath(dp);
     m_gateway->configure(specs, DeviceStore::kGatewayPort);
     // 起来了就清掉去重记忆：之后再坏（拔网卡等）还要能重新报一次。
     if (m_gateway->isAvailable())

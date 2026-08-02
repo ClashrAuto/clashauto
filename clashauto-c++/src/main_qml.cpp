@@ -154,6 +154,11 @@ int main(int argc, char *argv[])
     // 透明网关**规则层**自测（COAST_TPROXY_SELFTEST=1）：装 nft/策略路由 → 核对 → 增删设备
     // → 拆 → 核对拆干净。不需要真设备、不改路由决策（设备集合为空时规则一条都不命中）。
     // 需要 root。与下面几个 env 自检钩子同一惯例。
+    // 启动即清一遍 TPROXY 的陈旧内核规则：上一次进程若是被 kill -9 打死的,nft 表/ip rule/路由
+    // 还留在内核里,而"规则在、没进程接管"= 被覆盖的设备**完全断网**。幂等,没装过也安全。
+    // 放在最前面：任何后续初始化失败都不该让用户卡在断网状态。
+    TproxyRules::removeStale();
+
     if (qEnvironmentVariableIsSet("COAST_TPROXY_SELFTEST"))
         return runTproxyRulesSelfTest();
 

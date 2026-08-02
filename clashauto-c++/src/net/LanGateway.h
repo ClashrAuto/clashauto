@@ -52,6 +52,20 @@ public:
     // （SSH/网页/共享）。
     void configure(const QVector<NicSpec> &nics, quint16 socksPort);
 
+    // —— 数据面选择 ——
+    // 默认 lwIP（现状）。打开 tproxy 后：ARP/NDP 劫持照旧（那是「设备什么都不用改」的来源），
+    // 但劫持来的**数据帧不再进用户态**——内核转发 + nftables TPROXY 直接投给核心。
+    //
+    // 必须在 configure() 之前设好：configureLocal 是按当前模式决定「建不建 NetStack」的。
+    // 中途改模式需要先 disableAll() 再重新 configure()（现在没有这个用法，也不打算有：
+    // 模式在启动时从 AppConfig 定下来，改了要重启——这比在运行中把一半设备切到另一条路安全）。
+    struct DatapathSpec {
+        bool tproxy = false;
+        quint16 tproxyPort = 0; // 核心的 tproxy 入站端口（ConfigBuilder 发的 coast-tproxy）
+        quint16 dnsPort = 0;    // 核心的 DNS 监听端口；0 = 不劫持 DNS
+    };
+    void setDatapath(const DatapathSpec &spec);
+
     // 平台是否可用（至少一张网卡的二层端点 + 协议栈就绪）。DevicesController.gatewayReady 返回它。
     bool isAvailable() const;
     // 该 IP 是否落在某张已就绪网卡的子网里（= 能不能对它开代理）。

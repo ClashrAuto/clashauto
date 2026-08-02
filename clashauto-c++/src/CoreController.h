@@ -31,6 +31,8 @@ public:
     // 端口变更需重启核心才能重新 bind（热重载改不了），调用方负责随后 stop/startCore。
     void setUiPort(int port);
     int uiPort() const { return m_config.uiPort; }
+    /// 网关数据面是否走 TPROXY（见 AppConfig::gatewayTproxy）。DevicesController 据此配置 LanGateway。
+    bool gatewayTproxy() const { return m_config.gatewayTproxy; }
 
     // 设置 IPv6 开关。只改内存里的运行态，不自己触发重建 —— 调用方（SettingsController）
     // 落完 config.yaml 后统一调 rebuildConfig()，避免一次开关引发两次热重载。

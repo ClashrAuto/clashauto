@@ -37,6 +37,7 @@
 #include "IL2Endpoint.h"
 #include "NdpSpoofer.h"
 #include "NetStack.h"
+#include "TproxyRules.h" // TPROXY 数据面的内核规则（装/拆/设备集合）
 
 #include <QDateTime>
 #include <QDir>
@@ -265,6 +266,8 @@ public:
                            QString *err);
     void disableDeviceLocal(const QString &mac);
     void disableAllLocal();
+    // 数据面模式。必须在 configureLocal 之前设——它按模式决定建不建 NetStack。
+    void setDatapathLocal(const LanGateway::DatapathSpec &spec) { m_datapath = spec; }
     void recoverLocal();
     void teardownLocal(); // 还原全部 ARP + 销毁 NetStack/端点/ArpSpoofer（幂等）。退出/析构走它。
 
@@ -291,7 +294,14 @@ private:
     // 把当前状态刷进 GUI 可读的快照（每次改状态后调用一次）。
     void publishSnapshot();
 
-    NetStack *m_net = nullptr;               // 共用（lwIP 单实例，多 netif）
+    NetStack *m_net = nullptr;               // 共用（lwIP 单实例，多 netif）；**tproxy 模式下恒为 null**
+    // —— 数据面模式 ——
+    // tproxy 模式下不建 NetStack,数据帧根本不进用户态:内核转发 + nft TPROXY 直接投给核心。
+    // 此时二层端点只用来收发 ARP/NDP（劫持与安全监视），内核过滤器也只放行这两类帧。
+    LanGateway::DatapathSpec m_datapath;
+    TproxyRules m_tproxy;
+    // 把当前受害设备的 IP 集合推给 nft（谁被接管由这个集合决定）。lwIP 模式下是空操作。
+    void syncTproxyDevices();
     QHash<QString, GwNic *> m_nics;          // ifname → 套件
     quint16 m_socksPort = 0;
     QHash<quint64, QString> m_victimByMac;   // src MAC 打包键 → ip（帧过滤 + 记账）
@@ -337,8 +347,32 @@ private:
 };
 
 // 把「属于这张卡的」被劫持设备源 MAC 集合推给它的二层端点，装成内核态源 MAC 过滤（收方优化）。
+// 把当前受害设备的 IP 推给 nft 的 proxied 集合。**谁被接管完全由这个集合决定**：
+// 不在集合里的设备照常由内核转发（等价于「没开代理」），所以集合为空时装着规则也是安全的。
+// lwIP 模式下是空操作。
+void GatewayWorker::syncTproxyDevices()
+{
+    if (!m_datapath.tproxy || !m_tproxy.isInstalled())
+        return;
+    QStringList ips;
+    ips.reserve(m_victimMacStr.size());
+    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it)
+        ips.append(it.key()); // 这张表是 ip → mac
+    QString err;
+    if (!m_tproxy.syncDevices(ips, &err))
+        emit deviceError(QString(), QStringLiteral("TPROXY 设备集合更新失败: ") + err);
+}
+
 void GatewayWorker::pushMacFilter(GwNic *n) const
 {
+    // ★ tproxy 模式：**一个数据帧都不要**。劫持仍然需要收发 ARP/NDP（抢答、反制、被争抢检测），
+    //   但设备的数据帧由内核转发,进用户态纯属浪费——那正是这条数据面要省掉的东西。
+    //   传空集合即可:下面那套通用布局在 n=0 时恰好退化成「只放行 ARP + NDP」（见该函数内注释）。
+    if (m_datapath.tproxy) {
+        if (n && n->ep)
+            n->ep->setSourceMacFilter({});
+        return;
+    }
     if (!n || !n->ep)
         return;
     QVector<QByteArray> macs;
@@ -606,7 +640,9 @@ void GatewayWorker::learnDeviceV4(GwNic *n, const uchar *f, const QByteArray &fr
 
 void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame)
 {
-    if (!m_net || frame.size() < 14 + 40)
+    // tproxy 模式下**故意**不学 v6：现在的 nft 规则只覆盖 IPv4（见 TproxyRules），学了也没处用。
+    // 等 v6 规则补上之后，这里要改成「学到就同步进 nft 的 v6 集合」，而不是继续沿用 m_net 判据。
+    if (m_datapath.tproxy || !m_net || frame.size() < 14 + 40)
         return;
     const uchar *src = f + 14 + 8; // IPv6 源地址
     if (!ip6SrcIsRoutable(src))
@@ -626,8 +662,12 @@ void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &fr
     //   一台设为「禁网」的设备，它的 v6 地址是这里学到的，注册时丢了 reject，
     //   NetStack 的 handleUdpFrame6 就查不到 dev.reject → **该设备的 IPv6 UDP 不被拦截**，
     //   「禁网」在 v6 上静默失效。而这条路径只在设备真发 v6 流量时才走，真机极难覆盖到。
-    m_net->addDeviceV6(n->ep, ip6, mb, m_victimUserByMac.value(vkey),
-                       m_isolatedMacs.contains(vkey));
+    if (!m_net) // tproxy 模式没有用户态栈：设备身份由原始源 IP 承载,不需要在这里登记
+        return;
+    if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+        m_net->addDeviceV6(n->ep, ip6, mb, m_victimUserByMac.value(vkey),
+                           m_isolatedMacs.contains(vkey));
+    }
     if (n->watch) {
         const QString macStr = QStringLiteral("%1:%2:%3:%4:%5:%6")
                                    .arg(mb[0] & 0xFF, 2, 16, QChar('0')).arg(mb[1] & 0xFF, 2, 16, QChar('0'))
@@ -643,7 +683,11 @@ void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &fr
 
 bool GatewayWorker::availableLocal() const
 {
-    if (!m_net)
+    // 「网关可用」= 数据面就绪 + 至少一张卡的二层端点开着。
+    // 数据面就绪按模式分别判：lwIP 看用户态栈，tproxy 看内核规则装没装。
+    // ★ 这里原本也只写 `!m_net`——与 enableDeviceLocal 里那处是同一个坑的两半：
+    //   光修那一处没用,这条总闸照样会把 tproxy 模式判成"不可用"（UI 上也会显示网关不可用）。
+    if (m_datapath.tproxy ? !m_tproxy.isInstalled() : !m_net)
         return false;
     for (GwNic *n : m_nics) {
         if (n->ready && n->ep && n->ep->isOpen())
@@ -745,9 +789,24 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
     refreshLocalAddrs(); // 网卡/地址可能刚变（DHCP 续约、插拔、VPN 起落），每轮重建
     m_socksPort = socksPort;
 
-    // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。都在工作线程上创建。
     QString err;
-    if (!m_net) {
+    if (m_datapath.tproxy) {
+        // TPROXY 数据面：**不建 NetStack**。规则装不上就必须原地失败并让上层退回 lwIP——
+        // 半开着（规则装了一半 / 装了但核心没起监听）等于把被覆盖的设备**整台断网**,
+        // 那比"这条新路暂时用不了"糟糕得多。
+        if (!m_tproxy.isInstalled()) {
+            TproxyRules::Spec ts;
+            ts.tproxyPort = m_datapath.tproxyPort;
+            ts.dnsPort = m_datapath.dnsPort;
+            if (!m_tproxy.install(ts, &err)) {
+                emit deviceError(QString(),
+                                 QStringLiteral("TPROXY 规则装载失败（已保持未接管状态）: ") + err);
+                return;
+            }
+        }
+        syncTproxyDevices();
+    } else if (!m_net) {
+        // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。都在工作线程上创建。
         m_net = new NetStack(socksPort, this);
         if (!m_net->init(&err)) {
             emit deviceError(QString(), QStringLiteral("协议栈初始化失败: ") + err);
@@ -818,7 +877,9 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                              QStringLiteral("打开网卡失败(%1): ").arg(spec.ifname) + err);
             continue;
         }
-        if (!m_net->hasNic(n->ep)
+        // ★ m_net 判空必须在**最前面**：tproxy 模式下它恒为空，而 && 是从左到右求值的。
+        //   我第一版写成 `!m_net->hasNic(...) && m_net && ...`，hasNic 先解引用了空指针 → SIGSEGV。
+        if (m_net && !m_net->hasNic(n->ep)
             && !m_net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask, &err)) {
             emit deviceError(QString(),
                              QStringLiteral("协议栈挂载网卡失败(%1): ").arg(spec.ifname) + err);
@@ -941,7 +1002,8 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
                         std::fprintf(stderr, "[GW] -> lwIP fed(v6)=%lld\n", m_dbgFedLwip),
                             std::fflush(stderr);
-                    m_net->inputFrame(n->ep, frame);
+                    if (m_net) // tproxy 模式没有用户态栈，这里恒为空
+                        m_net->inputFrame(n->ep, frame);
                     return;
                 }
             }
@@ -1048,7 +1110,9 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             ++GatewayDiag::c.fedLwip;
             if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
                 std::fprintf(stderr, "[GW] -> lwIP fed=%lld\n", m_dbgFedLwip), std::fflush(stderr);
-            m_net->inputFrame(n->ep, frame);
+            if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+                m_net->inputFrame(n->ep, frame);
+            }
         });
         if (!n->arp) {
             n->arp = new ArpSpoofer(n->ep, this);
@@ -1070,6 +1134,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         // 刚就绪、还没劫持任何设备：先装「全丢」内核过滤，避免混杂模式下整段流量白白进用户态。
         pushMacFilter(n);
     }
+    syncTproxyDevices(); // 集合已清空 → nft 的 proxied 也要跟着空掉,否则设备仍被 TPROXY 截着
 
     // 消失的网卡（拔网线/断 WiFi）：没有活动劫持的直接摘掉，有的先留着等 disable 收尾。
     const QStringList known = m_nics.keys();
@@ -1084,8 +1149,9 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             // 端点的通知器随之在工作线程被销毁——合法。delete 后 n->ep 立刻失效，先 disconnect 免得
             // 尚未 delete 之前再进一帧踩到正被拆的 n。
             disconnect(n->ep, nullptr, this, nullptr);
-            if (m_net)
-                m_net->removeNic(n->ep);
+                if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+                    m_net->removeNic(n->ep);
+                }
             delete n->ep;
         }
         if (n->arp)
@@ -1108,9 +1174,20 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
 bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
                                       const QString &socksUser, bool reject, QString *err)
 {
-    if (!m_net || !availableLocal()) {
+    // 「就绪」按数据面分别判：lwIP 要有用户态栈，tproxy 要有装好的内核规则。
+    //
+    // ★ 这一行原本只写 `!m_net`，而 tproxy 模式下 m_net 恒为空 —— 于是**每一次接管都在第一行
+    //   失败返回**，表现是「一台设备都劫持不了」，且没有任何崩溃或报错线索（错误信息还理直气壮
+    //   地说"需要 root"）。第一版改造就栽在这里，查了一轮才定位到。
+    //   更值得记的是：当时我写脚本审计"所有 m_net-> 是否都加了空指针守卫"，那个脚本把含
+    //   `!m_net` 的行当成"已守卫"跳过了 —— 而这行的极性恰恰相反。**审计的启发式亲手把 bug
+    //   藏了起来。** 加新的数据面时,要找的不只是"解引用点",还有这类**前置条件判据**。
+    const bool datapathReady = m_datapath.tproxy ? m_tproxy.isInstalled() : (m_net != nullptr);
+    if (!datapathReady || !availableLocal()) {
         if (err)
-            *err = QStringLiteral("网关未就绪（需要 root/CAP_NET_RAW，或网卡未配置）");
+            *err = m_datapath.tproxy
+                       ? QStringLiteral("TPROXY 规则未装载（需要 root 与 nftables/iproute2）")
+                       : QStringLiteral("网关未就绪（需要 root/CAP_NET_RAW，或网卡未配置）");
         return false;
     }
     const QByteArray mb = macBytes(mac);
@@ -1140,7 +1217,9 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
         return false;
     }
 
-    m_net->addDevice(ip, mb, socksUser, reject);
+        if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+            m_net->addDevice(ip, mb, socksUser, reject);
+        }
     n->arp->startSpoof(mac, ip);
     if (n->ndp)
         n->ndp->startSpoof(mac); // v6 投毒只需 MAC（设备 v6 地址随后从实帧里被动学到）
@@ -1159,6 +1238,7 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     m_victimNic.insert(ip, n->spec.ifname);
     m_victimUserByMac.insert(vkey, socksUser); // v6 学习登记时补 mihomo 身份要用
     pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
+    syncTproxyDevices(); // tproxy 模式：把它加进 nft 的 proxied 集合（lwIP 模式下空操作）
     // 局域网隔离集合：policy=reject 的设备进来，抢答与方向过滤都据此判定。
     if (reject)
         m_isolatedMacs.insert(vkey);
@@ -1170,7 +1250,9 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     //   表现为「设成禁网了，它的 IPv6 UDP 还照走」。addDeviceV6 内部是 insert 覆盖，幂等。
     if (m_net) {
         for (const QString &ip6 : m_victimV6ByMac.value(vkey))
-            m_net->addDeviceV6(n->ep, ip6, mb, socksUser, reject);
+                if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+                    m_net->addDeviceV6(n->ep, ip6, mb, socksUser, reject);
+                }
     }
     // 崩溃兜底：把这台设备的还原帧预存起来。进程若被 SIGSEGV/abort 打死，正常的 disableAll
     // 一步都走不到，只有这条路能把设备的网关 ARP 还回去（详见 GatewayPanic.h）。
@@ -1206,11 +1288,15 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
             --n->victims;
     }
     if (m_net) {
-        m_net->removeDevice(ip);
+                if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+                    m_net->removeDevice(ip);
+                }
         // 摘掉这台设备学到的所有 v6 地址（nd6 静态邻居 + devices 表 + v6 UDP 会话）。
         const QSet<QString> v6s = m_victimV6ByMac.value(key);
         for (const QString &ip6 : v6s)
-            m_net->removeDeviceV6(ip6);
+                if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+                    m_net->removeDeviceV6(ip6);
+                }
     }
     m_victimByMac.remove(key);
     m_isolatedMacs.remove(key);
@@ -1222,6 +1308,7 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     m_victimV6ByMac.remove(key);
     if (n)
         pushMacFilter(n); // 该卡移除一台设备：重推内核过滤（可能变回「全丢」）
+    syncTproxyDevices(); // tproxy 模式：把它从 nft 的 proxied 集合里去掉
         pushIsolatedMacs(n);
     saveState();
     publishSnapshot();
@@ -1245,10 +1332,14 @@ void GatewayWorker::disableAllLocal()
     if (m_net) {
         const QStringList ips = m_victimMacStr.keys();
         for (const QString &ip : ips)
-            m_net->removeDevice(ip);
+            if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+                m_net->removeDevice(ip);
+            }
         for (auto it = m_victimV6ByMac.constBegin(); it != m_victimV6ByMac.constEnd(); ++it)
             for (const QString &ip6 : it.value())
-                m_net->removeDeviceV6(ip6);
+                if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+                    m_net->removeDeviceV6(ip6);
+                }
     }
     m_victimByMac.clear();
     m_victimMacStr.clear();
@@ -1402,8 +1493,9 @@ void GatewayWorker::teardownLocal()
     for (GwNic *n : m_nics) {
         if (n->ep) {
             disconnect(n->ep, nullptr, this, nullptr);
-            if (m_net)
-                m_net->removeNic(n->ep);
+                if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+                    m_net->removeNic(n->ep);
+                }
             delete n->ep; // 端点+通知器在工作线程析构（constraint 9）
         }
         if (n->arp)
@@ -1417,6 +1509,10 @@ void GatewayWorker::teardownLocal()
     m_nics.clear();
     delete m_net; // NetStack 的 QTimer + 所有 Socks5*/lwIP 结构在工作线程析构
     m_net = nullptr;
+    // nft 规则/ip rule/路由表是**内核持久状态**,不拆掉的话:规则还在、却没有进程接管 TPROXY
+    // 的流量 = 被覆盖的设备完全断网。析构里也有一道（TproxyRules 的析构调 remove），这里显式
+    // 再来一次是因为 teardownLocal 是「还原一切」的正式出口,不该依赖对象生命周期的时机。
+    m_tproxy.remove();
 }
 
 // ———————————————————————————— LanGateway（GUI 线程的编排入口）————————————————————————————
@@ -1467,6 +1563,16 @@ LanGateway::~LanGateway()
         d->thread = nullptr;
     }
     delete d;
+}
+
+void LanGateway::setDatapath(const DatapathSpec &spec)
+{
+    if (!d->workerReady())
+        return;
+    // 同步语义：紧跟其后的 configure() 必须已经看到新模式（configureLocal 按模式决定建不建 NetStack）。
+    QMetaObject::invokeMethod(
+        d->worker, [w = d->worker, spec] { w->setDatapathLocal(spec); },
+        Qt::BlockingQueuedConnection);
 }
 
 void LanGateway::configure(const QVector<NicSpec> &nics, quint16 socksPort)
