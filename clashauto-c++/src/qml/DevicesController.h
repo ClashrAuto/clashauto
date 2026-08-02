@@ -185,6 +185,9 @@ private:
     QString m_lastGatewayErr;
     // mac → 当前劫持所用的 IP。用来发现「设备换了 IP」（旧劫持已失效，需重上）。
     QHash<QString, QString> m_armedIp;
+    // 是否处于「已挂起」状态：handleSleep 置位、handleWake 清位。
+    // 置位期间 resumeProxies 一律不挂劫持——否则周期性重挂会把复原帧盖掉。
+    bool m_suspended = false;
     // mac → 上次自动恢复劫持失败的原因。resumeProxies 每轮都会重试，同一条只提示一次。
     QHash<QString, QString> m_resumeErr;
     // 内核在不在跑（CoreController::statusChanged 的第三个参数）。劫持只在它为真时上。

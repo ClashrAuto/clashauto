@@ -167,6 +167,7 @@ void DevicesController::handleSleep()
     std::fprintf(stderr, "[POWER] sleep: withdrawing %lld device proxy(ies)\n",
                  static_cast<long long>(m_gateway->activeDevices().size()));
     std::fflush(stderr);
+    m_suspended = true; // 置位后 resumeProxies 一律不再挂，免得把复原帧盖掉（见那里的说明）
     m_gateway->disableAll();
     m_armedIp.clear();
     m_resumeErr.clear();
@@ -175,6 +176,7 @@ void DevicesController::handleSleep()
 
 void DevicesController::handleWake()
 {
+    m_suspended = false; // 先解封，否则下面这一轮扫描回来照样不会挂
     if (!hasProxiedDevices())
         return;
     std::fprintf(stderr, "[POWER] wake: rescanning to re-arm device proxy\n");
@@ -190,6 +192,19 @@ void DevicesController::resumeProxies()
 {
     if (!m_gateway)
         return;
+    // ★ 已经进入挂起流程就**别再挂回去**。
+    //
+    //   handleSleep 撤销劫持并清空 m_armedIp（正确：机器要睡了，设备得能靠真网关继续上网），
+    //   可台账里的「代理网络」开关是**持久意图**、仍然是开的 —— 于是 5s 一次的在线态热更新
+    //   调到这里，看见「该代理却没 armed」，立刻又给挂了回去，把刚发出去的复原帧盖掉。
+    //   真机抓包实测：SIGUSR1 后 **15ms** 发出 15 个复原帧（5 台 × 3 次，is-at 真网关），
+    //   **961ms** 后重投毒帧就上来了，之后 3 秒内又发了 36 个，设备最终仍指着本机 ——
+    //   机器真睡下去就是**被代理设备集体断网**，而这正是睡眠处理本来要避免的事。
+    if (m_suspended) {
+        if (qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG"))
+            std::fprintf(stderr, "[RESUME] 已挂起，本轮不上劫持\n"), std::fflush(stderr);
+        return;
+    }
     // ★ 内核不在跑就一台都不上（见构造函数里那段说明）。开关仍然开着，等 onCoreRunningChanged
     //   在内核起来时补。少了这道门禁，开机时序（劫持 2s 就绪、内核可能还在加载 rule-provider，
     //   或正等 TUN 的 UAC 确认）就会把设备劫持到一个空出口上，表现为「重启后设备全网断」。
