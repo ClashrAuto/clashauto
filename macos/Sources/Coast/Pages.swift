@@ -6,6 +6,10 @@ import SwiftUI
 /// 流量指标 + 实时带宽图。对齐 `qml/StatusPage.qml` 的上半部分；
 /// 「今日流量」「连接速览」两块依赖历史库，随阶段 6 补。
 struct StatusPage: View {
+    /// 下两行卡片的**基准行高**（Qt 那边每张卡写死的 `Layout.preferredHeight`）。
+    /// 是下限不是定值 —— 理由见 `body` 里那段注释。
+    private static let cardRowHeight: CGFloat = 268
+
     /// 最近建立的 5 条。
     private var recentRows: [ConnectionRow] { ConnectionRow.recent(state.connections, limit: 5) }
     /// 发起方的设备名。判定逻辑在 `ConnectionRow.deviceLabel` —— 状态页两张卡共用一份。
@@ -30,11 +34,17 @@ struct StatusPage: View {
                 //   还省下整整一屏的竖向空间。
                 // 双列布局。**不用 `Grid`** —— 它按行等分可用高度，一旦某行内容更高，
                 // 其余行之间就会被撑出不均匀的空隙（实测第二、三行之间空了近 100pt）。
-                // 两个 HStack 各自定高，间距完全可控，也更贴近 Qt 的 GridLayout 行为
+                // 两个 HStack 各自管自己的行高，间距完全可控，也更贴近 Qt 的 GridLayout 行为
                 // （那边每张卡都写死 Layout.preferredHeight）。
-                // 每行 `alignment: .top` + 两张卡同一个定高：HStack 默认是**垂直居中**，
-                // 一旦两张卡实高有出入（内容撑高/撑矮一点），就会上下错位 —— 顶对齐 +
-                // 定高把「同行同高、顶边齐平」定死，与 Qt GridLayout 的行为一致。
+                // 每行 `alignment: .top` + 一个**行级**的高度：HStack 默认是垂直居中，
+                // 两张卡实高有出入时就会上下错位。
+                //
+                // ★ 高度是 `minHeight` 且加在**整行**上，不是 `height` 加在每张卡上。
+                //   写死 `.frame(height:)` 的话，内容超过那个数时 SwiftUI **不会压缩**，
+                //   而是把超出的部分**居中溢出**：今日流量卡满 5 条榜时要 280，塞进 268 的
+                //   槽里就上下各冒出 6 —— 它比左邻高一截、顶边也高 6，正是那处错位
+                //   （实测右卡上缘比左卡高 12px@2x）。改成行级 minHeight 后，某张卡要更高
+                //   时整行一起长，两张卡仍旧同高、顶边仍旧齐平。
                 HStack(alignment: .top, spacing: 10) {
                     // ★ 这里必须是**速率**。Qt 用的是 `bridge.upText`，那是
                     //   `speedText(up)`（带 `/s`）。原来写的是 `Formatting.bytes(...)`，
@@ -57,14 +67,14 @@ struct StatusPage: View {
                                     onOpenAll: { openWindow(id: ConnectionsWindowID.value) },
                                     onClearAll: { state.closeAllConnections() },
                                     deviceName: deviceName(for:))
-                        .frame(height: 268)
                     LatencyCard(monitor: state.latency)
-                        .frame(height: 268)
                 }
+                .frame(minHeight: Self.cardRowHeight)
                 HStack(alignment: .top, spacing: 10) {
-                    CompositionCard().frame(height: 268)
-                    TodayTrafficCard().frame(height: 268)
+                    CompositionCard()
+                    TodayTrafficCard()
                 }
+                .frame(minHeight: Self.cardRowHeight)
 
                 // 三盏状态灯已移除:页脚本来就有「核心 / 网页 / 增强」三个开关，
                 // 状态页再放一排只读的灯是重复,Qt 那边也没有。
@@ -132,7 +142,6 @@ struct NodesPage: View {
             //   叠成 20（见 `topBar`）。
             .padding(.trailing, 10)
             .pageHeaderBar(spacing: 8) { topBar }
-            .padding(.vertical, 10)
     }
 
     /// 顶栏固定 30 高（搜索框 28，展开时不撑高整行）、间距 6 —— 与 Qt 逐项一致。
@@ -220,7 +229,11 @@ struct NodesPage: View {
                 .help("帮助".t)
         }
         .frame(height: 30)
-        // 顶栏自管左右内距（主内容不再有，见 body）。
+        // 顶栏自管上、左、右内距（主内容不再有，见 body）。
+        // ★ 顶距在**顶栏**上，不在整页上：加在整页上那份会同时压出一个底距，
+        //   把列表的下缘从窗底抬开 10 —— 列表就穿不过页脚了（见 `content`）。
+        //   订阅/设备两页也是把 10 加在各自的顶栏里。
+        .padding(.top, 10)
         .padding(.leading, pageLeadingInset)
         .padding(.trailing, 10)
     }
@@ -251,6 +264,12 @@ struct NodesPage: View {
                 //   左右外边距（实测左 6.5 / 右 9 点），`listRowInsets` 归零和
                 //   `contentMargins(.horizontal, 0)` 都清不掉它 —— 而这一页的左右内距
                 //   要能自己说了算（左 0、右 10，见 `body`）。LazyVStack 一样是按需构建行。
+                //
+                // ★ 滚动区**直达窗底**，一点内距都不能加在它外面：26 上页脚是
+                //   `safeAreaBar`，列表要从它底下穿过去再由系统边缘效果渐隐。
+                //   外面垫 10 的话，列表在离页脚 10 的地方被自己的边界**硬切**一刀
+                //   （截图里最后一行被拦腰截断，下面是一条空带）。收尾的留白改成
+                //   加在**滚动内容**上 —— 它跟着内容滚，不动列表的边界。
                 ScrollView {
                     LazyVStack(spacing: 1) {
                         ForEach(visibleNodes) { node in
@@ -261,6 +280,7 @@ struct NodesPage: View {
                                     onDisable: { state.disableCurrentNode(node) })
                         }
                     }
+                    .padding(.bottom, 10)
                 }
             }
     }
