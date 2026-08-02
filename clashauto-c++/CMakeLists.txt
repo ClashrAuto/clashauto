@@ -165,6 +165,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         src/net/NetStack.cpp src/net/NetStack.h
         src/net/NdpSpoofer.cpp src/net/NdpSpoofer.h  # IPv6 的 ICMPv6/NDP 投毒器（ArpSpoofer 的 v6 对应物）
         src/net/LanGateway_linux.cpp
+        # 内核态转发规则（nftables TPROXY + 策略路由）。非 Linux 由 #if 守卫成空实现,
+        # 所以三端都编——省得调用方到处写平台分支。
+        src/net/TproxyRules.cpp src/net/TproxyRules.h
         # lwIP 那几条静默丢 SYN/静默杀连接路径的计数器实例（声明在同名 .h，累加在 tcp_in.c）。
         # 必须是 .c：定义在 C++ 里会被名字修饰，lwIP 侧链接不到。
         src/net/lwip_port/coast_lwip_diag.c

@@ -11,6 +11,7 @@
 #include "DeviceStore.h"
 #include "HistoryStore.h" // 上网历史库（SQLite）
 #include "LanScanner.h"   // COAST_SCAN_SELFTEST 的扫描耗时自检
+#include "net/TproxyRules.h" // COAST_TPROXY_SELFTEST 的规则层自测
 #include "LatencyProbe.h" // 状态页延迟卡：直连/路由/DNS/代理四个数
 #include "SubscriptionStore.h"
 #include "TrayController.h"
@@ -150,6 +151,12 @@ int main(int argc, char *argv[])
     // 路由器」这条路在没有 IPv6 的网络上永远跑不到（本项目的测试台就是如此），没有它等于零覆盖。
     // ★ 这个钩子**不再限于 POSIX**：NdpSpoofer 在 Windows 上同样编进产物，以前却连这一个
     //   纯解析自测都跑不了（钩子被上面那个守卫罩住了）。见 GatewaySelfTest.cpp 里的说明。
+    // 透明网关**规则层**自测（COAST_TPROXY_SELFTEST=1）：装 nft/策略路由 → 核对 → 增删设备
+    // → 拆 → 核对拆干净。不需要真设备、不改路由决策（设备集合为空时规则一条都不命中）。
+    // 需要 root。与下面几个 env 自检钩子同一惯例。
+    if (qEnvironmentVariableIsSet("COAST_TPROXY_SELFTEST"))
+        return runTproxyRulesSelfTest();
+
     if (qEnvironmentVariableIsSet("COAST_NDP_RA_SELFTEST"))
         return runNdpRaSelfTest();
 
