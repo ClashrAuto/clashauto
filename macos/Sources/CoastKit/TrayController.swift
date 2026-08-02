@@ -139,12 +139,13 @@ public final class TrayController {
         statusItem.length = drawn.width
     }
 
-    /// 角标字母。优先级与侧栏 logo 上那颗 `StatusBadge` 一致：
-    /// 增强 T > 网页 W > 核心开 C > 核心关 N。
+    /// 角标字母。优先级与侧栏 logo 上那颗 `StatusBadge` 一致：增强 T > 网页 W > 核心开 C。
+    /// **全关时不显示角标**（返回空串 → `globeImage` 不画）——「什么都没开」本来就是
+    /// 缺省态，挂个 N 出来反而像有东西在跑。侧栏那颗照旧显示 N，这里刻意不同。
     private var badgeLetter: String {
         if renderedTunEnabled == true { return "T" }
         if renderedProxyEnabled == true { return "W" }
-        return coreRunningForDraw ? "C" : "N"
+        return coreRunningForDraw ? "C" : ""
     }
 
     /// 上一次画好的地球（按边长/角标缓存）。`redraw()` 每秒都会被流量刷一次，
@@ -199,7 +200,7 @@ public final class TrayController {
         //   等于 side 时墨迹贴着画布边，字形光栅化到目标字号有半像素级的舍入，
         //   贴哪边哪边的抗锯齿行就被画布硬切 —— 上一版顶上被裁、这一版底下被裁，
         //   来回修就是因为把余量留成了 0。
-        let scale = (side - 1) / max(probeInk.width, probeInk.height)
+        let scale = (side - 1.4) / max(probeInk.width, probeInk.height)
         let glyphFont = NSFont(name: "iconfont", size: 100 * scale)!
         // 缩放后的墨迹（线性外推 —— 字形轮廓随字号线性缩放，误差在半像素内）。
         let ink = NSRect(x: probeInk.minX * scale, y: probeInk.minY * scale,
@@ -213,8 +214,10 @@ public final class TrayController {
 
             guard !badge.isEmpty else { return true }
             let bs = side * 0.42
-            let box = NSRect(x: side - bs, y: (side - ink.height) / 2,
-                             width: bs, height: bs)   // 右下角，底边 = 地球底边
+            // 底边 = 地球墨迹底边再往下 0.5：角标压着圆弧的切点看着偏高，
+            // 往下半 pt 视觉上才落在「右下角」（实拍调出来的值）。
+            let box = NSRect(x: side - bs, y: (side - ink.height) / 2 - 0.5,
+                             width: bs, height: bs)   // 右下角
             accent.set()
             NSBezierPath(roundedRect: box, xRadius: bs * 0.28, yRadius: bs * 0.28).fill()
 
