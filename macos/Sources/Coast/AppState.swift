@@ -369,11 +369,11 @@ public final class AppState {
         let env = ProcessInfo.processInfo.environment
         guard let ip = env["COAST_GATEWAY_TESTDEV"], !ip.isEmpty else { return }
         guard let mac = LanBrowser.arpMap()[ip] else {
-            append(log: "COAST_GATEWAY_TESTDEV=\(ip)：ARP 表里没有它，先让它发点流量再试")
+            append(log: "COAST_GATEWAY_TESTDEV=\(ip)：ARP 表里没有它，先让它发点流量再试") // i18n-ignore: 只在联调环境变量下出现
             return
         }
         _ = devices.setProxyEnabled(mac: mac, true, ip: ip)
-        append(log: "COAST_GATEWAY_TESTDEV=\(ip)（\(mac)）：已开代理，正在接管")
+        append(log: "COAST_GATEWAY_TESTDEV=\(ip)（\(mac)）：已开代理，正在接管") // i18n-ignore: 只在联调环境变量下出现
         await controller.rebuildConfig()
     }
 
@@ -493,7 +493,7 @@ public final class AppState {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.suspended = true   // 置位后周期性任务不再把接管挂回去（见 resume 侧说明）
-                self.append(log: "系统即将睡眠：撤销设备接管，让它们回到真网关")
+                self.append(log: "系统即将睡眠：撤销设备接管，让它们回到真网关".t)
             }
             // 撤销要在挂起**之前**完成。通知是同步投递的，这里等它做完再返回。
             let semaphore = DispatchSemaphore(value: 0)
@@ -508,7 +508,7 @@ public final class AppState {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.suspended = false  // 先解封，否则下面这次重挂会被自己拦掉
-                self.append(log: "系统已唤醒：重新接管设备")
+                self.append(log: "系统已唤醒：重新接管设备".t)
                 Task { await self.controller.resumeDeviceTakeover() }
             }
         }
@@ -529,7 +529,7 @@ public final class AppState {
             source.setEventHandler { [weak self] in
                 guard let self else { return }
                 let center = NSWorkspace.shared.notificationCenter
-                self.append(log: isSleep ? "SIGUSR1(testhook) → 模拟睡眠" : "SIGUSR2(testhook) → 模拟唤醒")
+                self.append(log: isSleep ? "SIGUSR1(testhook) → 模拟睡眠" : "SIGUSR2(testhook) → 模拟唤醒") // i18n-ignore: 只在 COAST_POWER_TESTHOOK 下出现
                 center.post(name: isSleep ? NSWorkspace.willSleepNotification
                                           : NSWorkspace.didWakeNotification, object: nil)
             }
@@ -606,7 +606,8 @@ public final class AppState {
                         continue
                     }
                     _ = self.devices.setProxyEnabled(mac: device.mac, true, ip: current)
-                    self.append(log: "设备 \(device.mac) 地址变了：\(device.lastIP) → \(current)，重新接管")
+                    self.append(log: String(format: "设备 %@ 地址变了：%@ → %@，重新接管".t,
+                                            device.mac, device.lastIP, current))
                     changed = true
                 }
                 if changed {

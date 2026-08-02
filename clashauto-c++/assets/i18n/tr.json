@@ -439,5 +439,9 @@
   "被争抢": "Çekişmeli",
   "另一台设备也在把这台设备的流量劫走": "Başka bir makine de bu cihazın trafiğini ele geçiriyor",
   "本网络的 IPv6 也已一并接管。": "Bu ağın IPv6 trafiği de yönetiliyor.",
-  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Bu ağda IPv6 yönlendiricisi bulunamadı; yalnızca IPv4 yönetiliyor."
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Bu ağda IPv6 yönlendiricisi bulunamadı; yalnızca IPv4 yönetiliyor.",
+  "系统即将睡眠：撤销设备接管，让它们回到真网关": "Sistem uykuya geçiyor: cihaz devralma kaldırılıyor, cihazlar gerçek ağ geçidine dönecek",
+  "系统已唤醒：重新接管设备": "Sistem uyandı: cihazlar yeniden devralınıyor",
+  "设备 %@ 地址变了：%@ → %@，重新接管": "%@ cihazının adresi değişti: %@ → %@, yeniden devralınıyor",
+  "仅显示在线设备": "Yalnızca çevrimiçi cihazları göster"
 }

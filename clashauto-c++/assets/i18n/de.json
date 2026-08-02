@@ -439,5 +439,9 @@
   "被争抢": "Umkämpft",
   "另一台设备也在把这台设备的流量劫走": "Ein anderer Rechner leitet den Datenverkehr dieses Geräts ebenfalls um",
   "本网络的 IPv6 也已一并接管。": "Das IPv6 dieses Netzwerks wird ebenfalls übernommen.",
-  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Kein IPv6-Router in diesem Netzwerk gefunden; nur IPv4 wird übernommen."
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Kein IPv6-Router in diesem Netzwerk gefunden; nur IPv4 wird übernommen.",
+  "系统即将睡眠：撤销设备接管，让它们回到真网关": "System wechselt in den Ruhezustand: Geräteübernahme wird aufgehoben, sie fallen auf das echte Gateway zurück",
+  "系统已唤醒：重新接管设备": "System aufgewacht: Geräte werden erneut übernommen",
+  "设备 %@ 地址变了：%@ → %@，重新接管": "Gerät %@ hat die Adresse gewechselt: %@ → %@, wird erneut übernommen",
+  "仅显示在线设备": "Nur Online-Geräte anzeigen"
 }

@@ -439,5 +439,9 @@
   "被争抢": "Conteso",
   "另一台设备也在把这台设备的流量劫走": "Un'altra macchina sta dirottando anche il traffico di questo dispositivo",
   "本网络的 IPv6 也已一并接管。": "Anche il traffico IPv6 di questa rete è gestito.",
-  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Nessun router IPv6 trovato in questa rete; viene gestito solo l'IPv4."
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "Nessun router IPv6 trovato in questa rete; viene gestito solo l'IPv4.",
+  "系统即将睡眠：撤销设备接管，让它们回到真网关": "Il sistema sta per sospendersi: rilascio il controllo dei dispositivi, torneranno al gateway reale",
+  "系统已唤醒：重新接管设备": "Sistema riattivato: ripresa del controllo dei dispositivi",
+  "设备 %@ 地址变了：%@ → %@，重新接管": "Il dispositivo %@ ha cambiato indirizzo: %@ → %@, ripresa del controllo",
+  "仅显示在线设备": "Mostra solo i dispositivi online"
 }

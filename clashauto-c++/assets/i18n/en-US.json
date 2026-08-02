@@ -440,5 +440,9 @@
   "被争抢": "Contended",
   "另一台设备也在把这台设备的流量劫走": "Another machine is also hijacking this device's traffic",
   "本网络的 IPv6 也已一并接管。": "This network's IPv6 traffic is being handled too.",
-  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "No IPv6 router found on this network; only IPv4 is handled."
+  "本网络未发现 IPv6 路由器，仅接管 IPv4。": "No IPv6 router found on this network; only IPv4 is handled.",
+  "系统即将睡眠：撤销设备接管，让它们回到真网关": "System going to sleep: releasing device takeover so they fall back to the real gateway",
+  "系统已唤醒：重新接管设备": "System woke up: taking the devices over again",
+  "设备 %@ 地址变了：%@ → %@，重新接管": "Device %@ changed address: %@ → %@, taking it over again",
+  "仅显示在线设备": "Show online devices only"
 }
