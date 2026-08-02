@@ -67,6 +67,22 @@ QString fmtBytes(qint64 v)
     }
     return QString::number(n, 'f', i == 0 ? 0 : 1) + QLatin1Char(' ') + QLatin1String(u[i]);
 }
+
+#if defined(Q_OS_MACOS)
+// 资源名是否属于 **Qt 这条 mac 产品线**（`…-qt.dmg` / `…-qt-…` / `…qt-…`）。
+//
+// 同一个 release 上并排躺着两条 mac 产品线的包，只有文件名里这个 qt 标记能区分：
+//   Coast-<ver>-macos-universal.dmg      —— Swift 版，部署目标 macOS 26
+//   Coast-<ver>-macos-universal-qt.dmg   —— 本程序，部署目标 13.0
+// 与 Swift 侧 `UpdateChecker.isQtLine` 一字对应（那边是把带 qt 的排除掉）。
+// 只认带分隔符的 qt，不裸匹配子串 —— 否则 "…-quic-…" 这类名字会被误伤。
+bool isQtLineAsset(const QString &name)
+{
+    const QString n = name.toLower();
+    return n.contains(QLatin1String("-qt.")) || n.contains(QLatin1String("-qt-"))
+           || n.contains(QLatin1String("qt-")) || n.endsWith(QLatin1String("-qt"));
+}
+#endif // Q_OS_MACOS
 } // namespace
 
 UpdateController::UpdateController(AppConfig config, CoreController *core, QObject *parent)
@@ -135,18 +151,15 @@ void UpdateController::refresh()
     fetchCore();
 }
 
-int UpdateController::recommendedIndex(int tab) const
+int UpdateController::recommendedIndex(int tab)
 {
     const QVector<Asset> &assets = tab == 1 ? m_betaAssets : m_releaseAssets;
-    if (assets.isEmpty()) {
-        return -1;
-    }
     // 各平台优先推荐「可一键安装」的资源，且必须**确定性**选取——不能只 return 0，因为
     // GitHub 资源顺序 = 上传顺序，Linux 上 0 号常是 .tar.gz，「一键更新」就变成下压缩包 →
     // 弹归档管理器 → 退出，什么都没装（即 Linux「更新错乱」的根因）。按扩展名精确择优：
     //   Windows → NSIS 安装器（名含 setup 的 .exe，支持 /S 静默安装 + 自动重启）
     //   Linux   → .deb（openUrl 交系统包管理器安装）
-    //   macOS   → .dmg（launchSilentUpdateAndRestartMac 覆盖 .app + 自动重启）
+    //   macOS   → 带 -qt 的 .dmg（launchSilentUpdateAndRestartMac 覆盖 .app + 自动重启）
     auto firstMatch = [&assets](auto pred) -> int {
         for (int i = 0; i < assets.size(); ++i) {
             if (pred(assets.at(i).name)) {
@@ -155,7 +168,32 @@ int UpdateController::recommendedIndex(int tab) const
         }
         return -1;
     };
-#if defined(Q_OS_WIN)
+#if defined(Q_OS_MACOS)
+    // ★★ macOS 单独一条路径，且**绝不退回**任意 .dmg。
+    //
+    //   同一个 release 上还躺着 Swift 版的 …-macos-universal.dmg，它的部署目标是 macOS 26。
+    //   一旦退回去挑到它：一键更新会 rm 掉现在这个 .app 再 ditto 新的进去 —— 用户的 Qt 版
+    //   被换成一个他的系统根本起不来的 app，双击没反应、没有任何提示，而且旧包已经删了、
+    //   回不去。这不是「挑得不够好」，是把人装死。
+    //
+    //   什么时候会走到「找不到」：某次 release 里 Qt 那条签名线挂了、只有 Swift 包传上来。
+    //   本程序只看最新的那个 release、不往回翻，所以此时退回**必然**是错的 —— 宁可告诉用户
+    //   「这版没有你的包」，也不能装错产品线。
+    //   （fetchReleases 里已按 isQtLineAsset 滤过一遍，这里是第二道闸。）
+    const int macIdx = firstMatch([](const QString &n) {
+        return n.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive) && isQtLineAsset(n);
+    });
+    if (macIdx < 0) {
+        // 必须说出来：QML 那边 i < 0 就是不动作，静默无反应比装错包好，但比不上讲清楚。
+        setStatus(tr("这个版本没有提供 Qt 版 macOS 包（…-macos-universal-qt.dmg），暂时无法一键更新。"
+                     "可稍后重试，或到 Releases 页手动下载。"));
+    }
+    return macIdx;
+#else
+    if (assets.isEmpty()) {
+        return -1;
+    }
+#  if defined(Q_OS_WIN)
     // 更新页改造：程序更新统一走「下载 portable zip → 解压覆盖到项目目录 → 重启」，故
     // 优先便携版 zip（名含 portable 的 .zip）→ 任意 .zip → 退回 NSIS 安装器（setup.exe / .exe）。
     int idx = firstMatch([](const QString &n) {
@@ -174,23 +212,11 @@ int UpdateController::recommendedIndex(int tab) const
     if (idx < 0) {
         idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive); });
     }
-#elif defined(Q_OS_MACOS)
-    // ★ mac 上同一个 release 有**两个** dmg：Qt 版（本程序）名里带 -qt，Swift 版没有。
-    //   Swift 版部署目标是 macOS 26 且是另一套界面/另一条产品线 —— 挑错了，用户在
-    //   macOS 13/14 上装完会直接双击没反应（系统版本不够），且毫无提示。所以先找带 qt 的，
-    //   找不到才退回任意 dmg（老 release 上只有一个包，那时还没分线）。
-    int idx = firstMatch([](const QString &n) {
-        return n.endsWith(QStringLiteral("-qt.dmg"), Qt::CaseInsensitive)
-               || (n.contains(QStringLiteral("-qt-"), Qt::CaseInsensitive)
-                   && n.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive));
-    });
-    if (idx < 0) {
-        idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive); });
-    }
-#else
+#  else
     int idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".deb"), Qt::CaseInsensitive); });
-#endif
+#  endif
     return idx >= 0 ? idx : 0;
+#endif
 }
 
 void UpdateController::fetchReleases()
@@ -276,6 +302,16 @@ void UpdateController::fetchReleases()
                     || name.endsWith(QStringLiteral(".sha256"), Qt::CaseInsensitive)) {
                     continue; // 忽略 metadata 与校验边车（边车仅供按名查表校验，不作可下载项展示）
                 }
+#if defined(Q_OS_MACOS)
+                // ★ mac 上「同平台同架构」还不够：一个 release 上并排放着两条产品线的包，
+                //   Swift 版（…-macos-universal.dmg）部署目标是 macOS 26、是另一个 app。
+                //   连列都不能列 —— 列表是用户能手点的，摆在那儿迟早有人点，点完就是
+                //   把自己的 Qt 版覆盖成一个起不来的 app，且旧包已删、回不去。
+                //   这是第一道闸；recommendedIndex 里还有第二道（那里同样不退回）。
+                if (!isQtLineAsset(name)) {
+                    continue;
+                }
+#endif
                 Asset item;
                 item.name = name;
                 item.url = a.value(QStringLiteral("browser_download_url")).toString();

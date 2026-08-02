@@ -70,8 +70,10 @@ public:
 
     // 打开更新窗即调用：拉 release 列表 + 内核版本（对齐 showUpdateDialog 打开即发起的请求）。
     Q_INVOKABLE void refresh();
-    // 推荐资源下标（优先含 setup 的安装包）；tab: 0=正式 1=测试。无资源返回 -1。
-    Q_INVOKABLE int recommendedIndex(int tab) const;
+    // 推荐资源下标（优先含 setup 的安装包）；tab: 0=正式 1=测试。无合适资源返回 -1。
+    // 非 const：macOS 上「这个 release 里没有本产品线的包」要写进 status 说给用户看，
+    // 静默返回 -1 的话点「更新」是毫无反应，用户只会以为程序坏了。
+    Q_INVOKABLE int recommendedIndex(int tab);
     // 「一键更新」：下载所选资源 → 校验 sha256 → 静默安装并自动重启。
     // tab: 0=正式 1=测试；index=资源下标；useMirror=国内代理下载（ghfast.top 直连）。
     Q_INVOKABLE void oneClickUpdate(int tab, int index, bool useMirror);
