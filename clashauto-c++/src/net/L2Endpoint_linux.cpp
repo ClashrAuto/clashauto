@@ -227,6 +227,9 @@ constexpr unsigned kRingFramesPerBlock = kRingBlockSize / kRingFrameSize; // = 3
 //   相对原来那个默认 208 KB 有 15 倍余量，足以吃下「lwIP 一次 tcp_output 把整个拥塞窗口刷出来」
 //   这种突发。要再往上加之前，先回头看一眼上面那条「必须短于 rto_min」的判据。
 constexpr int kTxSndBufBytes = 1 * 1024 * 1024; // 内核记 2 MiB
+// 收方缓冲。关掉 RX 环之后帧走 socket 接收队列，默认的 208 KB 在多设备高 pps 下会溢出
+// （真机四设备 6698 帧/s 时 rxdrop 一个窗口 666）。取 4 MiB，内核翻倍记账 ⇒ 实际 8 MiB。
+constexpr int kRxRcvBufBytes = 4 * 1024 * 1024;
 // 用户态积压：内核那层满了之后再兜一层。这层的时延同样计进上面的总账。
 constexpr qint64 kTxBacklogMaxBytes = 1 * 1024 * 1024;
 // 丢帧日志节流：链路一旦喂不进去就是每帧都丢，不节流会刷屏。
@@ -323,6 +326,28 @@ public:
 #endif
         if (!sndSet)
             ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
+
+        // ★ 收方缓冲同样要抬 —— **关掉 RX 环之后这条才成为必须**。
+        //
+        //   有环的时候，帧落在那 1 MiB 的 mmap 环里，`SO_RCVBUF` 根本不参与；现在走的是逐帧
+        //   recvfrom（见文件头那段选型账），帧先进 socket 的接收队列，而它的默认容量取自
+        //   `net.core.rmem_default` —— 多数发行版就是 **212992（208 KB）**，按满长帧算只排得下
+        //   一百四十来个。事件循环被别的活占住一小会儿就溢出，内核直接丢帧（`tp_drops`）。
+        //
+        //   丢在这里是最难查的一类：设备侧只看到 TCP 重传变多、变慢，而我们自己
+        //   `txdrop/tcpAbort/socksFail` 全是 0，看起来一切正常。
+        //   真机实测（树莓派网关，**四台设备同时打**、6698 帧/s）：`rxdrop` 一个窗口涨到 666；
+        //   单设备负载下则是 0~2 —— 所以这个坑只有多设备/高 pps 才现形，单设备测不出来。
+        //
+        //   取 4 MiB（内核同样翻倍记账 ⇒ 实际 8 MiB），与原先那 1 MiB 环相比有充足余量；
+        //   和发方一样优先 `SO_RCVBUFFORCE` 越过 `net.core.rmem_max` 的钳制。
+        int rcv = kRxRcvBufBytes;
+        bool rcvSet = false;
+#ifdef SO_RCVBUFFORCE
+        rcvSet = ::setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &rcv, sizeof(rcv)) == 0;
+#endif
+        if (!rcvSet)
+            ::setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv));
 
         // 非阻塞：回退路径（drainSocket）靠它循环 recv 到 EAGAIN，绝不在无数据时阻塞事件循环。
         // 发方同样依赖它：满了要拿到 EAGAIN/ENOBUFS 才能转去排队，而不是把工作线程堵死。
