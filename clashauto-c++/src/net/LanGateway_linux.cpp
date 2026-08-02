@@ -364,6 +364,31 @@ void GatewayWorker::syncTproxyDevices()
     QString err;
     if (!m_tproxy.syncDevices(ips, macs, &err))
         emit deviceError(QString(), QStringLiteral("TPROXY 设备集合更新失败: ") + err);
+
+    // 局域网隔离（policy=reject）：被隔离设备的 IP + 本机各网卡的网段。
+    QStringList isoIps;
+    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it) {
+        const QByteArray mb = macBytes(it.value());
+        if (mb.size() == 6
+            && m_isolatedMacs.contains(macKey(reinterpret_cast<const uchar *>(mb.constData()))))
+            isoIps.append(it.key());
+    }
+    QStringList lans;
+    for (GwNic *n : m_nics) {
+        if (!n->ready || !n->netMask4)
+            continue;
+        int bits = 0; // 掩码一定是连续 1，数前导 1 即前缀长度
+        for (quint32 m = n->netMask4; m & 0x80000000u; m <<= 1)
+            ++bits;
+        const quint32 net = n->localIp4 & n->netMask4;
+        const QString cidr = QStringLiteral("%1.%2.%3.%4/%5")
+                                 .arg((net >> 24) & 0xFF).arg((net >> 16) & 0xFF)
+                                 .arg((net >> 8) & 0xFF).arg(net & 0xFF).arg(bits);
+        if (!lans.contains(cidr))
+            lans.append(cidr);
+    }
+    if (!m_tproxy.syncIsolation(isoIps, lans, &err))
+        emit deviceError(QString(), QStringLiteral("TPROXY 隔离集合更新失败: ") + err);
 }
 
 void GatewayWorker::pushMacFilter(GwNic *n) const

@@ -76,6 +76,18 @@ public:
     /// 匹配（tproxy 下不学设备的 v6 地址，MAC 才是稳定的抓手），漏了它 = IPv6 绕过策略。
     bool syncDevices(const QStringList &ipv4, const QStringList &macs, QString *err = nullptr);
 
+    /// 更新「局域网隔离」集合：policy=reject 的设备 IP，以及本机各网卡的网段。
+    ///
+    /// 语义与 lwIP 那条一致——**被隔离设备不能主动发起到同网段，别人仍能访问它**——但换成
+    /// conntrack 判定（ct state new 才丢）。比 lwIP 现在那套无状态启发式准，而且 **UDP 也能按
+    /// 方向正确放行**：LanGateway_linux.cpp 里明说过 UDP 只能全丢，代价是对端也用不了被隔离
+    /// 设备上的 mDNS/SSDP 之类服务；conntrack 没有这个代价。
+    ///
+    /// 前提是这类流量真的会经过本机——靠 ArpSpoofer::answerIsolationArp 的抢答（tproxy 下二层
+    /// 端点照常在跑，这一层没变）。
+    bool syncIsolation(const QStringList &isolatedIpv4, const QStringList &lanCidrs,
+                       QString *err = nullptr);
+
     /// 拆除。幂等。析构时自动调用。
     void remove();
 

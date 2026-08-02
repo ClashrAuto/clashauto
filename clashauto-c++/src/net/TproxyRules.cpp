@@ -223,12 +223,31 @@ table inet %1 {
   set victimmacs {
     type ether_addr
   }
+  set isolated {
+    type ipv4_addr
+  }
+  set lansubnets {
+    type ipv4_addr
+    flags interval
+  }
   chain v6guard {
     type filter hook forward priority filter - 30; policy accept;
     ether saddr @victimmacs meta nfproto ipv6 counter drop
   }
+  chain isolate {
+    # 局域网隔离的**兜底**层（注意：这段在 nft 脚本里，注释必须用 # 不能用 //）。真正拦下
+    # 绝大多数包的是 prerouting 链里同样一条规则 —— 实测这条 forward 规则只命中 1 包：
+    # TPROXY 在 prerouting(mangle) 就把被接管设备的包截给本地 socket 了，路由判决都不做，
+    # forward 钩子根本轮不到。放着不删是因为它覆盖 prerouting 放行之后仍走转发的残余路径
+    # （跨网段本机地址旁路那几条 return）。顺带：只有 prerouting 那条能避免「TPROXY 本地
+    # socket 先把 TCP 握手做完、再由核心 REJECT」的假连通 —— 那正是 `nc -z` 会误报「通」
+    # 的原因，别再拿 -z 验隔离。
+    type filter hook forward priority filter - 20; policy accept;
+    ip saddr @isolated ip daddr @lansubnets ct state new counter drop
+  }
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
+    ip saddr @isolated ip daddr @lansubnets ct state new counter drop
 )")
                          .arg(QString::fromLatin1(kTable));
     if (m_spec.dnsPort != 0)
@@ -291,6 +310,30 @@ bool TproxyRules::syncDevices(const QStringList &ipv4, const QStringList &macs, 
     if (!macs.isEmpty()) {
         script += QStringLiteral("add element inet %1 victimmacs { %2 }\n")
                       .arg(QString::fromLatin1(kTable), macs.join(QStringLiteral(", ")));
+    }
+    return applyNft(script, err);
+}
+
+bool TproxyRules::syncIsolation(const QStringList &isolatedIpv4, const QStringList &lanCidrs,
+                                QString *err)
+{
+    if (!m_installed) {
+        if (err)
+            *err = QStringLiteral("规则未安装");
+        return false;
+    }
+    // 同 syncDevices：整体替换，不做增量 diff。
+    // isolate 链优先级 filter-20，**排在 forward_accept(filter-10) 之前**——后者会无条件 accept
+    // 被代理设备的流量，隔离必须先于它判定，否则永远轮不到。
+    QString script = QStringLiteral("flush set inet %1 isolated\nflush set inet %1 lansubnets\n")
+                         .arg(QString::fromLatin1(kTable));
+    if (!isolatedIpv4.isEmpty()) {
+        script += QStringLiteral("add element inet %1 isolated { %2 }\n")
+                      .arg(QString::fromLatin1(kTable), isolatedIpv4.join(QStringLiteral(", ")));
+    }
+    if (!lanCidrs.isEmpty()) {
+        script += QStringLiteral("add element inet %1 lansubnets { %2 }\n")
+                      .arg(QString::fromLatin1(kTable), lanCidrs.join(QStringLiteral(", ")));
     }
     return applyNft(script, err);
 }
@@ -418,6 +461,12 @@ bool TproxyRules::install(const Spec &, QString *err)
     return false;
 }
 bool TproxyRules::syncDevices(const QStringList &, const QStringList &, QString *err)
+{
+    if (err)
+        *err = QStringLiteral("TPROXY 仅 Linux 可用");
+    return false;
+}
+bool TproxyRules::syncIsolation(const QStringList &, const QStringList &, QString *err)
 {
     if (err)
         *err = QStringLiteral("TPROXY 仅 Linux 可用");
