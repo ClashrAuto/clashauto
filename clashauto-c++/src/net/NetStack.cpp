@@ -759,22 +759,30 @@ err_t lwipTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     flushRecvWindow(c);
     // ★ 每条连接的**第一段**设备上行数据，强制立刻 ACK 一次。
     //
-    //   不这么做的话，这个 ACK 要等 lwIP 的延迟 ACK 定时器（`tcp_fasttmr`，最长 250ms），
-    //   而 Linux 客户端的 **RTO 下限就是 200ms**（TCP_RTO_MIN）。两者同一量级，于是只要
-    //   上游（SOCKS → 目标）在 200ms 内没回数据、我们没有下行数据可以捎带这个 ACK，
-    //   客户端就必然把请求**重发一遍**。跨境节点、慢站点、以及网关自己被打满的时候，
-    //   「上游超过 200ms」根本不是小概率。
+    //   ★ 先说**没有**被证实的那个解释，免得下一个人重走一遍：起初以为是「lwIP 的延迟 ACK
+    //     定时器 250ms 撞上 Linux 客户端 200ms 的 RTO 下限」。**不成立** —— 本项目的
+    //     `TCP_TMR_INTERVAL` 早就调成了 100（见 lwipopts.h），`tcp_fasttmr` 100ms 一拍，
+    //     按理比 200ms 的 RTO 快得多。
     //
-    //   真机抓包（Pi 网关，四设备并发、Pi 已 CPU 饱和）的一条慢连接：
-    //     +0.002s GET 发出 → +0.215s GET **重传** → +0.216s 我们才 ACK → +2.720s 响应
-    //   那次重传纯属白跑：ACK 只比它晚 1ms，请求根本没丢。代价是双份的请求帧
-    //   （在已经饱和的网关上尤其亏），以及客户端把 cwnd 收掉。
+    //   实测到的事实是：真机抓包（Pi 网关，四设备并发、Pi 已 CPU 饱和）的一条慢连接
+    //     +0.002s GET 发出 → +0.215s GET **重传** → +0.216s 才出现 ACK → +2.720s 响应
+    //   那个 ACK 比重传只晚 1ms，说明它是**被重传触发的**（重复段会立刻 ACK），不是定时器发的。
+    //   也就是说 **+0.002 到 +0.215 这 213ms 里，延迟 ACK 一次都没送出去**，尽管定时器是
+    //   100ms 一拍。为什么没送出去，目前**没有查清**（同期诊断里 `late=0 maxLagMs=0`，
+    //   泵没有迟到，所以不是「定时器等不到泵」那条已知路径）。
+    //
+    //   在成因查清之前，这里用「第一段强制 ACK」把症状挡掉：重传本身是白跑的（请求没丢），
+    //   代价是双份请求帧 + 客户端收 cwnd。A/B 实测（同一二进制、交替跑）受影响设备
+    //   p99 2514/2685ms → 1107/1083ms。
     //
     //   为什么不是「每段都立刻 ACK」：那会废掉延迟 ACK 的批量效果 —— 设备**上传**大文件时
     //   每个数据段都回一帧，在 118 MB/s 的量级上是实打实的额外开销。只对第一段做，
     //   刚好覆盖「请求-响应」这个占绝大多数的形态，每条连接只多一帧，可以忽略。
     //   后续段仍走原来的路径：由 `flushRecvWindow` 的窗口更新或下行数据捎带。
-    if (!c->ackedFirstUpSegment && c->pcb && !c->lwipClosed) {
+    // 只为 A/B 量化这一帧的代价：置 COAST_NO_FIRST_ACK=1 可关掉本优化。
+    // 同一个二进制交替跑两组，能排掉构建差异和台子漂移。生产上不设这个变量。
+    static const bool kFirstAckDisabled = qEnvironmentVariableIntValue("COAST_NO_FIRST_ACK") != 0;
+    if (!kFirstAckDisabled && !c->ackedFirstUpSegment && c->pcb && !c->lwipClosed) {
         c->ackedFirstUpSegment = true;
         tcp_ack_now(c->pcb);
         tcp_output(c->pcb);
