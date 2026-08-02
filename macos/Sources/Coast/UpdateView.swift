@@ -299,7 +299,9 @@ struct UpdateView: View {
             // 脚本最多等 60 秒，比清理所需的时间富余得多。
             status = String(format: "已就绪（%@），正在退出安装…".t, staged.assetName)
             try? await Task.sleep(for: .milliseconds(300))   // 让状态那行来得及画出来
-            NSApplication.shared.terminate(nil)
+            // ★ 必须走「真退」入口：⌘Q 那道守门把普通 terminate 当「收窗口」拦下 ——
+            //   拦下的话替换脚本等不到进程退出，更新永远装不上。
+            AppDelegate.shared?.terminateForReal() ?? NSApplication.shared.terminate(nil)
         } catch AppUpdater.UpdateError.notInAppBundle {
             // 开发期直跑：没有可替换的 .app，退回打开发布页手动装。
             state.openReleasePage()

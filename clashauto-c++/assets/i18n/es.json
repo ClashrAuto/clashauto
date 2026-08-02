@@ -446,5 +446,11 @@
   "仅显示在线设备": "Mostrar solo dispositivos en línea",
   "添加域名规则": "Añadir regla de dominio",
   "添加进程规则": "Añadir regla de proceso",
-  "连接管理器": "Gestor de conexiones"
+  "连接管理器": "Gestor de conexiones",
+  "关闭窗口": "Cerrar ventana",
+  "准备安装…": "Preparando la instalación…",
+  "尚未取得发布信息，请稍后重试": "La información de la versión aún no está disponible, inténtalo más tarde",
+  "已就绪（%@），正在退出安装…": "Listo (%@), saliendo para instalar…",
+  "当前不是从 .app 运行，已打开发布页请手动安装": "No se está ejecutando desde una .app: se abrió la página de la versión, instala manualmente",
+  "程序更新失败：%@": "Error al actualizar la aplicación: %@"
 }
