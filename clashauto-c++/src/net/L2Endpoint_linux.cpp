@@ -232,6 +232,12 @@ constexpr int kTxSndBufBytes = 1 * 1024 * 1024; // 内核记 2 MiB
 constexpr int kRxRcvBufBytes = 4 * 1024 * 1024;
 // 用户态积压：内核那层满了之后再兜一层。这层的时延同样计进上面的总账。
 constexpr qint64 kTxBacklogMaxBytes = 1 * 1024 * 1024;
+// 一批 sendmmsg 最多攒多少帧 / 多少字节。64 帧 ≈ SOCKS 侧一次大块读被 lwIP 切出来的段数
+// （实测约 45），既能吃满典型批量，又不会让 iovec/mmsghdr 数组大到没意义。
+// **不要为了"批得更大"把它调高**：暂存只在当前事件处理这一轮内存在，攒不满就靠队列化 flush
+// 立刻发走；调高只会增加内存和一次 memset 的成本，换不到更大的批。
+constexpr size_t kTxStageMaxFrames = 64;
+constexpr qint64 kTxStageMaxBytes = 128 * 1024;
 // 丢帧日志节流：链路一旦喂不进去就是每帧都丢，不节流会刷屏。
 constexpr qint64 kDropReportMinIntervalMs = 30000;
 // 内核收方丢包计数（PACKET_STATISTICS）的采样间隔。读一次即清零，故按固定间隔累加。
@@ -392,6 +398,8 @@ public:
         }
         m_txQueue.clear();
         m_txQueuedBytes = 0;
+        m_txStage.clear();
+        m_txStageBytes = 0;
 #ifdef COAST_HAVE_TPACKET_V2
         if (m_ring) {
             // 先 munmap 再 close：环页由内核持有，socket 关闭时才真正释放；反过来做会在
@@ -438,25 +446,38 @@ public:
         return &m_panicCtx;
     }
 
-    // 发一帧。缓冲满时**排队重试**而不是丢（理由见文件头「发方」一节）。
+    // 发一帧。**先进本轮暂存批，由 flushTx() 用一次 sendmmsg 打包发走**；缓冲满时排队重试
+    // 而不是丢（理由见文件头「发方」一节）。
     // 返回 false 只在「参数非法 / 端点没开 / 队列也满了」——调用方（lwipLinkOutput）历来忽略它，
     // 这里也不指望它去处理；真正的可观测性在 m_txDropped 的节流日志上。
+    // 注意：进了暂存批的帧返回 true 只表示「已受理」，真正的发送结果在 flushTx 里体现（丢帧照常计数）。
     bool send(const QByteArray &frame) override
     {
         if (m_fd < 0 || frame.size() < 14) // 至少要够以太头
             return false;
 
         // 队列非空 = 内核正堵着，必须排到队尾，否则新帧插队会把同一条 TCP 流的段序打乱
-        // （乱序在对端表现为丢包重传，等于自己给自己制造损伤）。
+        // （乱序在对端表现为丢包重传，等于自己给自己制造损伤）。暂存批同理排在积压之后。
         if (!m_txQueue.empty())
             return enqueueTx(frame);
 
-        const int r = rawSend(frame);
-        if (r > 0)
+        m_txStage.push_back(frame);
+        m_txStageBytes += frame.size();
+        // 攒满就地发，避免暂存无界增长（也避免一次 sendmmsg 的 iovec 数组过大）。
+        if (m_txStage.size() >= kTxStageMaxFrames || m_txStageBytes >= kTxStageMaxBytes) {
+            flushTx();
             return true;
-        if (r == 0)
-            return enqueueTx(frame); // EAGAIN/ENOBUFS：缓冲满，等可写
-        return false;                // 其它 errno：这一帧真发不出去（网卡 down 等）
+        }
+        // 否则挂一次**队列化**的 flush：它会在当前事件处理返回、事件循环转下一轮之前跑掉，
+        // 所以帧最多等到本轮事件处理结束，不引入可观测的额外延迟（见 kTxStageMaxFrames 注释）。
+        if (!m_txFlushQueued) {
+            m_txFlushQueued = true;
+            QMetaObject::invokeMethod(this, [this]() {
+                m_txFlushQueued = false;
+                flushTx();
+            }, Qt::QueuedConnection);
+        }
+        return true;
     }
 
     QByteArray localMac() const override { return m_localMac; }
@@ -593,6 +614,81 @@ private:
                 return 0;
             return -1;
         }
+    }
+
+    // 把本轮暂存的帧用**一次 sendmmsg** 打包交给内核。
+    //
+    // 为什么要有它（这是量出来的，不是想当然）：树莓派 5 上跑满网关数据面时，strace 显示
+    // `sendto` 占了网关工作线程系统调用时间的 **78%**——3 秒 84724 次、28241 次/秒。来源很清楚：
+    // SOCKS 侧每读一大块（约 627 次/秒），lwIP 就把它切成约 45 个 MTU 帧，逐个 sendto 发出去。
+    // 一次 sendmmsg 正好覆盖这 45 帧，syscall 数直接掉一个数量级。
+    //
+    // 语义与逐帧路径**完全一致**：
+    //   · 内核只收下前 sent 条时，剩下的原样走 enqueueTx（积压队列 + 写通知器），顺序不乱；
+    //   · sendmmsg 整体失败（EAGAIN/ENOBUFS）时全部转积压，等价于原来每帧都拿到 EAGAIN；
+    //   · 真错误（其它 errno）按帧计入 txDropped，与 rawSend 的 -1 分支同义。
+    // 计数也保持不变（txFrames/txBytes 逐帧累加），gateway-diag.log 的口径不变。
+    void flushTx()
+    {
+        if (m_txStage.empty())
+            return;
+        // 积压非空说明内核正堵着：暂存批必须整体排到队尾，不能插队（同一条 TCP 流的段序）。
+        if (!m_txQueue.empty()) {
+            for (const QByteArray &f : m_txStage)
+                enqueueTx(f);
+            m_txStage.clear();
+            m_txStageBytes = 0;
+            return;
+        }
+
+        const int n = static_cast<int>(m_txStage.size());
+        for (int i = 0; i < n; ++i) {
+            const QByteArray &f = m_txStage[size_t(i)];
+            std::memset(&m_txAddr[i], 0, sizeof(m_txAddr[i]));
+            m_txAddr[i].sll_family = AF_PACKET;
+            m_txAddr[i].sll_ifindex = m_ifIndex;
+            m_txAddr[i].sll_halen = 6;
+            std::memcpy(m_txAddr[i].sll_addr, f.constData(), 6); // dst MAC = 帧头前 6 字节
+            m_txIov[i].iov_base = const_cast<char *>(f.constData());
+            m_txIov[i].iov_len = size_t(f.size());
+            std::memset(&m_txMsg[i], 0, sizeof(m_txMsg[i]));
+            m_txMsg[i].msg_hdr.msg_name = &m_txAddr[i];
+            m_txMsg[i].msg_hdr.msg_namelen = sizeof(m_txAddr[i]);
+            m_txMsg[i].msg_hdr.msg_iov = &m_txIov[i];
+            m_txMsg[i].msg_hdr.msg_iovlen = 1;
+        }
+
+        int done = 0;
+        while (done < n) {
+            const int r = ::sendmmsg(m_fd, &m_txMsg[done], unsigned(n - done), 0);
+            if (r > 0) {
+                for (int i = done; i < done + r; ++i) {
+                    ++GatewayDiag::c.txFrames;
+                    GatewayDiag::c.txBytes += qint64(m_txStage[size_t(i)].size());
+                }
+                ++GatewayDiag::c.txBatches;
+                done += r;
+                continue;
+            }
+            if (r < 0 && errno == EINTR)
+                continue; // 信号打断，原样重来
+            break;        // EAGAIN/ENOBUFS 或真错误：剩下的交给下面统一处理
+        }
+
+        if (done < n) {
+            const bool retryable = (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS);
+            for (int i = done; i < n; ++i) {
+                if (retryable) {
+                    enqueueTx(m_txStage[size_t(i)]); // 缓冲满：排队等可写，别丢
+                } else {
+                    ++GatewayDiag::c.txDropped;      // 网卡 down 之类：这一帧真发不出去
+                }
+            }
+            if (!retryable)
+                reportDropsThrottled();
+        }
+        m_txStage.clear();
+        m_txStageBytes = 0;
     }
 
     // 排进积压队列，并确保写就绪通知器是开着的。队列满则丢最新的一帧并计数。
@@ -838,6 +934,15 @@ private:
     QSocketNotifier *m_txNotifier = nullptr;
     std::deque<QByteArray> m_txQueue;
     qint64 m_txQueuedBytes = 0;
+    // 本轮暂存批（见 flushTx）。数组是**成员**而非局部：flushTx 在热路径上，每次重新分配
+    // 三个定长数组是白给的开销。持有 QByteArray 的隐式共享副本，保证 iov_base 指向的内存
+    // 活到 sendmmsg 返回——与 m_txQueue 同一条契约（见 IL2Endpoint.h：入参必须是自有内存）。
+    std::vector<QByteArray> m_txStage;
+    qint64 m_txStageBytes = 0;
+    bool m_txFlushQueued = false;
+    struct sockaddr_ll m_txAddr[kTxStageMaxFrames];
+    struct iovec m_txIov[kTxStageMaxFrames];
+    struct mmsghdr m_txMsg[kTxStageMaxFrames];
     // 丢帧的**累计**数不在这里——放 GatewayDiag::c 里，好让它一起进采样日志（多网卡时是合计值）。
     qint64 m_lastDropReportMs = -kDropReportMinIntervalMs;
     qint64 m_lastRxStatsMs = 0;
