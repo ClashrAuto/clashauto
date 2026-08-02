@@ -443,5 +443,7 @@
   "系统即将睡眠：撤销设备接管，让它们回到真网关": "Sistem uykuya geçiyor: cihaz devralma kaldırılıyor, cihazlar gerçek ağ geçidine dönecek",
   "系统已唤醒：重新接管设备": "Sistem uyandı: cihazlar yeniden devralınıyor",
   "设备 %@ 地址变了：%@ → %@，重新接管": "%@ cihazının adresi değişti: %@ → %@, yeniden devralınıyor",
-  "仅显示在线设备": "Yalnızca çevrimiçi cihazları göster"
+  "仅显示在线设备": "Yalnızca çevrimiçi cihazları göster",
+  "添加域名规则": "Alan adı kuralı ekle",
+  "添加进程规则": "İşlem kuralı ekle"
 }

@@ -443,5 +443,7 @@
   "系统即将睡眠：撤销设备接管，让它们回到真网关": "El sistema va a suspenderse: se libera el control de los dispositivos para que vuelvan a la puerta de enlace real",
   "系统已唤醒：重新接管设备": "El sistema se ha reactivado: retomando el control de los dispositivos",
   "设备 %@ 地址变了：%@ → %@，重新接管": "El dispositivo %@ cambió de dirección: %@ → %@, retomando el control",
-  "仅显示在线设备": "Mostrar solo dispositivos en línea"
+  "仅显示在线设备": "Mostrar solo dispositivos en línea",
+  "添加域名规则": "Añadir regla de dominio",
+  "添加进程规则": "Añadir regla de proceso"
 }

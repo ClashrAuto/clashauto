@@ -113,25 +113,28 @@ struct ConnectionsView: View {
             //   套两个 plain Button，选中态自己描 `.tint.opacity(0.35)`）只是长得像，
             //   开态既不是系统的 prominent 填充，按下也没有玻璃的形变。
             //
-            //   `GlassEffectContainer` 让间距小于 spacing 的相邻玻璃**融成一片** ——
-            //   这才是「一组」而不是「两颗各自的按钮」。两段仍各是独立开关
-            //   （可以同时开、也可以同时关），所以是两个 Toggle 而不是三选一的分段控件。
-            GlassEffectContainer(spacing: 6) {
-                HStack(spacing: 4) {
-                    Toggle(isOn: $showOnline) {
-                        Text("Online (\(state.connectionLedger.onlineCount))")
-                            .font(.system(size: 12))
-                    }
-                    Toggle(isOn: $showOffline) {
-                        Text("Offline (\(state.connectionLedger.offlineCount))")
-                            .font(.system(size: 12))
-                    }
+            //   外面套 `ControlGroup` 才是**一组**：它把两颗拼成一块连体的控件
+            //   （中间无缝、只有外侧是圆的）。先前用的是
+            //   `GlassEffectContainer` + `HStack(spacing: 4)` —— 那个容器只对
+            //   **自己上 `.glassEffect()`** 的视图做融合，管不到 `.buttonStyle(.glass)`
+            //   的系统按钮，于是渲染出来就是「两颗中间带缝的独立胶囊」，不是一组。
+            //
+            //   两段仍各是独立开关（可以同时开、也可以同时关），所以是两个 Toggle
+            //   而不是三选一的分段控件。
+            ControlGroup {
+                Toggle(isOn: $showOnline) {
+                    Text("Online (\(state.connectionLedger.onlineCount))")
+                        .font(.system(size: 12))
                 }
-                .toggleStyle(.button)
-                .buttonStyle(.glass)
-                .buttonBorderShape(.capsule)
-                .controlSize(.large)
+                Toggle(isOn: $showOffline) {
+                    Text("Offline (\(state.connectionLedger.offlineCount))")
+                        .font(.system(size: 12))
+                }
             }
+            .toggleStyle(.button)
+            .buttonStyle(.glass)
+            .controlSize(.large)
+            .fixedSize()
         } else {
             legacySegmentedToggles
         }
@@ -301,12 +304,27 @@ struct ConnectionsView: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        // 右键：拿本行的东西预填一条规则，再交给编辑器（类型/出口都还能改）。
+        //
+        // 有进程名时**多给一条**「添加进程规则」—— 这一行上其实有两个可以成规则的东西，
+        // 而它们回答的是不同的问题：域名规则管「这个站怎么走」，进程规则管
+        // 「这个程序怎么走」。想让某个 app 整个走直连时，按域名一条条加是加不完的。
+        // 进程名只有本机连接才有（核心的 find-process-mode 填的），局域网设备的
+        // 进程在别人机器上 —— 所以这条是按需出现，不占位。
         .contextMenu {
-            Button("添加规则".t) {
+            Button("添加域名规则".t) {
                 addingRule = RuleDraft(index: nil,
                                        rule: RulesStore.Rule(type: "DOMAIN-SUFFIX",
                                                              node: "DIRECT",
                                                              value: conn.host))
+            }
+            if !conn.process.isEmpty {
+                Button("添加进程规则".t) {
+                    addingRule = RuleDraft(index: nil,
+                                           rule: RulesStore.Rule(type: "PROCESS-NAME",
+                                                                 node: "DIRECT",
+                                                                 value: conn.process))
+                }
             }
         }
     }

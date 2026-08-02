@@ -443,5 +443,7 @@
   "系统即将睡眠：撤销设备接管，让它们回到真网关": "Hệ thống sắp ngủ: hủy tiếp quản thiết bị để chúng quay lại gateway thật",
   "系统已唤醒：重新接管设备": "Hệ thống đã thức dậy: tiếp quản lại các thiết bị",
   "设备 %@ 地址变了：%@ → %@，重新接管": "Thiết bị %@ đã đổi địa chỉ: %@ → %@, đang tiếp quản lại",
-  "仅显示在线设备": "Chỉ hiển thị thiết bị trực tuyến"
+  "仅显示在线设备": "Chỉ hiển thị thiết bị trực tuyến",
+  "添加域名规则": "Thêm quy tắc tên miền",
+  "添加进程规则": "Thêm quy tắc tiến trình"
 }

@@ -444,5 +444,7 @@
   "系统即将睡眠：撤销设备接管，让它们回到真网关": "System going to sleep: releasing device takeover so they fall back to the real gateway",
   "系统已唤醒：重新接管设备": "System woke up: taking the devices over again",
   "设备 %@ 地址变了：%@ → %@，重新接管": "Device %@ changed address: %@ → %@, taking it over again",
-  "仅显示在线设备": "Show online devices only"
+  "仅显示在线设备": "Show online devices only",
+  "添加域名规则": "Add domain rule",
+  "添加进程规则": "Add process rule"
 }
