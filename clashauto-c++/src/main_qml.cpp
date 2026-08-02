@@ -27,9 +27,10 @@
 #include "net/GatewayDiag.h"
 #include "net/GatewayPanic.h" // 崩溃兜底：进程被打死时裸发还原 ARP
 #include "net/LanGateway.h"
-#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+// 不加平台守卫：RA 解析自测(runNdpRaSelfTest)现在所有编网关的平台都有，含 Windows。
+// 头里另一个声明 runGatewaySelfTest() 只在 POSIX 有定义，但**声明**不需要守卫——
+// 只要调用点带守卫就不会产生未定义引用。
 #include "net/GatewaySelfTest.h"
-#endif
 
 #include <QApplication>
 #include <QFont>
@@ -141,13 +142,16 @@ int main(int argc, char *argv[])
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
     // 后退出（配合 validate/gateway_selftest.sh）。用 offscreen 平台即可（无显示环境）。
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+    // 数据面自测要 TAP(Linux)/feth+BPF(mac)，只有 POSIX 有。
     if (qEnvironmentVariableIsSet("COAST_GATEWAY_SELFTEST"))
         return runGatewaySelfTest();
+#endif
     // RA 解析自测：纯字节解析，不碰网络、不需要 root、毫秒级。单列一个钩子是因为「从 RA 学 v6
     // 路由器」这条路在没有 IPv6 的网络上永远跑不到（本项目的测试台就是如此），没有它等于零覆盖。
+    // ★ 这个钩子**不再限于 POSIX**：NdpSpoofer 在 Windows 上同样编进产物，以前却连这一个
+    //   纯解析自测都跑不了（钩子被上面那个守卫罩住了）。见 GatewaySelfTest.cpp 里的说明。
     if (qEnvironmentVariableIsSet("COAST_NDP_RA_SELFTEST"))
         return runNdpRaSelfTest();
-#endif
 
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报
     // "current style does not support customization"），本 app 全是自绘控件，必须 Basic。

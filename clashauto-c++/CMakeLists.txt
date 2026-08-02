@@ -154,11 +154,13 @@ qt_add_qml_module(clashauto-qml
 #          结构体打包(cc.h 有 _MSC_VER 分支)。链 wpcap/Packet/iphlpapi/ws2_32。
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     set(LWIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lwip/src")
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE)
-        # 网关 headless 自测钩子：Linux 用 TAP、mac 用 feth+真实 BPF 端点（Windows Npcap 暂不做 CI 自测）。
-        target_sources(clashauto-qml PRIVATE
-            src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
-    endif()
+    # 网关自测钩子。文件里分两段，守卫也分两段（见 GatewaySelfTest.cpp）：
+    #   · 数据面自测(COAST_GATEWAY_SELFTEST)：要 TAP(Linux)/feth+BPF(mac)，只在 POSIX 编；
+    #   · RA 解析自测(COAST_NDP_RA_SELFTEST)：纯字节解析，**所有编网关的平台都编，含 Windows**。
+    # 以前整个文件只在 Linux/mac 编，于是 Windows 随包发布了 NdpSpoofer::parseRouterAdvert
+    # 却连这一个不需要网络/root 的自测都跑不了 —— 而它正是「双栈设备 v6 漏代理」的唯一防线。
+    target_sources(clashauto-qml PRIVATE
+        src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
     target_sources(clashauto-qml PRIVATE
         src/net/NetStack.cpp src/net/NetStack.h
         src/net/NdpSpoofer.cpp src/net/NdpSpoofer.h  # IPv6 的 ICMPv6/NDP 投毒器（ArpSpoofer 的 v6 对应物）

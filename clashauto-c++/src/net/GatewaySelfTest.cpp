@@ -303,8 +303,24 @@ int runGatewaySelfTest()
     return qApp->exec();
 }
 
+#endif // Q_OS_LINUX || Q_OS_MACOS —— 以上是**数据面**自测，只有 POSIX 有 TAP/BPF 可用
+
 // ———————————— NdpSpoofer::parseRouterAdvert 的纯解析自测（说明见头文件）————————————
-// 这里手工拼 RA 字节流，不碰网络、不需要 root。Linux/mac 都编（解析器本身是跨平台纯字节操作）。
+// ★ 这一段**凡是编网关的平台都编**（Linux / macOS / **Windows**）：纯字节解析，不碰网络、
+//   不需要 root、不依赖 TAP/BPF，毫秒级。
+//   为什么专门把它挪出上面那个守卫：NdpSpoofer.cpp 在 Windows 上**是编进产物的**
+//   （CMake 的条件是 Linux OR APPLE OR WIN32），可整个自测文件此前被
+//   `#if Q_OS_LINUX || Q_OS_MACOS` 罩住 —— 于是 Windows 随包发布了 parseRouterAdvert，
+//   却**一行测试都没有**，而发布门禁(validate/gateway_selftest.sh)又只在 Linux 上跑。
+//   「从 RA 学 v6 路由器」正是「双栈设备 v6 漏代理」这类静默故障的唯一防线，
+//   在没有 IPv6 的网络上永远跑不到，没有自测就等于零覆盖 —— Windows 上双份地零覆盖。
+#include "NdpSpoofer.h"
+
+#include <QByteArray>
+#include <QString>
+
+#include <cstdio>
+
 namespace {
 
 // 拼一帧可配置的 RA。默认值是一条**合法**的 RA，各用例只改自己要测的那一项。
@@ -470,5 +486,3 @@ int runNdpRaSelfTest()
     std::fflush(stderr);
     return g_fail == 0 ? 0 : 1;
 }
-
-#endif // Q_OS_LINUX || Q_OS_MACOS
