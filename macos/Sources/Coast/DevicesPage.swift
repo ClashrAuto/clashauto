@@ -302,13 +302,13 @@ struct DevicesPage: View {
             Button {
                 Task { await state.rescanDevices() }
             } label: {
-                Text("\u{F064}") // refresh-line —— 与状态页延迟卡的刷新同一枚字形
-                    .font(.custom(IconFont.remix, size: 15))
-                    .rotationEffect(.degrees(scanning ? 360 : 0))
-                    .animation(scanning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                               : .default, value: scanning)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Rectangle())
+                // 转圈交给 CoreAnimation（理由与实测见 `CASpinner`）。
+                CASpinner(active: scanning, scheme: theme.dark ? .dark : .light) {
+                    Text("\u{F064}") // refresh-line —— 与状态页延迟卡的刷新同一枚字形
+                        .font(.custom(IconFont.remix, size: 15))
+                }
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .disabled(scanning)

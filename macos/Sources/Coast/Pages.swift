@@ -199,14 +199,13 @@ struct NodesPage: View {
                 // 测速：refresh-line 字形（与状态页延迟卡的刷新同一枚），
                 // 测速中持续旋转。
                 Button { state.clash.startSpeedTestForValidNodes() } label: {
-                    Text("\u{F064}") // refresh-line
-                        .font(.custom(IconFont.remix, size: 15))
-                        .legacyTint(theme.accent)
-                        .rotationEffect(.degrees(state.clash.speedTesting ? 360 : 0))
-                        .animation(state.clash.speedTesting
-                                   ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                                   : .default,
-                                   value: state.clash.speedTesting)
+                    // 转圈交给 CoreAnimation（理由与实测见 `CASpinner`）——
+                    // 测速一跑就是好几分钟，SwiftUI 的 repeatForever 会让整窗每帧重排到测完为止。
+                    CASpinner(active: state.clash.speedTesting, scheme: theme.dark ? .dark : .light) {
+                        Text("\u{F064}") // refresh-line
+                            .font(.custom(IconFont.remix, size: 15))
+                            .legacyTint(theme.accent)
+                    }
                 }
                 .buttonStyle(.plain)
                 .topBarGlass()

@@ -39,7 +39,7 @@ public final class HistoryStore: @unchecked Sendable {
     }
 
     /// 「某一项 → 字节」聚合（今日流量卡的 Top N）。
-    public struct GroupTotal: Sendable, Identifiable {
+    public struct GroupTotal: Sendable, Identifiable, Equatable {
         public let key: String
         public let bytes: Int64
         /// 界面上显示的名字。设备取台账里的名字；**空 key 三种维度含义不同，各给一句人话**

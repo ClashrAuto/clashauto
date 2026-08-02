@@ -71,13 +71,22 @@ public struct ConnectionRow: Sendable, Equatable, Identifiable {
     /// 会整条解析失败、全部退成 `distantPast`，「最近连接」于是变成一个乱序的列表。
     static func parseTimestamp(_ raw: String) -> Date {
         guard !raw.isEmpty else { return .distantPast }
-        let withFraction = ISO8601DateFormatter()
-        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = withFraction.date(from: raw) { return date }
-        let plain = ISO8601DateFormatter()
-        plain.formatOptions = [.withInternetDateTime]
-        return plain.date(from: raw) ?? .distantPast
+        if let date = Self.fractionFormatter.date(from: raw) { return date }
+        return Self.plainFormatter.date(from: raw) ?? .distantPast
     }
+
+    /// 两个格式器建一次反复用：`ISO8601DateFormatter()` 的构造在这个热路径上
+    /// （每 2 秒 × 每条连接 × 2 个）真金白银地出现在 CPU 采样里。它是线程安全的。
+    private static let fractionFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+    private static let plainFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
 
     /// 这条连接的发起设备名。
     ///

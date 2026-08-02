@@ -52,15 +52,14 @@ struct LatencyCard: View {
                 Button {
                     Task { await monitor.probe() }
                 } label: {
-                    Text("\u{F064}") // refresh-line
-                        .font(.custom(IconFont.remix, size: 15))
-                        .foregroundStyle(monitor.probing ? theme.textMuted : theme.accent)
-                        .rotationEffect(.degrees(monitor.probing ? 360 : 0))
-                        .animation(monitor.probing
-                                   ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                                   : .default,
-                                   value: monitor.probing)
-                        .contentShape(Rectangle())
+                    // 转圈交给 CoreAnimation（理由与实测见 `CASpinner`）。
+                    // 颜色在这里解析成具体值再传进去 —— Environment 穿不过那层 hosting view。
+                    CASpinner(active: monitor.probing, scheme: theme.dark ? .dark : .light) {
+                        Text("\u{F064}") // refresh-line
+                            .font(.custom(IconFont.remix, size: 15))
+                            .foregroundStyle(monitor.probing ? theme.textMuted : theme.accent)
+                    }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .disabled(monitor.probing)

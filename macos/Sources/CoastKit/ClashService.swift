@@ -142,9 +142,11 @@ public final class ClashService {
                     for try await sample in await self.api.trafficStream() {
                         self.up = sample.up
                         self.down = sample.down
-                        self.coreReachable = true      // 有流数据 = 核心在跑
+                        // 「变了才写」：这几个是布尔，一秒一帧地原样重写会让观察它们的
+                        // 视图（状态页的核心无响应警示）每秒白重排一次。
+                        if !self.coreReachable { self.coreReachable = true }  // 有流数据 = 核心在跑
                         self.failedStreamRounds = 0
-                        self.coreUnresponsive = false
+                        if self.coreUnresponsive { self.coreUnresponsive = false }
                     }
                 } catch {
                     // 流结束或出错都落到这里，下面统一等 2s 再重连
@@ -218,7 +220,7 @@ public final class ClashService {
         } catch {
             return
         }
-        coreReachable = true
+        if !coreReachable { coreReachable = true }
 
         let resolver = ProxyTree(proxies: proxies)
 
@@ -228,7 +230,9 @@ public final class ClashService {
             discoveredGroups.append(name)
         }
         discoveredGroups.sort()
-        groups = discoveredGroups
+        // 这条轮询 1 秒一轮，而列表通常一轮一轮完全没变 ——「变了才写」，
+        // 否则观察这些属性的页面（节点页整列列表）每秒都被原样重排一遍。
+        if groups != discoveredGroups { groups = discoveredGroups }
 
         let (groupName, group) = pickPrimaryGroup(proxies: proxies)
         var selected = group["now"] as? String ?? selectedNode
@@ -236,8 +240,9 @@ public final class ClashService {
         // 否则活动节点每秒都在变，列表会反复重建、切换通知乱弹。
         if speedTesting, !speedOriginalNode.isEmpty { selected = speedOriginalNode }
 
-        selectedGroup = groupName.isEmpty ? "GLOBAL" : groupName
-        selectedNode = selected
+        let nextGroup = groupName.isEmpty ? "GLOBAL" : groupName
+        if selectedGroup != nextGroup { selectedGroup = nextGroup }
+        if selectedNode != selected { selectedNode = selected }
 
         var list: [NodeInfo] = []
         for name in (group["all"] as? [String] ?? []) where !name.isEmpty {
@@ -269,7 +274,8 @@ public final class ClashService {
             }
         }
 
-        nodes = Self.sorted(list, selected: selected)
+        let sortedList = Self.sorted(list, selected: selected)
+        if nodes != sortedList { nodes = sortedList }
 
         // 核心刚起来、首次拿到节点：异步补测一次延迟，对齐「进列表即可见延迟」的体验。
         // 不用配置里的 lazy:false —— 那会卡启动。

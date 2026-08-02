@@ -142,6 +142,21 @@ struct SlidingCurve: NSViewRepresentable {
         /// 一拍之内左移一格 `dx`，到位后**停住**（`fillMode: .forwards` + 不移除）——
         /// 与原来 `phase = min(1, elapsed)` 的封顶行为一致：采样断了，曲线就该停在那儿。
         private func startSlide(_ model: SlidingCurve, in size: CGSize) {
+            // ★ 零流量时**不挂动画**。此时整条曲线是一条贴底的平线（最高点离底边
+            //   不到半个点），水平平移它在像素上没有任何区别 —— 但常驻的 CA 动画会让
+            //   渲染服务按满帧率给整窗合成。Qt 版同一处优化把「窗口开着」的整机开销
+            //   降了一大截。判据用**像素高度**而不是数值：量程有下限（128KB/s），
+            //   闲置时样本是 0 与补位的 1 B/s，折算成高度都远小于半个点。
+            // 阈值取 0.25pt（2x 屏上半个设备像素）：低于它连「一个像素的鼓包没在滑」
+            // 都不存在，纯粹的不可见。闲置时样本是 0 或补位的 1 B/s，
+            // 折算高度只有千分之一个点，远在阈值之下。
+            let peak = model.samples.max() ?? 0
+            if model.scale > 0,
+               size.height * model.headroom * CGFloat(min(1, peak / model.scale)) < 0.25 {
+                // 把上一轮可能残留的平移一并撤掉，图层回到相位 0（平线，看不出差别）。
+                container.removeAnimation(forKey: "slide")
+                return
+            }
             let slide = CABasicAnimation(keyPath: "transform.translation.x")
             slide.fromValue = 0
             slide.toValue = -Self.dx(model, in: size)

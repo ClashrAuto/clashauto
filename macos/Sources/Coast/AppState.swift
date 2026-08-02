@@ -269,9 +269,18 @@ public final class AppState {
 
     // MARK: 派生显示值
 
-    public var upText: String { Formatting.rate(clash.up) }
-    public var downText: String { Formatting.rate(clash.down) }
-    public var connectionsCount: Int { clash.connectionsCount }
+    /// 状态页显示的速率。**取自采样节拍那一刻的 `clash.up/down`，不直接读流**——
+    /// /traffic 流的每一帧、/connections 的每一轮、采样节拍各自落在不同的 runloop turn，
+    /// SwiftUI 每个 turn 都要把状态页整页重排一遍（实测 sample 里 70% 的主线程开销都在
+    /// 这条 layout 链上）。把「界面要显示的」全部收拢到 1Hz 的采样节拍**同一个 turn** 里改，
+    /// 一秒就只有一次重排。数字与曲线还因此严格同拍（原来数字比曲线早零点几秒）。
+    public var upText: String { Formatting.rate(displayedUp) }
+    public var downText: String { Formatting.rate(displayedDown) }
+    public private(set) var displayedUp: Int64 = 0
+    public private(set) var displayedDown: Int64 = 0
+    /// 连接数取解析后的行数（与「最近连接」同一份数据、同一拍更新）。
+    /// `clash.connectionsCount` 仍在，喂托盘那类非 SwiftUI 的消费者。
+    public var connectionsCount: Int { connections.count }
     public var totalDownText: String { Formatting.bytes(clash.downloadTotal) }
 
     /// 采样节拍。每推进一拍就 +1 —— 带宽折线靠它知道「新点是什么时候进来的」，
@@ -328,16 +337,30 @@ public final class AppState {
             // 代价说清楚：`deviceTraffic` 与 `composition` 是**会话累计**，隐藏期间不累加，
             // 所以它们统计的是「界面开着的这段时间」。真正的用量账在历史库里，不受影响。
             guard self.uiVisible else { return }
-            let rows = ConnectionRow.parse(connections)
-            self.connections = rows
-            self.connectionLedger.merge(rows)
-            // 本机自己发出的连接归到「本机」那一行 —— 否则全机器最忙的一台恒显示 0。
-            self.deviceTraffic.observe(rows, localIP: DeviceStore.localLANAddress() ?? "")
-            // 「用量最多」那一列要显示设备名，而设备名只有 AppState 认得（台账在它手上）。
-            let proxied = self.proxiedDeviceLabels
-            self.composition.observe(connections) { sourceIP, _ in
-                ConnectionRow.deviceLabel(sourceIP: sourceIP, proxied: proxied)
-            }
+            // **不在这儿加工**，只把快照存下，等下一次采样节拍（≤1s 后）在**同一个
+            // runloop turn** 里连同带宽采样一起落进界面 —— 否则这轮赋值自己占一个 turn，
+            // SwiftUI 就得为它单独把状态页整页重排一遍（理由详见 `upText` 上的注释）。
+            // 快照本身是 2s 一轮、节拍 1s 一拍，不会积压丢帧。
+            self.pendingSnapshot = connections
+        }
+    }
+
+    /// 等待下一拍落进界面的 /connections 快照（见 `onConnectionsSnapshot` 里的说明）。
+    private var pendingSnapshot: [[String: Any]]?
+
+    /// 把攒下的快照解析并写进各观察属性。**只在采样节拍那个 turn 里调**。
+    private func applyPendingSnapshot() {
+        guard let snapshot = pendingSnapshot else { return }
+        pendingSnapshot = nil
+        let rows = ConnectionRow.parse(snapshot)
+        connections = rows
+        connectionLedger.merge(rows)
+        // 本机自己发出的连接归到「本机」那一行 —— 否则全机器最忙的一台恒显示 0。
+        deviceTraffic.observe(rows, localIP: DeviceStore.localLANAddress() ?? "")
+        // 「用量最多」那一列要显示设备名，而设备名只有 AppState 认得（台账在它手上）。
+        let proxied = proxiedDeviceLabels
+        composition.observe(snapshot) { sourceIP, _ in
+            ConnectionRow.deviceLabel(sourceIP: sourceIP, proxied: proxied)
         }
     }
 
@@ -506,15 +529,23 @@ public final class AppState {
                     try? await Task.sleep(for: .seconds(5))
                     continue
                 }
-                self.latency.gatewayIP = LanTopology.defaultGateway()?.ip ?? ""
+                // netstat/arp 子进程放到后台线程跑：同步 `waitUntilExit` 在主 actor 上
+                // 每 5 秒挂主线程约 100ms（sample 里量到 218/11437 帧停在这行）。
+                let gateway = await Task.detached { LanTopology.defaultGateway()?.ip ?? "" }.value
+                // 下面三个都是「变了才写」：LatencyCard 观察着它们，
+                // 原样重写一遍也会触发一次整页重排。
+                if self.latency.gatewayIP != gateway { self.latency.gatewayIP = gateway }
                 // 当前选中节点的延迟直接取核心的测速结果，不自己再连一遍。
+                let (proxyName, proxyDelay): (String, Int)
                 if let current = self.clash.nodes.first(where: { $0.active }) {
-                    self.latency.proxyName = current.now.isEmpty ? current.name : current.now
-                    self.latency.proxyDelay = current.delay > 0 ? current.delay : LatencyProbe.unknown
+                    proxyName = current.now.isEmpty ? current.name : current.now
+                    proxyDelay = current.delay > 0 ? current.delay : LatencyProbe.unknown
                 } else {
-                    self.latency.proxyName = ""
-                    self.latency.proxyDelay = LatencyProbe.untested
+                    proxyName = ""
+                    proxyDelay = LatencyProbe.untested
                 }
+                if self.latency.proxyName != proxyName { self.latency.proxyName = proxyName }
+                if self.latency.proxyDelay != proxyDelay { self.latency.proxyDelay = proxyDelay }
                 try? await Task.sleep(for: .seconds(5))
             }
         }
@@ -741,13 +772,18 @@ public final class AppState {
 
     private func refreshTodayTraffic() {
         let scope: HistoryStore.Scope = trafficProxyOnly ? .proxyOnly : .all
-        todayHourly = history.todayHourly(scope: scope)
+        // 「变了才写」：这三个属性被今日流量卡观察着，闲置时每 10 秒原样重写
+        // 也会让 SwiftUI 把那张卡连同整页重排一遍。
+        let hourly = history.todayHourly(scope: scope)
+        if todayHourly != hourly { todayHourly = hourly }
         // 设备维度要显示台账里的名字而不是一串 MAC —— 历史库不认识台账，喂给它。
         let names = Dictionary(devices.all().map { ($0.mac, $0.alias.isEmpty ? $0.hostname : $0.alias) },
                                uniquingKeysWith: { first, _ in first })
-        todayTop = history.todayTop(dimension: trafficDimension, scope: scope,
-                                    deviceNames: names)
-        todayTotal = history.todayTotal(scope: scope)
+        let top = history.todayTop(dimension: trafficDimension, scope: scope,
+                                   deviceNames: names)
+        if todayTop != top { todayTop = top }
+        let total = history.todayTotal(scope: scope)
+        if todayTotal != total { todayTotal = total }
     }
 
     private func startBandwidthSampling() {
@@ -766,6 +802,11 @@ public final class AppState {
                 if self.bandwidthSamples.count > Self.bandwidthWindow {
                     self.bandwidthSamples.removeFirst(self.bandwidthSamples.count - Self.bandwidthWindow)
                 }
+                // 界面显示的速率与连接快照都在**这一拍、这一个 turn** 里落 ——
+                // 一秒只让 SwiftUI 重排一次（理由见 `upText` 上的注释）。
+                self.displayedUp = self.clash.up
+                self.displayedDown = self.clash.down
+                self.applyPendingSnapshot()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
