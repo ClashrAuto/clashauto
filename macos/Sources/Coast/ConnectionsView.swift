@@ -20,11 +20,20 @@ struct ConnectionsView: View {
     @State private var showOffline = true
     /// 右键「添加规则」用本行地址预填 value —— 与 Qt 的 `openForValue` 同义。
     @State private var addingRule: RuleDraft?
+    /// 搜索是否已展开。收起时只是一颗放大镜钮（设备页同款）。
+    @State private var searchShown = false
+    /// 液态玻璃形变要的命名空间：钮和输入框共享一个 `glassEffectID`，
+    /// 点开时是**同一块玻璃**拉长成输入框，不是「藏钮、换控件」。
+    @Namespace private var searchNS
 
-    /// 顶栏统一高度：两颗分段按钮与搜索框一致。26 以下沿用 Qt 的 26；
-    /// 26 上给 28 —— 与全 app 的玻璃控件（页脚开关、日志页标签）同高。
+    /// 顶栏控件高度：分段按钮与搜索框一致。26 以下沿用 Qt 的 26。
+    ///
+    /// 26 上是 **24**（原来 28）：顶栏就钉在标题栏那条带子里，24 + 上下各 2 = 28，
+    /// 正好等于**标准**标题栏高度，红绿灯中心 14、控件中心也是 14。
+    /// 早先那版带子是靠空 toolbar 抬到 54 的，顶栏再 44，480 高的窗顶上先去掉 98 ——
+    /// 现在整条 28。
     private var toolbarHeight: CGFloat {
-        if #available(macOS 26.0, *) { 28 } else { 26 }
+        if #available(macOS 26.0, *) { 24 } else { 26 }
     }
 
     private var rows: [ConnectionLedger.Entry] {
@@ -45,32 +54,35 @@ struct ConnectionsView: View {
     @ViewBuilder
     private var content: some View {
         if #available(macOS 26.0, *) {
-            // 26：顶栏钉在标题栏**下面**（`safeAreaBar` 挂在安全区上沿），
+            // 26：顶栏钉进标题栏那条带子（`safeAreaBar` + 整列越过顶部安全区），
             // 列表从它底下穿过、由系统 scroll edge effect 渐隐。
             //
-            // ★ 顶栏**不能**放进标题栏那条带子里（早先那版是 `ignoresSafeArea(.top)`
-            //   把整列顶上去 + 空 toolbar 抬高带子）。看着是漂亮，但**窗口拖不动了**：
-            //   标题栏那条带子是 macOS 唯一的拖动区，被 Online/Offline 和搜索框占满之后
-            //   点哪儿都是控件，没有一处能按住拖。附属窗又没有主窗那个
-            //   `isMovableByWindowBackground`（见 `WindowRestore`）—— 于是这个窗只能靠
-            //   系统的窗口菜单挪。带子空着才是对的。
+            // ★ 顶栏**必须右对齐**。带子是 macOS 唯一的拖动区，早先那版从左边排起、
+            //   把整条占满，结果**窗口拖不动了**（附属窗没有主窗那个
+            //   `isMovableByWindowBackground`，见 `WindowRestore`，只能靠系统窗口菜单挪）。
+            //   靠右之后左半条是空的：红绿灯 + 一段留白，按住那儿就能拖 ——
+            //   系统自带的窗口也都是这么排的。
+            //
+            // ★ 带子**不抬高**（`unifiesTitleBar: false`）：保持标准 28，顶栏正好这么高。
+            //   全屏时系统把标题栏整个收走，安全区归零，这 28 也就跟着没了 ——
+            //   顶栏直接顶到屏幕上沿，不留空带。
             list
                 .safeAreaBar(edge: .top, spacing: 0) { header }
                 .scrollEdgeEffectStyle(.soft, for: .all)
+                .ignoresSafeArea(.container, edges: .top)
                 // 附属窗默认进不了全屏，得自己把 collectionBehavior 换成 primary。
                 .allowsFullScreen()
                 // 整窗玻璃，和主窗同一层材质；行自带一层 `.regularMaterial`（见 `row`），
                 // 两层材质叠出「卡片浮在玻璃上」的分层。
-                .windowGlass(.sidebar)
+                .windowGlass(.sidebar, unifiesTitleBar: false)
         } else {
             VStack(spacing: 5) {
                 HStack(spacing: 10) {
                     segmentedToggles
-                    searchBox
+                    legacySearchBox
                 }
                 .padding(.top, 5)
-                .padding(.leading, ConnectionsView.headerLeadingInset)
-                .padding(.trailing, 5)
+                .padding(.horizontal, 5)
                 list
             }
             .background(theme.card)
@@ -79,20 +91,17 @@ struct ConnectionsView: View {
 
     // MARK: 顶栏
 
-    /// 钉在标题栏下面的顶栏。左 20 / 右 10；上下各 8 让它和标题栏、列表都不贴着。
-    ///
-    /// 左内距回到 20 了 —— 顶栏搬出标题栏之后，左边不再有红绿灯要让。
+    /// 钉在标题栏带子里的顶栏，**靠右**。左边那段空白是窗口的拖动区（见 `content`）。
+    /// 上下各 2 + 控件 24 = 28，与标准标题栏同高。
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
+            Spacer(minLength: 0)
             segmentedToggles
-            searchBox
+            searchControls
         }
-        .padding(.vertical, 8)
-        .padding(.leading, ConnectionsView.headerLeadingInset)
+        .padding(.vertical, 2)
         .padding(.trailing, 10)
     }
-
-    private static let headerLeadingInset: CGFloat = 20
 
     /// Online / Offline 两个筛选开关。两段各自独立（可以同时开），不是二选一。
     @ViewBuilder
@@ -175,33 +184,68 @@ struct ConnectionsView: View {
             .contentShape(Rectangle())
     }
 
+    /// 搜索：默认只有一颗放大镜钮，点开才拉成 200 宽的输入框。
+    ///
+    /// 26 上钮和输入框共享同一个 `glassEffectID` —— 点击时是**同一块玻璃**从钮的形状
+    /// 拉长成输入框（系统 Liquid Glass 形变），不是「藏一个、显另一个」。
+    /// 设备页、节点页是同一套做法。
+    ///
+    /// 为什么不常驻一个输入框：这条带子左半边要留给拖动（见 `content`），
+    /// 常驻一个 200 的框会把可拖区挤没。
     @ViewBuilder
-    private var searchBox: some View {
+    private var searchControls: some View {
         if #available(macOS 26.0, *) {
-            // 26：一颗玻璃胶囊 + 放大镜 + 清空钮，也就是系统各处搜索框的样子。
-            // Qt 那个「Search 前缀标签 + 1px 竖线」是 web 时代的画法，mac 上没人这么做。
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                TextField("Search", text: $query)   // i18n-ignore: 与 Qt 一致保留英文
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12))
-                if !query.isEmpty {
-                    Button { query = "" } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
+            GlassEffectContainer(spacing: 2) {
+                Group {
+                    if searchShown {
+                        glassSearchField
+                            .glassEffect(.regular, in: .capsule)
+                            .glassEffectID("search", in: searchNS)
+                    } else {
+                        glassSearchButton
+                            .glassEffect(.regular, in: .capsule)
+                            .glassEffectID("search", in: searchNS)
                     }
-                    .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 10)
-            .frame(height: toolbarHeight)
-            .glassCapsule()
         } else {
             legacySearchBox
         }
+    }
+
+    /// 展开态：200 宽的输入框，右侧 ✕ 清空并收回钮形态。
+    @available(macOS 26.0, *)
+    private var glassSearchField: some View {
+        ZStack(alignment: .trailing) {
+            TextField("Search", text: $query)   // i18n-ignore: 与 Qt 一致保留英文
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+                .padding(.leading, 10)
+                .padding(.trailing, 24)
+            Button {
+                query = ""
+                withAnimation(.snappy(duration: 0.28)) { searchShown = false }
+            } label: {
+                Image(systemName: "xmark").font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 8)
+        }
+        .frame(width: 200, height: toolbarHeight)
+    }
+
+    /// 收起态：一颗与分段同高的放大镜钮。
+    @available(macOS 26.0, *)
+    private var glassSearchButton: some View {
+        Button {
+            withAnimation(.snappy(duration: 0.28)) { searchShown = true }
+        } label: {
+            Image(systemName: "magnifyingglass").font(.system(size: 12))
+                .frame(width: toolbarHeight, height: toolbarHeight)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     /// Search：整块圆角，左侧「Search」前缀标签 + 一条 1px 竖线 + 输入框。

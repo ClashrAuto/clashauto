@@ -40,6 +40,11 @@ struct VisualEffectBackground: NSViewRepresentable {
 ///   一块和背景色差不多的灰。实测：不设的话把窗口挪到屏幕两端，侧栏像素只从
 ///   #3C4045 变到 #3B3D3C —— 几乎不动，那不是玻璃，是灰底。
 struct WindowConfigurator: NSViewRepresentable {
+    /// 是否把标题栏抬到与页面顶栏同高（挂空 toolbar）。**只有主窗要**：
+    /// 它的页面顶栏就钉在那条带子里。附属窗的顶栏浮在标题栏下面，带子空着当拖动区，
+    /// 抬高只是白占一截 —— 连接窗上实测抬完 54、顶栏再 44，480 高的窗顶上先去掉 98。
+    var unifiesTitleBar = true
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
         DispatchQueue.main.async { configure(view.window) }
@@ -62,10 +67,8 @@ struct WindowConfigurator: NSViewRepresentable {
             // 26：标题栏加高到与页面顶部导航栏一带同高（≈ 顶距 10 + 栏高 28 那一带）。
             // 做法是挂一个**空的** NSToolbar —— 这是把标题栏抬到统一工具栏高度、
             // 让红绿灯在其中垂直居中的受支持写法；transparent 保证不画任何工具栏底。
-            //
-            // 只有**主窗**需要：它的页面顶栏就钉在这条带子里。附属窗（连接窗）的顶栏浮在
-            // 标题栏**下面**，带子空着当拖动区，保持标准高度即可 —— 见 ConnectionsView。
             window.titlebarAppearsTransparent = true
+            guard unifiesTitleBar else { return }
             if window.toolbar == nil {
                 let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
                 toolbar.showsBaselineSeparator = false
@@ -137,9 +140,11 @@ extension View {
 
 extension View {
     /// 给整窗铺一层毛玻璃底（并把窗口本身设为透明，否则材质无效）。
-    func windowGlass(_ material: NSVisualEffectView.Material = .sidebar) -> some View {
+    func windowGlass(_ material: NSVisualEffectView.Material = .sidebar,
+                     unifiesTitleBar: Bool = true) -> some View {
         background(VisualEffectBackground(material: material).ignoresSafeArea())
-            .background(WindowConfigurator().frame(width: 0, height: 0))
+            .background(WindowConfigurator(unifiesTitleBar: unifiesTitleBar)
+                .frame(width: 0, height: 0))
     }
 }
 
