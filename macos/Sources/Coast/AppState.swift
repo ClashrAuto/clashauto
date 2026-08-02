@@ -255,8 +255,8 @@ public final class AppState {
     /// 连接窗每次打开时清空账本 —— 否则上次会话的离线连接会一直挂在列表里。
     public func resetConnectionLedger() { connectionLedger.reset() }
 
-    /// 打开发布页让用户自己下，**不做自动下载安装**。
-    /// 自动替换 .app 要处理签名、公证与「正在运行的自己」，风险远大于省下那两步点击。
+    /// 打开发布页。关于页的入口，也是更新窗在**开发期直跑**（没有可替换的 .app）时的回退 ——
+    /// 正常安装形态下的程序更新走 `AppUpdater` 自动下载替换，不经这里。
     public func openReleasePage() {
         guard let appRelease,
               let url = URL(string: "https://github.com/ClashrAuto/clashauto/releases/tag/\(appRelease.tag)")

@@ -200,7 +200,7 @@ public final class TrayController {
         //   等于 side 时墨迹贴着画布边，字形光栅化到目标字号有半像素级的舍入，
         //   贴哪边哪边的抗锯齿行就被画布硬切 —— 上一版顶上被裁、这一版底下被裁，
         //   来回修就是因为把余量留成了 0。
-        let scale = (side - 1.4) / max(probeInk.width, probeInk.height)
+        let scale = (side - 1.5) / max(probeInk.width, probeInk.height)
         let glyphFont = NSFont(name: "iconfont", size: 100 * scale)!
         // 缩放后的墨迹（线性外推 —— 字形轮廓随字号线性缩放，误差在半像素内）。
         let ink = NSRect(x: probeInk.minX * scale, y: probeInk.minY * scale,
