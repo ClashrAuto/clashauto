@@ -1,5 +1,7 @@
 #include "ArpSpoofer.h"
 
+#include <cstdio>
+
 #include "IL2Endpoint.h"
 
 #include <QDebug>
@@ -216,6 +218,39 @@ void ArpSpoofer::tick()
         return;
     for (auto it = m_victims.constBegin(); it != m_victims.constEnd(); ++it)
         sendSpoof(it.value());
+    reassertIsolation();
+}
+
+// ★ 隔离条目必须**跟着周期重投**，只在 who-has 那一刻抢答是不够的 —— 真主机也会应答同一次
+//   请求，一次性抢答赢不稳。真机实测：判据全过、抢答帧确实发了，A 的缓存里仍是对端的真实
+//   MAC，ping 照通。网关那条之所以稳，正是因为 tick() 每秒重投把真网关的应答压回去；
+//   这里照做。
+//
+//   注意这**不等于**「向全网段投毒」：只对 `m_isoAnswered` 里记着的目标重投，而那份记录是
+//   「A 真的问过谁」按需长出来的 —— A 没访问过的主机一条都不发。发包量与 A 的实际行为成正比，
+//   而不是与子网大小成正比。
+void ArpSpoofer::reassertIsolation()
+{
+    if (!m_endpoint || m_isoAnswered.isEmpty())
+        return;
+    for (auto it = m_isoAnswered.constBegin(); it != m_isoAnswered.constEnd(); ++it) {
+        const QByteArray &victimMac = it.key();
+        if (!m_isolated.contains(victimMac))
+            continue; // 已经解除隔离，等 healIsolation 收尾
+        const QByteArray victimIp = m_victims.contains(victimMac) ? m_victims.value(victimMac).ip
+                                                                  : QByteArray(4, char(0));
+        for (quint32 ip : it.value()) {
+            QByteArray ipb(4, char(0));
+            ipb[0] = char((ip >> 24) & 0xFF);
+            ipb[1] = char((ip >> 16) & 0xFF);
+            ipb[2] = char((ip >> 8) & 0xFF);
+            ipb[3] = char(ip & 0xFF);
+            const QByteArray reply =
+                    buildArpReply(victimMac, m_localMac, m_localMac, ipb, victimMac, victimIp);
+            m_endpoint->send(reply);
+        }
+    }
+    m_endpoint->flushTx();
 }
 
 void ArpSpoofer::sendSpoof(const Target &t)
@@ -374,4 +409,107 @@ QByteArray ArpSpoofer::buildArpRequest(const QByteArray &ethDst, const QByteArra
                                        const QByteArray &targetMac, const QByteArray &targetIp)
 {
     return buildArp(0x01, ethDst, ethSrc, senderMac, senderIp, targetMac, targetIp);
+}
+
+// ———————————————————————— 局域网隔离 ————————————————————————
+
+void ArpSpoofer::setIsolatedMacs(const QVector<QByteArray> &macs6)
+{
+    m_isolated.clear();
+    for (const QByteArray &m : macs6) {
+        if (m.size() == 6)
+            m_isolated.append(m);
+    }
+}
+
+void ArpSpoofer::learnLanMac(quint32 ip, const QByteArray &mac6)
+{
+    // 只学「像样」的：非零 IP、非零/非广播 MAC。学错一条就会把还原帧发到错地方。
+    if (ip == 0 || ip == 0xFFFFFFFFu || mac6.size() != 6)
+        return;
+    if (mac6 == QByteArray(6, '\0') || mac6 == QByteArray(6, char(0xFF)))
+        return;
+    m_lanMac.insert(ip, mac6);
+}
+
+QByteArray ArpSpoofer::lanMac(quint32 ip) const
+{
+    return m_lanMac.value(ip);
+}
+
+bool ArpSpoofer::answerIsolationArp(const QByteArray &frame, quint32 subnetBase,
+                                    quint32 subnetMask, quint32 localIp4, quint32 gatewayIp4)
+{
+    if (!m_endpoint || m_isolated.isEmpty() || !subnetMask)
+        return false;
+    if (frame.size() < 42)
+        return false;
+    const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+    if (f[12] != 0x08 || f[13] != 0x06)
+        return false;
+    if (f[14] != 0x00 || f[15] != 0x01 || f[16] != 0x08 || f[17] != 0x00 || f[18] != 6 || f[19] != 4)
+        return false;
+    if (f[20] != 0x00 || f[21] != 0x01) // 只抢答 request
+        return false;
+
+    const QByteArray senderMac(reinterpret_cast<const char *>(f + 22), 6);
+    if (!m_isolated.contains(senderMac))
+        return false; // 不是被隔离设备问的 → 不插手
+
+    const quint32 tpa = (quint32(f[38]) << 24) | (quint32(f[39]) << 16)
+                        | (quint32(f[40]) << 8) | quint32(f[41]);
+    // 只管同网段、且不是本机/网关的目标：网关由 answerGatewayArp 负责，本机本来就该回自己。
+    if ((tpa & subnetMask) != (subnetBase & subnetMask))
+        return false;
+    if (tpa == localIp4 || tpa == gatewayIp4 || tpa == 0)
+        return false;
+
+    const QByteArray senderIp(reinterpret_cast<const char *>(f + 28), 4);
+    QByteArray tpaBytes(4, '\0');
+    tpaBytes[0] = char((tpa >> 24) & 0xFF);
+    tpaBytes[1] = char((tpa >> 16) & 0xFF);
+    tpaBytes[2] = char((tpa >> 8) & 0xFF);
+    tpaBytes[3] = char(tpa & 0xFF);
+
+    // 回「这个 IP 在本机」。连发 + 两拍补帧，理由与 answerGatewayArp 完全相同：真主机也会应答，
+    // 我们必须是设备采信的最后写入者。
+    const QByteArray reply =
+            buildArpReply(senderMac, m_localMac, m_localMac, tpaBytes, senderMac, senderIp);
+    m_endpoint->send(reply);
+    m_endpoint->send(reply);
+    QTimer::singleShot(kAnswerBurstDelay1Ms, this, [this, reply, senderMac] {
+        if (m_endpoint && m_isolated.contains(senderMac)) {
+            m_endpoint->send(reply);
+            m_endpoint->flushTx();
+        }
+    });
+    m_isoAnswered[senderMac].insert(tpa);
+    return true;
+}
+
+void ArpSpoofer::healIsolation(const QByteArray &victimMac6)
+{
+    if (!m_endpoint || victimMac6.size() != 6)
+        return;
+    const QSet<quint32> targets = m_isoAnswered.value(victimMac6);
+    m_isoAnswered.remove(victimMac6);
+    for (quint32 ip : targets) {
+        const QByteArray real = m_lanMac.value(ip);
+        // ★ 不知道真实 MAC 就**不发**：胡乱还原等于再投一次毒。这种条目让设备自己老化掉
+        //   （Linux/Android 几分钟，Windows 更短），代价是这段时间它仍以为对端在本机 —— 而那时
+        //   我们已经不再拦截，帧到本机后无人处理，等价于「访问不通」，不会造成错误连接。
+        if (real.size() != 6)
+            continue;
+        QByteArray ipb(4, '\0');
+        ipb[0] = char((ip >> 24) & 0xFF);
+        ipb[1] = char((ip >> 16) & 0xFF);
+        ipb[2] = char((ip >> 8) & 0xFF);
+        ipb[3] = char(ip & 0xFF);
+        // spa=目标IP, sha=目标真实MAC → 把设备缓存改回真相。目的就是那台设备。
+        const QByteArray heal = buildArpReply(victimMac6, real, real, ipb, victimMac6, QByteArray(4, '\0'));
+        m_endpoint->send(heal);
+        m_endpoint->send(heal);
+    }
+    if (!targets.isEmpty())
+        m_endpoint->flushTx();
 }

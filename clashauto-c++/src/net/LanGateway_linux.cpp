@@ -293,6 +293,11 @@ private:
     QHash<QString, GwNic *> m_nics;          // ifname → 套件
     quint16 m_socksPort = 0;
     QHash<quint64, QString> m_victimByMac;   // src MAC 打包键 → ip（帧过滤 + 记账）
+    // 被隔离（policy=reject）设备的 MAC 打包键。它们去局域网的流量按方向过滤，见 forwardIsolatedLan。
+    QSet<quint64> m_isolatedMacs;
+    bool isIsolatedMac(const uchar *mac6) const { return m_isolatedMacs.contains(macKey(mac6)); }
+    void forwardIsolatedLan(GwNic *n, const QByteArray &frame, const uchar *f);
+    void pushIsolatedMacs(GwNic *n) const;
     // src MAC 打包键 → 最后一次看到「台账上那个 IP」发帧的时刻（uptime ms）。
     // 用来把「换地址」和「一个 MAC 上挂着多个 IP」区分开，见 learnDeviceV4。
     QHash<quint64, qint64> m_victimIpSeenMs;
@@ -330,6 +335,58 @@ void GatewayWorker::pushMacFilter(GwNic *n) const
             macs.append(mb);
     }
     n->ep->setSourceMacFilter(macs);
+}
+
+// 把当前的被隔离 MAC 集合推给这张卡的 ArpSpoofer（抢答时要据此判「是不是被禁设备在问」）。
+void GatewayWorker::pushIsolatedMacs(GwNic *n) const
+{
+    if (!n || !n->arp)
+        return;
+    QVector<QByteArray> macs;
+    for (quint64 k : m_isolatedMacs) {
+        QByteArray m(6, '\0');
+        for (int i = 0; i < 6; ++i)
+            m[5 - i] = char((k >> (8 * i)) & 0xFF);
+        macs.append(m);
+    }
+    n->arp->setIsolatedMacs(macs);
+}
+
+// 被隔离设备发往同网段的一帧：按方向放行或丢弃；放行的改写目的 MAC 后转发给真正的对端。
+void GatewayWorker::forwardIsolatedLan(GwNic *n, const QByteArray &frame, const uchar *f)
+{
+    if (!n || !n->ep || !n->arp || frame.size() < 34)
+        return;
+    const int ihl = (f[14] & 0x0F) * 4;
+    if (ihl < 20 || frame.size() < 14 + ihl)
+        return;
+    const uchar proto = f[23];
+    bool allow = false;
+    if (proto == 6) { // TCP：丢纯 SYN（A 在发起），其余放行
+        if (frame.size() >= 14 + ihl + 14) {
+            const uchar flags = f[14 + ihl + 13];
+            const bool syn = (flags & 0x02) != 0;
+            const bool ack = (flags & 0x10) != 0;
+            allow = !(syn && !ack);
+        }
+    } else if (proto == 1) { // ICMP：丢 echo-request(8)，放行 echo-reply(0) 等
+        if (frame.size() >= 14 + ihl + 1)
+            allow = f[14 + ihl] != 8;
+    }
+    // UDP(17) 与其余协议：allow 保持 false —— 理由见调用处的论证。
+    if (!allow) {
+        ++GatewayDiag::c.dropNonVictim; // 复用「被丢弃」计数，避免为此新增一栏
+        return;
+    }
+    const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
+                        | (quint32(f[32]) << 8) | quint32(f[33]);
+    const QByteArray peer = n->arp->lanMac(dst);
+    if (peer.size() != 6)
+        return; // 不知道对端真实 MAC → 只能丢（宁可不通，也不能瞎发）
+    QByteArray out = frame;
+    std::memcpy(out.data(), peer.constData(), 6);              // 目的 MAC = 对端真实 MAC
+    std::memcpy(out.data() + 6, macBytes(n->spec.localMac).constData(), 6); // 源 MAC = 本机
+    n->ep->send(out);
 }
 
 // 按 IP 找它属于哪张已就绪网卡（同网段判定）。找不到返回 nullptr。
@@ -820,6 +877,17 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             // 与上面的网关侧反制互补：这条管设备主动问的场景,上面那条管网关主动广播的场景。
             // 抢答后仍把该 ARP 喂给 lwIP（它据此维护设备 MAC 映射，无副作用）。
             if (isArp && n->arp) {
+                // 顺手学一条「局域网 IP → 真实 MAC」：ARP 的 sender 字段就是现成的真相，
+                // 隔离转发与撤销还原都要用它。
+                if (frame.size() >= 42) {
+                    const quint32 spa = (quint32(f[28]) << 24) | (quint32(f[29]) << 16)
+                                        | (quint32(f[30]) << 8) | quint32(f[31]);
+                    n->arp->learnLanMac(spa, QByteArray(reinterpret_cast<const char *>(f + 22), 6));
+                }
+                // 局域网隔离：被禁设备问「同网段的 X 在哪」→ 抢答本机，把它去 LAN 的流量引到
+                // 我们手上（放不放由上面的方向过滤决定）。详见 ArpSpoofer 里的论证。
+                n->arp->answerIsolationArp(frame, n->localIp4, n->netMask4, n->localIp4,
+                                           n->gatewayIp4);
                 if (n->arp->answerGatewayArp(frame) && gwDbgOn()
                     && (m_dbgArpAnswered++ % 50) == 0)
                     std::fprintf(stderr, "[GW] answered gateway ARP (count=%lld)\n",
@@ -855,6 +923,20 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                         return;
                     }
                     const bool sameSubnet = (dst & n->netMask4) == (n->localIp4 & n->netMask4);
+                    // ★ 局域网隔离（policy=reject 的设备）：按**方向**决定放不放。
+                    //   依据是「A 主动发起的第一个包有可识别特征」：
+                    //     · TCP 纯 SYN（有 SYN 无 ACK）= A 在发起 → 丢。既然纯 SYN 一律丢，
+                    //       后续任何已建立连接**必然是 B 发起的**，放行安全 —— 不需要状态表。
+                    //     · ICMP echo-request = A 主动探测 → 丢；echo-reply 放行（B 能 ping 通 A）。
+                    //     · UDP 没有方向标记，而 B→A 的包在交换网络里我们根本看不见（交换机只送到
+                    //       B 和 A 的端口），无从做有状态判断 → **全丢**。代价是 B 也用不了 A 上的
+                    //       UDP 服务（mDNS/SSDP 之类）；在「A 不能主动做任何事」的要求下这是唯一
+                    //       安全的取法。
+                    //   放行的帧必须改写目的 MAC 为对端真实 MAC：设备是被我们骗了才发到本机的。
+                    if (sameSubnet && dst != n->gatewayIp4 && isIsolatedMac(f + 6)) {
+                        forwardIsolatedLan(n, frame, f);
+                        return;
+                    }
                     if (sameSubnet && dst != n->gatewayIp4) {
                         ++GatewayDiag::c.bypassLan;
                         // 同网段直连,放行给系统,不进 lwIP。若设备只访问 LAN、没真出网,这里会涨。
@@ -976,6 +1058,12 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     m_victimNic.insert(ip, n->spec.ifname);
     m_victimUserByMac.insert(vkey, socksUser); // v6 学习登记时补 mihomo 身份要用
     pushMacFilter(n); // 该卡新增一台设备：重推内核过滤，放行这台的源 MAC
+    // 局域网隔离集合：policy=reject 的设备进来，抢答与方向过滤都据此判定。
+    if (reject)
+        m_isolatedMacs.insert(vkey);
+    else
+        m_isolatedMacs.remove(vkey);
+    pushIsolatedMacs(n);
     // 崩溃兜底：把这台设备的还原帧预存起来。进程若被 SIGSEGV/abort 打死，正常的 disableAll
     // 一步都走不到，只有这条路能把设备的网关 ARP 还回去（详见 GatewayPanic.h）。
     if (const IL2Endpoint::RawSendFn pfn = n->ep ? n->ep->panicSender() : nullptr)
@@ -1000,6 +1088,8 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     if (n) {
         if (n->arp)
             n->arp->stopSpoof(mac); // 内部会 heal（还原 ARP）
+            // 撤销隔离：把我们替它答过的那些同网段条目还原成真实 MAC。
+            n->arp->healIsolation(macBytes(mac));
         if (n->watch)
             n->watch->removeVictim(mac); // 从监视真相表移除（v4/v6 地址一并清）
         if (n->ndp)
@@ -1015,6 +1105,7 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
             m_net->removeDeviceV6(ip6);
     }
     m_victimByMac.remove(key);
+    m_isolatedMacs.remove(key);
     m_victimMacStr.remove(ip);
     m_victimNic.remove(ip);
     m_lastSeenMs.remove(key);
@@ -1022,6 +1113,7 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     m_victimV6ByMac.remove(key);
     if (n)
         pushMacFilter(n); // 该卡移除一台设备：重推内核过滤（可能变回「全丢」）
+        pushIsolatedMacs(n);
     saveState();
     publishSnapshot();
     emit statusChanged();

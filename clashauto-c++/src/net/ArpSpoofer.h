@@ -50,6 +50,33 @@ public:
     // ARP 帧时调用（源 MAC 已由二层过滤限定为被劫持设备）。
     bool answerGatewayArp(const QByteArray &frame);
 
+    // —— 局域网隔离（policy=reject 的设备）——
+    //
+    // 目标：**被禁设备不能主动访问局域网，但局域网仍能访问它**。
+    //
+    // 只骗被禁设备 A 一台：告诉它「你要找的那个同网段 IP 也在本机」。于是
+    //   · A → B 的帧全部到我们手上，由调用方按方向决定放不放（见 LanGateway 的隔离过滤）；
+    //   · B → A 完全不受影响 —— 我们从不碰 B 的缓存，B 解析出的永远是 A 的真实 MAC。
+    // 这个不对称是「只骗一边」的天然结果，也是它比传统全网段 MITM 安全得多的原因。
+    //
+    // 抢答而不是主动向全网段投毒：A 要找谁一定先广播 who-has，我们本来就收得到，
+    // 只在那一刻回一帧即可 —— 无需为整个 /24 维护 254 条投毒条目、也没有额外发包量。
+    void setIsolatedMacs(const QVector<QByteArray> &macs6); // 被隔离设备的 MAC（6 字节）
+    // 对被隔离设备发出的「who-has <同网段 IP>」抢答本机 MAC。返回是否抢答了。
+    // subnetBase/subnetMask 用于判「是不是同网段」；本机 IP 与网关 IP 不在此列
+    //（网关走 answerGatewayArp，本机本来就该回自己）。
+    bool answerIsolationArp(const QByteArray &frame, quint32 subnetBase, quint32 subnetMask,
+                            quint32 localIp4, quint32 gatewayIp4);
+    // 学到的局域网 IP→MAC（从任何观察到的 ARP 帧的 sender 字段）。转发与还原都要用真实 MAC。
+    void learnLanMac(quint32 ip, const QByteArray &mac6);
+    QByteArray lanMac(quint32 ip) const;
+    // 撤销隔离：把我们替某台设备答过的那些条目还原成真实 MAC（只还原学到过真实 MAC 的）。
+    void healIsolation(const QByteArray &victimMac6);
+
+private:
+    void reassertIsolation(); // 跟着 tick 周期重投隔离条目（一次性抢答压不住真主机，见实现）
+public:
+
     // 反应式反制:一看到真网关自己发的 ARP(它的广播 who-has 会携带「网关 IP 在真 MAC」把设备
     // 解毒)就立刻把所有 victim 重投一轮,盖回「网关在本机」。这是「时通时不通」的根治——周期
     // 重发跟 UniFi 的 ARP 刷新是 1:1 拉锯,必须一看到解毒就抢回。自带 ~50ms 节流防 ARP 风暴放大。
@@ -88,6 +115,11 @@ private:
     QVector<QByteArray> buildHealFrames(const QByteArray &victimMac,
                                         const QByteArray &victimIp) const;
     bool hasVictimMac(const QByteArray &mac6) const; // 6 字节 MAC 是否仍在被劫持集合里（延迟连发前复核）
+
+    QVector<QByteArray> m_isolated;             // 被隔离设备 MAC（6 字节）
+    QHash<quint32, QByteArray> m_lanMac;        // 观察学到的 局域网 IP → 真实 MAC
+    // 我们替哪台设备、对哪些目标 IP 抢答过 —— 撤销隔离时按这份还原。
+    QHash<QByteArray, QSet<quint32>> m_isoAnswered;
 
     static QByteArray macToBytes(const QString &); // "aa:bb:.." → 6 字节（非法返回空）
     static QByteArray ipToBytes(const QString &);  // "1.2.3.4"  → 4 字节（用 QHostAddress；非法返回空）
