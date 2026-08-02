@@ -393,6 +393,11 @@ struct NodeRow: View {
 ///
 /// 尺寸逐项照抄 QML：标签栏上/左/右内距 10、标签间距 6、标签高 30、左右内距 16、字号 13；
 /// 标签栏与时间线之间 8；时间线卡**贴到页面左/右/下边缘**（QML 的 `anchors.margins: 0`）。
+///
+/// 「Clash 内核」那条流**只在本页开着时才收**（`setLogsPageVisible`）：核心每秒能吐
+/// 几十行，没人看的时候一路格式化再插进数组纯属白烧。代价是刚打开时内核页是空的，
+/// 从这一刻起往后攒 —— 两条采集路径（管道 / tail `core.log`）都没法重放历史，
+/// 只有 tail 那条能回灌，而让两条路径行为不一致比空几秒更难解释。
 struct LogsPage: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
@@ -424,6 +429,11 @@ struct LogsPage: View {
                 .padding(.trailing, 10)
                 .padding(.leading, pageLeadingInset)
             }
+            // 订阅/退订核心那条流。用 onAppear/onDisappear 而不是盯着
+            // `state.currentPage`：页面切换是 `switch`，非当前页整个不在视图树上，
+            // 这两个回调就是「本页此刻是不是在」最直接的答案。
+            .onAppear { state.setLogsPageVisible(true) }
+            .onDisappear { state.setLogsPageVisible(false) }
     }
 }
 

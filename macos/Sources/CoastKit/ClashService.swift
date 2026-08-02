@@ -41,7 +41,7 @@ public final class ClashService {
 
     // MARK: 回调
 
-    public var onLog: ((String) -> Void)?
+    public var onLog: ((String, LogKind) -> Void)?
     /// 每轮 `/connections` 拿到的完整数组。历史库消费同一份，不额外发请求。
     public var onConnectionsSnapshot: (([[String: Any]]) -> Void)?
 
@@ -86,7 +86,7 @@ public final class ClashService {
     // MARK: - 生命周期
 
     public func start() {
-        log("Connecting to Clash API...")
+        log("Connecting to Clash API...", .routine)
         startTrafficStream()
         // 两条轮询各自成环。`await` 天然形成「上一拍没回来就不发下一拍」的效果 ——
         // C++ 版为此专门加了 m_connectionsInFlight / m_nodesInFlight 两个标志，这里不需要。
@@ -437,7 +437,7 @@ public final class ClashService {
                 group.addTask { [api] in _ = await api.delay(node: name) }
             }
         }
-        log("Delay test finished.")
+        log("Delay test finished.", .routine)
         await pollNodes()
         if thenSpeed { startSpeedTestForValidNodes() }
     }
@@ -509,7 +509,7 @@ public final class ClashService {
             }
             for await (name, bps) in taskGroup {
                 measuredSpeeds[name] = bps
-                log("测速 \(name) -> \(bps / 1024) KB/s")
+                log("测速 \(name) -> \(bps / 1024) KB/s", .routine)
             }
         }
 
@@ -519,11 +519,13 @@ public final class ClashService {
             try? await api.selectNode(group: group, name: speedOriginalNode)
         }
         speedTesting = false
-        log("下载测速完成")
+        log("下载测速完成", .routine)
         await pollNodes()
     }
 
-    private func log(_ message: String) { onLog?(message) }
+    /// 默认 `.notice`。轮询侧那几条**每轮/每个节点**都会刷的回执显式标 `.routine` ——
+    /// 页脚只有一行，被它们占着的话真正要看的错误永远露不出来。
+    private func log(_ message: String, _ kind: LogKind = .notice) { onLog?(message, kind) }
 }
 
 /// `/proxies` 那张图的只读视图：沿 `now` 链往下走的两个查询。

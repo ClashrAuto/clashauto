@@ -140,19 +140,27 @@ public final class AppState {
 
     // MARK: 日志
 
-    /// 环形日志。**必须有上限** —— 核心在 debug 级别下每秒能刷几十条，无界数组跑一晚上
-    /// 就是几百 MB，而日志页只看得到最近几屏。
+    /// 「主日志」标签页：**只有程序自己的**动作与结论（`.notice` / `.routine`）。
     ///
+    /// 以前核心的 stdout 也整条塞进来，于是这一页在核心 debug 刷屏时根本没法读 ——
+    /// 「程序做了什么」被淹在几千行连接日志里。两条流现在按 `LogKind` 彻底分开。
+    ///
+    /// 环形，**必须有上限**：无界数组跑一晚上就是几百 MB，而日志页只看得到最近几屏。
     /// **索引 0 = 最新**，与 Qt 的 `LogEntryModel` 一致（它 prepend 到第 0 行、
     /// 界面最新置顶）。
     public private(set) var logs: [LogEntry] = []
 
-    /// 「Clash 内核」标签页：只有核心进程吐出来的那些。与 Qt 一样**单独存一份**
-    /// 而不是每次渲染 `logs.filter` —— 过滤要扫全部 2000 条，而这个数组每条日志只写一次。
+    /// 「Clash 内核」标签页：**只有核心进程吐出来的原文**。单独存一份而不是每次渲染
+    /// `logs.filter` —— 过滤要扫全部 2000 条，而这个数组每条日志只写一次。
     public private(set) var coreLogs: [LogEntry] = []
 
+    /// 页脚那一行。只放**程序侧、值得看见的**那些（`.notice`）——
+    /// 核心原文和例行回执都不进来，理由见 `LogKind`。
     public private(set) var lastLog = ""
     private static let logCapacity = 2000
+
+    /// 日志页是否正开着。核心原文只在开着时才收 —— 见 `setLogsPageVisible`。
+    private var logsPageVisible = false
 
     public struct LogEntry: Identifiable, Sendable {
         public let id = UUID()
@@ -287,15 +295,18 @@ public final class AppState {
         devices = DeviceStore()
 
         controller.deviceStore = devices
-        // `CoastController` 这条流里既有它自己的编排消息、也有核心进程的 stdout ——
-        // 与 Qt 的 `CoreController::logUpdated` 是同一个口径，那边也整条路由进「Clash 内核」标签。
-        controller.onLog = { [weak self] message in self?.append(log: message, isCore: true) }
+        // 这条流里既有 controller 自己的编排消息、也有核心进程的 stdout，靠 `LogKind`
+        // 分流（以前整条被当成「核心日志」，两个标签页于是都不纯）。
+        controller.onLog = { [weak self] message, kind in self?.append(log: message, kind: kind) }
+        // `COAST_LOG_FILE` 是无头排障的口子（见 `mirrorToFile`），核心原文正是那时最要紧的
+        // 东西 —— 那种场景下没有界面、日志页永远打不开，所以订阅直接常开。
+        controller.streamsCoreOutput = Self.logFilePath != nil
         // 核心意外死亡是必须打扰用户的少数几件事之一：系统代理刚被撤掉，网络行为会突变,
         // 不说一声的话用户只会觉得「网怎么突然不走代理了」。
         controller.onCoreUnexpectedlyExited = {
             Notifier.post(title: "核心意外退出".t, body: "已自动关闭系统代理以避免断网".t)
         }
-        clash.onLog = { [weak self] message in self?.append(log: message) }
+        clash.onLog = { [weak self] message, kind in self?.append(log: message, kind: kind) }
         // 切节点成功 → 按「切换节点时弹出通知」决定弹不弹(nodeSwitchNote 之前是死开关)
         clash.onNodeSelected = { [weak self] name in
             guard let self, self.config.nodeSwitchNote else { return }
@@ -787,18 +798,49 @@ public final class AppState {
     @MainActor
     public static var modeTitles: [String] { ["规则".t, "全局".t, "直连".t] }
 
-    /// 追加一条日志。`isCore` 为真时**同时**进「主日志」和「Clash 内核」两个时间线 ——
-    /// 对齐 Qt 的路由：应用日志只进主线，核心日志两边都进。
-    private func append(log message: String, isCore: Bool = false) {
+    /// 追加一条日志，按 `LogKind` 分流：
+    ///
+    /// | kind | 主日志 | Clash 内核 | 页脚 |
+    /// |---|---|---|---|
+    /// | `.notice`  | ✓ | | ✓ |
+    /// | `.routine` | ✓ | | |
+    /// | `.core`    | | ✓（且仅在日志页开着时）| |
+    ///
+    /// 以前是一个 `isCore` 布尔，核心日志**两边都进**、且随便哪条都能占住页脚 ——
+    /// 三处显示于是都在讲同一件事：最近刷屏的那一行。
+    private func append(log message: String, kind: LogKind = .notice) {
+        // 核心原文：没人在看就**到此为止**，连时间戳都不格式化。
+        // （`COAST_LOG_FILE` 是无头排障的口子，开着时照旧落盘，不受页面开关影响。）
+        if kind == .core, !logsPageVisible, Self.logFilePath == nil { return }
+
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         let entry = LogEntry(time: Self.logTimeFormatter.string(from: Date()),
                              message: trimmed,
                              severity: LogSeverity.of(trimmed))
-        Self.prepend(entry, into: &logs)
-        if isCore { Self.prepend(entry, into: &coreLogs) }
-        lastLog = trimmed
+        switch kind {
+        case .core:
+            if logsPageVisible { Self.prepend(entry, into: &coreLogs) }
+        case .notice, .routine:
+            Self.prepend(entry, into: &logs)
+        }
+        if kind == .notice { lastLog = trimmed }
         Self.mirrorToFile(entry.time + " " + trimmed)
+    }
+
+    /// 日志页开/关。**只影响核心那条流** —— 主日志得一直收着，页脚那一行要用它。
+    ///
+    /// 核心原文才是需要省的那一头：mihomo 在 debug 级别下每秒几十行，而这些行在
+    /// 没人看的时候会一路走完「切行 → 跳主 actor → 格式化时间戳 → 判严重级别 →
+    /// 插进 2000 条数组的第 0 位」，最后被下一屏挤掉，谁也没看见。
+    public func setLogsPageVisible(_ visible: Bool) {
+        guard logsPageVisible != visible else { return }
+        logsPageVisible = visible
+        // `COAST_LOG_FILE` 开着时订阅常开 —— 无头排障没有界面，日志页永远打不开，
+        // 而那正是最需要核心原文的场景。
+        controller.streamsCoreOutput = visible || Self.logFilePath != nil
+        // 关页时把这一份丢掉：它只在页面开着的这段时间里有意义，留着白占内存。
+        if !visible { coreLogs = [] }
     }
 
     /// `COAST_LOG_FILE=<路径>` 时把日志**同时**追加到该文件。

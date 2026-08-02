@@ -21,9 +21,43 @@ public final class CoreProcess {
     /// 核心是否由特权 helper 以 root 启动。TUN 依赖它 —— 非 root 起的核心建不了 utun。
     public private(set) var isPrivileged = false
 
-    public var onLog: ((String) -> Void)?
+    public var onLog: ((String, LogKind) -> Void)?
     /// 核心二进制缺失时触发，UI 据此引导下载。
     public var onCoreMissing: ((String) -> Void)?
+
+    /// **有人正在看核心日志**（日志页开着）。为假时核心的 stdout 原文一律丢弃，
+    /// helper 路径连 `core.log` 都不去 tail —— 那是每 500ms 一次的真实 I/O，
+    /// 没人看的时候纯属白跑。
+    ///
+    /// ★ 「不处理」只能做到**不往上送**，管道**必须继续读**：不读的话核心写满 64KB
+    ///   管道缓冲就阻塞在 `write` 上，整个核心卡死 —— 那是比多几个字符串昂贵得多的代价。
+    ///   所以下面 `streamOutput` 里照旧收字节、照旧切行，只是不再跳回主 actor。
+    ///
+    /// 订阅是**从此刻起**：helper 路径从 `core.log` 的当前末尾开始 tail，不回灌历史，
+    /// 这样两条路径（管道 / tail）的行为一致 —— 管道那条本来就没法重放。
+    public var streamsCoreOutput = false {
+        didSet {
+            guard streamsCoreOutput != oldValue else { return }
+            coreOutputWanted.set(streamsCoreOutput)
+            if streamsCoreOutput {
+                if isRunning, isPrivileged { startLogTail() }
+            } else {
+                logTask?.cancel()
+                logTask = nil
+            }
+        }
+    }
+
+    /// `streamsCoreOutput` 的**跨线程副本**。`readabilityHandler` 跑在 Foundation
+    /// 自己的串行队列上，那里读不到 `@MainActor` 的属性。
+    private let coreOutputWanted = OutputSwitch()
+
+    private final class OutputSwitch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isOn: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set(_ on: Bool) { lock.lock(); value = on; lock.unlock() }
+    }
 
     private var config: AppConfig
     private var process: Process?
@@ -114,7 +148,7 @@ public final class CoreProcess {
                 try await launcher.startCore(executable: exe, config: fullConfigPath, userDir: AppPaths.userDir)
                 isPrivileged = true
                 isRunning = true
-                startLogTail()
+                if streamsCoreOutput { startLogTail() }
                 log("核心已由特权 helper 以 root 启动（支持 TUN）")
                 return .success(())
             } catch {
@@ -178,7 +212,7 @@ public final class CoreProcess {
         isRunning = true
         isPrivileged = false
         streamOutput(from: pipe)
-        log("Start clash is OK!")
+        log("Start clash is OK!", .routine)
         return .success(())
     }
 
@@ -242,11 +276,13 @@ public final class CoreProcess {
                 fileHandle.readabilityHandler = nil
                 return
             }
+            // 字节照收、行照切（缓冲要靠它保持有界），但没人在看时**到此为止** ——
+            // 不跳主 actor、不建日志条目。见 `streamsCoreOutput` 的说明。
             let lines = buffer.append(chunk)
-            guard !lines.isEmpty else { return }
+            guard self?.coreOutputWanted.isOn == true, !lines.isEmpty else { return }
             Task { @MainActor in
                 guard let self else { return }
-                for line in lines { self.log(line) }
+                for line in lines { self.log(line, .core) }
             }
         }
     }
@@ -274,11 +310,17 @@ public final class CoreProcess {
     private var logPipe: Pipe?
 
     /// helper 路径：核心是 root 起的，拿不到它的管道，改为 tail `logs/core.log`。
-    /// helper 每次 startCore 会把该文件截断到 0，所以从头读即可。
+    ///
+    /// 起点是**订阅那一刻的文件末尾**，不是 0：日志页没开的时候我们什么都不收
+    /// （见 `streamsCoreOutput`），开的时候再把此前攒下的几十万行回灌一遍就自相矛盾了，
+    /// 而且管道那条路径本来也没法重放 —— 两条路径得是同一种行为。
     private func startLogTail() {
+        logTask?.cancel()
         let path = AppPaths.userDir.appendingPathComponent("logs/core.log")
+        let start = (try? FileManager.default
+            .attributesOfItem(atPath: path.path)[.size] as? UInt64) ?? 0
         logTask = Task { [weak self] in
-            var offset: UInt64 = 0
+            var offset: UInt64 = start
             while !Task.isCancelled {
                 if let handle = try? FileHandle(forReadingFrom: path) {
                     defer { try? handle.close() }
@@ -288,7 +330,7 @@ public final class CoreProcess {
                         let text = String(data: data, encoding: .utf8) ?? ""
                         for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
                             guard let self else { return }
-                            await MainActor.run { self.log(String(line)) }
+                            await MainActor.run { self.log(String(line), .core) }
                         }
                     }
                 }
@@ -364,10 +406,12 @@ public final class CoreProcess {
               let seed = Resources.seed("Country.mmdb") else { return }
         try? FileManager.default.copyItem(at: seed, to: target)
         AppPaths.makeWritable(target)
-        log("Country.mmdb 已就位: \(target.path)")
+        log("Country.mmdb 已就位: \(target.path)", .routine)
     }
 
-    private func log(_ message: String) { onLog?(message) }
+    /// 默认 `.notice`：这个类里绝大多数 `log(...)` 都是程序自己的动作/结论。
+    /// 核心吐出来的原文由 `streamOutput`/`startLogTail` 显式标 `.core`。
+    private func log(_ message: String, _ kind: LogKind = .notice) { onLog?(message, kind) }
 }
 
 /// 以 root 启动核心的通道。阶段 3 由特权 helper 的 XPC 客户端实现。
