@@ -62,8 +62,24 @@ void ClashService::applyAuth(QNetworkRequest &req) const
     }
 }
 
+void ClashService::setUiActive(bool active)
+{
+    if (active == m_uiActive)
+        return;
+    m_uiActive = active;
+    if (!m_started)
+        return;
+    if (active) {
+        pollNodes();               // 先补一拍，别等下一个周期
+        m_nodesTimer.start(1000);
+    } else {
+        m_nodesTimer.stop();
+    }
+}
+
 void ClashService::start()
 {
+    m_started = true;
     emit statusUpdated(false, false, false);
     emit logUpdated("Connecting to Clash API...");
     startTrafficStream(); // /traffic 常开单流（不能每秒 GET，见头文件说明）
@@ -71,7 +87,8 @@ void ClashService::start()
     pollNodes();
     m_trafficTimer.start(2000);      // 看门狗：流断了就重连（核心重启/端口变更）
     m_connectionsTimer.start(2000);  // /connections 全量拉取开销大、只用到数量与 downloadTotal，2s 足够
-    m_nodesTimer.start(1000); // 1s 实时拉取节点列表状态（对齐旧项目 getProxies 每秒轮询）
+    if (m_uiActive)
+        m_nodesTimer.start(1000); // 1s 实时拉取节点列表状态（对齐旧项目 getProxies 每秒轮询）
 }
 
 void ClashService::setMode(const QString &mode)

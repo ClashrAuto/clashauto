@@ -3,6 +3,8 @@ screenshots/
 *.png
 clashauto-c++/build-qml/
 clashauto-c++/build-release/
+# 本机 macOS 上用 Homebrew Qt 编 Qt 版时的构建目录（这条产品线要在 mac 上验证）
+clashauto-c++/build-mac/
 schat.build/
 clashauto-c++/tools/
 .DS_Store

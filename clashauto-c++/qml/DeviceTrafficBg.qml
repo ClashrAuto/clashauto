@@ -71,8 +71,23 @@ Item {
         recomputeMax();
         canvas.requestPaint();
         // 不可见时不起跑：非代理行、切走的页面、被 ListView 回收的委托照样会被喂数据。
-        if (root.visible)
-            slide.restart();
+        // 两条曲线全是 0 时也不起跑 —— 那是两条贴底的平线，滑动看不出任何区别，
+        // 却要让整个窗口每帧重新提交一遍（理由与实测数据见 BandwidthChart.qml 顶部那段 ★）。
+        // 这里比状态页更要紧：**每个被代理的设备行各挂一条**，代理几台就有几条在顶着帧率。
+        if (root.visible && hasMotion())
+            slide.go();
+    }
+
+    // 这一拍的窗口里还有没有非零采样。
+    function hasMotion() {
+        var d = root.down || [], u = root.up || [];
+        for (var i = 0; i < d.length; ++i)
+            if (d[i] > 0)
+                return true;
+        for (var j = 0; j < u.length; ++j)
+            if (u[j] > 0)
+                return true;
+        return false;
     }
 
     function recomputeMax() {
@@ -97,13 +112,30 @@ Item {
     }
 
     // ——— 平移驱动 ———
-    NumberAnimation {
+    // Timer 而不是 NumberAnimation：x 是取整了的、step 只有 ~9-14px，一拍的平移本来就只有
+    // step 个离散位置；NumberAnimation 却按 vsync 每秒 tick 60 次，逼着整窗每帧重新提交。
+    // 每步 1px 的 Timer 在屏幕上的像素序列与取整后的 NumberAnimation 完全一致，出帧却降到
+    // step fps。理由与实测数据见 BandwidthChart.qml 里 slide 的注释。
+    Timer {
         id: slide
-        target: root
-        property: "slideX"
-        from: 0
-        to: -root.step
-        duration: root.periodMs
+        property int steps: 1
+        property int done: 0
+        repeat: true
+        onTriggered: {
+            ++done;
+            root.slideX = -done;
+            if (done >= steps)
+                stop();
+        }
+        // 语义同 NumberAnimation.restart()：从 0 重新滑到 -step，全程 periodMs。
+        function go() {
+            stop();
+            steps = Math.max(1, Math.round(root.step));
+            done = 0;
+            root.slideX = 0;
+            interval = Math.max(16, Math.round(root.periodMs / steps));
+            start();
+        }
     }
 
     // ——— 平移层：只画会跟着滚动走的东西 ———

@@ -87,6 +87,12 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
     // 状态页的「流量构成 + 连接速览」：蹭历史库那次 /connections（2s 一发），不额外发包。
     connect(m_clash, &ClashService::connectionsSnapshot, this, &QmlBridge::observeConnections);
 
+    // 窗口显隐轮询：1s 一次，只遍历几个 QWindow。
+    m_visibilityTimer = new QTimer(this);
+    m_visibilityTimer->setInterval(1000);
+    connect(m_visibilityTimer, &QTimer::timeout, this, &QmlBridge::syncUiVisible);
+    m_visibilityTimer->start();
+
     // 切换加载态：转圈帧推进（120ms）与 6s 兜底（严格对齐旧项目 m_spinnerTimer + beginNodeSwitch 内的兜底）
     m_spinnerTimer = new QTimer(this);
     m_spinnerTimer->setInterval(120);
@@ -755,19 +761,42 @@ void QmlBridge::setTrafficDimension(int dim)
 
 void QmlBridge::setStatusActive(bool active)
 {
+    m_statusActive = active;
     if (!m_todayTimer) {
         m_todayTimer = new QTimer(this);
         m_todayTimer->setInterval(10000);
         connect(m_todayTimer, &QTimer::timeout, this, &QmlBridge::refreshTodayTraffic);
     }
-    if (active == m_todayTimer->isActive())
+    // ★ 页面「可见」不等于窗口看得见：窗口隐藏时 QML 里 `Item.visible` 仍是 true，
+    //   于是这张卡那三条 GROUP BY 会在托盘态里一直每 10s 跑一轮。两个条件都要满足。
+    const bool wanted = active && m_uiVisible;
+    if (wanted == m_todayTimer->isActive())
         return;
-    if (active) {
+    if (wanted) {
         refreshTodayTraffic();
         m_todayTimer->start();
     } else {
         m_todayTimer->stop();
     }
+}
+
+// 窗口显隐轮询。见头文件里对 `uiVisible` 的说明（为什么是轮询而不是信号）。
+void QmlBridge::syncUiVisible()
+{
+    bool visible = false;
+    for (QWindow *w : QGuiApplication::topLevelWindows()) {
+        // 只认真正的顶层窗口：下拉/提示/菜单也是 QWindow，它们的显隐与「有没有人在看」无关。
+        if (w->isVisible() && w->type() == Qt::Window) {
+            visible = true;
+            break;
+        }
+    }
+    if (visible == m_uiVisible)
+        return;
+    m_uiVisible = visible;
+    // 状态页那张今日流量卡跟着窗口停/起（重新可见时 setStatusActive 会立刻补一次）
+    setStatusActive(m_statusActive);
+    emit uiVisibleChanged(visible);
 }
 
 void QmlBridge::resetConnections()

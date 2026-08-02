@@ -77,6 +77,14 @@ public:
 
     // —— UI 动作 ——
     Q_INVOKABLE void scan();                       // 手动全量扫描
+
+    // 窗口显隐（由 QmlBridge 推过来）。与页面自身的 setActive 取「与」决定节奏，
+    // 但**在线态热更新不受它影响**——见 applyCadence()。
+    void setUiVisible(bool visible);
+
+private:
+    void applyCadence();      // 按「页面开着 + 窗口看得见」重排两个定时器的节奏
+public:
     Q_INVOKABLE void setActive(bool active);       // 页面显隐：控制热更新定时器 + 连接轮询
     Q_INVOKABLE void select(const QString &mac);   // 选中设备（刷新详情 + 连接过滤）
     Q_INVOKABLE void setProxyEnabled(const QString &mac, bool on);
@@ -129,10 +137,12 @@ private:
     DeviceListModel m_model;
     DeviceConnectionsModel m_connModel;
 
-    QTimer *m_livenessTimer = nullptr; // 5s 轻量在线态刷新
+    // 在线态热更新。**常驻**：设备页开着 5s 一轮，否则 60s 一轮 —— 见 applyCadence()。
+    QTimer *m_livenessTimer = nullptr;
     QTimer *m_connTimer = nullptr;     // 1s 连接轮询（聚合流量）
     bool m_active = false;
     bool m_scanning = false;
+    bool m_uiVisible = true;
     bool m_connInFlight = false;
     QString m_selectedMac;
     QVariantMap m_selectedDevice;
@@ -200,6 +210,10 @@ private:
     // 上次全量扫描的时刻：进页面时用它去抖，避免来回切导航反复触发重扫（scan() 里 restart）。
     QElapsedTimer m_lastScan;
     static constexpr int kRescanMinIntervalMs = 30000;
+    // 在线态热更新的两档节奏：设备页开着要跟得上速率/在线态；收起来只为「新设备提醒 +
+    // 代理自愈 + 离线判定」服务，60s 足够（探测本身也是 5s 级的，再密没有意义）。
+    static constexpr int kLivenessFastMs = 5000;
+    static constexpr int kLivenessIdleMs = 60000;
     // 每连接 id → 上次累计字节 (down,up)：逐连接取增量，避免连接关闭时和值回退。
     QHash<QString, QPair<qint64, qint64>> m_connBytes;
     QElapsedTimer m_clock;

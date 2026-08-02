@@ -53,7 +53,14 @@ AppConfig AppConfigLoader::load()
     // 数据根 userDir = <AppData 根>/Coast（Win: %AppData%\Coast）：核心家目录(-d)，放 logs\、Country.mmdb、cache。
     // AppDataLocation 因 org==app=="Coast" 得 <根>/Coast/Coast，上跳一级回到品牌根 <根>/Coast。
     // 配置 yaml（config.yaml/full.yaml 等）单独放 configDir = userDir/config；cleanPath 为纯词法运算。
-    config.userDir = QDir::cleanPath(appData + QStringLiteral("/.."));
+    //
+    // `COAST_DATA_DIR` 可整体改写数据根（与 Swift 端 `AppPaths.userDir` 同名同语义）。
+    // ★ 本机验证离不开它：macOS 上 `QStandardPaths` 走的是 NSHomeDirectory/passwd，**不认 `$HOME`**，
+    //   所以「改 HOME 起一个隔离实例」在这里是无效的 —— 实测那样起的实例仍然读写用户**真实**的
+    //   config/coast.db（还因此把「窗口该不该隐藏」量成了反的：读到的是真配置里的 mini: false）。
+    const QString dataOverride = qEnvironmentVariable("COAST_DATA_DIR");
+    config.userDir = dataOverride.isEmpty() ? QDir::cleanPath(appData + QStringLiteral("/.."))
+                                            : QDir::cleanPath(dataOverride);
     config.configDir = QDir(config.userDir).filePath(QStringLiteral("config"));
     QDir().mkpath(config.configDir); // 一并创建父级 userDir
 

@@ -493,6 +493,12 @@ int main(int argc, char *argv[])
     // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
     lanGateway->recoverFromCrash();
     auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, history, &app);
+    // 窗口显隐 → 停/起那些**只喂界面**的活儿。点 ✕ 是「只隐藏不销毁」，QML 场景整棵还在，
+    // 不接这一条的话托盘态与开着窗口一样贵（实测两边都是 6.5%）。
+    // 各家自己决定停什么：ClashService 停 1s 的 /proxies；DevicesController 把 1s 的连接聚合停掉、
+    // 在线态热更新降到 60s（**不能停** —— 新设备提醒与代理自愈都挂在它上面）。
+    QObject::connect(&bridge, &QmlBridge::uiVisibleChanged, clash, &ClashService::setUiActive);
+    QObject::connect(&bridge, &QmlBridge::uiVisibleChanged, devicesCtrl, &DevicesController::setUiVisible);
     // Npcap 安装引导（Windows 专用；其它平台 supported()=false，设备页那条提示条不显示）。
     // 状态页「今日流量」卡的数据源（小时柱 + 进程/设备/域名 Top5）——同样是后置注入。
     bridge.setHistoryStore(history);

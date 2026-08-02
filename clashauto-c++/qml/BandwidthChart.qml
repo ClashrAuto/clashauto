@@ -26,6 +26,14 @@ import ClashAuto
 //      就占了主线程绘制开销的约 40%，而文字一秒才可能变一次。
 //
 // 一句话：**滚动不许触发重绘。** 任何让 onPaint 跟着滚动跑的改法都会把上面这些全部退回去。
+//
+// ★ 还有一条同样重要、但方向不同的：**没东西可动的时候，连滚动本身也别跑。**
+//   平移动画一开，Qt Quick 就得**把整个窗口每帧重新提交一遍**（场景图没有局部重绘），
+//   代价与这条曲线画了什么无关 —— macOS 实测（窗口开着、核心不跑、静止不动）：
+//   动画开着 **10.9%**，把它关掉只剩 **1.8%**，采样显示那 9 个点全在 Metal 的每帧编码上。
+//   而窗口里全是 0 的时候，曲线就是一条贴底的平线，**平移它在视觉上没有任何区别**。
+//   所以判据是「这 42 个采样里还有没有非零的」：有（哪怕只是几秒前那个正往左走的尖峰）
+//   就照常滑，全零就停。观感一模一样，闲置时整窗不再出帧。
 Item {
     id: root
     // 平移层比可见区宽一格，必须裁掉溢出的那一格（MetricCard 自己已 clip，独立成图时没人裁）。
@@ -66,6 +74,17 @@ Item {
         canvas.requestPaint();
     }
 
+    // 窗口里还有没有「看得出在动」的东西。见文件顶部那段 ★：全零时曲线是条平线，
+    // 滑它等于让整窗白白每帧重画。`Component.onCompleted` 预填的是 1.0（为了让曲线一上来
+    // 就铺满整宽），所以判据是**严格大于**这个预填值，不是 > 0。
+    readonly property real kIdleFloor: 1.0
+    function hasMotion() {
+        for (var i = 0; i < pointers.length; ++i)
+            if (pointers[i] > kIdleFloor)
+                return true;
+        return false;
+    }
+
     // 每秒一个样本 = 原 replay：推入新点、越界弹出最旧、滚动重新起跑。
     function push(value) {
         pointers.push(Math.max(0, value));
@@ -76,8 +95,9 @@ Item {
         // 从 x=0 重新滑到 -spacing：来早了就重新起跑，来晚了动画早已停在 -spacing。
         // 不可见时不起跑（对应旧版 Timer 的 running: root.visible）——外面每拍照喂数据，
         // 没这层判断的话切走的页面里还有一堆图在逐帧插值。
-        if (root.visible)
-            slide.restart();
+        // 全零时也不起跑（见 hasMotion）——那种情况下滑动是看不见的，却要整窗每帧重画。
+        if (root.visible && hasMotion())
+            slide.go();
     }
 
     onVisibleChanged: {
@@ -140,13 +160,36 @@ Item {
 
     // ——— 2) 平移层 ———
     // 一秒滑过一格。**只改 x，不重绘**：场景图搬现成的纹理，JS 完全不参与。
-    NumberAnimation {
+    //
+    // ★ 为什么是 Timer 而不是 NumberAnimation（改回去之前先读完）：
+    //   x 是取整了的（见 canvas.x），spacing 只有 ~9-11px，所以一秒的平移在屏幕上本来就只有
+    //   spacing 个离散位置。NumberAnimation 却按 vsync 每秒 tick 60 次——其中 ~50 次算出的 x
+    //   取整后与上一帧相同，屏幕一个像素都没变，但只要有动画在跑，Qt Quick 就把整窗 70+ 个
+    //   batch 重新编码提交一遍。改成「每步 1px 的 Timer」：屏幕上的像素序列与 NumberAnimation
+    //   逐帧取整后**完全一致**（线性动画越过 -k+0.5 的时刻就是均匀分布的，与均匀 Timer 只差
+    //   半步相位），但出帧从 60fps 降到 spacing fps。macOS 实测（窗口开着、曲线在动，25s 窗口
+    //   各测 3 次）：NumberAnimation 8.0/8.6/10.3% → Timer 3.1/3.4/4.2%。这不是「降帧率」——
+    //   可见的运动本来就是 ~10Hz 的整像素步进，QSG_RENDER_TIMING 下帧间隔从 16ms 变 ~100ms。
+    Timer {
         id: slide
-        target: root
-        property: "slideX"
-        from: 0
-        to: -root.spacing
-        duration: 1000
+        property int steps: 1   // 这一拍要走的总像素数（= 起跑时的 spacing）
+        property int done: 0    // 已走像素数
+        repeat: true
+        onTriggered: {
+            ++done;
+            root.slideX = -done;
+            if (done >= steps)
+                stop();
+        }
+        // 语义同 NumberAnimation.restart()：从 0 重新滑到 -spacing，全程 1000ms。
+        function go() {
+            stop();
+            steps = Math.max(1, Math.round(root.spacing));
+            done = 0;
+            root.slideX = 0;
+            interval = Math.max(16, Math.round(1000 / steps));
+            start();
+        }
     }
 
     Canvas {

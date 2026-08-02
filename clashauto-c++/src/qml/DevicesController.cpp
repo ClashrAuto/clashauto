@@ -93,7 +93,7 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
     m_newDeviceAlert = QSettings().value(QStringLiteral("devices/newDeviceAlert"), true).toBool();
 
     m_livenessTimer = new QTimer(this);
-    m_livenessTimer->setInterval(5000);
+    m_livenessTimer->setInterval(kLivenessIdleMs);
     connect(m_livenessTimer, &QTimer::timeout, this, [this] {
         QStringList ips;
         for (const DeviceRecord &d : m_store->devices())
@@ -107,6 +107,8 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
     connect(m_connTimer, &QTimer::timeout, this, &DevicesController::pollConnections);
 
     refreshModel();
+    // 在线态热更新从这一刻起就跑（60s 一轮），不等用户进设备页 —— 新设备提醒靠它。
+    applyCadence();
 
     // 重启后自动恢复代理。「代理网络」开关是**持久**的（存在 coast.db 的 device 表），劫持是**运行时**的：
     // 上次退出时 aboutToQuit→disableAll() 把 ARP 全还原了，新进程里没有任何东西把它们重新劫持，
@@ -539,22 +541,51 @@ void DevicesController::setActive(bool active)
     if (active == m_active)
         return;
     m_active = active;
-    if (active) {
+    if (active && m_uiVisible) {
         // 进页面扫一次——但**别每次切回来都重扫**。全量扫描是这个页面最重的动作（整段网段的
         // TCP 探测），来回点几次导航就会反复触发；在此期间 5s 的 liveness 热更新已经在维持
         // 在线态/流量了，30s 内切回来没必要再来一轮。
         if (!m_lastScan.isValid() || m_lastScan.elapsed() > kRescanMinIntervalMs)
             scan();
-        m_livenessTimer->start();
-        m_connTimer->start();
         m_clock.restart();
+    }
+    applyCadence();
+}
+
+void DevicesController::setUiVisible(bool visible)
+{
+    if (visible == m_uiVisible)
+        return;
+    m_uiVisible = visible;
+    applyCadence();
+}
+
+// 两个定时器的节奏：
+//
+//   • 连接聚合（1s，给设备行算实时速率）—— 纯界面数据，**页面看得见才跑**。
+//     「页面看得见」= 设备页是当前页 **且** 窗口没被收进托盘：QML 里 `Item.visible` 只反映
+//     自身与祖先项，窗口隐藏不会把它变成 false，所以光看 m_active 会在托盘态里一直跑。
+//
+//   • 在线态热更新（refreshLiveness：定向探测已知 IP + 重读 ARP 表）——**永远在跑**，
+//     只是频率降到 60s。三件事都挂在它上面，一停就全废：
+//       ① **新设备提醒**。原来它只在设备页开着（或有设备开着代理）时才跑，而扫描是
+//          `newDeviceFound` 的唯一来源 —— 于是这个默认打开的提醒**只在你正盯着设备页时
+//          才可能弹**，那恰恰是最不需要通知的时候；窗口一关就再也不响。
+//       ② 被代理设备换 IP / 掉线再上线后的 resumeProxies() 自愈（原来靠 hasProxiedDevices()
+//          这个条件维持，只覆盖了「已经开着代理」那一半）。
+//       ③ 离线判定与拓扑（网关 MAC）的新鲜度。
+//     代价：60s 一轮 = 对已知设备各发一个短命 TCP 探测 + 一次 arp 子进程，可以忽略。
+void DevicesController::applyCadence()
+{
+    const bool foreground = m_active && m_uiVisible;
+    if (foreground) {
+        m_connTimer->start();
     } else {
         m_connTimer->stop();
-        // 还有设备开着代理时，5s 的在线态热更新**不能停**：设备换 IP / 掉线再上线之后要靠它
-        // 触发 resumeProxies() 把劫持重新挂上。页面一关就停，等于代理只在设备页开着时才自愈。
-        if (!hasProxiedDevices())
-            m_livenessTimer->stop();
     }
+    m_livenessTimer->setInterval(foreground ? kLivenessFastMs : kLivenessIdleMs);
+    if (!m_livenessTimer->isActive())
+        m_livenessTimer->start();
 }
 
 void DevicesController::select(const QString &mac)

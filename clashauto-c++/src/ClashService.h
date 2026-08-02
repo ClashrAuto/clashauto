@@ -36,6 +36,14 @@ public:
     explicit ClashService(QObject *parent = nullptr);
 
     void start();
+
+    // 界面有没有人在看（由 QmlBridge 按窗口显隐推过来）。
+    //
+    // 只挡**纯给界面看**的那一条：`/proxies` 每秒一次，返回的是全部节点/策略组的大 JSON
+    // （几十上百个节点），是这里最贵的一条轮询。`/traffic`（托盘菜单要）与 `/connections`
+    // （历史记录的唯一数据源，停了会在历史上留一段空白）照旧跑。
+    // 恢复可见时立刻补一次，不让用户对着上一次的旧列表发呆。
+    void setUiActive(bool active);
     void setEndpoint(const QString &host, int port); // REST API 地址（对齐 config.uiPort，默认 9191）
     void setMixedPort(int port); // 混合代理端口（对齐 config.mixedPort，默认 7890）——下载测速经此端口走代理
     void setSecret(const QString &secret); // external-controller 的 secret；非空时所有发往核心的请求带 Authorization: Bearer
@@ -95,6 +103,8 @@ private:
     QTimer m_nodesTimer;
     bool m_connectionsInFlight = false; // /connections 轮询在途：上一拍未回则跳过，防止慢响应下请求自我堆积
     bool m_nodesInFlight = false;        // /proxies 轮询在途：同上
+    bool m_uiActive = true;              // 见 setUiActive
+    bool m_started = false;              // start() 调过没有——没起来时别自作主张启定时器
     QString m_host = "127.0.0.1";
     int m_port = 9191; // 默认对齐 AppConfig::uiPort / default.yaml；实际由 setEndpoint 按配置设定
     int m_mixedPort = 7890; // 默认对齐 AppConfig::mixedPort；由 setMixedPort 按配置设定

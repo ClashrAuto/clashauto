@@ -152,6 +152,20 @@ public:
     // 状态页显隐：只有它可见时才每 10s 重算今日流量（那是几条 GROUP BY，没人看时白烧 CPU）。
     Q_INVOKABLE void setStatusActive(bool active);
 
+    // 界面此刻有没有一个窗口真的被人看着（主窗或连接/详情/更新那几个附属窗）。
+    //
+    // ★ 点 ✕ 走的是「只隐藏不销毁」（Main.qml 的 onClosing + hide()），QML 场景整棵都还在，
+    //   于是每秒的节点轮询、连接聚合、模型更新照旧全跑一遍，算完没有任何人看。实测（接真核心、
+    //   核心不由本进程启动）：**窗口开着 6.5%，收进托盘还是 6.5%** —— 收起来一点不省。
+    //
+    //   页面级的 setStatusActive / DevicesController::setActive 挡不住这件事：QML 里
+    //   `Item.visible` 只反映自身与祖先项，**窗口隐藏不会把它变成 false**，所以页面一直
+    //   以为自己是「活的」。这里补的是窗口这一层。
+    //
+    // 停的是纯喂界面的那些；`/traffic`（托盘菜单要）、`/connections` → 历史落库、
+    // ARP 巡检与设备在线态热更新（新设备提醒、代理自愈都靠它）一律不停。
+    bool uiVisible() const { return m_uiVisible; }
+
     // macOS 毛玻璃：把 QML 窗口交给原生层做「透明标题栏 + 整窗 NSVisualEffectView」。
     // 非 macOS 上是安全 no-op。dark 决定玻璃深浅（跟随应用主题）。
     Q_INVOKABLE void applyMacGlass(QWindow *window, bool dark);
@@ -189,6 +203,9 @@ public:
 #endif
 
 signals:
+    /// 窗口显隐变了。main_qml 把它接到 ClashService::setUiActive 与
+    /// DevicesController::setUiVisible —— 这里只负责「看得见没有」，各家自己决定停什么。
+    void uiVisibleChanged(bool visible);
     void statusChanged();
     void trafficChanged();
     void connectionsChanged();
@@ -215,6 +232,9 @@ private slots:
     // 声明成 slot（而非普通私有函数）是为了能被 invokeMethod 按名字调到：这块纯算术没有 UI，
     // 只能靠喂两拍假快照、把四个输出打出来验（COAST_CONNSTATS_SELFTEST=1，见 main_qml.cpp）。
     void observeConnections(const QJsonArray &conns);
+
+private slots:
+    void syncUiVisible();
 
 private:
     static QString speedText(qint64 value);
@@ -270,6 +290,13 @@ private:
     // —— 今日流量卡（数据来自历史库；只在状态页可见时每 10s 重算，见 setStatusActive）——
     HistoryStore *m_history = nullptr;
     QTimer *m_todayTimer = nullptr;
+    // 1s 轮询窗口显隐。**不用信号**：Qt 没有「任意顶层窗口显隐」的全局信号，而附属窗散在
+    // 各个页面的 QML 里（连接窗在状态页、详情窗在设备页、更新窗在 Main），逐个去挂
+    // onVisibleChanged 既容易漏、又把这件事摊到四个文件里。每秒遍历几个 QWindow 的代价
+    // 可以忽略（与 Swift 端把可见性搭在 1Hz 采样循环上同一取舍）。
+    QTimer *m_visibilityTimer = nullptr;
+    bool m_uiVisible = true;
+    bool m_statusActive = false;   // 状态页自己报的可见性（与窗口那层取「与」）
     QVariantList m_todayHourly;
     QVariantList m_todayTop;
     qint64 m_todayTotal = 0;
