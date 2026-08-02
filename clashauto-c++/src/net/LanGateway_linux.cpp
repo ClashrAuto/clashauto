@@ -392,14 +392,26 @@ void GatewayWorker::forwardIsolatedLan(GwNic *n, const QByteArray &frame, const 
     }
     const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
                         | (quint32(f[32]) << 8) | quint32(f[33]);
-    const QByteArray peer = n->arp->lanMac(dst);
-    // ★ 已知不足（下一步要修）：`learnLanMac` 只从**本机收得到的** ARP 帧学，而对端的 ARP 应答
-    //   是单播给发问者的，交换机不会送到我们端口 —— 于是常态就是查不到，合法帧（B 发起、A 回复）
-    //   也会被丢在这里，B→A 的回程因此断掉。真机诊断实测 `peerMac=0`。
-    //   正解是让网关自己主动解析一次对端（发 who-has 并等应答，应答是给我们的，收得到），
-    //   或直接读内核邻居表。在补上之前，这条路径对「B 主动访问 A」的支持是不完整的。
-    if (peer.size() != 6)
-        return; // 不知道对端真实 MAC → 只能丢（宁可不通，也不能瞎发）
+    const quint32 dstU = dst;
+    const QByteArray peer = n->arp->lanMac(dstU);
+    if (peer.size() != 6) {
+        // 查不到对端 MAC → 网关**自己主动解析一次**（who-has 的应答单播给我们，收得到），
+        // 下一帧就能转发。首帧仍被丢，但 TCP 会重传 —— 与任何一次 ARP 冷启动同理，一个 RTT 的代价。
+        //
+        // ★ 为什么原来查不到：`learnLanMac` 只从**本机收得到的** ARP 帧学，而对端回给 A 的 reply
+        //   是单播给 A 的，交换机不送到我们端口。resolveLanPeer 用本机身份重问一遍，应答就到我们这。
+        //
+        // ★ **验证到哪一步、诚实交代**：resolveLanPeer 编译通过、逻辑闭环，但我**没能在真机上
+        //   端到端证明它闭环**。卡点在上游 —— 隔离抢答对同网段真实主机的竞速本就脆弱：抓包实测
+        //   A 广播 who-has <真实主机 .2> 时，**真实 .2 硬件直接回、比我们早 ~77µs**（我们要经
+        //   收帧→用户态判定→回帧一整圈），A 的投毒条目因此时有时无，转发路径没能稳定触发。
+        //   这不是本函数的问题，是「隔离抢答面对真实主机」这一层的可靠性问题（抢网关能稳，是因为
+        //   网关走软件转发、通常更慢）。要让隔离对真实对端也稳，得把抢答做得更激进（更短的连发
+        //   窗口 / 收到真主机 reply 立刻反制），那是下一步。此处 resolveLanPeer 是正确的一环，
+        //   但整条「B 主动访问 A」的回程要真正可靠，取决于上游抢答先稳下来。
+        n->arp->resolveLanPeer(dstU, n->localIp4);
+        return;
+    }
     QByteArray out = frame;
     std::memcpy(out.data(), peer.constData(), 6);              // 目的 MAC = 对端真实 MAC
     std::memcpy(out.data() + 6, macBytes(n->spec.localMac).constData(), 6); // 源 MAC = 本机

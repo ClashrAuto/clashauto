@@ -431,6 +431,35 @@ QByteArray ArpSpoofer::buildArpRequest(const QByteArray &ethDst, const QByteArra
     return buildArp(0x01, ethDst, ethSrc, senderMac, senderIp, targetMac, targetIp);
 }
 
+void ArpSpoofer::resolveLanPeer(quint32 targetIp4, quint32 ownIp4)
+{
+    if (!m_endpoint || targetIp4 == 0 || ownIp4 == 0)
+        return;
+    // 每目标 1s 一次：转发路径查不到 MAC 时会连丢好几帧，别每帧都广播一次 who-has。
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 last = m_lanResolveAt.value(targetIp4, 0);
+    if (last != 0 && now - last < 1000)
+        return;
+    m_lanResolveAt.insert(targetIp4, now);
+
+    auto u32ToBytes = [](quint32 v) {
+        QByteArray b(4, char(0));
+        b[0] = char((v >> 24) & 0xFF);
+        b[1] = char((v >> 16) & 0xFF);
+        b[2] = char((v >> 8) & 0xFF);
+        b[3] = char(v & 0xFF);
+        return b;
+    };
+    // 以**本机身份**广播 who-has <target>：sender=本机MAC/本机IP，target=对端。对端回的是单播
+    // reply（目的=本机 MAC），交换机会送到本端口，被 learnLanMac 学到 —— 这正是隔离转发缺的那块。
+    static const QByteArray bcast(6, char(0xFF));
+    static const QByteArray zeroMac(6, char(0));
+    const QByteArray req = buildArpRequest(bcast, m_localMac, m_localMac, u32ToBytes(ownIp4),
+                                           zeroMac, u32ToBytes(targetIp4));
+    m_endpoint->send(req);
+    m_endpoint->flushTx();
+}
+
 // ———————————————————————— 局域网隔离 ————————————————————————
 
 void ArpSpoofer::setIsolatedMacs(const QVector<QByteArray> &macs6)

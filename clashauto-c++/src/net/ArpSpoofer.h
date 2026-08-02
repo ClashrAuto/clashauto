@@ -72,6 +72,10 @@ public:
     QByteArray lanMac(quint32 ip) const;
     // 撤销隔离：把我们替某台设备答过的那些条目还原成真实 MAC（只还原学到过真实 MAC 的）。
     void healIsolation(const QByteArray &victimMac6);
+    // 主动解析一个局域网对端：以本机身份广播 who-has。对端的应答是**单播给我们**的，
+    // 交换机会送到本端口 → learnLanMac 收得到。用于隔离转发查不到对端 MAC 时补一次解析。
+    // ownIp4 = 本机在该网段的 IPv4（主机序）。内部按目标节流，避免每个被丢的帧都触发一次。
+    void resolveLanPeer(quint32 targetIp4, quint32 ownIp4);
 
 private:
     void reassertIsolation(); // 跟着 tick 周期重投隔离条目（一次性抢答压不住真主机，见实现）
@@ -126,6 +130,8 @@ private:
     //   一台被禁设备扫一遍 /24 就能让我们持续发 250+ 帧/秒，多台叠加更糟 ——
     //   等于把自己变成 ARP 放大源，还是被攻击方一句 nmap 就能触发的。
     QHash<QByteArray, QHash<quint32, qint64>> m_isoAnswered;
+    // resolveLanPeer 的每目标节流：目标 IP → 上次发 who-has 的时刻(uptime ms)。
+    QHash<quint32, qint64> m_lanResolveAt;
 
     static QByteArray macToBytes(const QString &); // "aa:bb:.." → 6 字节（非法返回空）
     static QByteArray ipToBytes(const QString &);  // "1.2.3.4"  → 4 字节（用 QHostAddress；非法返回空）
