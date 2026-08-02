@@ -1,3 +1,4 @@
+import AppKit
 import CoastKit
 import SwiftUI
 
@@ -25,6 +26,8 @@ struct ConnectionsView: View {
     /// 液态玻璃形变要的命名空间：钮和输入框共享一个 `glassEffectID`，
     /// 点开时是**同一块玻璃**拉长成输入框，不是「藏钮、换控件」。
     @Namespace private var searchNS
+    /// 本窗是否在全屏。只影响标题的左内距 —— 全屏没有红绿灯要让（见 `titleLeadingInset`）。
+    @State private var isFullScreen = false
 
     /// 顶栏控件高度：分段按钮与搜索框一致。26 以下沿用 Qt 的 26。
     ///
@@ -47,6 +50,19 @@ struct ConnectionsView: View {
                 RuleEditorSheet(draft: draft) { saved in save(rule: saved) }
                     .environment(state).environment(theme)
             }
+            // 只认**本窗**的通知：这两条是全应用广播的，主窗全屏时也会来一份。
+            .onReceive(NotificationCenter.default
+                .publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
+                if Self.isOwnWindow(note) { isFullScreen = true }
+            }
+            .onReceive(NotificationCenter.default
+                .publisher(for: NSWindow.didExitFullScreenNotification)) { note in
+                if Self.isOwnWindow(note) { isFullScreen = false }
+            }
+    }
+
+    private static func isOwnWindow(_ note: Notification) -> Bool {
+        (note.object as? NSWindow)?.identifier?.rawValue == ConnectionsWindowID.value
     }
 
     @ViewBuilder
@@ -112,7 +128,7 @@ struct ConnectionsView: View {
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .padding(.leading, Self.titleLeadingInset)
+                .padding(.leading, titleLeadingInset)
             Spacer(minLength: 8)
             segmentedToggles
             searchControls
@@ -121,8 +137,9 @@ struct ConnectionsView: View {
         .padding(.trailing, 10)
     }
 
-    /// 红绿灯右缘（78）+ 12 的呼吸。
-    private static let titleLeadingInset: CGFloat = 78 + 12
+    /// 标题左内距：窗口模式要让开红绿灯（右缘在窗口左缘往里 78）+ 12 的呼吸；
+    /// **全屏时没有红绿灯**，那 90 就成了一段没来由的空白 —— 收到 10。
+    private var titleLeadingInset: CGFloat { isFullScreen ? 10 : 78 + 12 }
 
     /// Online / Offline 两个筛选开关。两段各自独立（可以同时开），不是二选一。
     @ViewBuilder

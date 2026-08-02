@@ -81,13 +81,16 @@ struct WindowConfigurator: NSViewRepresentable {
                 window.toolbar = toolbar
             }
             window.toolbarStyle = .unified
-            hideToolbarInFullScreen(window, coordinator)
+            // ★ 每次都按当前状态摆正，而不是只在通知里翻。通知是「转场开始/结束」的
+            //   一次性事件，漏一次（或者被转场本身覆盖掉）带子就回不来了 ——
+            //   实测退出全屏后标题栏停在标准 28，而我们的顶栏还是 50，红绿灯中心 14、
+            //   顶栏中心 24，差 10 明显错位。`configure` 每轮布局都跑，能自愈。
+            window.toolbar?.isVisible = !window.styleMask.contains(.fullScreen)
+            observeFullScreen(window, coordinator)
         }
     }
 
-    /// 进全屏时把那个空 toolbar 收起来，退出再放回去。
-    ///
-    /// ★ **不做的话全屏后窗口顶上是一条纯白的空带**。窗口模式下这个 toolbar 是空的没关系
+    /// ★ **不收起的话全屏后窗口顶上是一条纯白的空带**。窗口模式下这个 toolbar 是空的没关系
     ///   —— 它只负责把标题栏抬到 50，我们自己的顶栏正好铺在那条带子上，谁也看不见它。
     ///   可全屏时系统把标题栏收走、却**把 toolbar 留下**并单独给它画一条不透明的底：
     ///   于是顶上多出一条白带，里面一个东西都没有（它本来就是空的），
@@ -95,8 +98,10 @@ struct WindowConfigurator: NSViewRepresentable {
     ///
     ///   收起 toolbar 之后全屏就没有这条带子了，安全区归零，顶栏直接顶到屏幕上沿 ——
     ///   也正是全屏该有的样子（那 50 本来就是为了让红绿灯有地方待，全屏没有红绿灯）。
+    /// ★ 收的时机用 `willEnter`（转场前就藏掉，全屏动画里不会闪一下白带），
+    ///   放的时机必须用 **`didExit`** —— `willExit` 太早，转场过程本身会把它又摁回去。
     @available(macOS 26.0, *)
-    private func hideToolbarInFullScreen(_ window: NSWindow, _ coordinator: Coordinator) {
+    private func observeFullScreen(_ window: NSWindow, _ coordinator: Coordinator) {
         guard coordinator.tokens.isEmpty else { return }
         let center = NotificationCenter.default
         coordinator.tokens = [
@@ -104,13 +109,11 @@ struct WindowConfigurator: NSViewRepresentable {
                                object: window, queue: .main) { note in
                 MainActor.assumeIsolated { (note.object as? NSWindow)?.toolbar?.isVisible = false }
             },
-            center.addObserver(forName: NSWindow.willExitFullScreenNotification,
+            center.addObserver(forName: NSWindow.didExitFullScreenNotification,
                                object: window, queue: .main) { note in
                 MainActor.assumeIsolated { (note.object as? NSWindow)?.toolbar?.isVisible = true }
             },
         ]
-        // 挂上观察者的这一刻可能已经在全屏里（窗口恢复、或者观察者装晚了）。
-        if window.styleMask.contains(.fullScreen) { window.toolbar?.isVisible = false }
     }
 }
 
