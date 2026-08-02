@@ -1927,7 +1927,8 @@ void NetStack::hijackDns(const QString &victimIp, quint16 vport, const QHostAddr
         }
     }
     if (!got) {
-        ++GatewayDiag::c.dnsNoReply; // 记一笔，别静默丢
+        // 单独一栏：这条查询**没发出去**，与「发出去了但核心没回」是两回事，处置也相反。
+        ++GatewayDiag::c.dnsNoId;
         return;
     }
 
