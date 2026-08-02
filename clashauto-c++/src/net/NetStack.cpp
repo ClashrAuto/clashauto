@@ -1044,10 +1044,13 @@ QString lwipStatsLine()
         const unsigned dDack    = n.delayed_acks - prev.delayed_acks;
         if (dBacklog || dSynTw || dTwKill || dPrio || dAlloc || dFast || dDack) {
             out += QStringLiteral(" synDropBl=%1 synHitTw=%2 twKill=%3 prioKill=%4"
-                                  " allocFail=%5 fastTmr=%6 dAck=%7")
+                                  " allocFail=%5 fastTmr=%6 dAck=%7 fastGapMax=%8ms")
                        .arg(dBacklog).arg(dSynTw).arg(dTwKill).arg(dPrio)
-                       .arg(dAlloc).arg(dFast).arg(dDack);
+                       .arg(dAlloc).arg(dFast).arg(dDack)
+                       .arg(coast_lwip_diag.fasttmr_max_gap_ms);
         }
+        // 最坏间隔是**瞬时量**，读完清零，下个窗口重新找峰值（与 txBacklogPeak 同约定）。
+        coast_lwip_diag.fasttmr_max_gap_ms = 0;
         prev = n;
     }
     return out;

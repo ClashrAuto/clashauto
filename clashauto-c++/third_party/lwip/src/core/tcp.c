@@ -111,6 +111,7 @@
 #include "lwip/ip6.h"
 #include "lwip/ip6_addr.h"
 #include "lwip/nd6.h"
+#include "lwip/sys.h"          /* sys_now()：Coast 诊断测 fasttmr 的实际间隔要用 */
 #include "coast_lwip_diag.h"   /* Coast 诊断计数器（fasttmr/延迟 ACK） */
 
 #include <string.h>
@@ -1487,8 +1488,25 @@ tcp_fasttmr(void)
 
   ++tcp_timer_ctr;
 
+  /* Coast 诊断：核对这个定时器到底有没有按 TCP_TMR_INTERVAL 跑。
+   * ★ 必须记在**函数入口**，不能记在下面的 tcp_fasttmr_start 标号处 ——
+   *   那个标号会被 goto 回来重扫链表，属于同一拍；记在那里会虚增 runs、
+   *   并把间隔算出一堆 0。延迟 ACK 等的就是「下一拍」，所以最坏间隔才是决定性的，
+   *   平均值会把毛刺抹平。 */
+  {
+    static u32_t coast_last_fasttmr_ms = 0;
+    const u32_t coast_now_ms = sys_now();
+    if (coast_last_fasttmr_ms != 0) {
+      const u32_t gap = coast_now_ms - coast_last_fasttmr_ms;
+      if (gap > coast_lwip_diag.fasttmr_max_gap_ms) {
+        coast_lwip_diag.fasttmr_max_gap_ms = gap;
+      }
+    }
+    coast_last_fasttmr_ms = coast_now_ms;
+  }
+  coast_lwip_diag.fasttmr_runs++;
+
 tcp_fasttmr_start:
-  coast_lwip_diag.fasttmr_runs++;   /* Coast 诊断：核对这个定时器到底有没有按 TCP_TMR_INTERVAL 跑 */
   pcb = tcp_active_pcbs;
 
   while (pcb != NULL) {
