@@ -150,6 +150,10 @@ public:
         QString mac;
         QString policyMode;   // follow / rule / global / direct / reject
         QString policyTarget; // global 模式的目标节点/组名
+        // 设备当前 IP。**只有 TPROXY 数据面用得到**：那条路没有 socks 用户名，设备身份只能靠
+        // 原始源 IP 表达（SRC-IP-CIDR 规则）。lwIP 那条仍走 IN-USER，不看这个字段。
+        // 可能为空（台账里还没记到 IP）——那样的设备生成不了规则，调用方需跳过。
+        QString ip;
     };
     static QVector<ProxyDeviceRow> proxiedDevices(const QString &configDir);
 

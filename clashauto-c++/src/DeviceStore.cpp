@@ -365,13 +365,14 @@ QVector<DeviceStore::ProxyDeviceRow> DeviceStore::proxiedDevices(const QString &
     if (!db.isOpen())
         return out;
     QSqlQuery q(db);
-    if (q.exec(QStringLiteral("SELECT mac,policy_mode,policy_target FROM device "
+    if (q.exec(QStringLiteral("SELECT mac,policy_mode,policy_target,ip FROM device "
                               "WHERE proxy_enabled=1 ORDER BY mac"))) {
         while (q.next()) {
             ProxyDeviceRow r;
             r.mac = q.value(0).toString().trimmed();
             r.policyMode = q.value(1).toString().trimmed();
             r.policyTarget = q.value(2).toString().trimmed();
+            r.ip = q.value(3).toString().trimmed(); // TPROXY 的 SRC-IP-CIDR 规则要用
             if (!r.mac.isEmpty())
                 out.append(r);
         }

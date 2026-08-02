@@ -482,8 +482,17 @@ QString ConfigBuilder::applyRejectDevices(QString yaml) const
         const QString user = DeviceStore::socksUser(row.mac);
         if (user.isEmpty())
             continue; // 非法 mac：与 applyDevicePolicies 同样跳过，别写出坏用户名
-        ruleLines += QStringLiteral("  - %1\n")
-                         .arg(yamlQuote(QStringLiteral("IN-USER,%1,REJECT").arg(user)));
+        // 身份载体按数据面分，理由同 applyDevicePolicies。**这一条尤其不能漏**：
+        // 漏了就是「用户把设备设成禁网、它却照常上网」——比策略不生效更糟，是安全预期被违背。
+        if (m_config.gatewayTproxy) {
+            if (row.ip.isEmpty())
+                continue; // 台账还没记到 IP，下一轮扫描到就有了
+            ruleLines += QStringLiteral("  - %1\n")
+                             .arg(yamlQuote(QStringLiteral("SRC-IP-CIDR,%1/32,REJECT").arg(row.ip)));
+        } else {
+            ruleLines += QStringLiteral("  - %1\n")
+                             .arg(yamlQuote(QStringLiteral("IN-USER,%1,REJECT").arg(user)));
+        }
     }
     if (ruleLines.isEmpty())
         return yaml;
@@ -621,6 +630,7 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         QString user;
         QString mode;   // follow / rule / global / direct / reject
         QString target; // global 模式的目标节点/组名
+        QString ip;     // TPROXY 模式的身份载体（见下面 policyMatcher）
     };
     QVector<ProxyDevice> proxied;
     for (const DeviceStore::ProxyDeviceRow &row : DeviceStore::proxiedDevices(m_config.configDir)) {
@@ -632,6 +642,7 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         dev.user = user;
         dev.mode = row.policyMode;
         dev.target = row.policyTarget;
+        dev.ip = row.ip;
         proxied.push_back(dev);
     }
 
@@ -695,7 +706,19 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         } else {
             continue; // follow / rule（及未知值）不生成 IN-USER 规则
         }
-        const QString rule = QString("IN-USER,%1,%2").arg(dev.user, target);
+        // 设备身份的载体按数据面分：
+        //   lwIP   → IN-USER,<socks 用户名>   （设备流量经 coast-gateway 那个 socks 口带用户名进来）
+        //   TPROXY → SRC-IP-CIDR,<ip>/32     （tproxy 入站没有用户名,但**原始源 IP 被完整保留**，
+        //                                     核心直接看得到设备真实 IP,这是更原生的表达）
+        // ★ 漏了这一步的后果不是"策略打折"而是**策略完全失效**：tproxy 下 IN-USER 永远匹配不上，
+        //   于是 global/direct 形同虚设，被标为「禁网」的设备照样畅通无阻上网（见 applyRejectDevices）。
+        // ★ 已知限制：SRC-IP-CIDR 绑的是**当前** IP。设备换址(DHCP 续约)后这条规则会指向旧地址,
+        //   要靠台账更新触发 rebuildConfig 才纠正；MAC 是稳的而 IP 不是,这是 tproxy 这条路的固有代价。
+        const QString rule = m_config.gatewayTproxy
+                                 ? QString("SRC-IP-CIDR,%1/32,%2").arg(dev.ip, target)
+                                 : QString("IN-USER,%1,%2").arg(dev.user, target);
+        if (m_config.gatewayTproxy && dev.ip.isEmpty())
+            continue; // 台账还没记到 IP：写不出规则，跳过（下一轮扫描到就有了）
         ruleLines += QString("  - %1\n").arg(yamlQuote(rule));
     }
     if (!ruleLines.isEmpty()) {
