@@ -82,6 +82,14 @@ public:
     // 停止全部（退出/急停）：还原所有被劫持设备的 ARP。
     void disableAll();
 
+    /// 彻底停：还原全部 ARP/NDP + 销毁数据面对象 + **拆掉 TPROXY 的内核规则**。幂等。
+    ///
+    /// ★ 必须显式接到 aboutToQuit，**不能指望析构函数**：真机实测 SIGTERM(pkill) 之后 nft 表、
+    ///   ip rule、route_localnet 全都还在——进程退出时 LanGateway 并没有被析构。而"规则还在、
+    ///   没有进程接管 TPROXY"= 被覆盖的设备**完全断网**，且它不会自己好（要等应用重启后
+    ///   removeStale 才清）。disableAll 只清空设备集合，拆不掉表与 sysctl。
+    void shutdown();
+
     // 启动时调用：若上次异常退出留有劫持清单，先给这些设备发还原 ARP（panic-restore）。
     void recoverFromCrash();
 

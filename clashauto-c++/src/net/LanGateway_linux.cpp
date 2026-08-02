@@ -1547,6 +1547,14 @@ LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl)
     d->thread->start();
 }
 
+void LanGateway::shutdown()
+{
+    if (!d->workerReady())
+        return;
+    QMetaObject::invokeMethod(d->worker, [w = d->worker] { w->teardownLocal(); },
+                              Qt::BlockingQueuedConnection);
+}
+
 LanGateway::~LanGateway()
 {
     if (d->thread) {

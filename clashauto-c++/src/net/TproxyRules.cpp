@@ -169,6 +169,18 @@ bool TproxyRules::install(const Spec &spec, QString *err)
     m_savedIp6Forward = sysctlRead(QStringLiteral("net.ipv6.conf.all.forwarding"));
     sysctlWrite(QStringLiteral("net.ipv4.ip_forward"), QStringLiteral("1"));
     sysctlWrite(QStringLiteral("net.ipv6.conf.all.forwarding"), QStringLiteral("1"));
+    if (m_spec.dnsPort != 0) {
+        // route_localnet：允许把包路由到 127.0.0.0/8。DNS 劫持那条 dnat 到回环，没有它内核会把
+        // 改写后的包当 martian 丢掉。
+        //
+        // ★ 它的风险是真实的：开了之后，**外来包只要以 127.0.0.0/8 为目的地就能被路由进本机的
+        //   回环服务**（本进程自己就有好几个只绑回环的口：核心 API 9191、混合口 7890、
+        //   网关 socks 7899）。所以必须配一道 rawpre 链把这类包丢掉——它挂在 raw 钩子上，
+        //   **早于 nat/dstnat**，所以只挡真正"从网卡进来就写着 127/8"的包；我们自己在 dstnat 里
+        //   改写出来的目的地是在它之后产生的，不受影响。两者缺一不可，别只留一个。
+        m_savedRouteLocalnet = sysctlRead(QStringLiteral("net.ipv4.conf.all.route_localnet"));
+        sysctlWrite(QStringLiteral("net.ipv4.conf.all.route_localnet"), QStringLiteral("1"));
+    }
 
     // 策略路由：TPROXY 打上 fwmark 之后，包的目的地址仍是原始目的地，必须靠这条把它留在本机
     // （`local default dev lo`），否则会被照常转发出去、根本到不了核心的监听 socket。
@@ -209,9 +221,22 @@ table inet %1 {
                   .arg(mark)
                   .arg(m_spec.tproxyPort);
     if (m_spec.dnsPort != 0) {
+        // DNS 劫持：**dnat 到 127.0.0.1**，不是 redirect。
+        //
+        // 核心的 DNS 监听绑在 127.0.0.1:1053（与 lwIP 那条路一致，见 NetStack::kDnsHijackPort）。
+        // `redirect` 把目的地改成**入口网卡的本机 IP**，绑回环的监听收不到；要用 redirect 就得把
+        // 监听改绑 0.0.0.0——那等于**把解析器暴露给整个局域网**，任何一台机器都能拿它当 DNS 用。
+        // 所以改成显式 dnat 到回环，监听维持 127.0.0.1 不动。代价是要开 route_localnet
+        // （见下面 install 里那段），而它的风险由 rawpre 链兜住。
+        //
+        // 真机实测（被接管设备 dig @1.1.1.1 www.baidu.com）：返回 198.18.0.73，正是核心的 fake-ip。
         script += QStringLiteral(R"(  chain dnsnat {
     type nat hook prerouting priority dstnat; policy accept;
-    ip saddr @proxied udp dport 53 counter redirect to :%1
+    ip saddr @proxied udp dport 53 counter dnat ip to 127.0.0.1:%1
+  }
+  chain rawpre {
+    type filter hook prerouting priority raw; policy accept;
+    iifname != "lo" ip daddr 127.0.0.0/8 counter drop
   }
 )")
                       .arg(m_spec.dnsPort);
@@ -261,8 +286,10 @@ void TproxyRules::remove()
                                QStringLiteral("table"), table});
     sysctlWrite(QStringLiteral("net.ipv4.ip_forward"), m_savedIpForward);
     sysctlWrite(QStringLiteral("net.ipv6.conf.all.forwarding"), m_savedIp6Forward);
+    sysctlWrite(QStringLiteral("net.ipv4.conf.all.route_localnet"), m_savedRouteLocalnet);
     m_savedIpForward.clear();
     m_savedIp6Forward.clear();
+    m_savedRouteLocalnet.clear();
     m_installed = false;
 }
 
@@ -307,12 +334,14 @@ int runTproxyRulesSelfTest()
     }
     QString dump = TproxyRules::dumpRuleset();
     const bool hasTproxy = dump.contains(QStringLiteral("tproxy"));
-    const bool hasDnsNat = dump.contains(QStringLiteral("redirect to :17853"));
+    const bool hasDnsNat = dump.contains(QStringLiteral("dnat ip to 127.0.0.1:17853"));
+    const bool hasRawGuard = dump.contains(QStringLiteral("127.0.0.0/8"));
     const bool hasFwdChain = dump.contains(QStringLiteral("forward_accept"));
-    if (!hasTproxy || !hasDnsNat || !hasFwdChain) {
+    if (!hasTproxy || !hasDnsNat || !hasFwdChain || !hasRawGuard) {
         say("TPROXY-SELFTEST: FAIL 规则不完整 —— tproxy=%s",
             QString::number(hasTproxy) + " dnsnat=" + QString::number(hasDnsNat)
-                + " forward=" + QString::number(hasFwdChain));
+                + " forward=" + QString::number(hasFwdChain)
+                + " rawguard=" + QString::number(hasRawGuard));
         say("\n%s\n", dump);
         r.remove();
         return 1;

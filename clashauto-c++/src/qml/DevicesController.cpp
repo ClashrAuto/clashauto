@@ -313,11 +313,12 @@ void DevicesController::ensureGatewayConfigured()
     LanGateway::DatapathSpec dp;
     dp.tproxy = m_core && m_core->gatewayTproxy();
     dp.tproxyPort = DeviceStore::kTproxyPort;
-    // dnsPort 暂留 0 = 不劫持 DNS。核心的 DNS 监听现在绑在 127.0.0.1:1053,而 nat redirect 的
-    // 目的地会变成入口网卡的本机 IP,绑回环的监听收不到——要么把它改绑 0.0.0.0（会把 DNS 暴露到
-    // 局域网,得先想清楚），要么开 route_localnet。这一步先不做,于是 tproxy 模式下设备用自己的
-    // DNS：**流量照样被按 IP 代理,但域名类规则（DOMAIN/GEOSITE）会失配**。见提交信息。
-    dp.dnsPort = 0;
+    // DNS 劫持端口 = 核心的 DNS 监听（ConfigBuilder 写死 127.0.0.1:1053，与 lwIP 那条路共用同
+    // 一个口，见 NetStack.cpp 的 kDnsHijackPort）。TproxyRules 用 dnat 到回环 + route_localnet
+    // 打到它，**不改监听地址**——改绑 0.0.0.0 等于把解析器暴露给整个局域网。
+    // 这里写字面量而不是引 NetStack 的常量：那个常量在 .cpp 的匿名空间里，为它开个头文件不值得；
+    // 三处（ConfigBuilder 的 dns.listen、NetStack 的 kDnsHijackPort、这里）本来就得一起改。
+    dp.dnsPort = 1053;
     m_gateway->setDatapath(dp);
     m_gateway->configure(specs, DeviceStore::kGatewayPort);
     // 起来了就清掉去重记忆：之后再坏（拔网卡等）还要能重新报一次。

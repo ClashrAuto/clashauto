@@ -560,6 +560,10 @@ int main(int argc, char *argv[])
 
     // 退出必须可靠还原所有被劫持设备的 ARP（否则设备断网）。
     QObject::connect(&app, &QCoreApplication::aboutToQuit, lanGateway, &LanGateway::disableAll);
+    // disableAll 之后再彻底拆一次：它只清空设备集合，拆不掉 TPROXY 的 nft 表 / ip rule /
+    // route_localnet。这些是**内核持久状态**,进程走了还留着,而"规则在、没进程接管"= 设备断网。
+    // 实测 SIGTERM 后析构函数并不会跑,所以这一条不能省（见 LanGateway::shutdown 的注释）。
+    QObject::connect(&app, &QCoreApplication::aboutToQuit, lanGateway, &LanGateway::shutdown);
 
     // 睡眠/唤醒：合盖睡下去时本机就不转发了，必须在挂起前把被代理设备还给真网关（否则它一直
     // 指着一台睡着的机器 = 断网），醒来再重扫拓扑补挂。直连（非队列）确保在挂起窗口内跑完。

@@ -93,6 +93,8 @@ private:
     // ip_forward 原值，remove() 时还原（我们只在需要时打开，不擅自改变用户的系统设置）。
     QString m_savedIpForward;
     QString m_savedIp6Forward;
+    // route_localnet 原值（只有开了 DNS 劫持才会动它；见 install/remove 里的说明）。
+    QString m_savedRouteLocalnet;
 };
 
 // —— 自测钩子（COAST_TPROXY_SELFTEST=1）——
