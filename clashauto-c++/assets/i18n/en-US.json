@@ -453,5 +453,7 @@
   "尚未取得发布信息，请稍后重试": "Release info not available yet, please try again later",
   "已就绪（%@），正在退出安装…": "Ready (%@), quitting to install…",
   "当前不是从 .app 运行，已打开发布页请手动安装": "Not running from a .app — opened the release page, please install manually",
-  "程序更新失败：%@": "App update failed: %@"
+  "程序更新失败：%@": "App update failed: %@",
+  "查看详情": "View details",
+  "忘记此设备": "Forget this device"
 }

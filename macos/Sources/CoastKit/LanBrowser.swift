@@ -34,11 +34,15 @@ public struct LanBrowser: Sendable {
             self.interface = interface
         }
 
-        /// 显示名：主机名 > 厂商 > IP。
+        /// 显示名：主机名 > 厂商 > IP > MAC。
+        ///
+        /// ★ 最后那一档兜底是必需的：离线设备的 `ip` 是空的，而主机名/厂商本来就常常查不到
+        ///   （随机 MAC 的手机既没有 PTR 记录、OUI 表里也查不到）—— 三档全空时原来直接返回
+        ///   空字符串，界面上就是**一行没有名字、什么都没有的设备**。MAC 至少是这台设备的
+        ///   真实身份，认不出是谁也比一片空白强。
         public var displayName: String {
-            if !hostname.isEmpty { return hostname }
-            if !vendor.isEmpty { return vendor }
-            return ip
+            for candidate in [hostname, vendor, ip] where !candidate.isEmpty { return candidate }
+            return mac
         }
 
         /// 设备类型（用于选图标）。口径对齐 C++ `LanScanner::classify` 的关键词表，

@@ -122,7 +122,10 @@ public final class AppState {
         // ★ **全部台账设备**，不只是「正在被代理」的那些 —— Qt 的 `deviceNameFor()`
         //   是拿整张台账去匹配源 IP 的。只看代理中的话，一台认得出名字、但此刻没开代理的
         //   设备，它的连接在列表里只会显示成一串 IP。
-        devices.all().filter { !$0.lastIP.isEmpty }.map { (ip: $0.lastIP, alias: $0.alias) }
+        // 没起过备注名的用扫描存下来的主机名顶上 —— 台账现在存了身份，
+        // 连接行不必再为一台明明认得出名字的设备显示一串 IP。
+        devices.all().filter { !$0.lastIP.isEmpty }
+            .map { (ip: $0.lastIP, alias: $0.alias.isEmpty ? $0.hostname : $0.alias) }
     }
 
     // MARK: 局域网安全告警
@@ -691,7 +694,7 @@ public final class AppState {
         let scope: HistoryStore.Scope = trafficProxyOnly ? .proxyOnly : .all
         todayHourly = history.todayHourly(scope: scope)
         // 设备维度要显示台账里的名字而不是一串 MAC —— 历史库不认识台账，喂给它。
-        let names = Dictionary(devices.all().map { ($0.mac, $0.alias) },
+        let names = Dictionary(devices.all().map { ($0.mac, $0.alias.isEmpty ? $0.hostname : $0.alias) },
                                uniquingKeysWith: { first, _ in first })
         todayTop = history.todayTop(dimension: trafficDimension, scope: scope,
                                     deviceNames: names)

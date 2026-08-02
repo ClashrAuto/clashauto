@@ -274,10 +274,10 @@ struct DeviceDetailView: View {
     }
 
     private func setTypeOverride(_ key: String) {
-        var record = recordOrDefault
         // `unknown` 存空串 —— 台账里「空」就是「跟着自动识别走」，不占一个魔法值。
-        record.typeOverride = key == "unknown" ? "" : key
-        _ = state.devices.save(record)
+        // 走 store 的读-改-写入口，而不是 `save(recordOrDefault)`：后者拿的可能是一条
+        // 现造的空记录，整条覆盖会把备注名/策略一起抹掉。
+        state.devices.setTypeOverride(mac: mac, key == "unknown" ? "" : key)
         state.ledgerDidChange()
     }
 
@@ -506,11 +506,8 @@ struct DeviceDetailView: View {
     }
 
     private func setPolicy(_ mode: DeviceStore.PolicyMode, _ target: String) {
-        var record = recordOrDefault
-        record.policyMode = mode
-        record.policyTarget = target
         // 台账里还没有就顺手建一条 —— 用户选了策略，那条记录本来就该存在了。
-        _ = state.devices.save(record)
+        state.devices.setPolicy(mac: mac, mode: mode, target: target)
         state.ledgerDidChange()
         Task { await state.controller.rebuildConfig() }
     }

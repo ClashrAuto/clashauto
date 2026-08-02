@@ -20,6 +20,62 @@ enum SelfTests {
         if environment["COAST_PATHS_SELFTEST"] == "1" { pathsSelfTest() }
         if environment["COAST_TOPO_SELFTEST"] == "1" { topoSelfTest() }
         if environment["COAST_LATENCY_SELFTEST"] == "1" { latencySelfTest() }
+        if environment["COAST_DEVICES_SELFTEST"] == "1" { devicesSelfTest() }
+    }
+
+    /// 设备台账 / 设备列表自检（对应 Qt 的 `COAST_DEVICEDB_SELFTEST`）。
+    ///
+    /// 打印的正是设备页那份合并结果：这一轮扫到了谁、台账里记着谁、哪些台账记录会
+    /// 变成一行离线设备、哪些被判为残留丢掉。**每一行都带显示名** —— 「一堆没有名字的
+    /// 设备」这个 bug 在 GUI 之外唯一看得见的地方就是这里。
+    /// 配 `COAST_DATA_DIR=<某份数据目录的副本>` 可以拿真实台账验，而不动正在用的那份。
+    private static func devicesSelfTest() {
+        print("=== 设备台账 / 列表自检 ===")
+        print("configDir: \(AppPaths.configDir.path)")
+        let store = DeviceStore()
+        guard store.isOpen else {
+            print("台账打不开（coast.db）")
+            exit(1)
+        }
+
+        let scanned = runBlocking { await LanBrowser().scan() }
+        print("\n-- 本轮扫到 \(scanned.count) 台 --")
+        for device in scanned {
+            print("  \(device.mac)  \(device.ip.isEmpty ? "-" : device.ip)  「\(device.displayName)」"
+                  + "  \(device.vendor.isEmpty ? "" : device.vendor)")
+        }
+
+        store.recordSeen(scanned)
+        let purged = store.purgeStale(before: Date().addingTimeInterval(-30 * 24 * 3600))
+
+        let seen = Set(scanned.map(\.mac))
+        let prefix = DeviceStore.subnetPrefix(DeviceStore.localLANAddress() ?? "")
+        var kept = 0, dropped = 0, nameless = 0
+        print("\n-- 台账 \(store.all().count) 条（本机网段前缀 \(prefix.isEmpty ? "?" : prefix)）--")
+        for record in store.all() where !seen.contains(record.mac) {
+            let keeps = DeviceStore.keepsOfflineRow(record, localPrefix: prefix)
+            keeps ? (kept += 1) : (dropped += 1)
+            // 显示名为空 = 界面上那一行什么都没有。这正是要盯住的东西，单独计数。
+            if record.displayLabel.isEmpty { nameless += 1 }
+            print("  \(keeps ? "留" : "丢")  \(record.mac)  「\(record.displayLabel)」"
+                  + "  上次可见 \(record.lastSeen.timeIntervalSince1970 > 0 ? "\(record.lastSeen)" : "从未")"
+                  + (record.hasUserIntent ? "  [用户动过]" : ""))
+        }
+        print("\n在线 \(scanned.count) 行 + 离线 \(kept) 行；丢弃残留 \(dropped) 条；"
+              + "清理过期 \(purged) 条；没有名字的行 \(nameless)")
+        exit(nameless == 0 ? 0 : 1)
+    }
+
+    /// 自检钩子跑在 GUI 起来之前，没有 async 上下文 —— 用信号量把异步调用等回来。
+    private static func runBlocking<T: Sendable>(_ work: @escaping @Sendable () async -> T) -> T {
+        let semaphore = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var result: T?
+        Task {
+            result = await work()
+            semaphore.signal()
+        }
+        semaphore.wait()
+        return result!
     }
 
     /// helper 自检：报告 bundle 布局与 SMAppService 状态。

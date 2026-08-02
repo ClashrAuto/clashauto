@@ -452,5 +452,7 @@
   "尚未取得发布信息，请稍后重试": "Informações da versão ainda não disponíveis, tente novamente mais tarde",
   "已就绪（%@），正在退出安装…": "Pronto (%@), saindo para instalar…",
   "当前不是从 .app 运行，已打开发布页请手动安装": "Não está sendo executado de um .app — página da versão aberta, instale manualmente",
-  "程序更新失败：%@": "Falha na atualização do aplicativo: %@"
+  "程序更新失败：%@": "Falha na atualização do aplicativo: %@",
+  "查看详情": "Ver detalhes",
+  "忘记此设备": "Esquecer este dispositivo"
 }

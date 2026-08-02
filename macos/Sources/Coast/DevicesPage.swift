@@ -43,6 +43,10 @@ struct DevicesPage: View {
     /// 只在 `rows` 变化时重算，不在每行里各查一次。
     @State private var gateway: LanTopology.Gateway?
     @State private var localMACs: Set<String> = []
+    /// 本机所在网段的 /24 前缀，判「离线行是不是这个网络的」用。
+    /// 与 `gateway`/`localMACs` 同理**在扫描那一拍算一次** —— `allRows` 每次渲染都会跑，
+    /// 在那里现查网卡地址等于每帧几次 `getifaddrs`。
+    @State private var localPrefix = ""
     private var gatewayIP: String { gateway?.ip ?? "" }
 
     private func rejection(for row: Row) -> RedirectTargets.Rejection? {
@@ -70,6 +74,14 @@ struct DevicesPage: View {
 
     /// 合并后的行：发现到的 + 只在台账里的（设备离线了但凭据还在，不能让它从界面上消失）。
     ///
+    /// ★ 离线行有**两处**曾经是错的，一起修的：
+    ///   • 台账里的每一条都会变成一行 —— 包括「开过一次代理又关掉」「只是被扫到过」这些
+    ///     没有任何用户配置的残留。实测一台机器上 10 条记录、当前网络一台都不在，
+    ///     于是列表里凭空多出 10 行灰设备。去留判据现在在 `DeviceStore.keepsOfflineRow`。
+    ///   • 那一行的内容是现造的 `LanBrowser.Device(mac:ip:"",interface:"")` + `hostname = alias`，
+    ///     台账里既没存主机名也没存厂商，所以没起过备注名的设备**整行都是空的**：
+    ///     没有名字、没有副标题，就是一块灰色头像。现在身份从台账里读回来。
+    ///
     /// 排序照搬 Qt `DeviceListModel::buildTarget()`：**在线优先 → 今日流量（MB 档位）降序
     /// → IP 升序 → MAC 兜底**。三点说明，都是 Qt 注释里写明的理由：
     ///
@@ -82,11 +94,21 @@ struct DevicesPage: View {
         var result = discovered.map { Row(discovered: $0, record: ledger[$0.mac]) }
         let seen = Set(discovered.map(\.mac))
         for (mac, record) in ledger where !seen.contains(mac) {
-            var offline = LanBrowser.Device(mac: mac, ip: "", interface: "")
-            offline.hostname = record.alias
-            result.append(Row(discovered: offline, record: record, online: false))
+            guard DeviceStore.keepsOfflineRow(record, localPrefix: localPrefix) else { continue }
+            result.append(Row(discovered: Self.offlineDevice(from: record),
+                              record: record, online: false))
         }
         return Self.ordered(result, todayBytes: todayByDevice)
+    }
+
+    /// 用台账里存下来的身份还原一台离线设备（地址/主机名/厂商/型号/接口都是上次扫到时的）。
+    static func offlineDevice(from record: DeviceStore.Device) -> LanBrowser.Device {
+        var device = LanBrowser.Device(mac: record.mac, ip: record.lastIP,
+                                       interface: record.interface)
+        device.hostname = record.hostname
+        device.vendor = record.vendor
+        device.model = record.model
+        return device
     }
 
     /// 见 `allRows` 的说明。比较键在 `CoastKit.DeviceOrdering`（那边有测试）。
@@ -105,6 +127,15 @@ struct DevicesPage: View {
         var online = true
         var id: String { discovered.mac }
         var proxyEnabled: Bool { record?.proxyEnabled ?? false }
+        /// 行上显示的名字：**备注名优先**，其次才是自动认出来的那个。
+        ///
+        /// ★ 原来这里直接用 `discovered.displayName`，于是用户在详情窗里起的备注名
+        ///   在列表上根本不显示（详情窗自己是显示的，所以看着像「只有那个窗认这个名字」）。
+        ///   离线行以前是靠把 alias 塞进 `hostname` 绕过去的 —— 绕过去的只有离线那一半。
+        var displayName: String {
+            let alias = record?.alias ?? ""
+            return alias.isEmpty ? discovered.displayName : alias
+        }
         /// 生效类型 = 用户手动指定优先，否则自动识别（对齐 Qt `DeviceStore::effectiveType()`）。
         /// 详情窗改完类型，列表里的色块图标要立刻跟着变。
         var typeKey: String {
@@ -131,7 +162,13 @@ struct DevicesPage: View {
                 header
             }
         }
-        .task { await scan() }
+        // 先把台账里记着的设备铺上去（离线态），再等这一轮扫描把在线的换上来 ——
+        // 不先铺的话，每次进这一页都要对着「正在扫描局域网…」空等一两秒，
+        // 而那几台设备明明上一秒还在。
+        .task {
+            reloadLedger()
+            await scan()
+        }
         // 详情窗改完台账后立刻重读（否则列表要等下一轮扫描才更新图标/名字）
         .onChange(of: state.ledgerRevision) { _, _ in reloadLedger() }
     }
@@ -401,7 +438,8 @@ struct DevicesPage: View {
                               tick: state.pollTick,
                               contended: contendedIPs.contains(row.discovered.ip),
                               onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
-                              onOpenDetail: { openDetail(row) })
+                              onOpenDetail: { openDetail(row) },
+                              onForget: { forget(row) })
                 }
             }
         }
@@ -463,12 +501,25 @@ struct DevicesPage: View {
         defer { scanning = false }
         gateway = LanTopology.defaultGateway()
         localMACs = LanTopology.localMACs()
+        localPrefix = DeviceStore.subnetPrefix(DeviceStore.localLANAddress() ?? "")
         discovered = await browser.scan()
         // 每轮扫描后交给 AppState 判断有没有没见过的设备（首轮只记基线、不提醒）
         state.noticeDevices(discovered.map(\.mac))
+        // ★ 把这一轮的身份落库 —— 「设备列表持久化」就是这一句。没有它，列表只是
+        //   系统邻居表的一次投影：重启后一片空白，设备睡一觉就什么都不剩。
+        //   身份列与用户列在库里是分开写的，这里不会覆盖任何用户设置。
+        state.devices.recordSeen(discovered)
+        // 顺手清掉用户从没动过、又很久没再出现的记录，台账才不会只增不减。
+        _ = state.devices.purgeStale(before: Date().addingTimeInterval(-Self.ledgerRetention))
+        state.ledgerDidChange()   // 台账变了：本页重读快照，历史库的 IP→MAC 映射也跟着更新
         reloadLedger()
         todayByDevice = state.history.todayByDevice()
     }
+
+    /// 没有任何用户配置的记录在台账里的保留期。比离线行的 24 小时长得多 ——
+    /// 「不再显示」和「彻底忘掉」是两件事：一台每周只开一次的设备不该每次都算新设备
+    /// （那会让「新设备提醒」变成每周一次的假警报）。
+    private static let ledgerRetention: TimeInterval = 30 * 24 * 3600
 
     private func reloadLedger() {
         ledger = Dictionary(uniqueKeysWithValues: state.devices.all().map { ($0.mac, $0) })
@@ -481,6 +532,21 @@ struct DevicesPage: View {
         state.ledgerDidChange()
         if enabled { openDetail(row) }   // 刚开启就把详情打开（策略在里面选）
         Task { await state.controller.rebuildConfig() }
+    }
+
+    /// 从台账里删掉这台设备（右键菜单）。
+    ///
+    /// 台账此前**只进不出**：`DeviceStore.remove` 全项目没有任何调用者，于是一台设备一旦
+    /// 进过台账就再也拿不掉 —— 联调用的假设备、换过网络的邻居会一直挂在列表里。
+    /// 语义是「忘掉它」而不是「拉黑它」：设备还在网上的话下一轮扫描会作为一台新设备回来，
+    /// 只是备注名/策略/类型这些用户配置被清掉了。正开着代理的不给删（先关代理，
+    /// 否则接管还挂着、记录却没了）。
+    private func forget(_ row: Row) {
+        guard !row.proxyEnabled else { return }
+        _ = state.devices.remove(mac: row.discovered.mac)
+        discovered.removeAll { $0.mac == row.discovered.mac }
+        state.ledgerDidChange()
+        reloadLedger()
     }
 
 }
@@ -502,6 +568,8 @@ private struct DeviceRow: View {
     var contended = false
     let onToggleProxy: (Bool) -> Void
     let onOpenDetail: () -> Void
+    /// 右键「忘记此设备」。正开着代理时不给这一项（先关代理）。
+    let onForget: () -> Void
 
     @State private var hovering = false
 
@@ -520,7 +588,7 @@ private struct DeviceRow: View {
             // 副标题长的行会把右侧几列压窄，同一列在不同行落在不同的 x 上。
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 6) {
-                    Text(row.discovered.displayName)
+                    Text(row.displayName)
                         .font(.system(size: 13))
                         .foregroundStyle(theme.textPrimary)
                         .lineLimit(1).truncationMode(.tail)
@@ -617,6 +685,12 @@ private struct DeviceRow: View {
     var body: some View {
         Button(action: onOpenDetail) { rowContent }
             .buttonStyle(.plain)
+            .contextMenu {
+                Button("查看详情".t, action: onOpenDetail)
+                if !row.proxyEnabled {
+                    Button("忘记此设备".t, action: onForget)
+                }
+            }
     }
 
     /// 类型头像 34×34 圆角 8 + 图标 18 + 右下角 11 的在线小圆点（带 2px 描边）。
@@ -729,7 +803,10 @@ private struct DeviceRow: View {
         var parts: [String] = []
         if !row.discovered.ip.isEmpty { parts.append(row.discovered.ip) }
         let vendor = row.discovered.vendor
-        if !vendor.isEmpty, vendor != row.discovered.displayName { parts.append(vendor) }
+        if !vendor.isEmpty, vendor != row.displayName { parts.append(vendor) }
+        // 名字回落到了 MAC（主机名/厂商/IP 全都没有）时，副标题会是空的 —— 那正是
+        // 「什么都没有的一行」的样子。至少把它是**离线**这件事说出来。
+        if parts.isEmpty, !row.online { parts.append("离线".t) }
         return parts.joined(separator: "  ·  ")
     }
 }
