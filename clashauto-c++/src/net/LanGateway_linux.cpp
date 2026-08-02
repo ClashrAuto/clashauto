@@ -293,6 +293,9 @@ private:
     QHash<QString, GwNic *> m_nics;          // ifname → 套件
     quint16 m_socksPort = 0;
     QHash<quint64, QString> m_victimByMac;   // src MAC 打包键 → ip（帧过滤 + 记账）
+    // src MAC 打包键 → 最后一次看到「台账上那个 IP」发帧的时刻（uptime ms）。
+    // 用来把「换地址」和「一个 MAC 上挂着多个 IP」区分开，见 learnDeviceV4。
+    QHash<quint64, qint64> m_victimIpSeenMs;
     QHash<QString, QString> m_victimMacStr;  // ip → mac 串（disable 用）
     QHash<QString, QString> m_victimNic;     // ip → ifname（disable/持久化找回对应网卡）
     QHash<quint64, qint64> m_lastSeenMs;     // src MAC 打包键 → 上次见到该 victim 帧的时刻（唤醒沿检测）
@@ -449,8 +452,27 @@ void GatewayWorker::learnDeviceV4(GwNic *n, const uchar *f, const QByteArray &fr
         return; // 不是我们在劫持的设备
     const QString oldIp = it.value();
     const QString newIp = QHostAddress(src).toString();
-    if (newIp == oldIp)
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (newIp == oldIp) {
+        m_victimIpSeenMs[vkey] = nowMs;   // 台账上那个地址仍在使用
         return;
+    }
+    // ★ **一个 MAC 上挂多个 IPv4 是常态，不能当成「换地址」**（静态 IP + DHCP、虚拟机宿主、
+    //   Docker 网桥、临时别名都会这样）。没有这道判据时两个地址会轮流把台账改来改去，
+    //   而每改一次上层都要按新地址**重挂一次接管**，在途连接跟着被打断。
+    //   真机实测（Pi 网关、四设备并发）：给 ens18 加一个同 MAC 的第二 IP，该设备的
+    //   p99 立刻从 **99ms 跳到 2518ms**、速率掉掉一半；把第二个 IP 删掉，同一份二进制
+    //   立刻回到 99ms。这个现象被我当成「饱和下的公平性问题」追了好几轮，其实是这里。
+    //
+    //   判据用「旧地址是不是还在发包」而不是「有没有见过两个 IP」：真的换地址时旧地址
+    //   必然不再出现（DHCP 续约到新址、重新入网），静默期一过自然就认了；而多 IP 设备的
+    //   两个地址都在持续发包，永远过不了这道门 —— 正是我们想要的。
+    //   3 秒：远大于正常设备的发包间隔（ARP/DNS/keepalive 都是秒级以内），
+    //   又远小于用户对「换了地址多久能恢复」的容忍度。
+    constexpr qint64 kIpMoveQuietMs = 3000;
+    const qint64 lastSeenOld = m_victimIpSeenMs.value(vkey, 0);
+    if (lastSeenOld != 0 && nowMs - lastSeenOld < kIpMoveQuietMs)
+        return; // 旧地址还活着 → 这是同一台设备的另一个地址，不是搬家
     // 同子网才认（换网段不在这里猜）
     if (n->netMask4 != 0) {
         const quint32 oldRaw = QHostAddress(oldIp).toIPv4Address();
