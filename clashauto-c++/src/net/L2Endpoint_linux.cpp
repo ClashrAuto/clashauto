@@ -464,19 +464,11 @@ public:
         m_txStage.push_back(frame);
         m_txStageBytes += frame.size();
         // 攒满就地发，避免暂存无界增长（也避免一次 sendmmsg 的 iovec 数组过大）。
-        if (m_txStage.size() >= kTxStageMaxFrames || m_txStageBytes >= kTxStageMaxBytes) {
+        // 其余情况等 flushTx()——调用点由 IL2Endpoint::flushTx 的契约规定，**不要**在这里
+        // 自己挂队列化冲刷：那是绕开契约,既多一次 metacall,也会掩盖「新出帧路径漏了 flush」
+        // 这类真问题(契约的兜底是泵那一拍,漏了会以 25ms 卡顿的形式暴露出来,而不是被悄悄糊住)。
+        if (m_txStage.size() >= kTxStageMaxFrames || m_txStageBytes >= kTxStageMaxBytes)
             flushTx();
-            return true;
-        }
-        // 否则挂一次**队列化**的 flush：它会在当前事件处理返回、事件循环转下一轮之前跑掉，
-        // 所以帧最多等到本轮事件处理结束，不引入可观测的额外延迟（见 kTxStageMaxFrames 注释）。
-        if (!m_txFlushQueued) {
-            m_txFlushQueued = true;
-            QMetaObject::invokeMethod(this, [this]() {
-                m_txFlushQueued = false;
-                flushTx();
-            }, Qt::QueuedConnection);
-        }
         return true;
     }
 
@@ -628,7 +620,7 @@ private:
     //   · sendmmsg 整体失败（EAGAIN/ENOBUFS）时全部转积压，等价于原来每帧都拿到 EAGAIN；
     //   · 真错误（其它 errno）按帧计入 txDropped，与 rawSend 的 -1 分支同义。
     // 计数也保持不变（txFrames/txBytes 逐帧累加），gateway-diag.log 的口径不变。
-    void flushTx()
+    void flushTx() override
     {
         if (m_txStage.empty())
             return;
@@ -789,6 +781,10 @@ private:
 #else
         drainSocket();
 #endif
+        // 契约点①：这一次唤醒里由 lwIP 顺带打出来的所有帧,在排空末尾一次提交
+        // （见 IL2Endpoint::flushTx 的调用契约；Windows 后端在同一位置收口）。
+        // 缺了它,这批帧要等泵那一拍(最多 25 ms)——对 TCP 自时钟是致命的。
+        flushTx();
         m_inDrain = false;
     }
 
@@ -939,7 +935,6 @@ private:
     // 活到 sendmmsg 返回——与 m_txQueue 同一条契约（见 IL2Endpoint.h：入参必须是自有内存）。
     std::vector<QByteArray> m_txStage;
     qint64 m_txStageBytes = 0;
-    bool m_txFlushQueued = false;
     struct sockaddr_ll m_txAddr[kTxStageMaxFrames];
     struct iovec m_txIov[kTxStageMaxFrames];
     struct mmsghdr m_txMsg[kTxStageMaxFrames];
