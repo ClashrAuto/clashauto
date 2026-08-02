@@ -122,6 +122,9 @@ public:
 
     // —— 用户编辑（会持久化）——
     void setAlias(const QString &mac, const QString &alias);
+    /// 更新设备当前的 v4 地址。数据面现学到设备换地址（DHCP 续约/重连）时调它 ——
+    /// 规则生成与界面都读这一列，不更新的话投毒会继续打向旧地址（详见 DevicesController 的接线处）。
+    void setDeviceIp(const QString &mac, const QString &ip);
     void setTypeOverride(const QString &mac, DeviceType type);
     void setProxyEnabled(const QString &mac, bool on);
     void setPolicy(const QString &mac, DevicePolicyMode mode, const QString &target);

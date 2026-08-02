@@ -480,6 +480,16 @@ void DeviceStore::setAlias(const QString &mac, const QString &alias)
     scheduleSave();
 }
 
+void DeviceStore::setDeviceIp(const QString &mac, const QString &ip)
+{
+    DeviceRecord *d = find(mac);
+    if (!d || ip.isEmpty() || d->ip == ip)
+        return;
+    d->ip = ip;
+    emit changed();
+    scheduleSave();
+}
+
 void DeviceStore::setTypeOverride(const QString &mac, DeviceType type)
 {
     DeviceRecord *d = find(mac);

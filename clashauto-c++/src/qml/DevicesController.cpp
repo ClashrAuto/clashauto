@@ -58,6 +58,20 @@ DevicesController::DevicesController(DeviceStore *store, ClashService *clash, Co
                 });
         // 邻居安全监视：ArpWatch 检测到「有人代理本机 / 抢我劫持的设备」→ 横幅 + 徽标 + 托盘。
         connect(m_gateway, &LanGateway::securityAlert, this, &DevicesController::onSecurityAlert);
+        // 设备换了 v4 地址（数据面现学到的）：更新台账并按新地址重挂劫持。
+        //
+        // ★ 不做这件事的后果是**静默失效**：投毒帧按 victim 的 IP 单播，地址一换就全打空，
+        //   设备的网关表项老化后掉回真网关走直连，而界面依旧显示「已代理」。
+        //   真机实测（macvlan 造的设备连换两次地址）：第一次约 110s 后靠全量扫描才跟上，
+        //   第二次**过了 120s 仍没跟上**——本机 ARP 表里压根没有新地址，扫描无从发现，
+        //   成功率掉到 67.6%。数据面每一帧都带着源 IP，没有理由去等扫描。
+        connect(m_gateway, &LanGateway::deviceIpChanged, this,
+                [this](const QString &mac, const QString &newIp) {
+                    if (mac.isEmpty() || newIp.isEmpty() || !m_store)
+                        return;
+                    m_store->setDeviceIp(mac, newIp); // 落台账：规则生成与界面都读它
+                    resumeProxies();                  // 它自己会发现 armedIp 变了 → 拆旧的、按新地址重上
+                });
     }
     // ★ 内核是被劫持设备的**唯一出口**。投毒一旦上了，设备的每个包（包括最终会命中 DIRECT 规则的
     //   那些）都必须走 lwIP → SOCKS 127.0.0.1:7899 → mihomo 才出得去——它没有「绕过我们直连」这条

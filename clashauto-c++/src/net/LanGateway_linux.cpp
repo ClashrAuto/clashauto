@@ -268,6 +268,8 @@ public:
 
 signals:
     void deviceError(const QString &mac, const QString &message);
+    /// 从设备自己的帧里现学到它换了 v4 地址（DHCP 续约等）。上层据此更新台账并按新地址重挂劫持。
+    void deviceIpChanged(const QString &mac, const QString &newIp);
     void statusChanged();
     void securityAlert(int kind, const QString &offenderMac, const QString &subjectIp,
                        const QString &subjectMac);
@@ -301,6 +303,7 @@ private:
     // 常态；留在这里 + 写回状态文件，等 configureLocal 拿到就绪网卡后重试，直到真的还原掉。
     QVector<QJsonObject> m_pendingHeal;
     void learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame); // 从设备 v6 帧学它的地址
+    void learnDeviceV4(GwNic *n, const uchar *f, const QByteArray &frame); // 从设备 v4 帧学它换没换地址
     // 从线上观察到的 RA 学 v6 路由器（不依赖本机 accept_ra / 路由表）。详见实现处的说明。
     void learnRouterFromRa(GwNic *n, const QByteArray &frame);
     std::shared_ptr<GwShared> m_shared;
@@ -407,6 +410,75 @@ void GatewayWorker::learnRouterFromRa(GwNic *n, const QByteArray &frame)
     }
     // 拓扑变了要重写崩溃恢复清单，否则异常退出后按旧（空）拓扑还原不了 v6。
     persist();
+}
+
+// 从被劫持设备自己的 v4 帧里现学它当前的地址。
+//
+// ★ **为什么必须有它**：投毒帧是**按 victim 的 IP 单播**发出去的（见 ArpSpoofer::startSpoof），
+//   而那个 IP 来自台账。设备换地址（DHCP 续约、断线重连、换网段）之后，台账要等一轮**全量
+//   局域网扫描**才可能更新 —— 而扫描能不能发现新地址，又取决于本机 ARP 表里恰好有它。
+//   真机实测：第一次换地址约 110s 后才跟上；第二次**过了 120s 仍没跟上**，本机 ARP 表里
+//   压根没有新地址，设备侧的网关表项已经消失、成功率掉到 67.6%。
+//   期间界面依然显示「已代理」—— 又一个「说在代理其实没有」的场景。
+//
+//   而我们其实**每一帧都看得到设备的源 IP**：数据面本来就是按 **MAC** 认设备的
+//   （m_victimByMac），源 IP 就在帧里。所以根本不必等扫描，现学即可 —— 与上面 v6 那套
+//   （learnDeviceV6）完全同一个思路。
+//
+// 判据从严，避免把一台设备的劫持挂到不相干的地址上：
+//   · 必须是这张卡上**已在劫持**的 MAC（m_victimByMac 命中）；
+//   · 新地址必须与旧地址**同一子网**（换网段属于重新入网，交给正常的发现流程，不在这里猜）；
+//   · 0.0.0.0（DHCP DISCOVER 的源）与组播/广播源一律忽略。
+// 命中就发信号，由上层去更新台账 + 按新地址重挂（拆旧的、上新的），本函数不直接动投毒器 ——
+// 劫持的启停归 DevicesController 编排，这里只负责「看见了」。
+void GatewayWorker::learnDeviceV4(GwNic *n, const uchar *f, const QByteArray &frame)
+{
+    if (frame.size() < 34)
+        return;
+    const quint16 ethType = (quint16(f[12]) << 8) | f[13];
+    if (ethType != 0x0800)
+        return;
+    const quint32 src = (quint32(f[26]) << 24) | (quint32(f[27]) << 16)
+                        | (quint32(f[28]) << 8) | quint32(f[29]);
+    if (src == 0 || (src >> 28) == 0xE || src == 0xFFFFFFFFu)
+        return; // 0.0.0.0 / 组播 / 广播源：不是设备的真实地址
+
+    const quint64 vkey = macKey(f + 6);
+    auto it = m_victimByMac.constFind(vkey);
+    if (it == m_victimByMac.constEnd())
+        return; // 不是我们在劫持的设备
+    const QString oldIp = it.value();
+    const QString newIp = QHostAddress(src).toString();
+    if (newIp == oldIp)
+        return;
+    // 同子网才认（换网段不在这里猜）
+    if (n->netMask4 != 0) {
+        const quint32 oldRaw = QHostAddress(oldIp).toIPv4Address();
+        if ((oldRaw & n->netMask4) != (src & n->netMask4))
+            return;
+    }
+    // ★ 这个地址已经属于**另一台**正在被劫持的设备 → 一律不认。
+    //   两种现实来源：① 某台设备的旧地址被 DHCP 分给了别人，两边短时都在用；
+    //   ② 链路上出现了源 MAC 与源 IP 不一致的帧（网桥/虚拟网卡的转发、或伪造）。
+    //   认了的话，我们会把 A 的劫持改挂到 B 的地址上 —— 轻则两台一起失灵，重则去投毒
+    //   一台根本没开代理的机器。宁可这一次不学，等它自己再发一帧（正常设备每秒都在发）。
+    //   真机就撞到过：rig 里有流量从另一张网卡出去，日志立刻出现
+    //   「device 02:…:02 v4 changed .202 -> .231」这种张冠李戴。
+    if (m_victimMacStr.contains(newIp))
+        return;
+    // ★ MAC 串**直接从帧里格式化**，别拿 oldIp 去 `m_victimMacStr` 反查 —— 那张表是 ip→mac，
+    //   多设备时不同设备的记录会互相盖，反查回来的可能是**另一台设备**的 MAC，
+    //   于是台账被改到不相干的设备上。第一版就这么写的，真机日志立刻露馅：
+    //   「device v4 changed 192.168.20.202 -> 192.168.20.239 / -> .203」—— old 恒为某一台、
+    //   new 却是别人的地址。帧里就有源 MAC，没有任何理由绕一圈。
+    const uchar *sm = f + 6;
+    const QString macStr = QString::asprintf("%02x:%02x:%02x:%02x:%02x:%02x",
+                                             sm[0], sm[1], sm[2], sm[3], sm[4], sm[5]);
+    if (gwDbgOn())
+        std::fprintf(stderr, "[GW] device %s v4 changed %s -> %s\n", macStr.toUtf8().constData(),
+                     oldIp.toUtf8().constData(), newIp.toUtf8().constData()),
+            std::fflush(stderr);
+    emit deviceIpChanged(macStr, newIp);
 }
 
 void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame)
@@ -720,6 +792,8 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     return;
                 }
             }
+            // 设备换 IP（DHCP 续约/重连）时从它自己的帧里现学 —— 与上面的 v6 现学同精神。
+            learnDeviceV4(n, f, frame);
             // ARP 抢答：被劫持设备一问「谁是网关?」就同步回「网关在本机 MAC」，赶在真网关前面。
             // 与上面的网关侧反制互补：这条管设备主动问的场景,上面那条管网关主动广播的场景。
             // 抢答后仍把该 ARP 喂给 lwIP（它据此维护设备 MAC 映射，无副作用）。
@@ -1150,6 +1224,7 @@ LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl)
     connect(d->worker, &GatewayWorker::deviceError, this, &LanGateway::deviceError);
     connect(d->worker, &GatewayWorker::statusChanged, this, &LanGateway::statusChanged);
     connect(d->worker, &GatewayWorker::securityAlert, this, &LanGateway::securityAlert);
+    connect(d->worker, &GatewayWorker::deviceIpChanged, this, &LanGateway::deviceIpChanged);
     d->thread->start();
 }
 

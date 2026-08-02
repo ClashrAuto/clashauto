@@ -78,6 +78,9 @@ signals:
     // offenderMac=冒充者 MAC；subjectIp=被冒充/被抢的 IP；subjectMac=被抢设备 MAC（kind=1 才有值）。
     void securityAlert(int kind, const QString &offenderMac, const QString &subjectIp,
                        const QString &subjectMac);
+    /// 从设备自己的帧里现学到它换了 v4 地址（DHCP 续约/重连）。
+    /// 上层据此更新台账并按新地址重挂劫持 —— 否则投毒仍打向旧地址，设备会静默掉回直连。
+    void deviceIpChanged(const QString &mac, const QString &newIp);
 
 private:
     class Impl;
