@@ -607,7 +607,12 @@ void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &fr
     if (set.contains(ip6))
         return;
     const QByteArray mb(reinterpret_cast<const char *>(f + 6), 6);
-    m_net->addDeviceV6(n->ep, ip6, mb, m_victimUserByMac.value(vkey));
+    // ★ reject 必须一起带上：这条是**运行时现学**的 v6 注册点，漏传就走默认 false ——
+    //   一台设为「禁网」的设备，它的 v6 地址是这里学到的，注册时丢了 reject，
+    //   NetStack 的 handleUdpFrame6 就查不到 dev.reject → **该设备的 IPv6 UDP 不被拦截**，
+    //   「禁网」在 v6 上静默失效。而这条路径只在设备真发 v6 流量时才走，真机极难覆盖到。
+    m_net->addDeviceV6(n->ep, ip6, mb, m_victimUserByMac.value(vkey),
+                       m_isolatedMacs.contains(vkey));
     if (n->watch) {
         const QString macStr = QStringLiteral("%1:%2:%3:%4:%5:%6")
                                    .arg(mb[0] & 0xFF, 2, 16, QChar('0')).arg(mb[1] & 0xFF, 2, 16, QChar('0'))
@@ -1096,6 +1101,13 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     else
         m_isolatedMacs.remove(vkey);
     pushIsolatedMacs(n);
+    // ★ 已经学到的 v6 地址要按**新的** reject 重注册一遍：DeviceInfo 里的 reject 是注册时
+    //   拍下的快照，策略切换（普通 ⇄ 禁网）只改 v4 那条的话，该设备旧的 v6 记录仍带着旧值 ——
+    //   表现为「设成禁网了，它的 IPv6 UDP 还照走」。addDeviceV6 内部是 insert 覆盖，幂等。
+    if (m_net) {
+        for (const QString &ip6 : m_victimV6ByMac.value(vkey))
+            m_net->addDeviceV6(n->ep, ip6, mb, socksUser, reject);
+    }
     // 崩溃兜底：把这台设备的还原帧预存起来。进程若被 SIGSEGV/abort 打死，正常的 disableAll
     // 一步都走不到，只有这条路能把设备的网关 ARP 还回去（详见 GatewayPanic.h）。
     if (const IL2Endpoint::RawSendFn pfn = n->ep ? n->ep->panicSender() : nullptr)
