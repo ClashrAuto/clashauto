@@ -170,19 +170,28 @@ public final class TrayController {
     /// 右下角圆角方块角标，圆角 = 角标边长 ×0.28，字号 ×0.66、加粗
     /// （托盘只有十几 pt，不加粗根本认不出字母）。
     ///
-    /// 与 Qt 的三处不同（前两处是实拍后改的）：
-    ///   · 字号 ×0.80（Qt 是 ×0.94）。0.94 的圆几乎贴满整张图，在菜单栏里上缘直接
-    ///     顶到栏边，看着像溢出去了 —— 0.80 上下各留出约 2pt，和系统图标一个节奏。
+    /// 与 Qt 的两处不同：
     ///   · 角标边长 ×0.42（Qt 是 ×0.5）。一半的角标把地球右下角整个盖掉，喧宾夺主。
     ///   · 地球**恒为白色**（这一点其实是回到 Qt：它在 mac 上就是白的）。中间试过跟
     ///     `effectiveAppearance` 走明暗 —— 26 的透明菜单栏把状态图标画成白色一套，
     ///     `bestMatch` 却报 aqua，按它画出来是黑地球压在深色栏上。别信它。
     ///     角标恒为品牌蓝底白字（Qt 的白底蓝字压在白地球上糊成一坨，见上一条提交）。
     ///
+    /// 地球**按墨迹贴满整张图**：先用基准字号量出墨迹盒，再缩放到墨迹的长边正好等于
+    /// `side` —— 不是像 Qt 那样拿一个经验系数（×0.94）去乘字号。字号系数量的是
+    /// **度量盒**，墨迹在盒里还有内缩，乘出来总是差一圈；按墨迹算，圆的直径就是图的边长。
+    ///
     /// 字体没注册（`IconFont.registerAll()` 没跑过）时返回 nil，调用方会退回兜底灰块。
     static func globeImage(side: CGFloat, badge: String) -> NSImage? {
-        guard side > 0, let glyphFont = NSFont(name: "iconfont", size: side * 0.80) else { return nil }
+        guard side > 0, let probeFont = NSFont(name: "iconfont", size: 100) else { return nil }
         let accent = NSColor(srgbRed: 0x48 / 255, green: 0x98 / 255, blue: 0xF8 / 255, alpha: 1)
+
+        // 基准字号下的墨迹 → 缩放系数 → 目标字号。
+        let probe = NSAttributedString(string: "\u{E600}", attributes: [.font: probeFont])
+        let probeInk = probe.boundingRect(with: .zero, options: [.usesDeviceMetrics])
+        guard probeInk.width > 0, probeInk.height > 0 else { return nil }
+        let glyphFont = NSFont(name: "iconfont",
+                               size: 100 * side / max(probeInk.width, probeInk.height))!
 
         return NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
             let glyph = NSAttributedString(string: "\u{E600}",
