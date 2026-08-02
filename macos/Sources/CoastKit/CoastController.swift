@@ -269,7 +269,14 @@ public final class CoastController {
         coreProbeTask = nil
         coreRestarts = 0
         // 退出/停核心前先复原被接管的设备。放在最前面：哪怕后面出错，设备也已经被放回去了。
-        try? await helper.stopRedirect()
+        //
+        // ★ 没接管过就**别去敲 helper**：`stopRedirect()` 在没有现成连接时会临时建一条，
+        //   而 helper 不在/没响应时那次 XPC 要等满默认超时（15 秒）才返回 —— 退出路径上
+        //   等于程序「点了退出退不掉」，自更新更是直接卡在「正在退出安装…」。
+        //   判据与睡眠那条路一致（`withdrawTakeoverForSleep` 里也是先看这个集合）。
+        if !activeRedirectIPs.isEmpty {
+            try? await helper.stopRedirect()
+        }
         activeRedirectIPs = []
         v6GatewayActive = false
         await stopProxy()

@@ -25,14 +25,18 @@ struct CoastApp: App {
         .commands {
             // 默认的「新建窗口」对常驻托盘的单窗应用没有意义，去掉免得用户开出第二个。
             CommandGroup(replacing: .newItem) {}
-            // ⌘Q = **只收窗口**（与 ✕ 一致），真正退出只在托盘菜单「退出程序」。
-            // 代理客户端退出 = 整机断代理，而 ⌘Q 太容易顺手按到 —— Qt 版就因此
-            // 接过「按了 Cmd+Q 网怎么断了」的反馈。菜单文字也换掉：
-            // 写着「退出」实际只是收窗口的话，就成了另一种撒谎。
-            CommandGroup(replacing: .appTermination) {
-                Button("关闭窗口".t) { AppDelegate.shared?.hideToTray() }
-                    .keyboardShortcut("q")
-            }
+            // ⌘Q **保留系统默认的「退出 Coast」**。
+            //
+            // ★ 这里原来把整个 `.appTermination` 组换成了一颗「关闭窗口」——
+            //   于是菜单里**根本没有退出这一项**，⌘Q 绑的是收窗口。出发点是
+            //   「代理客户端退出 = 整机断代理，⌘Q 太容易顺手按到」，但代价太大：
+            //   mac 上 ⌘Q 就是「退出这个程序」，改掉它等于用户唯一的退出手势失灵，
+            //   而且**程序自更新会卡住** —— 替换脚本在外面等本进程退出，等不到就永远装不上。
+            //   退出时的清理（停核心 + 还原系统代理）本来就在 `applicationShouldTerminate`
+            //   里做，所以「退了网就断」并不成立，那正是清理要解决的事。
+            //
+            //   ✕ 仍然只收窗口不退出（见 `WindowRestore.CloseGuard`）——
+            //   那才是真正容易误点的那个。
         }
 
         // 更新窗是**独立顶层窗**，不是 sheet —— 与 Qt 一致，而且这里有个硬理由：
@@ -122,6 +126,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 窗口这时候可能还没建出来（WindowGroup 是在第一轮 runloop 之后才铺的）。
         DispatchQueue.main.async { WindowRestore.adopt() }
 
+        // 退出自检（`COAST_QUIT_SELFTEST=1`）：起来 3 秒后自己走一遍退出流程。
+        // 外面量「进程多久真的没了」就能验两件事：⌘Q/托盘/自更新那条路**没有被拦下**，
+        // 以及清理卡住时看门狗兜得住。这条路没法用单测覆盖 —— 它要的正是一个真的
+        // NSApplication 生命周期；而它坏掉的表现（退不掉、更新装不上）又足够重。
+        if ProcessInfo.processInfo.environment["COAST_QUIT_SELFTEST"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+                // 顺带验菜单里**有**⌘Q 那一项：这个 bug 的另一半正是它被整组换掉了
+                // （`CommandGroup(replacing: .appTermination)`），于是 ⌘Q 绑的是收窗口。
+                var quit: NSMenuItem?
+                for top in NSApplication.shared.mainMenu?.items ?? [] {
+                    for item in top.submenu?.items ?? [] where item.keyEquivalent == "q" {
+                        if item.keyEquivalentModifierMask == .command { quit = item }
+                    }
+                }
+                let title = quit?.title ?? "<none>"
+                let action = quit?.action.map { NSStringFromSelector($0) } ?? "-"
+                print("QUIT-SELFTEST menuItem=\(title) action=\(action)")
+                self?.terminateForReal()
+            }
+        }
+
         // 点输入框以外的任何地方都让输入框**失去焦点**（对所有窗口生效）。
         // AppKit 的默认行为是焦点一直留在框里，点空白毫无反应 —— 桌面用户的
         // 预期是「点别处 = 收起编辑」。实现：正在编辑时第一响应者是窗口的
@@ -144,7 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 点 ✕ **不退出程序**，只隐藏窗口。
     ///
     /// 这是刻意的：代理客户端常驻托盘，✕ 直接退会连带停掉核心与系统代理，用户以为只是关个窗，
-    /// 结果整机断代理。⌘Q 同理（见 scene 的 commands）—— 真正退出只有托盘菜单「退出程序」。
+    /// 结果整机断代理。**⌘Q 不在此列** —— 它是明确的「退出这个程序」，见 scene 的 commands。
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// 点 Dock 图标重新打开主窗（窗口被 ✕ 隐藏后回来的方式之一；另一条是托盘的「控制面板」）。
@@ -160,48 +185,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
-    /// 托盘「退出程序」置位。没有它的 terminate 一律按「收窗口」处理（见下）。
-    private var quitConfirmed = false
-
-    /// 真正退出的唯一入口（托盘菜单，以及程序自更新那条“必须退出”的路）。
+    /// 退出入口（托盘菜单「退出程序」、程序自更新那条“必须退出”的路）。
+    /// 现在与 ⌘Q 走同一条路 —— 留着这个名字是因为调用点写着它，读起来也更清楚。
     func terminateForReal() {
-        quitConfirmed = true
         NSApplication.shared.terminate(nil)
     }
 
-    /// 把所有窗口收进托盘 —— 与点 ✕ 完全同一套动作（orderOut + accessory）。
-    func hideToTray() {
-        NSApplication.shared.windows.forEach { $0.orderOut(nil) }
-        NSApplication.shared.setActivationPolicy(.accessory)
-    }
-
-    /// 这次 terminate 是不是系统注销/关机/重启发起的。
+    /// 清理的兜底时限：到点还没跑完就**硬退**。
     ///
-    /// ★ 这一档**必须放行**：guard 在注销路径上返回 cancel 的话，用户的 mac 会
-    ///   「注销被 Coast 阻止」，比误退出恶劣得多。判据：系统发起的 quit 是带
-    ///   `why:` 属性的 Apple Event（logout/shutdown/restart 一族）；用户 ⌘Q 走菜单
-    ///   （没有 Apple Event），Dock 退出有事件但没有 `why:`。
-    private var terminationIsSystemInitiated: Bool {
-        guard let event = NSAppleEventManager.shared().currentAppleEvent,
-              event.eventID == kAEQuitApplication else { return false }
-        return event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason)) != nil
-    }
+    /// 8 秒是按最坏情况给的：清理里有几次 XPC（撤销设备接管、还原系统代理、停提权核心），
+    /// helper 不在/没响应时它们各自要等到自己的超时（最长 15 秒）。正常路径（helper 在、
+    /// XPC 是本机调用）是毫秒级，走不到这里。
+    private static let shutdownDeadline: TimeInterval = 8
 
+    private enum Shutdown { case idle, running, done }
+    private var shutdown: Shutdown = .idle
+
+    /// ★ **不能用 `.terminateLater`。**
+    ///
+    /// 看着最对的写法是「返回 `.terminateLater`，清理跑完再 `reply(toApplicationShouldTerminate:)`」。
+    /// 实测是**死等**：`-[NSApplication terminate:]` 会在 `_shouldTerminate` 里跑一个**嵌套事件
+    /// 循环**等这个回复，而那个循环不派发主队列的活 —— 清理的 `Task { @MainActor }` 排不上，
+    /// 连「到点强制放行」的 `DispatchQueue.main.asyncAfter` 看门狗也排不上，于是回复永远不会来。
+    /// 采样抓到的主线程栈就停在 `terminate: → _shouldTerminate → nextEventMatchingMask`，
+    /// 进程 5 分钟都没退。**这就是「点了退出退不掉」的根因**：⌘Q、托盘「退出程序」、
+    /// 自更新那条「必须退出」的路，全都堵在这儿（自更新的表现是永远卡在「正在退出安装…」，
+    /// 替换脚本在外面等一个不会退出的进程）。
+    ///
+    /// 改成「先 `.terminateCancel` 放掉那个嵌套循环 → 回到正常 runloop 跑清理 → 清理完再
+    /// `terminate` 一次」，第二次进来直接 `.terminateNow`。清理卡住时看门狗 `exit(0)` 兜底 ——
+    /// 这时主队列是活的，它跑得起来。
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // 托盘点的、或系统要注销/关机 → 真退。其余一切（Dock 右键退出、AppleScript quit、
-        // 谁的 terminate 顺手波及）→ 当 ✕ 处理：收窗口、进程留着。
-        guard quitConfirmed || terminationIsSystemInitiated else {
-            hideToTray()
+        switch shutdown {
+        case .done:
+            return .terminateNow
+        case .running:
+            // 清理在跑，用户又点了一次/托盘又发了一次：别叠第二遍清理，等它自己走完。
+            return .terminateCancel
+        case .idle:
+            guard let state else { return .terminateNow }
+            shutdown = .running
+            // 退出前停核心 + 还原系统代理 —— 否则用户退出应用后整机仍指着一个已经没人监听的
+            // 端口，表现为「关了 Coast 就上不了网」。
+            Task { @MainActor in
+                await state.shutdown()
+                self.shutdown = .done
+                NSApplication.shared.terminate(nil)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.shutdownDeadline) { [weak self] in
+                guard self?.shutdown != .done else { return }
+                // 清理没在时限内回来（多半卡在某次 XPC 上）。继续等下去就是「退不掉」，
+                // 那比少做一步清理糟得多 —— 硬退。
+                exit(0)
+            }
             return .terminateCancel
         }
-        guard let state else { return .terminateNow }
-        // 退出前必须停核心 + 还原系统代理 —— 否则用户退出应用后整机仍指着一个已经没人监听的
-        // 端口，表现为「关了 Coast 就上不了网」。用 terminateLater 等清理跑完。
-        Task { @MainActor in
-            await state.shutdown()
-            NSApplication.shared.reply(toApplicationShouldTerminate: true)
-        }
-        return .terminateLater
     }
 
     func attach(state: AppState) {
