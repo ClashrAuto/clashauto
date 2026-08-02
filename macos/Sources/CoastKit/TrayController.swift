@@ -166,44 +166,50 @@ public final class TrayController {
     /// 细节糊成一团，也看不出核心/代理/增强开着没有。Qt 版早就不这么干了。
     ///
     /// 画法对齐 Qt：字形 U+E600（`iconfont.ttf`，与侧栏那颗 logo 同一个）、
-    /// **按墨迹居中**（不是按字体度量盒 —— 这个字形的墨迹在盒内偏右约 2%，按盒居中会明显偏）；
     /// 右下角圆角方块角标，圆角 = 角标边长 ×0.28，字号 ×0.66、加粗
     /// （托盘只有十几 pt，不加粗根本认不出字母）。
     ///
-    /// 与 Qt 的两处不同：
+    /// 与 Qt 的两处刻意不同：
     ///   · 角标边长 ×0.42（Qt 是 ×0.5）。一半的角标把地球右下角整个盖掉，喧宾夺主。
     ///   · 地球**恒为白色**（这一点其实是回到 Qt：它在 mac 上就是白的）。中间试过跟
     ///     `effectiveAppearance` 走明暗 —— 26 的透明菜单栏把状态图标画成白色一套，
     ///     `bestMatch` 却报 aqua，按它画出来是黑地球压在深色栏上。别信它。
-    ///     角标恒为品牌蓝底白字（Qt 的白底蓝字压在白地球上糊成一坨，见上一条提交）。
+    ///     角标恒为品牌蓝底白字（Qt 的白底蓝字压在白地球上糊成一坨，见提交历史）。
     ///
-    /// 地球**按墨迹贴满整张图**：先用基准字号量出墨迹盒，再缩放到墨迹的长边正好等于
-    /// `side` —— 不是像 Qt 那样拿一个经验系数（×0.94）去乘字号。字号系数量的是
-    /// **度量盒**，墨迹在盒里还有内缩，乘出来总是差一圈；按墨迹算，圆的直径就是图的边长。
+    /// ★ 地球的缩放与定位**按实测像素**，不按字体度量。这一步走过两版弯路：
+    ///   · Qt 的经验系数（字号 ×0.94）乘的是度量盒，墨迹在盒里还有内缩，出来偏小；
+    ///   · `boundingRect(.usesDeviceMetrics)` 声称给墨迹盒，实测**报小了** ——
+    ///     按它把长边缩放到正好等于图宽，画出来顶上仍被裁掉一截（截图可证）。
+    ///   所以先把字形渲染进一张探测位图、扫 alpha 求出**真实墨迹范围**，再据此缩放/居中：
+    ///   圆的直径正好等于图的边长，四边都不裁。每个 (边长, 角标) 只算一次（见缓存）。
+    ///
+    /// 角标底边对齐**地球墨迹的底边**（不是图的底边）——两者若有半像素的差，
+    /// 角标看着就像从地球上坠下去了。
     ///
     /// 字体没注册（`IconFont.registerAll()` 没跑过）时返回 nil，调用方会退回兜底灰块。
     static func globeImage(side: CGFloat, badge: String) -> NSImage? {
         guard side > 0, let probeFont = NSFont(name: "iconfont", size: 100) else { return nil }
+        guard let probeInk = measuredInk(of: "\u{E600}", font: probeFont, canvas: 256,
+                                         drawAt: NSPoint(x: 64, y: 64)) else { return nil }
         let accent = NSColor(srgbRed: 0x48 / 255, green: 0x98 / 255, blue: 0xF8 / 255, alpha: 1)
 
-        // 基准字号下的墨迹 → 缩放系数 → 目标字号。
-        let probe = NSAttributedString(string: "\u{E600}", attributes: [.font: probeFont])
-        let probeInk = probe.boundingRect(with: .zero, options: [.usesDeviceMetrics])
-        guard probeInk.width > 0, probeInk.height > 0 else { return nil }
-        let glyphFont = NSFont(name: "iconfont",
-                               size: 100 * side / max(probeInk.width, probeInk.height))!
+        // 探测字号 → 目标字号：让真实墨迹的长边正好等于 side。
+        let scale = side / max(probeInk.width, probeInk.height)
+        let glyphFont = NSFont(name: "iconfont", size: 100 * scale)!
+        // 缩放后的墨迹（线性外推 —— 字形轮廓随字号线性缩放，误差在半像素内）。
+        let ink = NSRect(x: probeInk.minX * scale, y: probeInk.minY * scale,
+                         width: probeInk.width * scale, height: probeInk.height * scale)
 
         return NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
             let glyph = NSAttributedString(string: "\u{E600}",
                                            attributes: [.font: glyphFont, .foregroundColor: NSColor.white])
-            // `.usesDeviceMetrics` 拿到的是**墨迹**盒（不是行盒），照它居中。
-            let ink = glyph.boundingRect(with: .zero, options: [.usesDeviceMetrics])
             glyph.draw(at: NSPoint(x: (side - ink.width) / 2 - ink.minX,
                                    y: (side - ink.height) / 2 - ink.minY))
 
             guard !badge.isEmpty else { return true }
             let bs = side * 0.42
-            let box = NSRect(x: side - bs, y: 0, width: bs, height: bs)   // 右下角
+            let box = NSRect(x: side - bs, y: (side - ink.height) / 2,
+                             width: bs, height: bs)   // 右下角，底边 = 地球底边
             accent.set()
             NSBezierPath(roundedRect: box, xRadius: bs * 0.28, yRadius: bs * 0.28).fill()
 
@@ -215,6 +221,40 @@ public final class TrayController {
             letter.draw(at: NSPoint(x: box.midX - ls.width / 2, y: box.midY - ls.height / 2))
             return true
         }
+    }
+
+    /// 把字符串画进一张 `canvas`×`canvas` 的位图、扫 alpha，返回**真实墨迹范围**
+    /// （相对 `drawAt`，坐标同绘图坐标系：y 向上）。画不出一个像素时返回 nil。
+    private static func measuredInk(of string: String, font: NSFont,
+                                    canvas: Int, drawAt origin: NSPoint) -> NSRect? {
+        guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil,
+                                         pixelsWide: canvas, pixelsHigh: canvas,
+                                         bitsPerSample: 8, samplesPerPixel: 4,
+                                         hasAlpha: true, isPlanar: false,
+                                         colorSpaceName: .deviceRGB,
+                                         bytesPerRow: 0, bitsPerPixel: 0),
+              let context = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSAttributedString(string: string, attributes: [.font: font,
+                                                        .foregroundColor: NSColor.white])
+            .draw(at: origin)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        var minX = canvas, maxX = -1, minY = canvas, maxY = -1
+        for y in 0..<canvas {
+            for x in 0..<canvas where (rep.colorAt(x: x, y: y)?.alphaComponent ?? 0) > 0.05 {
+                minX = min(minX, x); maxX = max(maxX, x)
+                minY = min(minY, y); maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        // 位图的 y 向下，翻回绘图坐标（y 向上），再挪到相对 drawAt。
+        return NSRect(x: CGFloat(minX) - origin.x,
+                      y: CGFloat(canvas - 1 - maxY) - origin.y,
+                      width: CGFloat(maxX - minX + 1),
+                      height: CGFloat(maxY - minY + 1))
     }
 
     /// 纯函数版，好让测试量得到宽度（`NSStatusItem` 在测试进程里造不出来）。
