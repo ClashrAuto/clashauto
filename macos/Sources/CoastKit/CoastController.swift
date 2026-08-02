@@ -36,11 +36,20 @@ public final class CoastController {
     private var activeRedirectIPs: Set<String> = []
     /// 本会话是否真的设过系统代理。退出路径上 stop 会被调用多次，没设过就别做无谓的还原动作。
     private var systemProxyActive = false
+    /// 核心意外退出后的有界自愈状态（见 `handleUnexpectedCoreExit`）。
+    private var coreRestarts = 0
+    private var coreStartedAt: Date?
+    /// helper 起的核心没有进程句柄，只能靠 REST 探活（见 `startCoreLivenessProbe`）。
+    private var coreProbeTask: Task<Void, Never>?
+    /// 只用来探活（`/configs`），与 UI 那条轮询各用各的，互不影响。
+    private let api: ClashAPI
 
     public init(config: AppConfig) {
         self.config = config
         self.core = CoreProcess(config: config)
         self.builder = ConfigBuilder(config: config)
+        self.api = ClashAPI(host: config.host, port: config.uiPort,
+                            mixedPort: config.mixedPort, secret: config.secret)
         isProxyEnabled = config.webProxy
         isTunEnabled = config.tun
 
@@ -66,6 +75,8 @@ public final class CoastController {
 
     public func startCore() async {
         guard !isCoreRunning else { return }
+        // 记下拉起时刻：意外退出时据此判断「这次是不是稳定跑了一阵才崩的」，是就把重启预算清零。
+        coreStartedAt = Date()
         let path = builder.ensureFullConfig(tunEnabled: isTunEnabled)
         guard let path else {
             log("生成 full.yaml 失败")
@@ -79,6 +90,8 @@ public final class CoastController {
         if case .success = result, isProxyEnabled {
             await startProxy()
         }
+        // helper 起的核心归 helper 所有，本进程收不到它的退出通知 —— 靠 REST 探活补上。
+        if isCoreRunning && isPrivileged { startCoreLivenessProbe() }
     }
 
     /// 核心自己死了（崩溃 / 被 kill / 配置热重载踩到 panic）时的收尾。
@@ -95,6 +108,10 @@ public final class CoastController {
         guard isCoreRunning else { return }   // stopCore 已经处理过就别重复来一遍
         isCoreRunning = false
         isPrivileged = false
+        // ★ 也要把 CoreProcess 自己的状态复位。helper 起的核心它收不到退出通知，`isRunning`
+        //   会一直是 true，下面那次 `startCore()` 会被它开头的 guard 直接早退并**报成功** ——
+        //   自愈就成了空转。详见 `CoreProcess.markDead()` 的说明。
+        core.markDead()
         log("核心意外退出：正在撤销系统代理与设备接管，避免断网")
         // ★ 先通知，再收拾。
         //
@@ -106,12 +123,95 @@ public final class CoastController {
         activeRedirectIPs = []
         v6GatewayActive = false
         await stopProxy()
+
+        // ★ 有界自愈：把核心重新拉起来。
+        //
+        //   上面这段撤接管是对的（fail-safe：设备掉回真网关走直连，而不是被劫持到一个不存在的
+        //   出口上断网）。但**撤完之后没有任何人再把核心拉起来** —— app 还活着、界面上那些开关
+        //   还亮着，而网关就此永久停摆，直到用户去点一次「启动」。被代理设备的主人根本看不到
+        //   这个界面，他只会静默失去代理。Qt 那边同一个缺口已在 CoreController 里修过，
+        //   两端保持一致的语义。
+        //
+        //   **有界**是关键：连续最多 kMaxRestarts 次；只要有一次活过 kStableSeconds 就认为稳住了、
+        //   预算清零（"跑了一天后崩一次"不该因为历史计数而不救）。超预算就停手并明确记一条 ——
+        //   那时多半是配置或内核本身坏了，无脑重启只会刷屏并反复扰动设备。
+        //   主动停走的是 `stopCore()`，根本不会到这里，所以不需要额外的"是不是我自己停的"标志。
+        let now = Date()
+        if let started = coreStartedAt, now.timeIntervalSince(started) >= Self.kStableSeconds {
+            coreRestarts = 0
+        }
+        guard coreRestarts < Self.kMaxRestarts else {
+            log("核心连续 \(coreRestarts) 次异常退出，已停止自动重启——请检查配置或内核")
+            return
+        }
+        coreRestarts += 1
+        log("核心异常退出，2 秒后自动重启（第 \(coreRestarts)/\(Self.kMaxRestarts) 次）")
+        try? await Task.sleep(for: .seconds(2))   // 别贴着崩溃点立刻重来，给端口/句柄让位
+        guard !isCoreRunning else { return }
+        await startCore()
+        // 核心起来之后把台账里还开着代理的设备重新接管回去（startCore 自己不做这件事）。
+        await resumeDeviceTakeover()
+    }
+
+    /// 连续自动重启的次数上限，以及「活多久算稳住了」。理由见 `handleUnexpectedCoreExit`。
+    private static let kMaxRestarts = 3
+    private static let kStableSeconds: TimeInterval = 60
+
+    // MARK: - 核心存活探测（helper 起的核心专用）
+
+    /// ★ **helper 起的核心死了没人知道** —— 这条探测就是为了补上它。
+    ///
+    /// `CoreProcess` 只有 `launchPlain` 那条路挂了 `terminationHandler`；而 macOS 的**默认出货
+    /// 配置**是经 helper 以 root 启动（TUN 要 root），那条路只是 `isRunning = true` 就返回了，
+    /// 进程归 helper 所有，本进程手里**没有任何句柄**，于是核心崩了、被杀了、OOM 了，app 全然不知：
+    /// 界面照显「运行中」，PF 的 rdr 规则**照旧挂着**，被接管设备的流量继续被重定向到一个
+    /// 已经没人监听的端口 —— 那不是「代理失效」，是**设备被切断**。
+    /// 真机实测（负载中 kill 掉 root 核心）：设备侧 **87.6% 的连接直接 connection refused**，
+    /// 而 app 这边一条日志都没有、规则一条没撤。
+    ///
+    /// 探测用 REST（`/configs`）而不是查 pid：我们真正关心的是「核心还能不能干活」，
+    /// 端口没人听和进程没了对使用者是同一件事，而 REST 一次往返本来就是本地回环、成本可忽略。
+    /// 连续失败 `kProbeFailsToDeclareDead` 次才判死 —— 单次超时可能只是核心在忙（比如正在
+    /// 热重载一份大配置），一次抖动就宣布死亡会把自动重启变成自伤。
+    private static let kProbeIntervalSeconds: UInt64 = 5
+    private static let kProbeFailsToDeclareDead = 3
+
+    private func startCoreLivenessProbe() {
+        guard coreProbeTask == nil else { return }
+        coreProbeTask = Task { [weak self] in
+            var consecutiveFailures = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Double(Self.kProbeIntervalSeconds)))
+                guard let self else { return }
+                // 只在「我们认为核心正在跑、且是 helper 拥有的」时候探测。非特权那条路有
+                // terminationHandler，不需要这一层；核心本来就停着时更不该探。
+                guard self.isCoreRunning, self.isPrivileged else {
+                    consecutiveFailures = 0
+                    continue
+                }
+                do {
+                    _ = try await self.api.configs()
+                    consecutiveFailures = 0
+                } catch {
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= Self.kProbeFailsToDeclareDead {
+                        consecutiveFailures = 0
+                        self.log("核心 REST 连续 \(Self.kProbeFailsToDeclareDead) 次无响应，判定为意外退出")
+                        await self.handleUnexpectedCoreExit()
+                    }
+                }
+            }
+        }
     }
 
     /// 核心意外退出后通知上层（弹通知 / 提示用户）。
     public var onCoreUnexpectedlyExited: (() -> Void)?
 
     public func stopCore() async {
+        // 主动停：先把探活停掉，免得它把这次"消失"当成崩溃再拉一次起来。
+        coreProbeTask?.cancel()
+        coreProbeTask = nil
+        coreRestarts = 0
         // 退出/停核心前先复原被接管的设备。放在最前面：哪怕后面出错，设备也已经被放回去了。
         try? await helper.stopRedirect()
         activeRedirectIPs = []

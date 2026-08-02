@@ -63,6 +63,27 @@ public final class CoreProcess {
 
     // MARK: - 启停
 
+    /// 外部发现核心其实已经没了 —— 把本对象的状态复位，好让下一次 `start()` 真的去启动。
+    ///
+    /// ★ 只有 helper（root）那条路需要它：那条路把进程交给 helper，本进程**没有句柄也收不到
+    ///   退出通知**，`isRunning` 会一直停在 true。于是 `start()` 开头那句
+    ///   `guard !isRunning else { return .success(()) }` 会**直接早退并报成功**，
+    ///   调用方以为核心起来了，实际什么都没发生 —— 自愈重启会变成一个空转的循环。
+    ///   真机实测就是这个样子：日志里「自动重启（第 1/3 次）」「第 2/3 次」都记了，
+    ///   而 `ps` 里始终没有核心，最后耗尽预算放弃、PF 规则还挂着。
+    ///   非特权那条路有 `terminationHandler` 会自己复位，用不到这个方法。
+    public func markDead() {
+        guard isRunning else { return }
+        isRunning = false
+        isPrivileged = false
+        logTask?.cancel(); logTask = nil
+        if let pipe = logPipe {
+            pipe.fileHandleForReading.readabilityHandler = nil
+            try? pipe.fileHandleForReading.close()
+            logPipe = nil
+        }
+    }
+
     @discardableResult
     public func start(tunEnabled: Bool, fullConfigPath: URL) async -> Result<Void, StartFailure> {
         guard !isRunning else { return .success(()) }

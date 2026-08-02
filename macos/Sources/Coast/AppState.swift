@@ -654,6 +654,36 @@ public final class AppState {
         Self.prepend(entry, into: &logs)
         if isCore { Self.prepend(entry, into: &coreLogs) }
         lastLog = trimmed
+        Self.mirrorToFile(entry.time + " " + trimmed)
+    }
+
+    /// `COAST_LOG_FILE=<路径>` 时把日志**同时**追加到该文件。
+    ///
+    /// 为什么需要它：app 的日志平时只进「日志」页，无头排障时一个字都看不到。而 macOS 上
+    /// 想从外面接住 app 的输出出奇地难 —— 真机上逐个试过并都失败：
+    ///   · 在 `launchctl asuser …` 外层重定向：那条命令会把进程重新挂进用户的 launchd 会话，
+    ///     **stdio 被脱离**，日志文件恒为 0 字节；
+    ///   · 启动脚本内部 `exec > file` 再 `print`：Swift 的 stdout 重定向到文件是**全缓冲**，
+    ///     几行短日志会一直躺在缓冲区里不落盘；
+    ///   · 改用 `NSLog`：统一日志里也搜不到（GUI app 的子系统过滤）。
+    /// 于是改成 app **自己**往文件写：路径由我们决定（用户目录下，权限没问题），
+    /// 每条 open→write→close，**不带缓冲**，进程被强杀也不会丢最后几行。
+    ///
+    /// 只在设了环境变量时才开，正常使用零开销、零副作用。
+    private static let logFilePath: String? = {
+        ProcessInfo.processInfo.environment["COAST_LOG_FILE"].flatMap { $0.isEmpty ? nil : $0 }
+    }()
+
+    private static func mirrorToFile(_ line: String) {
+        guard let path = logFilePath else { return }
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        guard let handle = FileHandle(forWritingAtPath: path) else { return }
+        defer { try? handle.close() }
+        try? handle.seekToEnd()
+        try? handle.write(contentsOf: data)
     }
 
     /// 最新置顶 + 封顶。`insert(at: 0)` 是 O(n) 的搬移，但 n 封顶 2000、每条日志只搬一次，
