@@ -5,6 +5,7 @@
 #include "IL2Endpoint.h"
 
 #include <QDebug>
+#include <QDateTime>
 #include <QHostAddress>
 #include <QTimer>
 
@@ -24,6 +25,14 @@ static constexpr int kBoostTicks = 8;
 // 连发两帧，再在 5ms / 18ms 各补一帧，把真网关那一发（软件转发路径通常更慢）盖回去。
 static constexpr int kAnswerBurstDelay1Ms = 5;
 static constexpr int kAnswerBurstDelay2Ms = 18;
+// 隔离目标条目的空闲老化与上限。真机实测过放大：被禁设备扫一遍离线 IP 段，每个不存在的地址
+// 也会建条目，tick() 每秒全量重投 —— 20 个目标 23.5 帧/秒、80 个 89.4 帧/秒，完全线性。
+// 老化让「不再访问的目标」自然退出；上限是兜底，防 nmap 这类一瞬间铺满整个 /24。
+// 30s：远大于正常设备连续访问同一对端的间隔，又远小于「扫一次就钉一整天」。
+static constexpr qint64 kIsoTargetIdleMs = 30000;
+// 64：一台设备真正会持续互访的局域网对端不会有这么多（NAS/打印机/网关/几台电脑）；
+// 顶到上限说明它在扫段，那正是我们要拒绝放大的场景 —— 丢掉最老的一条腾位。
+static constexpr int kIsoMaxTargetsPerDevice = 64;
 
 ArpSpoofer::ArpSpoofer(IL2Endpoint *endpoint, QObject *parent)
     : QObject(parent), m_endpoint(endpoint), m_timer(new QTimer(this)),
@@ -233,13 +242,24 @@ void ArpSpoofer::reassertIsolation()
 {
     if (!m_endpoint || m_isoAnswered.isEmpty())
         return;
-    for (auto it = m_isoAnswered.constBegin(); it != m_isoAnswered.constEnd(); ++it) {
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (auto it = m_isoAnswered.begin(); it != m_isoAnswered.end(); ++it) {
         const QByteArray &victimMac = it.key();
         if (!m_isolated.contains(victimMac))
             continue; // 已经解除隔离，等 healIsolation 收尾
         const QByteArray victimIp = m_victims.contains(victimMac) ? m_victims.value(victimMac).ip
                                                                   : QByteArray(4, char(0));
-        for (quint32 ip : it.value()) {
+        // ★ 空闲老化：设备已经不再访问的目标停止重投。没有它，一次全网段扫描留下的条目会
+        //   **永久**每秒重投（实测每条约 1.08 帧/秒、完全线性）。设备自己的 ARP 缓存本来就
+        //   几分钟就老化，我们钉得比它久没有意义 —— 它下次要用会重新 who-has，那时再抢答即可。
+        for (auto t = it->begin(); t != it->end();) {
+            if (now - t.value() > kIsoTargetIdleMs)
+                t = it->erase(t);
+            else
+                ++t;
+        }
+        for (auto t = it->constBegin(); t != it->constEnd(); ++t) {
+            const quint32 ip = t.key();
             QByteArray ipb(4, char(0));
             ipb[0] = char((ip >> 24) & 0xFF);
             ipb[1] = char((ip >> 16) & 0xFF);
@@ -483,7 +503,22 @@ bool ArpSpoofer::answerIsolationArp(const QByteArray &frame, quint32 subnetBase,
             m_endpoint->flushTx();
         }
     });
-    m_isoAnswered[senderMac].insert(tpa);
+    QHash<quint32, qint64> &targets = m_isoAnswered[senderMac];
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    if (!targets.contains(tpa) && targets.size() >= kIsoMaxTargetsPerDevice) {
+        // 顶到上限：淘汰最久没被访问的那条，给新目标腾位（而不是无限增长）。
+        quint32 oldestIp = 0;
+        qint64 oldestMs = nowMs;
+        for (auto t = targets.constBegin(); t != targets.constEnd(); ++t) {
+            if (t.value() <= oldestMs) {
+                oldestMs = t.value();
+                oldestIp = t.key();
+            }
+        }
+        if (oldestIp)
+            targets.remove(oldestIp);
+    }
+    targets.insert(tpa, nowMs);
     return true;
 }
 
@@ -491,7 +526,7 @@ void ArpSpoofer::healIsolation(const QByteArray &victimMac6)
 {
     if (!m_endpoint || victimMac6.size() != 6)
         return;
-    const QSet<quint32> targets = m_isoAnswered.value(victimMac6);
+    const QList<quint32> targets = m_isoAnswered.value(victimMac6).keys();
     m_isoAnswered.remove(victimMac6);
     for (quint32 ip : targets) {
         const QByteArray real = m_lanMac.value(ip);

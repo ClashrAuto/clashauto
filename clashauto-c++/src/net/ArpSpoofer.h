@@ -119,7 +119,13 @@ private:
     QVector<QByteArray> m_isolated;             // 被隔离设备 MAC（6 字节）
     QHash<quint32, QByteArray> m_lanMac;        // 观察学到的 局域网 IP → 真实 MAC
     // 我们替哪台设备、对哪些目标 IP 抢答过 —— 撤销隔离时按这份还原。
-    QHash<QByteArray, QSet<quint32>> m_isoAnswered;
+    // 值是「目标 IP → 最后一次为它抢答的时刻(uptime ms)」。
+    // ★ 必须带时间戳、且必须有上限 —— 真机实测过放大：被禁设备 ping 一遍**离线** IP 段，
+    //   每个不存在的地址也会建一条（who-has 收得到就答），然后 tick() 每秒全量重投：
+    //   目标 20 个 → 23.5 帧/秒；扩到 80 个 → 89.4 帧/秒，每条约 1.08 帧/秒**完全线性**。
+    //   一台被禁设备扫一遍 /24 就能让我们持续发 250+ 帧/秒，多台叠加更糟 ——
+    //   等于把自己变成 ARP 放大源，还是被攻击方一句 nmap 就能触发的。
+    QHash<QByteArray, QHash<quint32, qint64>> m_isoAnswered;
 
     static QByteArray macToBytes(const QString &); // "aa:bb:.." → 6 字节（非法返回空）
     static QByteArray ipToBytes(const QString &);  // "1.2.3.4"  → 4 字节（用 QHostAddress；非法返回空）
