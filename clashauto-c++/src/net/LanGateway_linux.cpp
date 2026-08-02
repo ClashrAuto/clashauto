@@ -1091,6 +1091,12 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     ++n->victims;
     const quint64 vkey = macKey(mb);
     m_victimByMac.insert(vkey, ip);
+    // ★ 换址防抖的基线：此刻台账 IP 刚确立，视为"刚见过"。**必须初始化**，否则
+    //   learnDeviceV4 的静默期判据 `m_victimIpSeenMs.value(vkey, 0)` 会拿到 0 → 判成
+    //   「旧地址早已静默」→ 立即采纳新地址。于是一台设备若在**刚被劫持、台账 IP 还没
+    //   来得及发帧**时就先发了另一个 IP 的帧（多 IP 主机很可能如此），防抖直接被绕过，
+    //   又触发那个反复重挂的抖动（本会话 6600b09 修的正是它）。窗口窄但真实。
+    m_victimIpSeenMs[vkey] = QDateTime::currentMSecsSinceEpoch();
     m_victimMacStr.insert(ip, mac);
     m_victimNic.insert(ip, n->spec.ifname);
     m_victimUserByMac.insert(vkey, socksUser); // v6 学习登记时补 mihomo 身份要用
@@ -1153,6 +1159,7 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     m_victimMacStr.remove(ip);
     m_victimNic.remove(ip);
     m_lastSeenMs.remove(key);
+    m_victimIpSeenMs.remove(key); // 换址防抖基线：随设备一起清，别在 QHash 里越积越多
     m_victimUserByMac.remove(key);
     m_victimV6ByMac.remove(key);
     if (n)
