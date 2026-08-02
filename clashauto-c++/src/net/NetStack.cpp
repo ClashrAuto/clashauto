@@ -48,6 +48,14 @@ namespace {
 struct DeviceInfo {
     QByteArray mac6;
     QString socksUser;
+    // 「禁网」设备。TCP 那条腿靠核心的 `IN-USER,<user>,REJECT` 规则就够了（连接带着用户名进
+    // SOCKS），但 **UDP 和 DNS 走的不是 SOCKS 那条路**：DNS 被劫持直投核心的 :1053，
+    // 普通 UDP 走 associate，两者到了核心都没有「入站用户」可供规则区分 ——
+    // mihomo 的 DNS 监听更是根本没有这个概念。真机实测（设备设为 reject）：
+    //   TCP 0 字节✓ / IPv6 000✓ / **DNS 有 44 字节应答✗ / UDP 有 9 字节回包✗**
+    // 也就是被禁的设备照样能解析域名、照样能收发任意 UDP（够跑非 443 口的 QUIC、
+    // 游戏流量甚至隧道）。这两条只能在**网关这一层**按设备身份拦，所以标记带到这里。
+    bool reject = false;
 };
 
 // 一条被终结的 TCP 连接：lwIP pcb ↔ 到 mihomo 的 Socks5Tcp。
@@ -1397,11 +1405,12 @@ bool NetStack::hasNic(IL2Endpoint *ep) const
     return d->nics.contains(ep);
 }
 
-void NetStack::addDevice(const QString &ip, const QByteArray &mac6, const QString &socksUser)
+void NetStack::addDevice(const QString &ip, const QByteArray &mac6, const QString &socksUser,
+                         bool reject)
 {
     if (ip.isEmpty() || mac6.size() != 6)
         return;
-    d->devices.insert(ip, DeviceInfo{mac6, socksUser});
+    d->devices.insert(ip, DeviceInfo{mac6, socksUser, reject});
     if (d->inited) {
         // 预置静态 ARP：lwIP 回包给设备时直接用其 MAC，不发 ARP 请求。
         ip4_addr_t a;
@@ -1426,13 +1435,13 @@ void NetStack::removeDevice(const QString &ip)
 }
 
 void NetStack::addDeviceV6(IL2Endpoint *from, const QString &ip6, const QByteArray &mac6,
-                           const QString &socksUser)
+                           const QString &socksUser, bool reject)
 {
     if (ip6.isEmpty() || mac6.size() != 6)
         return;
     // 与 v4 共用 devices 表：key 是 v6 地址串，和 v4 的点分串天然不冲突。lwipTcpAccept 里
     // userForIp(victimIp) 用的就是这张表，v6 连接的 victimIp 是 v6 串，正好命中。
-    d->devices.insert(ip6, DeviceInfo{mac6, socksUser});
+    d->devices.insert(ip6, DeviceInfo{mac6, socksUser, reject});
     if (!d->inited)
         return;
     Nic *nic = d->nics.value(from);
@@ -1548,6 +1557,11 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
     const QByteArray payload = frame.mid(14 + ihl + 8, ulen - 8);
 
     const DeviceInfo dev = d->devices.value(srcIp);
+    // ★ 「禁网」设备的 UDP（含被劫持的 :53）在这里就丢掉 —— 到了核心已经分不出是谁了。
+    if (dev.reject) {
+        ++GatewayDiag::c.udpFlowsRefused;
+        return;
+    }
     if (dev.mac6.size() != 6)
         return;
 
@@ -1668,6 +1682,11 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
     const QByteArray payload = frame.mid(14 + 40 + 8, ulen - 8);
 
     const DeviceInfo dev = d->devices.value(srcIp);
+    // 同 v4：禁网设备的 UDP 在网关层丢弃（见 DeviceInfo::reject 的论证）。
+    if (dev.reject) {
+        ++GatewayDiag::c.udpFlowsRefused;
+        return;
+    }
     if (dev.mac6.size() != 6)
         return;
 

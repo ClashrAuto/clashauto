@@ -59,7 +59,10 @@ public:
 
     // 开始劫持某设备：ip+mac 为目标，socksUser 为其 mihomo 身份（dev-<mac 短哈希>）。
     // 成功后该设备所有 IP 流量经用户态栈拨 mihomo。失败置 *err。
-    bool enableDevice(const QString &mac, const QString &ip, const QString &socksUser, QString *err);
+    // reject=true：该设备被设为「禁网」。TCP 靠核心的 IN-USER 规则拦，但 UDP/DNS 不带用户名
+    // 进核心，只能在网关层丢 —— 见 NetStack 里 DeviceInfo::reject 的论证。
+    bool enableDevice(const QString &mac, const QString &ip, const QString &socksUser,
+                      bool reject, QString *err);
     // 停止劫持某设备并还原其 ARP。
     void disableDevice(const QString &mac);
     // 停止全部（退出/急停）：还原所有被劫持设备的 ARP。

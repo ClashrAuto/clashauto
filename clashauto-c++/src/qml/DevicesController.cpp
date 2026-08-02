@@ -231,7 +231,10 @@ void DevicesController::resumeProxies()
             m_core->rebuildConfig();
         }
         QString err;
-        const bool ok = m_gateway->enableDevice(d.mac, d.ip, DeviceStore::socksUser(d.mac), &err);
+        // reject 要一路带到网关：UDP/DNS 不带用户名进核心，只能在那一层按设备丢。
+        const bool rejectDev = d.policyMode == DevicePolicyMode::Reject;
+        const bool ok = m_gateway->enableDevice(d.mac, d.ip, DeviceStore::socksUser(d.mac),
+                                                rejectDev, &err);
         // 恢复劫持的成败在 headless（网关联调、树莓派）下**没有任何出口**——gatewayError 只连到
         // 设备页的浮动提示。一行 stderr，定位「重启后没接上代理」时这是唯一凭据。
         if (qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG")) {
@@ -676,7 +679,9 @@ void DevicesController::setProxyEnabled(const QString &mac, bool on)
         ensureGatewayConfigured();
         if (on) {
             QString err;
-            if (m_gateway->enableDevice(mac, ip, DeviceStore::socksUser(mac), &err)) {
+            const DeviceRecord *pd = m_store ? m_store->find(mac) : nullptr;
+            const bool rejectDev = pd && pd->policyMode == DevicePolicyMode::Reject;
+            if (m_gateway->enableDevice(mac, ip, DeviceStore::socksUser(mac), rejectDev, &err)) {
                 m_armedIp.insert(mac, ip); // 记住劫持所用的 IP（resumeProxies 据此发现 IP 变了）
                 m_resumeErr.remove(mac);
             } else {

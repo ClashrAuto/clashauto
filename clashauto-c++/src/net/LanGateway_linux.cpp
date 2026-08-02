@@ -259,7 +259,7 @@ public:
 
     // 以下六个方法皆在工作线程执行。
     void configureLocal(const QVector<LanGateway::NicSpec> &specs, quint16 socksPort);
-    bool enableDeviceLocal(const QString &mac, const QString &ip, const QString &socksUser,
+    bool enableDeviceLocal(const QString &mac, const QString &ip, const QString &socksUser, bool reject,
                            QString *err);
     void disableDeviceLocal(const QString &mac);
     void disableAllLocal();
@@ -929,7 +929,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
 }
 
 bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
-                                      const QString &socksUser, QString *err)
+                                      const QString &socksUser, bool reject, QString *err)
 {
     if (!m_net || !availableLocal()) {
         if (err)
@@ -963,7 +963,7 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
         return false;
     }
 
-    m_net->addDevice(ip, mb, socksUser);
+    m_net->addDevice(ip, mb, socksUser, reject);
     n->arp->startSpoof(mac, ip);
     if (n->ndp)
         n->ndp->startSpoof(mac); // v6 投毒只需 MAC（设备 v6 地址随后从实帧里被动学到）
@@ -1300,7 +1300,7 @@ bool LanGateway::canProxy(const QString &ip) const
 }
 
 bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QString &socksUser,
-                              QString *err)
+                              bool reject, QString *err)
 {
     if (!d->workerReady()) {
         if (err)
@@ -1314,8 +1314,8 @@ bool LanGateway::enableDevice(const QString &mac, const QString &ip, const QStri
     QString e;
     QMetaObject::invokeMethod(
         d->worker,
-        [this, &ok, &e, &mac, &ip, &socksUser] {
-            ok = d->worker->enableDeviceLocal(mac, ip, socksUser, &e);
+        [this, &ok, &e, &mac, &ip, &socksUser, reject] {
+            ok = d->worker->enableDeviceLocal(mac, ip, socksUser, reject, &e);
         },
         Qt::BlockingQueuedConnection);
     if (err)

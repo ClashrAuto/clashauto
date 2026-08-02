@@ -48,7 +48,8 @@ public:
     bool hasNic(IL2Endpoint *ep) const;
 
     // 登记/注销被劫持设备：静态 ARP(ip↔mac) + 记录其 mihomo 身份用户名。
-    void addDevice(const QString &ip, const QByteArray &mac6, const QString &socksUser);
+    void addDevice(const QString &ip, const QByteArray &mac6, const QString &socksUser,
+                   bool reject = false);
     void removeDevice(const QString &ip);
 
     // IPv6 版：登记设备的某个 v6 地址（从它发出的实帧里学到的，一台设备可能有多个：链路本地 +
@@ -56,7 +57,7 @@ public:
     // 见 nd6.c 的 Coast 补丁）+ 记录 mihomo 身份。from = 学到该帧的网卡端点（决定装到哪个 netif）。
     // 幂等：同址重复调用只刷新。
     void addDeviceV6(IL2Endpoint *from, const QString &ip6, const QByteArray &mac6,
-                     const QString &socksUser);
+                     const QString &socksUser, bool reject = false);
     void removeDeviceV6(const QString &ip6);
 
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。
