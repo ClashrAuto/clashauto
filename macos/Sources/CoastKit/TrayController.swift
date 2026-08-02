@@ -180,8 +180,8 @@ public final class TrayController {
     ///   · Qt 的经验系数（字号 ×0.94）乘的是度量盒，墨迹在盒里还有内缩，出来偏小；
     ///   · `boundingRect(.usesDeviceMetrics)` 声称给墨迹盒，实测**报小了** ——
     ///     按它把长边缩放到正好等于图宽，画出来顶上仍被裁掉一截（截图可证）。
-    ///   所以先把字形渲染进一张探测位图、扫 alpha 求出**真实墨迹范围**，再据此缩放/居中：
-    ///   圆的直径正好等于图的边长，四边都不裁。每个 (边长, 角标) 只算一次（见缓存）。
+    ///   所以先把字形渲染进一张探测位图、扫 alpha 求出**真实墨迹范围**，再据此缩放/居中，
+    ///   长边只到 side-1（余量的理由见函数体）。每个 (边长, 角标) 只算一次（见缓存）。
     ///
     /// 角标底边对齐**地球墨迹的底边**（不是图的底边）——两者若有半像素的差，
     /// 角标看着就像从地球上坠下去了。
@@ -193,8 +193,13 @@ public final class TrayController {
                                          drawAt: NSPoint(x: 64, y: 64)) else { return nil }
         let accent = NSColor(srgbRed: 0x48 / 255, green: 0x98 / 255, blue: 0xF8 / 255, alpha: 1)
 
-        // 探测字号 → 目标字号：让真实墨迹的长边正好等于 side。
-        let scale = side / max(probeInk.width, probeInk.height)
+        // 探测字号 → 目标字号：让真实墨迹的长边 = side - 1。
+        //
+        // ★ 那个 -1（上下各 0.5pt）是**抗锯齿的活动余量**，不是留白。缩放到正好
+        //   等于 side 时墨迹贴着画布边，字形光栅化到目标字号有半像素级的舍入，
+        //   贴哪边哪边的抗锯齿行就被画布硬切 —— 上一版顶上被裁、这一版底下被裁，
+        //   来回修就是因为把余量留成了 0。
+        let scale = (side - 1) / max(probeInk.width, probeInk.height)
         let glyphFont = NSFont(name: "iconfont", size: 100 * scale)!
         // 缩放后的墨迹（线性外推 —— 字形轮廓随字号线性缩放，误差在半像素内）。
         let ink = NSRect(x: probeInk.minX * scale, y: probeInk.minY * scale,
