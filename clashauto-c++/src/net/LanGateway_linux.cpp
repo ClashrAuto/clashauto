@@ -360,6 +360,18 @@ void GatewayWorker::forwardIsolatedLan(GwNic *n, const QByteArray &frame, const 
     const int ihl = (f[14] & 0x0F) * 4;
     if (ihl < 20 || frame.size() < 14 + ihl)
         return;
+    // ★ **源 IP 必须等于该设备自己的地址**，否则我们就是它的伪造跳板。
+    //   这条路径会把放行的帧**改写源 MAC 为本机**再发出去，所以危害比普通伪造更重：
+    //   接收方看到的是「来自网关机 MAC 的帧」，更可信，而且反查不到真凶 —— 一台被我们
+    //   判定为「不可信、要禁网」的设备，反倒借我们的身份获得了更强的伪造能力。
+    //   而它要过前面的方向过滤只需把 TCP 标志位带上 ACK，门槛为零。
+    const quint32 src = (quint32(f[26]) << 24) | (quint32(f[27]) << 16)
+                        | (quint32(f[28]) << 8) | quint32(f[29]);
+    const QString claimed = m_victimByMac.value(macKey(f + 6));
+    if (claimed.isEmpty() || ipToU32(claimed) != src) {
+        ++GatewayDiag::c.dropNonVictim;
+        return;
+    }
     const uchar proto = f[23];
     bool allow = false;
     if (proto == 6) { // TCP：丢纯 SYN（A 在发起），其余放行
@@ -381,6 +393,11 @@ void GatewayWorker::forwardIsolatedLan(GwNic *n, const QByteArray &frame, const 
     const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
                         | (quint32(f[32]) << 8) | quint32(f[33]);
     const QByteArray peer = n->arp->lanMac(dst);
+    // ★ 已知不足（下一步要修）：`learnLanMac` 只从**本机收得到的** ARP 帧学，而对端的 ARP 应答
+    //   是单播给发问者的，交换机不会送到我们端口 —— 于是常态就是查不到，合法帧（B 发起、A 回复）
+    //   也会被丢在这里，B→A 的回程因此断掉。真机诊断实测 `peerMac=0`。
+    //   正解是让网关自己主动解析一次对端（发 who-has 并等应答，应答是给我们的，收得到），
+    //   或直接读内核邻居表。在补上之前，这条路径对「B 主动访问 A」的支持是不完整的。
     if (peer.size() != 6)
         return; // 不知道对端真实 MAC → 只能丢（宁可不通，也不能瞎发）
     QByteArray out = frame;
