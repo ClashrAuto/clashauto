@@ -46,6 +46,7 @@ private:
     QString applyCustomRules(QString yaml) const;
     QString applyDevicePolicies(QString yaml) const; // 设备台账(coast.db device 表) → 网关 SOCKS listener + IN-USER 规则
     QString applyPrivateNetworkRules(QString yaml) const; // 私网/回环/链路本地 → DIRECT，前插到 rules: 最顶
+    QString applyRejectDevices(QString yaml) const;       // 「禁网」设备 → REJECT，必须压过私网直连
     QString applySniffer(QString yaml) const;        // 顶层 sniffer: 块——从 TLS SNI/HTTP Host 还原域名
     QString applyProfilePersistence(QString yaml) const; // 顶层 profile: 块——持久化 fake-ip 映射与节点选择，扛住热重载
     QString addToFirstGroup(QString yaml, const QStringList &names) const;

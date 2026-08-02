@@ -69,6 +69,9 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled, bool ipv6Enabled)
     //   否则会把「访问自己家路由器后台 / 内网 NAS」也发到代理节点上（LanGateway_linux.cpp 里旁路
     //   广播/组播那段注释描述的就是这个坑的另一半）。
     yaml = applyPrivateNetworkRules(yaml);
+    // ★ 再压一层：「禁网」要连内网一起禁，所以必须排在私网直连之后（后插的在最上面）。
+    //   与 global/direct 分开两趟的理由见 applyRejectDevices。
+    yaml = applyRejectDevices(yaml);
     yaml = applySniffer(yaml);
     yaml = applyProfilePersistence(yaml);
 
@@ -454,6 +457,46 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
 //   · 不含组播/广播：网关侧 L2 已经旁路掉了（bypassBcast），TUN 也不路由它们。
 // 一律带 no-resolve：只想拦「目的地就是私网 IP 字面量」的连接，绝不为了比对而强行解析域名
 //（开了 fake-ip 之后强行解析既慢又没意义）。
+/// 「禁网」设备的 REJECT 规则。**单独一趟、排在 applyPrivateNetworkRules 之后**，
+/// 这样它落在 rules: 最顶、压过私网直连。
+///
+/// ★ 为什么不能和 global/direct 一起在 applyDevicePolicies 里发：那一趟在私网规则**之前**，
+///   于是私网直连会盖在禁网之上 —— 真机实测（Pi 网关、设备设为 reject）：访问公网被拦
+///   （http_code=000）✓，但访问 10.99.0.2 **照样通** ✗。也就是被禁的设备仍能访问用户内网的
+///   NAS、摄像头、路由器后台、其它设备。而「禁网」的典型使用场景恰恰是「这台不可信」，
+///   把内网整个敞开与用户预期相反。
+///   私网规则压过 IN-USER 这个顺序**本身是对的**，但它的理由（见 ensureFullConfig 里的注释）
+///   只针对 `policy=global`：不该把「访问自家路由器后台」发到代理节点上。那条理由对
+///   `reject` 不成立 —— 禁网就是要连内网也一起禁。所以按模式分开两趟，各归各位。
+///
+/// ★ **仍有一块管不到**：与设备**同网段**的流量在二层就被旁路了（LanGateway 的 bypassLan），
+///   根本不进核心，任何规则都拦不住它。所以这条修复覆盖的是「其它私网段」（10/8、172.16/12
+///   以及别的子网），同子网内的互访要拦得换机制（例如不旁路、或在二层直接丢）。
+///   这一点必须说清楚，免得以为「禁网」已经是密不透风的。
+QString ConfigBuilder::applyRejectDevices(QString yaml) const
+{
+    QString ruleLines;
+    for (const DeviceStore::ProxyDeviceRow &row : DeviceStore::proxiedDevices(m_config.configDir)) {
+        if (row.policyMode != QLatin1String("reject"))
+            continue;
+        const QString user = DeviceStore::socksUser(row.mac);
+        if (user.isEmpty())
+            continue; // 非法 mac：与 applyDevicePolicies 同样跳过，别写出坏用户名
+        ruleLines += QStringLiteral("  - %1\n")
+                         .arg(yamlQuote(QStringLiteral("IN-USER,%1,REJECT").arg(user)));
+    }
+    if (ruleLines.isEmpty())
+        return yaml;
+    const qsizetype rulesPos = yaml.indexOf("\nrules:");
+    if (rulesPos < 0)
+        return yaml;
+    const qsizetype lineEnd = yaml.indexOf('\n', rulesPos + 1);
+    if (lineEnd < 0)
+        return yaml;
+    yaml.insert(lineEnd + 1, ruleLines);
+    return yaml;
+}
+
 QString ConfigBuilder::applyPrivateNetworkRules(QString yaml) const
 {
     static const char *const kNets[] = {
@@ -628,7 +671,7 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
     for (const ProxyDevice &dev : proxied) {
         QString target;
         if (dev.mode == "reject") {
-            target = "REJECT";
+            continue; // ★ 禁网**不在这里发**，见 applyRejectDevices（必须压过私网直连）
         } else if (dev.mode == "direct") {
             target = "DIRECT";
         } else if (dev.mode == "global") {
