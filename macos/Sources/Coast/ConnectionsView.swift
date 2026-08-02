@@ -107,37 +107,62 @@ struct ConnectionsView: View {
     @ViewBuilder
     private var segmentedToggles: some View {
         if #available(macOS 26.0, *) {
-            // ★ 用**系统自己的**液态玻璃按钮组，不是手画的胶囊：
-            //   `Toggle` + `.toggleStyle(.button)` + `.buttonStyle(.glass)` —— 开态的
-            //   填充、按下的形变、无障碍语义全交给系统。手画那版（一层 glassCapsule
-            //   套两个 plain Button，选中态自己描 `.tint.opacity(0.35)`）只是长得像，
-            //   开态既不是系统的 prominent 填充，按下也没有玻璃的形变。
+            // **一颗玻璃胶囊，里面两个按钮** —— 与页脚的模式切换、日志页的标签同一套
+            //   （`glassCapsule()` 罩整组，段自己只画选中底）。
             //
-            //   外面套 `ControlGroup` 才是**一组**：它把两颗拼成一块连体的控件
-            //   （中间无缝、只有外侧是圆的）。先前用的是
-            //   `GlassEffectContainer` + `HStack(spacing: 4)` —— 那个容器只对
-            //   **自己上 `.glassEffect()`** 的视图做融合，管不到 `.buttonStyle(.glass)`
-            //   的系统按钮，于是渲染出来就是「两颗中间带缝的独立胶囊」，不是一组。
+            // ★ 走过两条死路，都别再试：
+            //   1. `.buttonStyle(.glass)`（不管外面套 `GlassEffectContainer` 还是
+            //      `ControlGroup`）—— 那个样式**每颗自己画一个胶囊**，谁也拼不到一起，
+            //      渲染出来永远是「中间带缝的两颗独立胶囊」。
+            //   2. 段的选中底用 `Capsule()` —— 两段同时开时就是两颗药丸并排，
+            //      中间那道缝正是「看着像两个按钮」的来源。
             //
-            //   两段仍各是独立开关（可以同时开、也可以同时关），所以是两个 Toggle
-            //   而不是三选一的分段控件。
-            ControlGroup {
-                Toggle(isOn: $showOnline) {
-                    Text("Online (\(state.connectionLedger.onlineCount))")
-                        .font(.system(size: 12))
-                }
-                Toggle(isOn: $showOffline) {
-                    Text("Offline (\(state.connectionLedger.offlineCount))")
-                        .font(.system(size: 12))
-                }
+            //   所以选中底用 `UnevenRoundedRectangle`：**只有外侧那一头是圆的**，
+            //   朝里的一头切平。两段都开时两块底严丝合缝连成一条，只有整组的外缘是圆的
+            //   —— 这才是「一个胶囊里的两个按钮」。（NavButton 里用的是同一招。）
+            //
+            //   两段仍各是独立开关（可以同时开、也可以同时关），不是三选一。
+            HStack(spacing: 0) {
+                filterSegment(title: "Online (\(state.connectionLedger.onlineCount))",
+                              on: showOnline, outerEdge: .leading) { showOnline.toggle() }
+                filterSegment(title: "Offline (\(state.connectionLedger.offlineCount))",
+                              on: showOffline, outerEdge: .trailing) { showOffline.toggle() }
             }
-            .toggleStyle(.button)
-            .buttonStyle(.glass)
-            .controlSize(.large)
-            .fixedSize()
+            .glassCapsule()
         } else {
             legacySegmentedToggles
         }
+    }
+
+    /// 组里的一段。`outerEdge` 说明它靠哪一头 —— 只有那一头的两个角是圆的。
+    @available(macOS 26.0, *)
+    private func filterSegment(title: String, on: Bool,
+                               outerEdge: HorizontalEdge,
+                               action: @escaping () -> Void) -> some View {
+        // 圆角取半个高，才和外层胶囊的弧度对得上；小了会在外缘露出一圈直角。
+        let radius = toolbarHeight / 2
+        let leading = outerEdge == .leading ? radius : 0
+        let trailing = outerEdge == .trailing ? radius : 0
+        return Button(action: action) {
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .fixedSize()
+                .padding(.horizontal, 12)
+                .frame(height: toolbarHeight)
+                .background {
+                    if on {
+                        UnevenRoundedRectangle(topLeadingRadius: leading,
+                                               bottomLeadingRadius: leading,
+                                               bottomTrailingRadius: trailing,
+                                               topTrailingRadius: trailing,
+                                               style: .continuous)
+                            .fill(.tint.opacity(0.35))
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var legacySegmentedToggles: some View {
