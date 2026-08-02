@@ -1441,14 +1441,29 @@ static void closeDeviceConns(NetStack::Impl *d, const QString &ip)
     ip_addr_t want;
     if (!ipaddr_aton(ip.toLatin1().constData(), &want))
         return;
-    QVector<TcpConn *> victims;
-    for (struct tcp_pcb *p = tcp_active_pcbs; p; p = p->next) {
-        // ip_addr_cmp 会先比类型再比地址：v4 want 不会误配 v6 pcb，反之亦然。
-        if (ip_addr_cmp(&p->remote_ip, &want) && p->callback_arg)
-            victims.push_back(static_cast<TcpConn *>(p->callback_arg));
+    // ★ **每次重扫链表、只关一条**，绝不缓存一批裸指针再逐个关。
+    //   先收集后批关看着更省，实则是 use-after-free：closeConn 里 `c->socks->closeTunnel()`
+    //   是**同步**的，可能触发别的连接的槽 → 连锁 delete 掉 victims 里的其它 TcpConn，
+    //   后续迭代就在对已释放内存调用 closeConn。而现成的 g_destroyedConn 哨兵**救不了**——
+    //   它只记「最近一次」被 delete 的那一个地址（单哨兵、非集合），连锁删两个以上就漏。
+    //   重扫的代价是 O(n²) 最坏，但 n 是「这一台设备的连接数」、且只在设备移除/换址时跑一次，
+    //   完全不在数据面热路径上；拿它换掉一个 UAF 是划算的。
+    //   循环上界 = 每轮至少关掉一条，否则 break（防意外的死循环）。
+    for (;;) {
+        TcpConn *victim = nullptr;
+        for (struct tcp_pcb *p = tcp_active_pcbs; p; p = p->next) {
+            // ip_addr_cmp 会先比类型再比地址：v4 want 不会误配 v6 pcb，反之亦然。
+            if (ip_addr_cmp(&p->remote_ip, &want) && p->callback_arg) {
+                victim = static_cast<TcpConn *>(p->callback_arg);
+                break;
+            }
+        }
+        if (!victim)
+            break; // 该地址已无连接
+        closeConn(victim, true); // abort：设备不在这个地址了，没有可优雅关闭的对端
+        // closeConn 必然把这条从 tcp_active_pcbs 摘掉（tcp_abort/tcp_close），
+        // 所以下一轮重扫不会再选中它 —— 循环必然收敛。
     }
-    for (TcpConn *c : victims)
-        closeConn(c, true); // abort：设备已经不在这个地址了，没有优雅关闭的对端
 }
 
 void NetStack::removeDevice(const QString &ip)
