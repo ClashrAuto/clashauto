@@ -103,6 +103,14 @@ AppConfig AppConfigLoader::load()
     config.increment = boolFromYaml(yaml, "increment", config.increment);
     config.closeToTray = boolFromYaml(yaml, "mini", config.closeToTray);
     config.autoStart = boolFromYaml(yaml, "sys", config.autoStart);
+    // 数据面模式。配置键 gatewayTproxy；环境变量 COAST_GATEWAY_DATAPATH 优先（tproxy / lwip），
+    // 供测试与"线上出问题时不改配置就能退回去"用。
+    config.gatewayTproxy = boolFromYaml(yaml, "gatewayTproxy", config.gatewayTproxy);
+    const QByteArray dpEnv = qgetenv("COAST_GATEWAY_DATAPATH").trimmed().toLower();
+    if (dpEnv == "tproxy")
+        config.gatewayTproxy = true;
+    else if (dpEnv == "lwip")
+        config.gatewayTproxy = false;
     config.nodeSwitchNote = boolFromYaml(yaml, "note", config.nodeSwitchNote);
     config.autoUpdateMinutes = intFromYaml(yaml, "autoUpdate", config.autoUpdateMinutes);
     config.allowRule = nestedValueFromYaml(yaml, "use_rule", "allow", config.allowRule);

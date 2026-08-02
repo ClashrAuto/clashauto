@@ -179,6 +179,11 @@ public:
     // 独立于主混合口(7890)，让 Coast 自己的测速仍免认证走 7890。ConfigBuilder 生成此 listener，
     // LanGateway 拨号连此端口——两边必须一致。
     static constexpr quint16 kGatewayPort = 7899;
+    // TPROXY 数据面的入站端口（AppConfig::gatewayTproxy 打开时才发这个 listener）。
+    // 与 kGatewayPort 挨着放：这两个都是「网关专用、不对外」的口,改端口时容易一起看到。
+    // TPROXY 下设备身份由**原始源 IP**承载(核心直接看得到),不再需要 socks 用户名那套,
+    // 所以这个 listener 不带 users:。
+    static constexpr quint16 kTproxyPort = 7898;
 
 signals:
     void changed();          // 任一展示字段变化（控制器据此刷新模型）

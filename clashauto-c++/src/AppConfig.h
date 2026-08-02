@@ -35,6 +35,17 @@ struct AppConfig {
     // dns.fake-ip-range6 三件套。注意三者缺一不可：只开 dns.ipv6 而没有 v6 fake-ip 池时，
     // fake-ip 模式下核心对 AAAA 照样回空答案（见 mihomo dns/middleware.go 的 withFakeIP）。
     bool ipv6 = false;
+    // 透明网关的**数据面**走哪条路。默认 false = 现有的 lwIP 用户态栈。
+    //
+    // 打开后改走「内核转发 + nftables TPROXY」：ARP 劫持照旧（那是「设备什么都不用改」的来源），
+    // 但劫持来的帧不再喂进 lwIP，而是由内核转发、TPROXY 投给核心。树莓派 5 实测同机同靶：
+    //   lwIP 0.89 Gbps @ 82%（单线程,换网卡也过不去）  vs  TPROXY 10.6 Gbps @ 0.73 核。
+    // 仅 Linux 有效（需要 nftables + iproute2 + root）；其它平台恒为 lwIP。
+    //
+    // ★ 默认 false 是刻意的：这条路一旦装了规则却没人接管，被覆盖的设备会**完全断网**，
+    //   所以在它跑够久之前，默认必须是可回退的那一条。环境变量 COAST_GATEWAY_DATAPATH=tproxy
+    //   可临时覆盖（供测试；见 AppConfigLoader::load）。
+    bool gatewayTproxy = false;
     QString language = "zh-CN";
 
     QString clashExecutable() const;

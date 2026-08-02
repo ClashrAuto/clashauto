@@ -652,6 +652,19 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         block += "        password: coast\n"; // 密码固定字面量 coast，与 LanGateway 拨号一致
     }
 
+    // TPROXY 数据面：额外发一个 tproxy inbound。**与上面那个 socks listener 并存**——
+    // 切换数据面不需要改配置结构,而且 lwIP 那条路随时能退回去(它用的是 socks 那个口)。
+    //   · listen 必须是 0.0.0.0：TPROXY 投递保留的是**原始目的地址**,绑在 127.0.0.1 上收不到。
+    //   · 不带 users:：TPROXY 下核心直接看得到设备的真实源 IP,设备身份用 SRC-IP-CIDR 规则表达,
+    //     比 socks 用户名那套更原生(也少一层认证开销)。
+    //   · TCP 与 UDP 共用这一个口,mihomo 的 tproxy inbound 两者都收。
+    if (m_config.gatewayTproxy) {
+        block += "  - name: coast-tproxy\n";
+        block += "    type: tproxy\n";
+        block += "    listen: 0.0.0.0\n";
+        block += QString("    port: %1\n").arg(DeviceStore::kTproxyPort);
+    }
+
     // 若已存在我们上轮生成的顶层 listeners: 块，整块替换（从 listeners: 到下一个顶层键为止，
     // 用与 mergePlugin 相同的「顶层键 + 后续缩进行」正则匹配）；否则追加到文件末尾。
     const QRegularExpression listenersBlock(
