@@ -110,11 +110,31 @@ else bad "没找到 linux x86_64 .deb"; fi
 
 sec "Linux 无头运行冒烟（装 .deb + Xvfb 真跑 Coast）"
 if [ -n "$DEB" ]; then
+  # ★ 先确认这些库**装 deb 之前确实不在**——否则下面那句「依赖解析 OK」就是空话。
+  #   容器镜像一旦预装了 Qt 运行时库，Depends 漏写一项也照样绿灯，只有用户的干净机器会炸。
+  #   挑的这几个都不是 xvfb/xauth/dbus-x11 的依赖，正常情况下这里必须是「未预装」。
+  preinstalled=""
+  for l in libxcb-cursor0 libgl1 libopengl0 libx11-xcb1 libzstd1 libsm6; do
+    dpkg -s "$l" >/dev/null 2>&1 && preinstalled="$preinstalled $l"
+  done
+  if [ -n "$preinstalled" ]; then
+    bad "容器已预装 Qt 运行时库（$preinstalled）——依赖解析这一项形同虚设，请从 Dockerfile 移除"
+  else
+    ok "装 deb 前容器不含 Qt 运行时库（依赖解析这一项是真测的）"
+  fi
   if apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq "./$DEB" >/dev/null 2>&1; then
     ok "dpkg 安装成功（.deb 声明的运行时依赖解析 OK）"
   else
     bad "deb 安装失败（依赖问题？）"
   fi
+  # 安装后复核：Depends 是否真的把这些拉了进来。漏写的话上面 apt 不会报错（它只装声明了的），
+  # 要到 25 秒冒烟那步才以「platform plugin 加载失败」的形式暴露——那时错因已经隔了好几层。
+  missing=""
+  for l in libxcb-cursor0 libgl1 libopengl0 libx11-xcb1 libzstd1 libsm6 libice6; do
+    dpkg -s "$l" >/dev/null 2>&1 || missing="$missing $l"
+  done
+  [ -n "$missing" ] && bad "装完 deb 后仍缺:$missing —— Depends 漏写，干净系统上会起不来" \
+                    || ok "Depends 已把关键运行时库全部拉入"
   if [ -x /opt/coast/coast ]; then
     export COAST_NO_AUTOSTART=1   # 跳过「自动下载并启动内核」，只验 UI 起 + 配置种子落地
     export HOME=/root
