@@ -32,6 +32,7 @@ extern "C" {
 // 「现在就把 ACK 发出去」的入口，而这条链路必须要（理由见 lwipTcpRecv 末尾）。
 // 本项目已经 vendor 了 lwIP 并打过 tcp_in.c 的补丁，port 层引 priv 头是这类集成的常规做法。
 #include "lwip/priv/tcp_priv.h"
+#include "coast_lwip_diag.h"
 #include "lwip/stats.h"
 #include "lwip/tcp.h"
 #include "lwip/timeouts.h"
@@ -1025,6 +1026,30 @@ QString lwipStatsLine()
                .arg(uint(lwip_stats.mem.used))
                .arg(uint(lwip_stats.mem.max))
                .arg(uint(lwip_stats.mem.err));
+
+    // ★ `coast_lwip_diag` 那一组以前**只写不读**：头文件里写着「读取方是 lwipStatsLine()」，
+    //   但这里并没有打印它们。于是 lwipopts.h 中关于 twKill / synHitTw / backlog 静默丢 SYN
+    //   的那几大段论证，全都无法在运行时核对 —— 计数器攒着，谁也看不见。补上。
+    //   这几条恰恰是 lwIP **不会回调上层**的静默路径，看不见就等于没有。
+    //   按窗口出增量（与本行其余字段一致），全 0 的窗口整段省略，免得把行撑爆。
+    {
+        static struct coast_lwip_diag prev = {};
+        const struct coast_lwip_diag &n = coast_lwip_diag;
+        const unsigned dBacklog = n.syn_drop_backlog - prev.syn_drop_backlog;
+        const unsigned dSynTw   = n.syn_hit_timewait - prev.syn_hit_timewait;
+        const unsigned dTwKill  = n.tw_killed - prev.tw_killed;
+        const unsigned dPrio    = n.prio_killed - prev.prio_killed;
+        const unsigned dAlloc   = n.alloc_fail - prev.alloc_fail;
+        const unsigned dFast    = n.fasttmr_runs - prev.fasttmr_runs;
+        const unsigned dDack    = n.delayed_acks - prev.delayed_acks;
+        if (dBacklog || dSynTw || dTwKill || dPrio || dAlloc || dFast || dDack) {
+            out += QStringLiteral(" synDropBl=%1 synHitTw=%2 twKill=%3 prioKill=%4"
+                                  " allocFail=%5 fastTmr=%6 dAck=%7")
+                       .arg(dBacklog).arg(dSynTw).arg(dTwKill).arg(dPrio)
+                       .arg(dAlloc).arg(dFast).arg(dDack);
+        }
+        prev = n;
+    }
     return out;
 }
 

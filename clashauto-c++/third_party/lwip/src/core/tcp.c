@@ -111,6 +111,7 @@
 #include "lwip/ip6.h"
 #include "lwip/ip6_addr.h"
 #include "lwip/nd6.h"
+#include "coast_lwip_diag.h"   /* Coast 诊断计数器（fasttmr/延迟 ACK） */
 
 #include <string.h>
 
@@ -1487,6 +1488,7 @@ tcp_fasttmr(void)
   ++tcp_timer_ctr;
 
 tcp_fasttmr_start:
+  coast_lwip_diag.fasttmr_runs++;   /* Coast 诊断：核对这个定时器到底有没有按 TCP_TMR_INTERVAL 跑 */
   pcb = tcp_active_pcbs;
 
   while (pcb != NULL) {
@@ -1496,6 +1498,7 @@ tcp_fasttmr_start:
       /* send delayed ACKs */
       if (pcb->flags & TF_ACK_DELAY) {
         LWIP_DEBUGF(TCP_DEBUG, ("tcp_fasttmr: delayed ACK\n"));
+        coast_lwip_diag.delayed_acks++;   /* Coast 诊断：见 coast_lwip_diag.h */
         tcp_ack_now(pcb);
         tcp_output(pcb);
         tcp_clear_flags(pcb, TF_ACK_DELAY | TF_ACK_NOW);

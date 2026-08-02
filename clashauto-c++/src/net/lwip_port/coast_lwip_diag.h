@@ -30,6 +30,8 @@ struct coast_lwip_diag {
     unsigned int lastack_killed;    /* 同上，TIME_WAIT 也没得杀 → 杀 LAST_ACK */
     unsigned int prio_killed;       /* 再没得杀 → **杀一条活连接**（设备侧看到连接凭空断掉） */
     unsigned int alloc_fail;        /* 降级链走完仍拿不到 pcb → SYN 被丢 */
+    unsigned int fasttmr_runs;      /* tcp_fasttmr 实际被调用的次数（应 ≈ 秒数 × 1000/TCP_TMR_INTERVAL） */
+    unsigned int delayed_acks;      /* 其中真正把一条延迟 ACK 发出去的次数 */
     unsigned int tw_scan;           /* tcp_kill_timewait 累计走过的链表节点数（除以 tw_killed = 每次扫多长） */
 };
 
