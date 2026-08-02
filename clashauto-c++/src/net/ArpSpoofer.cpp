@@ -614,8 +614,13 @@ bool ArpSpoofer::counterIsolationReply(const QByteArray &frame)
     const quint32 spa = (quint32(f[28]) << 24) | (quint32(f[29]) << 16)
                         | (quint32(f[30]) << 8) | quint32(f[31]); // 应答者 IP = 被争夺的目标
     // 这个目标确实是我们正为这台设备接管的？（避免对无关 reply 乱投）
-    const QHash<quint32, qint64> &targets = m_isoAnswered.value(ethDst);
-    if (!targets.contains(spa))
+    // ★ 用 constFind 而不是 `const QHash& = m_isoAnswered.value(...)`：QHash::value() **按值返回**，
+    //   把它绑到 const 引用上绑的是临时对象 —— 生命周期延长规则让它不至于立刻出错，但每次调用都
+    //   悄悄做了一次完整的 QHash 深拷贝，而本函数在**收帧热路径**上（每个 ARP reply 都进来一次），
+    //   一台设备最多 64 个隔离目标，等于每帧白拷 64 项。而且那种写法会让读者误以为拿到的是容器内
+    //   部引用。constFind 零拷贝、语义明确。
+    const auto tit = m_isoAnswered.constFind(ethDst);
+    if (tit == m_isoAnswered.constEnd() || !tit->contains(spa))
         return false;
     // 顺手把真相记下来：这条 reply 里就有目标的真实 MAC，转发路径要用（省一次 resolveLanPeer）。
     learnLanMac(spa, sha);
