@@ -1432,17 +1432,19 @@ void NetStack::addDevice(const QString &ip, const QByteArray &mac6, const QStrin
 //   MEMP_NUM_TCP_PCB 吃光、新连接建不了。
 //   拓扑：被劫持连接里 lwIP 冒充靶机当"服务器"，设备是"客户端" → `pcb->remote_ip` = 设备 IP。
 //   先收集再关：closeConn 会改 tcp_active_pcbs 链表，边遍历边关是 use-after-free。
+// ip 可以是 v4 或 v6 串。★ **必须两栈都处理**：catch-all 监听器是双栈（IP_ANY_TYPE，
+//   见 init），v4/v6 SYN 都会被 accept 建连，所以设备的 v6 TCP 连接同样会在换址/移除后
+//   变成孤儿。只匹配 v4 会把 v6 连接漏在 lwIP 里等 24h established 超时 —— 与 v4 泄漏同性质。
 static void closeDeviceConns(NetStack::Impl *d, const QString &ip)
 {
     Q_UNUSED(d);
-    ip4_addr_t want;
-    if (!ip4addr_aton(ip.toLatin1().constData(), &want))
+    ip_addr_t want;
+    if (!ipaddr_aton(ip.toLatin1().constData(), &want))
         return;
     QVector<TcpConn *> victims;
     for (struct tcp_pcb *p = tcp_active_pcbs; p; p = p->next) {
-        if (!IP_IS_V4_VAL(p->remote_ip))
-            continue;
-        if (ip4_addr_cmp(ip_2_ip4(&p->remote_ip), &want) && p->callback_arg)
+        // ip_addr_cmp 会先比类型再比地址：v4 want 不会误配 v6 pcb，反之亦然。
+        if (ip_addr_cmp(&p->remote_ip, &want) && p->callback_arg)
             victims.push_back(static_cast<TcpConn *>(p->callback_arg));
     }
     for (TcpConn *c : victims)
@@ -1490,6 +1492,7 @@ void NetStack::addDeviceV6(IL2Endpoint *from, const QString &ip6, const QByteArr
 void NetStack::removeDeviceV6(const QString &ip6)
 {
     d->devices.remove(ip6);
+    closeDeviceConns(d, ip6); // 同 v4：关掉该 v6 地址的 TCP 连接，别让它成孤儿泄漏 PCB
     if (auto *s = d->udp.take(ip6))
         destroyUdpSess(d, s);
     Nic *nic = d->deviceV6Nic.take(ip6);
