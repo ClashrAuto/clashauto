@@ -445,5 +445,6 @@
   "设备 %@ 地址变了：%@ → %@，重新接管": "%@ cihazının adresi değişti: %@ → %@, yeniden devralınıyor",
   "仅显示在线设备": "Yalnızca çevrimiçi cihazları göster",
   "添加域名规则": "Alan adı kuralı ekle",
-  "添加进程规则": "İşlem kuralı ekle"
+  "添加进程规则": "İşlem kuralı ekle",
+  "连接管理器": "Bağlantı yöneticisi"
 }

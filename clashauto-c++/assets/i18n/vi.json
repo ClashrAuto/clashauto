@@ -445,5 +445,6 @@
   "设备 %@ 地址变了：%@ → %@，重新接管": "Thiết bị %@ đã đổi địa chỉ: %@ → %@, đang tiếp quản lại",
   "仅显示在线设备": "Chỉ hiển thị thiết bị trực tuyến",
   "添加域名规则": "Thêm quy tắc tên miền",
-  "添加进程规则": "Thêm quy tắc tiến trình"
+  "添加进程规则": "Thêm quy tắc tiến trình",
+  "连接管理器": "Trình quản lý kết nối"
 }

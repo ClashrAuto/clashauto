@@ -28,10 +28,8 @@ struct ConnectionsView: View {
 
     /// 顶栏控件高度：分段按钮与搜索框一致。26 以下沿用 Qt 的 26。
     ///
-    /// 26 上是 **24**（原来 28）：顶栏就钉在标题栏那条带子里，24 + 上下各 2 = 28，
-    /// 正好等于**标准**标题栏高度，红绿灯中心 14、控件中心也是 14。
-    /// 早先那版带子是靠空 toolbar 抬到 54 的，顶栏再 44，480 高的窗顶上先去掉 98 ——
-    /// 现在整条 28。
+    /// 26 上是 **24**：带子高 50（见 `bandHeight`），控件在里面垂直居中。
+    /// 早先那版是带子 54 + 顶栏另占 44，480 高的窗顶上先去掉 98 —— 现在这两条合成一条。
     private var toolbarHeight: CGFloat {
         if #available(macOS 26.0, *) { 24 } else { 26 }
     }
@@ -63,8 +61,10 @@ struct ConnectionsView: View {
             //   靠右之后左半条是空的：红绿灯 + 一段留白，按住那儿就能拖 ——
             //   系统自带的窗口也都是这么排的。
             //
-            // ★ 带子**不抬高**（`unifiesTitleBar: false`）：保持标准 28，顶栏正好这么高。
-            //   全屏时系统把标题栏整个收走，安全区归零，这 28 也就跟着没了 ——
+            // ★ 带子抬到 `Self.bandHeight`（空 toolbar，`unifiesTitleBar: true`）——
+            //   红绿灯由系统在这条带子里垂直居中，顶栏给同样的定高、内容也居中，
+            //   两边就在一条水平线上。
+            //   全屏时系统把标题栏整个收走，安全区归零，这一条也就跟着没了 ——
             //   顶栏直接顶到屏幕上沿，不留空带。
             list
                 .safeAreaBar(edge: .top, spacing: 0) { header }
@@ -74,7 +74,7 @@ struct ConnectionsView: View {
                 .allowsFullScreen()
                 // 整窗玻璃，和主窗同一层材质；行自带一层 `.regularMaterial`（见 `row`），
                 // 两层材质叠出「卡片浮在玻璃上」的分层。
-                .windowGlass(.sidebar, unifiesTitleBar: false)
+                .windowGlass(.sidebar)
         } else {
             VStack(spacing: 5) {
                 HStack(spacing: 10) {
@@ -91,17 +91,38 @@ struct ConnectionsView: View {
 
     // MARK: 顶栏
 
+    /// 标题栏那条带子的高度。控件在里面垂直居中，红绿灯由系统居中，两边对齐。
+    static let bandHeight: CGFloat = 50
+
     /// 钉在标题栏带子里的顶栏，**靠右**。左边那段空白是窗口的拖动区（见 `content`）。
-    /// 上下各 2 + 控件 24 = 28，与标准标题栏同高。
+    ///
+    /// 定高 `bandHeight`、内容垂直居中（HStack 默认就是 `.center`）——
+    /// 不用上下内距去凑：内距是「顶着上沿往下推」，控件一改高就又不居中了。
     private var header: some View {
         HStack(spacing: 8) {
-            Spacer(minLength: 0)
+            // 窗口标题。系统那份被 `hiddenTitleBar` 关掉了（它会画在带子正中，和右边
+            // 这一组撞在一起），这里自己在左边摆一个。
+            //
+            // ★ 左内距要让开红绿灯：它们的右缘在窗口左缘往里 78（三颗 14 的按钮、
+            //   起点 20、间距 20），再留 12 的呼吸。
+            // ★ 只有它可压缩（其余都 `fixedSize`）——窗口拖到最小宽 480 且搜索展开时，
+            //   总宽超出，让标题先截断，不能去挤按钮上的字。
+            Text("连接管理器".t)
+                .font(.system(size: 15))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.leading, Self.titleLeadingInset)
+            Spacer(minLength: 8)
             segmentedToggles
             searchControls
         }
-        .padding(.vertical, 2)
+        .frame(height: Self.bandHeight)
         .padding(.trailing, 10)
     }
+
+    /// 红绿灯右缘（78）+ 12 的呼吸。
+    private static let titleLeadingInset: CGFloat = 78 + 12
 
     /// Online / Offline 两个筛选开关。两段各自独立（可以同时开），不是二选一。
     @ViewBuilder

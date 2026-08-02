@@ -445,5 +445,6 @@
   "设备 %@ 地址变了：%@ → %@，重新接管": "El dispositivo %@ cambió de dirección: %@ → %@, retomando el control",
   "仅显示在线设备": "Mostrar solo dispositivos en línea",
   "添加域名规则": "Añadir regla de dominio",
-  "添加进程规则": "Añadir regla de proceso"
+  "添加进程规则": "Añadir regla de proceso",
+  "连接管理器": "Gestor de conexiones"
 }
