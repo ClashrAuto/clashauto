@@ -4,6 +4,7 @@
 
 #if defined(Q_OS_LINUX)
 
+#include <QDir>
 #include <QFile>
 #include <QProcess>
 #include <QStandardPaths>
@@ -58,6 +59,13 @@ void sysctlWrite(const QString &key, const QString &value)
     run(QStringLiteral("sysctl"), {QStringLiteral("-qw"), key + QLatin1Char('=') + value});
 }
 
+// send_redirects 原值的存档文件。放 /run（tmpfs，重启即空）：重启后 sysctl 本来就回到系统
+// 默认，没有陈旧值要还原。
+QString redirStatePath()
+{
+    return QStringLiteral("/run/coast-tproxy-redirects");
+}
+
 } // namespace
 
 TproxyRules::~TproxyRules()
@@ -93,6 +101,24 @@ void TproxyRules::removeStale()
     }
     run(QStringLiteral("ip"), {QStringLiteral("route"), QStringLiteral("flush"),
                                QStringLiteral("table"), QStringLiteral("99")});
+    // iptables 侧那条放行也要清 —— 它按 comment 找，静态调用也删得掉（kill -9 之后就靠这个）。
+    TproxyRules().removeIptablesForward();
+    // send_redirects 的崩溃恢复：把上次留下的存档还原掉。装载路径里也有一份（见
+    // saveAndDisableRedirects），这里覆盖的是"启动时不进 tproxy 模式"的情况 —— 上次崩在
+    // tproxy 模式、这次以 lwIP 起来，没人会去调 install，存档就得在这儿吃掉。
+    QFile prev(redirStatePath());
+    if (prev.exists() && prev.open(QIODevice::ReadOnly)) {
+        const QStringList lines = QString::fromUtf8(prev.readAll()).split(QLatin1Char('\n'),
+                                                                         Qt::SkipEmptyParts);
+        prev.close();
+        for (const QString &l : lines) {
+            const int eq = l.indexOf(QLatin1Char('='));
+            if (eq > 0)
+                sysctlWrite(QStringLiteral("net.ipv4.conf.%1.send_redirects").arg(l.left(eq)),
+                            l.mid(eq + 1));
+        }
+        QFile::remove(redirStatePath());
+    }
 }
 
 bool TproxyRules::runIp(const QStringList &args, QString *err)
@@ -141,6 +167,135 @@ table inet %1 {
     return applyNft(script, err);
 }
 
+// 关掉**每一张**网卡的 ICMP 重定向发送，并记下原值。见 install() 里的论证：
+// 内核取 all 与 per-device 的或，逐网卡关才有效。
+void TproxyRules::saveAndDisableRedirects()
+{
+    m_savedRedirects.clear();
+    // ★ 崩溃恢复必须放在读取当前值**之前**。
+    //   上一次若是被 kill -9 打死的，网卡上留着的是我们写下的 0；这时再"记录原值"就会把 0
+    //   当成用户的设置存档，remove() 还原回 0 —— 于是 send_redirects 被我们永久改掉，
+    //   而代码里到处承诺"不擅自改变用户的系统设置"。真机踩到过：一轮 kill -9 测试之后，
+    //   eth0 的 send_redirects 就再也回不到 1 了。
+    //   所以先把上次的存档吃掉、还原真正的原值，再重新采样。
+    QFile prev(redirStatePath());
+    if (prev.exists() && prev.open(QIODevice::ReadOnly)) {
+        const QStringList lines = QString::fromUtf8(prev.readAll()).split(QLatin1Char('\n'),
+                                                                         Qt::SkipEmptyParts);
+        prev.close();
+        for (const QString &l : lines) {
+            const int eq = l.indexOf(QLatin1Char('='));
+            if (eq > 0)
+                sysctlWrite(QStringLiteral("net.ipv4.conf.%1.send_redirects").arg(l.left(eq)),
+                            l.mid(eq + 1));
+        }
+        QFile::remove(redirStatePath());
+    }
+    QDir dir(QStringLiteral("/proc/sys/net/ipv4/conf"));
+    const QStringList ifs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &n : ifs) {
+        const QString key = QStringLiteral("net.ipv4.conf.%1.send_redirects").arg(n);
+        const QString cur = sysctlRead(key);
+        if (cur.isEmpty())
+            continue;
+        m_savedRedirects.insert(n, cur);
+        sysctlWrite(key, QStringLiteral("0"));
+    }
+    // 落盘，供下次启动做崩溃恢复。
+    QFile f(redirStatePath());
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QString body;
+        for (auto it = m_savedRedirects.constBegin(); it != m_savedRedirects.constEnd(); ++it)
+            body += it.key() + QLatin1Char('=') + it.value() + QLatin1Char('\n');
+        f.write(body.toUtf8());
+        f.close();
+    }
+}
+
+void TproxyRules::restoreRedirects()
+{
+    for (auto it = m_savedRedirects.constBegin(); it != m_savedRedirects.constEnd(); ++it)
+        sysctlWrite(QStringLiteral("net.ipv4.conf.%1.send_redirects").arg(it.key()), it.value());
+    m_savedRedirects.clear();
+    QFile::remove(redirStatePath()); // 正常还原完就把存档撤掉，别让下次启动重复还原
+}
+
+
+// iptables 侧的放行。**这条不是冗余，是必需的。**
+//
+// 头文件里原来的说法是「用独立 nft 链就能绕开 Docker 把 FORWARD 设成 policy DROP」——真机实测
+// 推翻了它：netfilter 在同一个 hook 上会依次跑**所有** base chain，我们在自己的 nft 链里 accept
+// 只结束自己那条链的遍历，iptables 的 filter/FORWARD 照样跑，它的 DROP 才是最终裁决。
+// 证据（Pi 上 Docker 环境，10 个 ping）：
+//     Chain FORWARD (policy DROP 42724893 → 42724903)   ← 正好 +10
+//   而 FORWARD 里的 ACCEPT 全部限定在 docker0 上，eth0→eth0 的转发一条都不匹配，直落 policy。
+// 症状是「TCP 上网完全正常、ICMP 全丢」：TCP/UDP 在 prerouting 就被 tproxy 截走，压根不进转发
+// 路径；只有 ICMP 这类既不是 TCP 也不是 UDP 的流量才真的走内核转发，于是只有它撞上 DROP。
+//
+// 插到 DOCKER-USER（Docker 官方留给用户的钩子，它保证在自己的规则之前执行且不会清掉用户规则）；
+// 没装 Docker 就直接插 FORWARD 头部。规则用 --comment 打上标记，退出/崩溃后按标记精确删除。
+static const char *kIptComment = "coast-tproxy";
+
+static QString iptChain()
+{
+    // DOCKER-USER 存在就优先用它——直接改 FORWARD 头部会被 Docker 重启时的规则重排冲掉。
+    if (run(QStringLiteral("iptables"), {QStringLiteral("-n"), QStringLiteral("-L"),
+                                         QStringLiteral("DOCKER-USER")})
+        == 0)
+        return QStringLiteral("DOCKER-USER");
+    return QStringLiteral("FORWARD");
+}
+
+void TproxyRules::ensureIptablesForward()
+{
+    if (QStandardPaths::findExecutable(QStringLiteral("iptables")).isEmpty()
+        && !QFile::exists(QStringLiteral("/usr/sbin/iptables")))
+        return; // 纯 nft 系统且没有 Docker，多半 policy 就是 accept，无需插手
+    removeIptablesForward(); // 先清残留，避免重复插
+    const QString chain = iptChain();
+    for (const QString &in : m_spec.ifnames) {
+        for (const QString &out : m_spec.ifnames) {
+            run(QStringLiteral("iptables"),
+                {QStringLiteral("-I"), chain, QStringLiteral("1"), QStringLiteral("-i"), in,
+                 QStringLiteral("-o"), out, QStringLiteral("-m"), QStringLiteral("comment"),
+                 QStringLiteral("--comment"), QString::fromLatin1(kIptComment),
+                 QStringLiteral("-j"), QStringLiteral("ACCEPT")});
+        }
+    }
+}
+
+void TproxyRules::removeIptablesForward()
+{
+    if (QStandardPaths::findExecutable(QStringLiteral("iptables")).isEmpty()
+        && !QFile::exists(QStringLiteral("/usr/sbin/iptables")))
+        return;
+    // 按 comment 找回自己插过的规则再删 —— 不依赖当时的网卡名，所以 kill -9 之后的清理也管用。
+    for (const QString &chain : {QStringLiteral("DOCKER-USER"), QStringLiteral("FORWARD")}) {
+        for (int guard = 0; guard < 32; ++guard) { // 防御性上限，别在异常输出上死循环
+            QString out;
+            if (run(QStringLiteral("iptables"), {QStringLiteral("-S"), chain}, &out) != 0)
+                break;
+            QString victim;
+            for (const QString &line : out.split(QLatin1Char('\n'))) {
+                if (line.startsWith(QStringLiteral("-A "))
+                    && line.contains(QString::fromLatin1(kIptComment))) {
+                    victim = line;
+                    break;
+                }
+            }
+            if (victim.isEmpty())
+                break;
+            QStringList args = victim.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+            args[0] = QStringLiteral("-D");
+            // --comment 的值在 -S 输出里带引号，去掉才能原样传回去
+            for (QString &a : args)
+                a.remove(QLatin1Char('"'));
+            if (run(QStringLiteral("iptables"), args) != 0)
+                break;
+        }
+    }
+}
+
 bool TproxyRules::install(const Spec &spec, QString *err)
 {
     if (m_installed) {
@@ -167,6 +322,27 @@ bool TproxyRules::install(const Spec &spec, QString *err)
     // 记下并打开转发（只在需要时打开，remove() 还原——不擅自改变用户的系统设置）。
     m_savedIpForward = sysctlRead(QStringLiteral("net.ipv4.ip_forward"));
     sysctlWrite(QStringLiteral("net.ipv4.ip_forward"), QStringLiteral("1"));
+    // ★ 必须同时关掉 ICMP 重定向的**发送**，否则我们会亲手把流量赶出代理。
+    //
+    // 打开转发之后，内核对「从 eth0 进来、又要从 eth0 出去」的包会给上一跳发 ICMP redirect
+    // （"这条路你直接走，别绕我"）。而透明网关的整个前提就是 ARP 抢答把双向流量都引到本机，
+    // 所以**每一个**转发包都命中这个条件。真机抓到的原话：
+    //     192.168.20.91 > 192.168.20.1: ICMP redirect 192.168.20.239 to host 192.168.20.239
+    // ——我们在告诉**真实路由器**：发给这台被劫持设备的包别走我，直接给它。路由器一采信，
+    // 该设备的回程流量就整条绕开代理。同一机制对被劫持设备侧同样成立（去程绕开）。
+    // 症状先从 ICMP 露出来：TPROXY 模式下 ping 网关 1000 包只回 56 个，重测直接 100% 丢；
+    // 而 TCP 看着一切正常（TCP 在 prerouting 就被 tproxy 截走，压根不进转发路径，不触发重定向）
+    // —— 「能上网但 ping 不通」正是这个洞的伪装。lwIP 那条路没有此问题：它全程用户态处理，
+    // 从不使用内核转发。
+    //
+    // ★ 必须**逐网卡**关。内核对 send_redirects 取的是 all 与 per-device 的**或**
+    //   （IN_DEV_ORCONF），只把 all 写成 0 挡不住任何一张已存在的网卡；`default` 更只对
+    //   之后新建的网卡生效。真机验证过这个区别：只关 all+default 时，重定向照发不误
+    //   （IcmpOutRedirects 在 10 个 ping 期间仍 +6，tcpdump 也照样抓得到）。
+    //   所以这里遍历 /proc/sys/net/ipv4/conf/* 全关，并逐张记下原值，remove() 时精确还原。
+    saveAndDisableRedirects();
+    ensureIptablesForward(); // Docker 的 FORWARD policy DROP 会吃掉一切内核转发，见上
+
     // ★ **故意不打开 IPv6 转发**，而且下面还有一条 v6 兜底丢弃链。
     //
     // 这条 tproxy 规则集目前只覆盖 IPv4。第一版这里跟着 v4 一起把 ipv6 forwarding 也打开了，
@@ -352,6 +528,9 @@ void TproxyRules::remove()
                                QStringLiteral("table"), table});
     sysctlWrite(QStringLiteral("net.ipv4.ip_forward"), m_savedIpForward);
     sysctlWrite(QStringLiteral("net.ipv4.conf.all.route_localnet"), m_savedRouteLocalnet);
+    // 还原重定向开关：不擅自留下改动过的系统设置（关掉它对普通路由器是有害的）。
+    restoreRedirects();
+    removeIptablesForward();
     m_savedIpForward.clear();
     m_savedRouteLocalnet.clear();
     m_installed = false;

@@ -39,6 +39,7 @@
 // 回退到 lwIP 数据面——**不可用时必须回退，不能半开着**（半开 = 设备断网）。
 // 权限：需要 root/CAP_NET_ADMIN。
 
+#include <QHash>
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
@@ -51,6 +52,9 @@ public:
         quint16 dnsPort = 0;    // 核心的 DNS 监听端口；0 = 不劫持 DNS
         quint32 fwmark = 0x1;   // TPROXY 打的标记，配合下面的策略路由把包留在本机
         int routeTable = 0x63;  // 策略路由表号（99）。只放一条 `local default dev lo`
+        // 网关接管的网卡名。用于往 iptables 的 FORWARD/DOCKER-USER 里插一条**限定到这些网卡**
+        // 的 ACCEPT —— 见 ensureIptablesForward() 的论证：光有 nft 链挡不住 Docker 的 policy DROP。
+        QStringList ifnames;
     };
 
     TproxyRules() = default;
@@ -108,6 +112,17 @@ private:
     QString m_savedIpForward;
     // route_localnet 原值（只有开了 DNS 劫持才会动它；见 install/remove 里的说明）。
     QString m_savedRouteLocalnet;
+    // 装载前每张网卡的 send_redirects 原值（网卡名 → 值）。见 install() 里那段：透明网关必须
+    // 关掉它，否则内核会替我们向真实路由器和被劫持设备广播「别走这条路」，把流量赶出代理；
+    // 而内核取 all 与 per-device 的或，只能逐网卡关、逐网卡还原。
+    QHash<QString, QString> m_savedRedirects;
+    void saveAndDisableRedirects();
+    void restoreRedirects();
+    // 往 iptables 侧插/删「放行本网关转发」的 ACCEPT。**不能只靠 nft 的 forward_accept 链**：
+    // iptables 的 filter/FORWARD 是**另一个** base chain，我们在自己的 nft 链里 accept 只结束
+    // 本链遍历，另一条链的 DROP 仍是最终裁决。真机实测证据见 .cpp。
+    void ensureIptablesForward();
+    void removeIptablesForward();
 };
 
 // —— 自测钩子（COAST_TPROXY_SELFTEST=1）——

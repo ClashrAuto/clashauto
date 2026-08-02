@@ -826,6 +826,9 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             TproxyRules::Spec ts;
             ts.tproxyPort = m_datapath.tproxyPort;
             ts.dnsPort = m_datapath.dnsPort;
+            for (const LanGateway::NicSpec &ns : specs)
+                if (!ns.ifname.isEmpty())
+                    ts.ifnames.append(ns.ifname);
             if (!m_tproxy.install(ts, &err)) {
                 emit deviceError(QString(),
                                  QStringLiteral("TPROXY 规则装载失败（已保持未接管状态）: ") + err);
