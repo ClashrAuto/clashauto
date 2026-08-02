@@ -867,8 +867,23 @@ err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
         pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
     });
 
+    // ★ 必须夹 ConnWatch，理由与 lwipTcpRecv 里那处**完全相同**，只是这里一直漏着：
+    //   connectTo() 可能**同步** emit failed（拨 mihomo 当场失败：端口没监听/连接被拒/
+    //   本机资源紧张），我们的 failed 槽是直连的 → 当场 closeConn(c, true) → tcp_abort(pcb)
+    //   → pcb 被 memp_free 回收。而 lwIP 的 tcp_process 在 SYN_RCVD 分支里是这么写的：
+    //       TCP_EVENT_ACCEPT(...);
+    //       if (err != ERR_OK) { ...; return ERR_ABRT; }
+    //       tcp_receive(pcb);          // ← 回调回 ERR_OK 就立刻拿同一个 pcb 继续用
+    //   所以固定回 ERR_OK ＝ 让 lwIP 对**已释放的 pcb** 调 tcp_receive，读到 state=0/
+    //   local_port=0，撞死在 "tcp_receive: wrong state" 断言上 —— 整个进程 abort，
+    //   **所有**被代理设备一起断网（不只是肇事那条连接）。
+    //   真机复现：被代理设备一边 DNS 洪水(120 并发 ~3000qps)一边跑 TCP，两次两中；
+    //   纯 DNS 或纯 TCP 都不崩 —— 洪水的作用是把泵饿到迟到近 300ms，把这个平时极窄的
+    //   同步失败窗口拉大到必现。closeConn 早就算好了 aborted 并登记给 ConnWatch，
+    //   只差这里把它取出来回给 lwIP。
+    ConnWatch watch(c);
     c->socks->connectTo(g_impl->socksPort, serverIp, serverPort, user);
-    return ERR_OK;
+    return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
 }
 
 // ————————————— lwIP 内存池诊断：把 LWIP_STATS 真正读出来 —————————————
