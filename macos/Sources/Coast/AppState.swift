@@ -472,6 +472,77 @@ public final class AppState {
                 try? await Task.sleep(for: .seconds(30))
             }
         }
+        startProxiedAddressFollow()
+    }
+
+    /// 跟随被代理设备的地址变化（DHCP 续约 / 断线重连）。
+    ///
+    /// ★ **不修的话是静默彻底断网**，不是"慢一点"：PF 的 rdr 规则写的是
+    ///   `from <设备IP> -> 127.0.0.1:redir`，ARP 投毒也按 IP 单播。设备一换地址，
+    ///   规则全部落空 —— 而 ARP 那边它仍把本机当网关，于是包发过来、我们既不重定向也不 NAT，
+    ///   有去无回。真机实测（虚拟设备从 .201 换到 .251）：**成功率直接 0%**，而台账、
+    ///   PF 规则 30 秒后仍是旧地址。（Linux 那侧同样的场景还能靠普通转发跑到 67.6%，
+    ///   macOS 这条更脆。）
+    ///
+    /// 为什么不能指望原有路径：台账的地址只在 `LanBrowser.scan()` 的结果里，而那个扫描
+    /// **写在设备页的视图里**（`DevicesPage.scan()`）—— 用户不打开设备页就永远不跑；
+    /// 而且 `DeviceStore.updateAddress` 全项目**没有任何调用者**。也就是说地址跟随这件事
+    /// 此前根本没接线。
+    ///
+    /// 这里复用 ArpWatch 已经在读的系统邻居表（`arp -an`），不额外发探测；
+    /// **只在真有设备被代理时才跑**，否则整段跳过，空载零开销。
+    private func startProxiedAddressFollow() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self else { return }
+                let proxied = self.devices.proxiedDevices()
+                guard !proxied.isEmpty else { continue }
+                // 系统邻居表是 ip→mac；这里要的是「某个 MAC 现在在哪个 IP」，反过来建一张。
+                //
+                // ★ 一个 MAC 对应多个表项时不能随手取一个：邻居表里常有还没老化的陈旧条目，
+                //   而字典反转的取值顺序是不定的 —— 真机就抖过，同一台设备被依次学成
+                //   .251 → .239 → .201，中间那次是别的机器的地址、直接把接管挂错了地方。
+                //
+                //   但也**不能一律跳过**：设备换址之后「旧条目还在 + 新条目也在」恰恰是**常态**
+                //   （macOS 的 ARP 条目要十几分钟才老化），一律跳过等于永远不跟随 —— 实测就是
+                //   换址 14 秒后台账、PF 规则仍是旧地址、设备 0%。
+                //
+                //   ⚠️ **已知缺口，别当它修完了**：歧义时这里只能跳过，于是「旧条目尚未老化」
+                //   这个最常见的 DHCP 场景仍然跟不上（实测换址 14s 后台账/PF 规则仍是旧地址、
+                //   设备 0%），要等旧条目自己老化（macOS 上十几分钟）才会恢复。
+                //   试过在歧义时用 TCP 探活来分辨死活，**不成立** —— `LatencyProbe.tcpRTT`
+                //   把「连接被拒(RST，说明主机活着)」和「超时(主机不在)」都归成 unknown，
+                //   拿它判会把活着的设备判死。app 这一层根本没有可靠的死活信号。
+                //
+                //   真正无歧义的证据在**帧**里：源 MAC 与源 IP 同时出现，一眼就知道谁在哪。
+                //   Linux 那侧正是这么修的（`GatewayWorker::learnDeviceV4`，3 秒内跟上）。
+                //   macOS 上只有 **helper** 拿得到帧（它为 ARP/NDP 投毒开着 BPF），
+                //   所以完整的修法是让 helper 学到之后经 XPC 通知 app —— 那要动 XPC 契约，
+                //   是独立的一件事，没有和这次一起做。
+                var ipsOfMac: [String: [String]] = [:]
+                for (ip, mac) in LanBrowser.arpMap() { ipsOfMac[mac.lowercased(), default: []].append(ip) }
+                let ipOfMac = ipsOfMac.compactMapValues { $0.count == 1 ? $0[0] : nil }
+
+                var changed = false
+                for device in proxied {
+                    guard let current = ipOfMac[device.mac.lowercased()],
+                          !current.isEmpty, current != device.lastIP else { continue }
+                    // 这个地址已经属于**另一台**被代理的设备 → 不认（旧址被 DHCP 分给别人，
+                    // 或链路上有源 MAC/IP 不一致的帧）。认了会把 A 的接管改挂到 B 的地址上。
+                    if proxied.contains(where: { $0.mac != device.mac && $0.lastIP == current }) {
+                        continue
+                    }
+                    _ = self.devices.setProxyEnabled(mac: device.mac, true, ip: current)
+                    self.append(log: "设备 \(device.mac) 地址变了：\(device.lastIP) → \(current)，重新接管")
+                    changed = true
+                }
+                if changed {
+                    // 重建配置（规则里的 SRC-IP 要跟着走）并把接管按新地址重新下发。
+                    await self.controller.rebuildConfig()
+                }
+            }
+        }
     }
 
     private func runArpWatchOnce() {
