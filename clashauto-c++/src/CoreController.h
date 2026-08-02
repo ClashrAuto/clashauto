@@ -76,6 +76,10 @@ private:
     bool m_tunEnabled = false;
     bool m_ipv6Enabled = false;
     bool m_sysproxyActive = false; // 本会话是否真的应用过系统代理：stopProxy 据此跳过无谓的还原动作
+    // —— 核心意外退出后的有界自愈（见 .cpp 里 QProcess::finished 那段）——
+    bool m_stopRequested = false;  // 是不是我们主动停的：主动停不重启，崩溃才重启
+    int m_coreRestarts = 0;        // 本轮连续自动重启次数，起来一阵子就清零
+    qint64 m_coreStartedMs = 0;    // 上次拉起核心的时刻，用来判断「这次算不算稳住了」
 #if defined(Q_OS_MACOS)
     const void *m_macAuthRef = nullptr; // 实为 AuthorizationRef(=const AuthorizationOpaqueRef*)；const void* 避免引 Security 头且不丢 const
     bool m_helperCoreRunning = false;  // 核心是否由特权 helper（root）启动（TUN 依赖此）

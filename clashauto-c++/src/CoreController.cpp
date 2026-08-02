@@ -14,6 +14,7 @@
 #include <QRegularExpression>
 #include <QSettings>
 #include <QSysInfo>
+#include <QDateTime>
 #include <QTimer>
 
 #if defined(Q_OS_WIN)
@@ -223,6 +224,50 @@ CoreController::CoreController(AppConfig config, QObject *parent)
         stopProxy();
         emit logUpdated(tr("Clash 核心已退出，代码: %1").arg(code));
         emitStatus();
+
+        // ★ 核心**意外**退出时有界自愈地拉起来。
+        //
+        //   为什么必须做：被代理设备没有"直连"这条路——本机就是它的默认网关，核心一没，
+        //   DevicesController 会立刻撤掉劫持让设备掉回真网关（这一步是对的，fail-safe，
+        //   真机验过 ARP 秒回真路由器）。但撤完之后**没有任何人再把核心拉起来**：
+        //   coast 还活着、每秒刷「内核未运行，本轮不上劫持」，于是网关就此**永久停摆**，
+        //   直到有人去界面上手动点一次。而设备主人根本看不到这个界面 —— 他只会静默地
+        //   失去代理，且不知道发生过什么。真机实测（负载中 pkill 核心）复现的就是这个状态。
+        //
+        //   **有界**是关键，别做成崩溃循环：只连续重试 kMaxCoreRestarts 次；只要有一次
+        //   活过 kCoreStableMs 就认为稳住了、把计数清零（这样"跑了一天后崩一次"不会因为
+        //   历史计数而不救）。超出预算就彻底停手并明确记一条 —— 那时多半是配置或内核本身
+        //   坏了，无脑重启只会刷屏并反复扰动设备。
+        //
+        //   `m_stopRequested` 区分「用户/程序主动停」与「崩了」：主动停一律不重启。
+        constexpr int kMaxCoreRestarts = 3;
+        constexpr qint64 kCoreStableMs = 60000;  // 活过 1 分钟就算稳住
+        constexpr int kCoreRestartDelayMs = 2000; // 别贴着崩溃点立刻重来，给端口/文件句柄让位
+
+        if (m_stopRequested) {
+            m_stopRequested = false;
+            m_coreRestarts = 0;
+            return;
+        }
+        const qint64 aliveMs = m_coreStartedMs > 0
+                                   ? QDateTime::currentMSecsSinceEpoch() - m_coreStartedMs
+                                   : 0;
+        if (aliveMs >= kCoreStableMs)
+            m_coreRestarts = 0; // 上一次是长期稳定运行后才崩的，预算重新开始
+        if (m_coreRestarts >= kMaxCoreRestarts) {
+            emit logUpdated(tr("核心连续 %1 次异常退出，已停止自动重启——请检查配置或内核")
+                                .arg(m_coreRestarts));
+            return;
+        }
+        ++m_coreRestarts;
+        emit logUpdated(tr("核心异常退出，%1 秒后自动重启（第 %2/%3 次）")
+                            .arg(kCoreRestartDelayMs / 1000)
+                            .arg(m_coreRestarts)
+                            .arg(kMaxCoreRestarts));
+        QTimer::singleShot(kCoreRestartDelayMs, this, [this] {
+            if (!isRunning())
+                startCore(); // 起来之后 DevicesController 的 statusChanged 会把劫持重新上回去
+        });
     });
 }
 
@@ -353,6 +398,10 @@ void CoreController::startCore()
     if (isRunning()) {
         return;
     }
+    // 记下这次拉起的时刻：QProcess::finished 里据此判断「这次是不是稳定跑了一阵才崩的」，
+    // 是的话就把自动重启的预算清零（见那段注释）。
+    m_coreStartedMs = QDateTime::currentMSecsSinceEpoch();
+    m_stopRequested = false;
 
     // 集成内核先落位再取 clashExecutable()：它的「扁平优先、回退旧路径」判定依赖文件是否存在
     seedBundledCore();
@@ -471,6 +520,9 @@ void CoreController::startCore()
 
 void CoreController::stopCore()
 {
+    // 主动停：finished 槽据此**不**触发自动重启（否则用户点"停止"会被我们又拉起来）。
+    m_stopRequested = true;
+    m_coreRestarts = 0;
     stopProxy();
 #if defined(Q_OS_MACOS)
     if (m_helperCoreRunning) {
