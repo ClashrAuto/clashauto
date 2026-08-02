@@ -557,6 +557,8 @@ final class Redirector: @unchecked Sendable {
         }
         // 确保 PF 本身是开的（-E 引用计数，卸载时 -X 对应）。已开时 -E 也安全。
         _ = runPfctl(["-E"], stdin: nil)
+        // 每次装规则都重设一遍：别的服务（互联网共享等）重载主规则集会把它打回默认 10s。
+        tightenPurgeInterval()
         return nil
     }
 
@@ -614,6 +616,27 @@ final class Redirector: @unchecked Sendable {
         //   （默认 24h）—— 长连接（SSH、WebSocket、下载）必须留着。
         //   同一台子改完复测：930 / 1006 / 966 conn/s，**不再逐轮劣化**，状态峰值 9673 不再触顶，
         //   压力一停就迅速回落。
+        // ★ **别再往下调这几个值了** —— 试过，没用，原因见下。
+        //
+        //   直觉是「状态数 ≈ 连接速率 × 停留时长」，那把 closed/finwait 从 5s 压到 2s
+        //   就该减半。**实测完全没动**：4 台设备各 16 并发、合计 ~1000 conn/s、持续 60s，
+        //   5/5/10 与 2/2/5 两组的状态峰值都是 **10001**（正好顶死硬上限），
+        //   `pfctl -s info` 的 `memory` 丢包分别 388 / 469，设备侧失败数与之一一对应
+        //   （390 / 471 —— 每个失败正好对应一次 PF 丢包）。
+        //
+        //   把状态表抓出来看才明白：8000 多条全是 `FIN_WAIT_2:FIN_WAIT_2`，
+        //   而且 **`expires in 00:00:00`** —— 超时**早就到了**，只是**还没被回收**。
+        //   pf 的清扫是一个按 `set timeout interval`（默认 **10 秒**）分摊扫全表的后台线程，
+        //   所以一条到期状态最长要在表里再躺 10 秒。真正的停留时长是
+        //   `max(超时值, 清扫周期)` —— 只要超时值低于 10s，改它就是一个字都不影响。
+        //   平衡点因此固定在 1000/s × 10s = 1 万，正好撞上限，这才是那 0.5% 失败的来源。
+        //
+        //   真修法是把清扫周期调下来（见 `tightenPurgeInterval()`，实测 interval=1 之后
+        //   同一负载 **四台全 100.0%、零失败**，状态峰值 10001 → 6108，`memory` 丢包归零）。
+        //   这里保持 5/5/10 就够：它们只覆盖「设备 ↔ 本机环回」这一段（LAN + loopback，
+        //   RTT 不到 1ms），到**目标服务器**的那条连接是核心自己拨的本机 socket、**不占 PF 状态**。
+        //   `tcp.first`/`tcp.opening` 不设：默认值再大也被清扫周期盖住，压短只是白担
+        //   「慢握手被误杀」的风险。**`tcp.established` 一个字不动**（默认 24h）—— 长连接必须留着。
         let tcpTimeouts = "(tcp.closed 5, tcp.finwait 5, tcp.closing 10)"
         // DNS 是一来一回的短交互，UDP 状态没必要留满默认的 60s。
         let udpTimeouts = "(udp.first 10, udp.single 10, udp.multiple 20)"
@@ -665,6 +688,110 @@ final class Redirector: @unchecked Sendable {
 
     private func uninstallPF() {
         _ = runPfctl(["-a", Self.anchorName, "-F", "all"], stdin: nil)  // 清空我们的 anchor
+        restorePurgeInterval()
+    }
+
+    /// 干净收尾时把清扫周期还回 10s。**只在这条路上做** —— 崩溃恢复的静态 `restore()` 不碰它：
+    /// 那条路上没有改动前的快照，再写一次主规则集只是白白多一次弄坏用户防火墙的机会。
+    /// 而且这个选项**本来就不跨重启**（开机会重载 `/etc/pf.conf`），漏还的代价有上限。
+    private func restorePurgeInterval() {
+        guard !purgeTuneAbandoned, let snap = mainRulesetSnapshot() else { return }
+        _ = runPfctl(["-m", "-f", "-"], stdin: "set timeout interval 10\n" + snap.text)
+    }
+
+    // MARK: - PF 清扫周期
+
+    /// PF 到期状态的回收周期（`set timeout interval`）。macOS 默认 **10 秒**。
+    ///
+    /// 为什么非动不可：pf 的状态表是**全系统一张、硬上限 10000 条**，而清扫是一个按这个周期
+    /// 分摊扫全表的后台线程 —— 一条状态即使超时早到了，也要在表里再躺最多一个周期。
+    /// 于是真正的停留时长是 `max(per-rule 超时, interval)`，我们 anchor 里那几个 5s/10s
+    /// 全被 10s 盖住，**调它们一点用都没有**（实测见 `anchorRulesText()` 里的注释）。
+    ///
+    /// 真机实测（iMac 网关、4 台设备各 16 并发、合计 ~1000 conn/s、持续 60s）：
+    ///   · interval=10（默认）：状态峰值 **10001**（顶死上限），`memory` 丢包 388，设备侧 99.3~99.5%
+    ///   · interval=1        ：状态峰值 **6108**，`memory` 丢包 **0**，四台设备**全 100.0%**
+    ///
+    /// ★ **为什么不能用 `pfctl -m -f` 只喂这一行**（这是个会把网关整死的坑，别踩）：
+    ///   `-m` 只保证「没写到的**选项**保持原值」，**规则集照样按文件内容整体替换**。
+    ///   喂一个只有 `set timeout interval 1` 的文件 = 主规则集被清空 ——
+    ///   `anchor "com.apple/*"` / `rdr-anchor "com.apple/*"` 这些**锚点引用全没了**。
+    ///   我们的 `com.apple/coast.redirect` 规则还在、`pfctl -s Anchors` 也看得见，
+    ///   但主规则集里再没有东西去引用它，于是**永远不会被求值**，网关静默失效。
+    ///   `/etc/pf.conf` 开头那段注释就是在说这件事（"the nested anchors rely on the
+    ///   anchor point defined here"）。真机上验证过：确实被清空了。
+    ///
+    ///   所以这里**先把当前主规则集原样读回来**（四个 dump 拼起来就是完整的一份，
+    ///   而且本身就是合法的 pf.conf 语法），把选项加在最前面，再整份灌回去。
+    ///   不读 `/etc/pf.conf` 而读实时状态，是为了保住**系统服务动态插进来的锚点**
+    ///   （互联网共享等，`/etc/pf.conf` 里没有）—— 直接重载 pf.conf 会把它们丢掉。
+    ///
+    /// 装完会**逐条核对**主规则集是否与改动前完全一致；只要少了一行就立刻从
+    /// `/etc/pf.conf` 复原并放弃（`purgeTuneAbandoned` 置位，之后不再尝试）——
+    /// 宁可回到 10001 顶格的老样子，也不能让用户的防火墙缺一条规则。
+    private var purgeTuneAbandoned = false
+
+    /// 读回当前主规则集。返回 (给 pfctl 重灌用的文本, 用于比对的行集合)。
+    /// 顺序照 `/etc/pf.conf` 的既定顺序：scrub → nat/rdr → dummynet → filter。
+    private func mainRulesetSnapshot() -> (text: String, lines: [String])? {
+        func dump(_ what: String) -> [String]? {
+            guard let out = pfctlOutput(["-s", what]) else { return nil }
+            return out.split(separator: "\n").map(String.init)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+        }
+        guard let rules = dump("rules"), let nat = dump("nat"),
+              let dn = dump("dummynet") else { return nil }
+        let scrub = rules.filter { $0.hasPrefix("scrub") }
+        let filt = rules.filter { !$0.hasPrefix("scrub") }
+        let ordered = scrub + nat + dn + filt
+        return (ordered.joined(separator: "\n") + "\n", ordered)
+    }
+
+    /// 把 `set timeout interval` 压到 1 秒。幂等；失败或校验不过就自动复原并永久放弃。
+    private func tightenPurgeInterval() {
+        guard !purgeTuneAbandoned else { return }
+        // 已经是 1s 就别动 —— 每写一次主规则集就多一次弄坏用户防火墙的机会，能省则省。
+        if let t = pfctlOutput(["-s", "timeouts"]),
+           t.split(separator: "\n").contains(where: {
+               $0.hasPrefix("interval") && $0.contains(" 1s") }) {
+            return
+        }
+        guard let before = mainRulesetSnapshot(), !before.lines.isEmpty else {
+            Audit.log("PF: 读不回主规则集，跳过清扫周期调优（保持默认 interval=10s）")
+            purgeTuneAbandoned = true
+            return
+        }
+        guard runPfctl(["-m", "-f", "-"],
+                       stdin: "set timeout interval 1\n" + before.text) else {
+            Audit.log("PF: 设置 interval 失败，尝试复原主规则集")
+            _ = runPfctl(["-f", "/etc/pf.conf"], stdin: nil)
+            purgeTuneAbandoned = true
+            return
+        }
+        // 核对：主规则集必须一行不差。少一行就说明我们把用户的防火墙改坏了。
+        guard let after = mainRulesetSnapshot(), after.lines == before.lines else {
+            Audit.log("PF: 主规则集在设置 interval 后发生变化，立即从 /etc/pf.conf 复原并放弃调优")
+            _ = runPfctl(["-f", "/etc/pf.conf"], stdin: nil)
+            purgeTuneAbandoned = true
+            return
+        }
+        Audit.log("PF: 状态清扫周期 interval=1s（默认 10s）—— 主规则集 \(after.lines.count) 条已原样保留")
+    }
+
+    /// 跑 pfctl 并拿回 stdout（拿不到就返回 nil）。
+    private func pfctlOutput(_ arguments: [String]) -> String? {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/sbin/pfctl")
+        task.arguments = arguments
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        guard (try? task.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     @discardableResult
