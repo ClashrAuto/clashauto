@@ -19,9 +19,18 @@ public final class CoastController {
     /// 助手未启用时都是 false（见 `syncRedirect` 各分支）。
     public private(set) var v6GatewayActive = false
 
-    public var onLog: ((String) -> Void)?
+    /// 这条流里**两种消息都有**：本类自己的编排消息（`.notice`/`.routine`）和核心
+    /// 进程吐出来的原文（`.core`）。收集端靠 `LogKind` 分流 —— 以前它整条被当成
+    /// 「核心日志」，于是主日志被核心刷屏、内核页里混着程序自己的动作。
+    public var onLog: ((String, LogKind) -> Void)?
     /// 核心二进制缺失，UI 据此引导用户去「设置 → 系统」下载。
     public var onCoreMissing: ((String) -> Void)?
+
+    /// 转发给 `CoreProcess`：日志页开着才收核心原文。见那边的说明。
+    public var streamsCoreOutput: Bool {
+        get { core.streamsCoreOutput }
+        set { core.streamsCoreOutput = newValue }
+    }
 
     private var config: AppConfig
     private let core: CoreProcess
@@ -54,7 +63,7 @@ public final class CoastController {
         isTunEnabled = config.tun
 
         core.privilegedLauncher = helper
-        core.onLog = { [weak self] message in self?.log(message) }
+        core.onLog = { [weak self] message, kind in self?.onLog?(message, kind) }
         core.onCoreMissing = { [weak self] path in self?.onCoreMissing?(path) }
         core.onUnexpectedExit = { [weak self] in
             Task { await self?.handleUnexpectedCoreExit() }
@@ -287,7 +296,7 @@ public final class CoastController {
             do {
                 try await helper.setSystemProxy(enabled: true, host: config.host, port: config.mixedPort)
                 systemProxyActive = true
-                log("Start sysproxy ok!")
+                log("Start sysproxy ok!", .routine)
                 return
             } catch {
                 log("设置系统代理失败（helper）：\(error)")
@@ -298,7 +307,7 @@ public final class CoastController {
         do {
             try systemProxy.enable(host: config.host, port: config.mixedPort)
             systemProxyActive = true
-            log("Start sysproxy ok!")
+            log("Start sysproxy ok!", .routine)
         } catch {
             log("设置系统代理失败：\(error)")
         }
@@ -314,7 +323,7 @@ public final class CoastController {
             catch { log("还原系统代理失败：\(error)") }
         }
         systemProxyActive = false
-        log("Stop sysproxy ok!")
+        log("Stop sysproxy ok!", .routine)
     }
 
     // MARK: - TUN
@@ -496,7 +505,7 @@ public final class CoastController {
                            mixedPort: config.mixedPort, secret: config.secret)
         do {
             try await api.reloadConfig(path: path.path)
-            log("Clash 配置已重载")
+            log("Clash 配置已重载", .routine)
         } catch {
             log("重载 Clash 配置失败: \(error)")
         }
@@ -547,5 +556,7 @@ public final class CoastController {
         }
     }
 
-    private func log(_ message: String) { onLog?(message) }
+    /// 默认 `.notice`：本类的消息都是程序自己的动作/结论。每次开关都会刷一条的
+    /// 例行回执显式标 `.routine`（页脚不显示它们，日志页照收）。
+    private func log(_ message: String, _ kind: LogKind = .notice) { onLog?(message, kind) }
 }

@@ -1,3 +1,4 @@
+import AppKit
 import CoastKit
 import SwiftUI
 
@@ -8,9 +9,10 @@ import SwiftUI
 /// Qt 那边是独立顶层窗（600×560）；这里沿用本项目既有做法以 sheet 呈现（`ConnectionsView`
 /// 与 `RulesEditor` 同样如此），尺寸取 Qt 的 600×560。
 ///
-/// ★ **一处刻意的行为差异**：「程序」页的「更新」不做自动下载安装，只打开发布页。
-///   自动替换 .app 要处理签名、公证与「正在运行的自己」，风险远大于省下的那两步点击 ——
-///   这是既有决定，不是这次移植漏了。内核与 GeoIP 两页是**真的**在下载安装。
+/// 三页都是**真的**在下载安装。「程序」页走 `AppUpdater`：下载 dmg/zip → 校验 sha256 →
+/// 放出替换脚本 → 退出进程，脚本等本进程死透后覆盖 .app 并重启（Qt 的
+/// `launchSilentUpdateAndRestartMac` 同一套）。开发期直跑（不是 .app）没有可替换的目标，
+/// 那条路回退成打开发布页。
 struct UpdateView: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
@@ -263,13 +265,49 @@ struct UpdateView: View {
         guard !busy else { return }
         switch tab {
         case .app:
-            // 只打开发布页 —— 不做自动下载安装（见类型注释）。
-            state.openReleasePage()
-            status = "已打开发布页，请手动下载安装".t
+            work = Task { await runAppUpdate() }
         case .core:
             work = Task { await runCoreUpdate() }
         case .geoip:
             work = Task { await runGeoIPUpdate() }
+        }
+    }
+
+    private func runAppUpdate() async {
+        guard let release = state.appRelease else {
+            // 打开窗就查过一轮（`load()`），还拿不到就是检查失败（限流/断网），
+            // 让用户先看到检查为什么失败，而不是在这儿闷头再试一次下载。
+            status = "尚未取得发布信息，请稍后重试".t
+            return
+        }
+        busy = true
+        defer { busy = false; progress = nil }
+        let updater = AppUpdater(useMirror: state.config.mirror,
+                                 proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
+        do {
+            let staged = try await updater.stage(release: release) { step in
+                Task { @MainActor in
+                    switch step {
+                    case .downloading(let percent): progress = percent
+                    case .verifying: progress = nil; status = "校验中…".t
+                    case .installing: progress = nil; status = "准备安装…".t
+                    }
+                }
+            }
+            // 替换脚本已经在外面等着了，本进程必须退出它才动手。
+            // terminate 走 AppDelegate 的清理路径（停核心、还原系统代理）——
+            // 脚本最多等 60 秒，比清理所需的时间富余得多。
+            status = String(format: "已就绪（%@），正在退出安装…".t, staged.assetName)
+            try? await Task.sleep(for: .milliseconds(300))   // 让状态那行来得及画出来
+            // ★ 必须走「真退」入口：⌘Q 那道守门把普通 terminate 当「收窗口」拦下 ——
+            //   拦下的话替换脚本等不到进程退出，更新永远装不上。
+            AppDelegate.shared?.terminateForReal() ?? NSApplication.shared.terminate(nil)
+        } catch AppUpdater.UpdateError.notInAppBundle {
+            // 开发期直跑：没有可替换的 .app，退回打开发布页手动装。
+            state.openReleasePage()
+            status = "当前不是从 .app 运行，已打开发布页请手动安装".t
+        } catch {
+            status = String(format: "程序更新失败：%@".t, error.localizedDescription)
         }
     }
 

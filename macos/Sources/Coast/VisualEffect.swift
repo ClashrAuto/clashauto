@@ -40,17 +40,28 @@ struct VisualEffectBackground: NSViewRepresentable {
 ///   一块和背景色差不多的灰。实测：不设的话把窗口挪到屏幕两端，侧栏像素只从
 ///   #3C4045 变到 #3B3D3C —— 几乎不动，那不是玻璃，是灰底。
 struct WindowConfigurator: NSViewRepresentable {
+    /// 是否把标题栏抬到与页面顶栏同高（挂空 toolbar）。主窗和连接窗都要 ——
+    /// 它们的顶栏就钉在那条带子里。不需要的窗传 false，保持标准 28。
+    var unifiesTitleBar = true
+
+    final class Coordinator {
+        var tokens: [NSObjectProtocol] = []
+        deinit { tokens.forEach(NotificationCenter.default.removeObserver) }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        DispatchQueue.main.async { configure(view.window) }
+        DispatchQueue.main.async { configure(view.window, context.coordinator) }
         return view
     }
 
     func updateNSView(_ view: NSView, context: Context) {
-        DispatchQueue.main.async { configure(view.window) }
+        DispatchQueue.main.async { configure(view.window, context.coordinator) }
     }
 
-    private func configure(_ window: NSWindow?) {
+    private func configure(_ window: NSWindow?, _ coordinator: Coordinator) {
         guard let window else { return }
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -59,25 +70,119 @@ struct WindowConfigurator: NSViewRepresentable {
         window.hasShadow = true
 
         if #available(macOS 26.0, *) {
-            // 26：标题栏加高到与页面顶部导航栏一带同高（≈ 顶距 10 + 栏高 28 那一带）。
-            // 做法是挂一个**空的** NSToolbar —— 这是把标题栏抬到统一工具栏高度、
-            // 让红绿灯在其中垂直居中的受支持写法；transparent 保证不画任何工具栏底。
+            // 26：标题栏加高到与页面顶栏同高。做法是挂一个**空的** NSToolbar ——
+            // 这是把标题栏抬到统一工具栏高度、让红绿灯在其中垂直居中的受支持写法；
+            // transparent 保证不画任何工具栏底。
             window.titlebarAppearsTransparent = true
+            guard unifiesTitleBar else { return }
             if window.toolbar == nil {
                 let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
                 toolbar.showsBaselineSeparator = false
                 window.toolbar = toolbar
             }
             window.toolbarStyle = .unified
+            // ★ 每次都按当前状态摆正，而不是只在通知里翻。通知是「转场开始/结束」的
+            //   一次性事件，漏一次（或者被转场本身覆盖掉）带子就回不来了 ——
+            //   实测退出全屏后标题栏停在标准 28，而我们的顶栏还是 50，红绿灯中心 14、
+            //   顶栏中心 24，差 10 明显错位。`configure` 每轮布局都跑，能自愈。
+            window.toolbar?.isVisible = !window.styleMask.contains(.fullScreen)
+            observeFullScreen(window, coordinator)
         }
+    }
+
+    /// ★ **不收起的话全屏后窗口顶上是一条纯白的空带**。窗口模式下这个 toolbar 是空的没关系
+    ///   —— 它只负责把标题栏抬到 50，我们自己的顶栏正好铺在那条带子上，谁也看不见它。
+    ///   可全屏时系统把标题栏收走、却**把 toolbar 留下**并单独给它画一条不透明的底：
+    ///   于是顶上多出一条白带，里面一个东西都没有（它本来就是空的），
+    ///   而我们的顶栏被挤到白带下面。主窗和连接窗都中招。
+    ///
+    ///   收起 toolbar 之后全屏就没有这条带子了，安全区归零，顶栏直接顶到屏幕上沿 ——
+    ///   也正是全屏该有的样子（那 50 本来就是为了让红绿灯有地方待，全屏没有红绿灯）。
+    /// ★ 收的时机用 `willEnter`（转场前就藏掉，全屏动画里不会闪一下白带），
+    ///   放的时机必须用 **`didExit`** —— `willExit` 太早，转场过程本身会把它又摁回去。
+    @available(macOS 26.0, *)
+    private func observeFullScreen(_ window: NSWindow, _ coordinator: Coordinator) {
+        guard coordinator.tokens.isEmpty else { return }
+        let center = NotificationCenter.default
+        coordinator.tokens = [
+            center.addObserver(forName: NSWindow.willEnterFullScreenNotification,
+                               object: window, queue: .main) { note in
+                MainActor.assumeIsolated { (note.object as? NSWindow)?.toolbar?.isVisible = false }
+            },
+            center.addObserver(forName: NSWindow.didExitFullScreenNotification,
+                               object: window, queue: .main) { note in
+                MainActor.assumeIsolated { (note.object as? NSWindow)?.toolbar?.isVisible = true }
+            },
+        ]
+    }
+}
+
+/// 让**附属窗**能进全屏。
+///
+/// ★ SwiftUI 给次级 `Window` scene 的 collectionBehavior 是
+///   `[.auxiliary, .fullScreenAuxiliary]`（实测 131328）。`fullScreenAuxiliary` 的语义是
+///   「可以**跟着别的窗**一起待在全屏空间里」，**它自己进不去** —— 于是绿灯点下去只是
+///   zoom（铺满可用区），永远进不了全屏。主窗那份是 `[.primary, .fullScreenPrimary]`
+///   （65664），所以主窗一直好用，这个坑只在附属窗上。
+///
+/// ★ **设一次不够**：SwiftUI 会在窗口建好之后把它改回去。实测设完立刻读回是 131200
+///   （aux 位已摘、primary 已加），6 秒后又变回 131328。所以挂上 `didUpdateNotification`
+///   一直盯着 —— 那个通知在窗口活跃时每轮事件循环都来，而这里只是两次位测试，命中才写。
+struct FullScreenCapableWindow: NSViewRepresentable {
+
+    final class Coordinator {
+        var token: NSObjectProtocol?
+        deinit { if let token { NotificationCenter.default.removeObserver(token) } }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { attach(view.window, context.coordinator) }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async { attach(nsView.window, context.coordinator) }
+    }
+
+    private func attach(_ window: NSWindow?, _ coordinator: Coordinator) {
+        guard let window else { return }
+        Self.makePrimary(window)
+        guard coordinator.token == nil else { return }
+        coordinator.token = NotificationCenter.default.addObserver(
+            forName: NSWindow.didUpdateNotification, object: window, queue: .main
+        ) { note in
+            guard let updated = note.object as? NSWindow else { return }
+            MainActor.assumeIsolated { Self.makePrimary(updated) }
+        }
+    }
+
+    @MainActor
+    private static func makePrimary(_ window: NSWindow) {
+        let behavior = window.collectionBehavior
+        guard !behavior.contains(.fullScreenPrimary) || behavior.contains(.fullScreenAuxiliary)
+        else { return }
+        window.collectionBehavior.remove(.fullScreenAuxiliary)
+        window.collectionBehavior.insert(.fullScreenPrimary)
+    }
+}
+
+extension View {
+    /// 让承载它的窗口能进全屏（附属窗默认不能，见 `FullScreenCapableWindow`）。
+    func allowsFullScreen() -> some View {
+        background(FullScreenCapableWindow().frame(width: 0, height: 0))
     }
 }
 
 extension View {
     /// 给整窗铺一层毛玻璃底（并把窗口本身设为透明，否则材质无效）。
-    func windowGlass(_ material: NSVisualEffectView.Material = .sidebar) -> some View {
+    func windowGlass(_ material: NSVisualEffectView.Material = .sidebar,
+                     unifiesTitleBar: Bool = true) -> some View {
         background(VisualEffectBackground(material: material).ignoresSafeArea())
-            .background(WindowConfigurator().frame(width: 0, height: 0))
+            .background(WindowConfigurator(unifiesTitleBar: unifiesTitleBar)
+                .frame(width: 0, height: 0))
     }
 }
 

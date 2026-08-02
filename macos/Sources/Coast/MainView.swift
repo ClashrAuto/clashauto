@@ -166,21 +166,31 @@ struct MainView: View {
 
     private var footer: some View {
         HStack(spacing: 5) {
-            // Qt 这个图标是 14（比旁边 12 的日志文字大一档），原来写成了 12。
-            Image(systemName: "terminal")
-                .font(.system(size: 14))
-                .foregroundStyle(theme.textMuted)
+            // 这一行只放**程序侧、值得看见的**那条（`LogKind.notice`）：核心原文和
+            // 「Start sysproxy ok!」这类每次开关都会刷的例行回执都不进来 ——
+            // 页脚只有一行，被它们占着的话真正要看的错误永远露不出来。
+            //
+            // 空着时**连图标一起收掉**：一个孤零零的终端图标后面什么都没有，看着像坏了。
+            // 刚启动、还没有任何值得说的事情时就是这个状态。
+            if state.lastLog.isEmpty {
+                Spacer(minLength: 0)
+            } else {
+                // Qt 这个图标是 14（比旁边 12 的日志文字大一档），原来写成了 12。
+                Image(systemName: "terminal")
+                    .font(.system(size: 14))
+                    .foregroundStyle(theme.textMuted)
 
-            Text(state.lastLog)
-                .font(.system(size: 12))
-                .foregroundStyle(theme.textSecondary)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                // ★ 让日志行**先**被压缩。不给优先级的话，SwiftUI 会去截右侧按钮上的
-                //   文字 —— 展开模式按钮组时第一个选项就变成了「…」，按钮上的字没了，
-                //   而左边那行日志本来就是可有可无的信息。
-                .layoutPriority(0)
+                Text(state.lastLog)
+                    .font(.system(size: 12))
+                    .foregroundStyle(theme.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    // ★ 让日志行**先**被压缩。不给优先级的话，SwiftUI 会去截右侧按钮上的
+                    //   文字 —— 展开模式按钮组时第一个选项就变成了「…」，按钮上的字没了，
+                    //   而左边那行日志本来就是可有可无的信息。
+                    .layoutPriority(0)
+            }
 
             FooterSwitch(label: "增强".t, isOn: state.controller.isTunEnabled) { state.toggleTun() }
             FooterSwitch(label: "网页".t, isOn: state.controller.isProxyEnabled) { state.toggleProxy() }

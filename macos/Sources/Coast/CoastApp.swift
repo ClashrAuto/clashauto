@@ -25,6 +25,14 @@ struct CoastApp: App {
         .commands {
             // 默认的「新建窗口」对常驻托盘的单窗应用没有意义，去掉免得用户开出第二个。
             CommandGroup(replacing: .newItem) {}
+            // ⌘Q = **只收窗口**（与 ✕ 一致），真正退出只在托盘菜单「退出程序」。
+            // 代理客户端退出 = 整机断代理，而 ⌘Q 太容易顺手按到 —— Qt 版就因此
+            // 接过「按了 Cmd+Q 网怎么断了」的反馈。菜单文字也换掉：
+            // 写着「退出」实际只是收窗口的话，就成了另一种撒谎。
+            CommandGroup(replacing: .appTermination) {
+                Button("关闭窗口".t) { AppDelegate.shared?.hideToTray() }
+                    .keyboardShortcut("q")
+            }
         }
 
         // 更新窗是**独立顶层窗**，不是 sheet —— 与 Qt 一致，而且这里有个硬理由：
@@ -57,6 +65,12 @@ struct CoastApp: App {
                 .nonRestorableWindow()
         }
         .defaultSize(width: 720, height: 480)
+        // 顶栏（Online/Offline + 搜索）钉在标题栏那条带子里，所以系统标题栏必须让位：
+        // 这一句给的是「透明 + 内容铺满整窗（fullSizeContentView）+ 不画标题文字」。
+        // ★ 从 AppKit 侧补 `fullSizeContentView` **顶不上**它 —— 试过，窗口顶部照样是
+        //   一条不透明白带、顶栏被整个盖住。带子的**高度**则由 `unifiedTitleBar()` 抬
+        //   （见那边）。红绿灯与拖动都还在，只是和顶栏并成了一条。
+        .windowStyle(.hiddenTitleBar)
     }
 }
 
@@ -130,7 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 点 ✕ **不退出程序**，只隐藏窗口。
     ///
     /// 这是刻意的：代理客户端常驻托盘，✕ 直接退会连带停掉核心与系统代理，用户以为只是关个窗，
-    /// 结果整机断代理。真正退出走托盘菜单「退出程序」或 Cmd+Q。
+    /// 结果整机断代理。⌘Q 同理（见 scene 的 commands）—— 真正退出只有托盘菜单「退出程序」。
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// 点 Dock 图标重新打开主窗（窗口被 ✕ 隐藏后回来的方式之一；另一条是托盘的「控制面板」）。
@@ -146,7 +160,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return false
     }
 
+    /// 托盘「退出程序」置位。没有它的 terminate 一律按「收窗口」处理（见下）。
+    private var quitConfirmed = false
+
+    /// 真正退出的唯一入口（托盘菜单，以及程序自更新那条“必须退出”的路）。
+    func terminateForReal() {
+        quitConfirmed = true
+        NSApplication.shared.terminate(nil)
+    }
+
+    /// 把所有窗口收进托盘 —— 与点 ✕ 完全同一套动作（orderOut + accessory）。
+    func hideToTray() {
+        NSApplication.shared.windows.forEach { $0.orderOut(nil) }
+        NSApplication.shared.setActivationPolicy(.accessory)
+    }
+
+    /// 这次 terminate 是不是系统注销/关机/重启发起的。
+    ///
+    /// ★ 这一档**必须放行**：guard 在注销路径上返回 cancel 的话，用户的 mac 会
+    ///   「注销被 Coast 阻止」，比误退出恶劣得多。判据：系统发起的 quit 是带
+    ///   `why:` 属性的 Apple Event（logout/shutdown/restart 一族）；用户 ⌘Q 走菜单
+    ///   （没有 Apple Event），Dock 退出有事件但没有 `why:`。
+    private var terminationIsSystemInitiated: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == kAEQuitApplication else { return false }
+        return event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason)) != nil
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // 托盘点的、或系统要注销/关机 → 真退。其余一切（Dock 右键退出、AppleScript quit、
+        // 谁的 terminate 顺手波及）→ 当 ✕ 处理：收窗口、进程留着。
+        guard quitConfirmed || terminationIsSystemInitiated else {
+            hideToTray()
+            return .terminateCancel
+        }
         guard let state else { return .terminateNow }
         // 退出前必须停核心 + 还原系统代理 —— 否则用户退出应用后整机仍指着一个已经没人监听的
         // 端口，表现为「关了 Coast 就上不了网」。用 terminateLater 等清理跑完。
@@ -178,7 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         tray.onToggleCore = { state.toggleCore() }
         tray.onToggleProxy = { state.toggleProxy() }
         tray.onToggleTun = { state.toggleTun() }
-        tray.onQuit = { NSApplication.shared.terminate(nil) }
+        tray.onQuit = { [weak self] in self?.terminateForReal() }
         self.tray = tray
 
         // 每秒把流量与状态推给托盘。TrayController 内部只在真的变了时才写，不会让图标闪。
@@ -198,6 +245,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func showMainWindow() { WindowRestore.showMainWindow() }
 }
 
+
+/// 三个附属窗都要跟着**应用主题**走明暗，而不是跟系统外观。
+///
+/// ★ 少了这一句就是「主窗黑、附属窗白」：`preferredColorScheme` 原来只加在 `MainView`
+///   上，附属窗于是沿用系统外观 —— 应用主题设成深色而 macOS 是浅色时（autoTheme 关掉
+///   手选深色就是这个组合），系统材质（玻璃、`.regularMaterial`、`.primary` 文字）
+///   全按浅色渲染，整窗一片白。Qt 那边不会有这问题：它每个颜色都是自己画的。
+private extension View {
+    func followsAppTheme(_ theme: Theme) -> some View {
+        preferredColorScheme(theme.dark ? .dark : .light)
+    }
+}
+
 /// 连接窗的 scene id。
 enum MainWindowID { static let value = "coast.main" }
 
@@ -210,6 +270,7 @@ private struct ConnectionsWindowRoot: View {
             ConnectionsView()
                 .environment(state)
                 .environment(state.theme)
+                .followsAppTheme(state.theme)
         } else {
             Color.clear
         }
@@ -226,6 +287,7 @@ private struct DeviceDetailWindowRoot: View {
             DeviceDetailView()
                 .environment(state)
                 .environment(state.theme)
+                .followsAppTheme(state.theme)
         } else {
             Color.clear
         }
@@ -247,6 +309,7 @@ private struct UpdateWindowRoot: View {
             UpdateView()
                 .environment(state)
                 .environment(state.theme)
+                .followsAppTheme(state.theme)
         } else {
             // 主窗还没建好（理论上打不开这个窗，留个兜底而不是崩）。
             Color.clear
