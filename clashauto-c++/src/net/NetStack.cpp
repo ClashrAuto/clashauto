@@ -28,10 +28,6 @@ extern "C" {
 #include "lwip/memp.h"
 #include "lwip/nd6.h"
 #include "lwip/netif.h"
-// 内部头：只为 `tcp_ack_now()`（强制立刻 ACK 的标志位宏）。公共 lwip/tcp.h 没有对外暴露
-// 「现在就把 ACK 发出去」的入口，而这条链路必须要（理由见 lwipTcpRecv 末尾）。
-// 本项目已经 vendor 了 lwIP 并打过 tcp_in.c 的补丁，port 层引 priv 头是这类集成的常规做法。
-#include "lwip/priv/tcp_priv.h"
 #include "coast_lwip_diag.h"
 #include "lwip/stats.h"
 #include "lwip/tcp.h"
@@ -69,8 +65,6 @@ struct TcpConn {
     bool socksClosed = false;  // socks 侧已关闭：等 toLwip 排空后再优雅关 lwIP 侧
     bool established = false;
     bool lwipClosed = false;
-    // 这条连接的第一段设备上行数据是否已经强制 ACK 过（见 lwipTcpRecv 末尾的论证）。
-    bool ackedFirstUpSegment = false;
 };
 
 } // namespace
@@ -758,44 +752,6 @@ err_t lwipTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     if (!watch.alive())
         return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
     flushRecvWindow(c);
-    // ★ 每条连接的**第一段**设备上行数据，强制立刻 ACK 一次。
-    //
-    //   ★ 先说**没有**被证实的那个解释，免得下一个人重走一遍：起初以为是「lwIP 的延迟 ACK
-    //     定时器 250ms 撞上 Linux 客户端 200ms 的 RTO 下限」。**不成立** —— 本项目的
-    //     `TCP_TMR_INTERVAL` 早就调成了 100（见 lwipopts.h），`tcp_fasttmr` 100ms 一拍，
-    //     按理比 200ms 的 RTO 快得多。
-    //
-    //   实测到的事实是：真机抓包（Pi 网关，四设备并发、Pi 已 CPU 饱和）的一条慢连接
-    //     +0.002s GET 发出 → +0.215s GET **重传** → +0.216s 才出现 ACK → +2.720s 响应
-    //   那个 ACK 比重传只晚 1ms，说明它是**被重传触发的**（重复段会立刻 ACK），不是定时器发的。
-    //   也就是说 **+0.002 到 +0.215 这 213ms 里，延迟 ACK 一次都没送出去**，尽管定时器是
-    //   100ms 一拍。为什么没送出去，目前**没有查清**（同期诊断里 `late=0 maxLagMs=0`，
-    //   泵没有迟到，所以不是「定时器等不到泵」那条已知路径）。
-    //
-    //   在成因查清之前，这里用「第一段强制 ACK」把症状挡掉：重传本身是白跑的（请求没丢），
-    //   代价是双份请求帧 + 客户端收 cwnd。
-    //
-    //   A/B 实测（同一二进制、`COAST_NO_FIRST_ACK` 交替，四设备并发各 16 路）：
-    //     · 关闭：受影响设备 p99 **2514/2685/2645/2670ms**，速率只有其它三台的一半
-    //     · 开启：p99 **101/99.6/94.3/110.1ms**，速率与其它三台齐平
-    //   即这条修复不是「把尾巴削短一点」，而是**整个异常消失**。
-    //
-    //   ★ 关于吞吐代价：先前只用 2+2 个样本时看着像「低 5%」，扩到 4+4 之后**不成立** ——
-    //     开启 1285/1306/1152/1272（均值 1254）、关闭 1264/1316/1260/1249（均值 1272），
-    //     差 1.4%，落在轮间波动里。别再拿「5% 代价」当决策依据。
-    //
-    //   为什么不是「每段都立刻 ACK」：那会废掉延迟 ACK 的批量效果 —— 设备**上传**大文件时
-    //   每个数据段都回一帧，在 118 MB/s 的量级上是实打实的额外开销。只对第一段做，
-    //   刚好覆盖「请求-响应」这个占绝大多数的形态，每条连接只多一帧，可以忽略。
-    //   后续段仍走原来的路径：由 `flushRecvWindow` 的窗口更新或下行数据捎带。
-    // 只为 A/B 量化这一帧的代价：置 COAST_NO_FIRST_ACK=1 可关掉本优化。
-    // 同一个二进制交替跑两组，能排掉构建差异和台子漂移。生产上不设这个变量。
-    static const bool kFirstAckDisabled = qEnvironmentVariableIntValue("COAST_NO_FIRST_ACK") != 0;
-    if (!kFirstAckDisabled && !c->ackedFirstUpSegment && c->pcb && !c->lwipClosed) {
-        c->ackedFirstUpSegment = true;
-        tcp_ack_now(c->pcb);
-        tcp_output(c->pcb);
-    }
     return ERR_OK;
 }
 
