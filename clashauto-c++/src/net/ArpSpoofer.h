@@ -19,6 +19,7 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QSet>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -123,6 +124,11 @@ private:
     QVector<QByteArray> buildHealFrames(const QByteArray &victimMac,
                                         const QByteArray &victimIp) const;
     bool hasVictimMac(const QByteArray &mac6) const; // 6 字节 MAC 是否仍在被劫持集合里（延迟连发前复核）
+    // 按 6 字节 MAC 取 victim 的 4 字节 IP。m_victims 的键是**小写 MAC 字符串**，直接拿
+    // QByteArray 去 contains/value 会走 QByteArray→QString 隐式转换：编译得过、永远查不中
+    // （reassertIsolation 原先就这么写，victimIp 恒为 0.0.0.0）。查不到返回空。
+    QByteArray victimIpByMac(const QByteArray &mac6) const;
+    void seedIsolationTargets(const QByteArray &victimMac6, qint64 now);
 
     QVector<QByteArray> m_isolated;             // 被隔离设备 MAC（6 字节）
     QHash<quint32, QByteArray> m_lanMac;        // 观察学到的 局域网 IP → 真实 MAC
@@ -134,6 +140,17 @@ private:
     //   一台被禁设备扫一遍 /24 就能让我们持续发 250+ 帧/秒，多台叠加更糟 ——
     //   等于把自己变成 ARP 放大源，还是被攻击方一句 nmap 就能触发的。
     QHash<QByteArray, QHash<quint32, qint64>> m_isoAnswered;
+    // 主动毒化的**持续播种窗口**：MAC → 截止时刻。窗口内每个 tick 都从 m_lanMac 补齐目标。
+    // 不能只在「进入隔离」那一刻播一次 —— 那一刻通常是进程刚起来、m_lanMac 还基本是空的
+    // （局域网 IP→MAC 全靠被动观察 ARP 学），播了等于没播（真机上第一轮偶然成功、第二轮就漏）。
+    QHash<QByteArray, qint64> m_isoSeedUntil;
+    // ★ 「我到底毒过谁」的账本 —— 与 m_isoAnswered **分开**记，且**不参与空闲老化**。
+    //   m_isoAnswered 回答的是「还要不要继续每秒重投」，30s 不访问就该清掉(防放大)；
+    //   但设备自己的 ARP 缓存活得久得多(macOS 约 20 分钟)。两者共用一份表的后果真机踩到了：
+    //   隔离持续 90s 后目标已老化出表，此时解除隔离/退出，healIsolation 无从还原，那台**已经
+    //   不再被隔离**的设备局域网继续黑洞十几分钟(外网却正常，症状极难定位)。
+    //   上限比 kIsoMaxTargetsPerDevice 宽：它是「同一时刻重投多少」，这里是「累计毒过多少」。
+    QHash<QByteArray, QSet<quint32>> m_isoPoisoned;
     // resolveLanPeer 的每目标节流：目标 IP → 上次发 who-has 的时刻(uptime ms)。
     QHash<quint32, qint64> m_lanResolveAt;
 

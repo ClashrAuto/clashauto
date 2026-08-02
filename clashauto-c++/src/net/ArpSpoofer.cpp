@@ -33,6 +33,22 @@ static constexpr qint64 kIsoTargetIdleMs = 30000;
 // 64：一台设备真正会持续互访的局域网对端不会有这么多（NAS/打印机/网关/几台电脑）；
 // 顶到上限说明它在扫段，那正是我们要拒绝放大的场景 —— 丢掉最老的一条腾位。
 static constexpr int kIsoMaxTargetsPerDevice = 64;
+// 主动毒化的播种窗口：进入隔离后这段时间内，每个 tick 都拿最新的 m_lanMac 补齐目标。
+// 60s：足够覆盖「进程刚起来、局域网 MAC 还没学全」那段空窗（实测 50s 时仍可能漏），
+// 又不至于让设备真正不访问的对端被无限期钉住（窗口结束后照常走 kIsoTargetIdleMs 老化）。
+static constexpr qint64 kIsoSeedWindowMs = 60000;
+// 「毒过谁」账本的每设备上限。只存 quint32，256 条不到 2KB；够覆盖一个 /24 里真实存在的主机数，
+// 又不至于让一台狂扫段的设备把内存吃穿。顶到上限就不再记 —— 那些条目由设备自己老化。
+static constexpr int kIsoPoisonLedgerMax = 256;
+
+// 4 字节网络序 IP → quint32（与 m_lanMac / m_isoAnswered 的键同一编码：大端拼装）。
+static quint32 ipFromBytes(const QByteArray &b)
+{
+    if (b.size() != 4)
+        return 0;
+    const uchar *p = reinterpret_cast<const uchar *>(b.constData());
+    return (quint32(p[0]) << 24) | (quint32(p[1]) << 16) | (quint32(p[2]) << 8) | quint32(p[3]);
+}
 
 ArpSpoofer::ArpSpoofer(IL2Endpoint *endpoint, QObject *parent)
     : QObject(parent), m_endpoint(endpoint), m_timer(new QTimer(this)),
@@ -217,6 +233,14 @@ void ArpSpoofer::boostTick()
 
 void ArpSpoofer::healAll()
 {
+    // ★ 先还原隔离毒化，再还原网关劫持 —— 顺序要紧：healIsolation 要用 m_victims 查 victimIP
+    //   （伪造 request 的 tpa），下面那句 m_victims.clear() 一执行就查不到了。
+    //
+    //   healAll 原先**只**还原网关那条，隔离毒化的条目全靠设备自己老化。主动毒化上线后这
+    //   变成了实打实的故障：退出时最多 64 个对端仍指向本机，而进程已经不在了，那台设备的
+    //   局域网直接黑洞（外网却正常，症状极具迷惑性）。真机踩过一次。
+    for (const QByteArray &mac : m_isoAnswered.keys())
+        healIsolation(mac);
     if (configured()) {
         for (auto it = m_victims.constBegin(); it != m_victims.constEnd(); ++it)
             healOne(it->mac, it->ip);
@@ -256,12 +280,20 @@ void ArpSpoofer::reassertIsolation()
     if (!m_endpoint || m_isoAnswered.isEmpty())
         return;
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // 播种窗口内的设备：先拿**当前**的 m_lanMac 补齐目标，再往下重投。
+    for (const QByteArray &m : m_isolated)
+        if (now < m_isoSeedUntil.value(m, 0))
+            seedIsolationTargets(m, now);
     for (auto it = m_isoAnswered.begin(); it != m_isoAnswered.end(); ++it) {
         const QByteArray &victimMac = it.key();
         if (!m_isolated.contains(victimMac))
             continue; // 已经解除隔离，等 healIsolation 收尾
-        const QByteArray victimIp = m_victims.contains(victimMac) ? m_victims.value(victimMac).ip
-                                                                  : QByteArray(4, char(0));
+        // 必须走 victimIpByMac：m_victims 的键是小写 MAC **字符串**，拿 6 字节 QByteArray 去
+        // contains/value 会走隐式转换，编译得过但永远查不中 —— 原先这里 victimIp 恒为 0.0.0.0，
+        // 下面那条伪造 request 的 tpa 也就恒为 0，设备按 RFC 826 根本不会当成「问我」来处理。
+        QByteArray victimIp = victimIpByMac(victimMac);
+        if (victimIp.size() != 4)
+            victimIp = QByteArray(4, char(0));
         // ★ 空闲老化：设备已经不再访问的目标停止重投。没有它，一次全网段扫描留下的条目会
         //   **永久**每秒重投（实测每条约 1.08 帧/秒、完全线性）。设备自己的 ARP 缓存本来就
         //   几分钟就老化，我们钉得比它久没有意义 —— 它下次要用会重新 who-has，那时再抢答即可。
@@ -278,9 +310,20 @@ void ArpSpoofer::reassertIsolation()
             ipb[1] = char((ip >> 16) & 0xFF);
             ipb[2] = char((ip >> 8) & 0xFF);
             ipb[3] = char(ip & 0xFF);
+            // 记进「毒过谁」账本（不老化），退出/解除隔离时据此还原。
+            QSet<quint32> &ledger = m_isoPoisoned[victimMac];
+            if (ledger.size() < kIsoPoisonLedgerMax)
+                ledger.insert(ip);
             const QByteArray reply =
                     buildArpReply(victimMac, m_localMac, m_localMac, ipb, victimMac, victimIp);
             m_endpoint->send(reply);
+            // 再补一条伪造 request（op=1，tpa=victimIP/tha=victimMAC，sender 仍是 对端IP/本机MAC），
+            // 与 sendSpoof 的 (a2) 同理同据：现代系统对**非请求** reply 视而不见，缓存里已有对端
+            // 真实 MAC 时上面那条 reply 是打不动它的；只有「目标是自己」的 request 才按 RFC 826
+            // 强制吸收 sender。主动毒化能不能真盖掉热缓存，全靠这一条。
+            if (victimIp != QByteArray(4, char(0)))
+                m_endpoint->send(
+                        buildArpRequest(victimMac, m_localMac, m_localMac, ipb, victimMac, victimIp));
         }
     }
     m_endpoint->flushTx();
@@ -475,12 +518,63 @@ void ArpSpoofer::resolveLanPeer(quint32 targetIp4, quint32 ownIp4)
 
 // ———————————————————————— 局域网隔离 ————————————————————————
 
+QByteArray ArpSpoofer::victimIpByMac(const QByteArray &mac6) const
+{
+    for (auto it = m_victims.constBegin(); it != m_victims.constEnd(); ++it)
+        if (it->mac == mac6)
+            return it->ip;
+    return {};
+}
+
 void ArpSpoofer::setIsolatedMacs(const QVector<QByteArray> &macs6)
 {
+    const QVector<QByteArray> before = m_isolated;
     m_isolated.clear();
     for (const QByteArray &m : macs6) {
         if (m.size() == 6)
             m_isolated.append(m);
+    }
+    // ★ 主动毒化：设备**刚进入**隔离时，把当前已知的所有局域网对端一次性塞进重投集合。
+    //
+    //   没有这段的话隔离是纯被动的——只有设备自己 who-has 某个对端时 answerIsolationArp 才
+    //   有机会抢答，而设备的 ARP 缓存里若还留着对端的**真实** MAC（macOS 约 20 分钟、Linux
+    //   base_reachable_time 30s 起随机），它压根不会再问，流量直接 L2 直达，隔离形同虚设。
+    //   真机实测过：34 刚跟 239 通过信、缓存是热的，设成隔离后 SSH banner 照样读得到，nft 的
+    //   两条隔离规则命中都是 0（包根本没到网关）；手工 `arp -d` 清掉缓存后立刻就拦住了。
+    //
+    //   这里只打时间戳，实际发帧交给 reassertIsolation（跟着 1s tick 走）。kIsoTargetIdleMs
+    //   的空闲老化会在 30s 后把设备实际没在访问的目标清掉，所以这是个**有界**的毒化窗口，
+    //   不会退化成「一次全网段扫描留下的条目永久每秒重投」那个老问题。
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const QByteArray &m : m_isolated) {
+        if (before.contains(m))
+            continue; // 本来就在隔离中，别重开窗口
+        m_isoSeedUntil[m] = now + kIsoSeedWindowMs;
+        seedIsolationTargets(m, now); // 立刻播一次，剩下的交给 tick 补齐
+    }
+    // 解除隔离的：关掉窗口（还原由 LanGateway 侧调 healIsolation 负责）
+    for (auto it = m_isoSeedUntil.begin(); it != m_isoSeedUntil.end();) {
+        if (m_isolated.contains(it.key()))
+            ++it;
+        else
+            it = m_isoSeedUntil.erase(it);
+    }
+}
+
+// 把当前已知的局域网对端塞进某台被隔离设备的重投集合。窗口内每 tick 调一次。
+void ArpSpoofer::seedIsolationTargets(const QByteArray &victimMac6, qint64 now)
+{
+    const QByteArray ownIp = victimIpByMac(victimMac6);
+    const quint32 own = ownIp.size() == 4 ? ipFromBytes(ownIp) : 0;
+    const quint32 gw = m_gatewayIp.size() == 4 ? ipFromBytes(m_gatewayIp) : 0;
+    QHash<quint32, qint64> &tgts = m_isoAnswered[victimMac6];
+    for (auto it = m_lanMac.constBegin(); it != m_lanMac.constEnd(); ++it) {
+        // 自己不用毒；网关那条由 sendSpoof 的 (a)/(a2) 专门负责，别在这儿发重复帧。
+        if (it.key() == own || it.key() == gw)
+            continue;
+        if (tgts.size() >= kIsoMaxTargetsPerDevice && !tgts.contains(it.key()))
+            break; // 与抢答路径同一个上限，别让毒化成为放大器
+        tgts.insert(it.key(), now);
     }
 }
 
@@ -576,8 +670,17 @@ void ArpSpoofer::healIsolation(const QByteArray &victimMac6)
 {
     if (!m_endpoint || victimMac6.size() != 6)
         return;
-    const QList<quint32> targets = m_isoAnswered.value(victimMac6).keys();
+    // 按**账本**还原，不是按重投表 —— 重投表被空闲老化清过，据它还原会漏掉大半。
+    QSet<quint32> all = m_isoPoisoned.value(victimMac6);
+    const QList<quint32> answered = m_isoAnswered.value(victimMac6).keys();
+    for (quint32 ip : answered)
+        all.insert(ip);
+    const QList<quint32> targets = all.values();
     m_isoAnswered.remove(victimMac6);
+    m_isoPoisoned.remove(victimMac6);
+    QByteArray victimIp = victimIpByMac(victimMac6);
+    if (victimIp.size() != 4)
+        victimIp = QByteArray(4, char(0));
     for (quint32 ip : targets) {
         const QByteArray real = m_lanMac.value(ip);
         // ★ 不知道真实 MAC 就**不发**：胡乱还原等于再投一次毒。这种条目让设备自己老化掉
@@ -591,9 +694,17 @@ void ArpSpoofer::healIsolation(const QByteArray &victimMac6)
         ipb[2] = char((ip >> 8) & 0xFF);
         ipb[3] = char(ip & 0xFF);
         // spa=目标IP, sha=目标真实MAC → 把设备缓存改回真相。目的就是那台设备。
-        const QByteArray heal = buildArpReply(victimMac6, real, real, ipb, victimMac6, QByteArray(4, '\0'));
+        const QByteArray heal = buildArpReply(victimMac6, real, real, ipb, victimMac6, victimIp);
         m_endpoint->send(heal);
         m_endpoint->send(heal);
+        // ★ 还要发一条伪造 request（tpa=victimIP/tha=victimMAC，sender=对端IP/对端真实MAC）。
+        //   与毒化侧完全对称：只发 reply 是**还原不掉**的 —— 现代系统对非请求 reply 视而不见，
+        //   设备缓存里那条指向本机的条目会一直留到自己老化。真机实测过：解除隔离后 macOS 仍
+        //   把对端解析到网关 MAC，而此时我们已不再转发，等于把一台**没被隔离**的设备的局域网
+        //   打成黑洞（外网正常，只有 LAN 不通，很难查）。原先 tpa 还写死 0.0.0.0，
+        //   设备按 RFC 826 更不会当成「问我」来处理。
+        if (victimIp != QByteArray(4, char(0)))
+            m_endpoint->send(buildArpRequest(victimMac6, real, real, ipb, victimMac6, victimIp));
     }
     if (!targets.isEmpty())
         m_endpoint->flushTx();
