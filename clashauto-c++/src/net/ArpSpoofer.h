@@ -158,5 +158,9 @@ private:
     QByteArray m_localMac;   // 6 字节（本机 = 冒充的“网关”）
     QByteArray m_gatewayIp;  // 4 字节
     QByteArray m_gatewayMac; // 6 字节（真实网关，heal 时用）
+    // configure 被每轮扫描重复调用（真机 ~5s 一次/网卡），所以配置状态只在**翻转**时说一次。
+    // 与 NdpSpoofer 的 m_lastConfigOk/m_configLogged 同构 —— 那边早有此处理，这边漏了。
+    bool m_lastConfigOk = false;
+    bool m_configLogged = false;
     QHash<QString, Target> m_victims; // key = 小写 victimMac
 };

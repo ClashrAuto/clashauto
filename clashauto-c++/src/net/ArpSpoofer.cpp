@@ -65,8 +65,21 @@ void ArpSpoofer::configure(const QString &localMac, const QString &gatewayIp, co
     m_localMac = macToBytes(localMac);
     m_gatewayIp = ipToBytes(gatewayIp);
     m_gatewayMac = macToBytes(gatewayMac);
-    if (!configured())
-        qWarning() << "ArpSpoofer: 配置无效，欺骗将 no-op" << localMac << gatewayIp << gatewayMac;
+    // ★ 只在**状态翻转**时说一次。configure 每轮扫描都会被调用（真机实测 ~5s 一次、每网卡一次），
+    //   原来无条件 qWarning：一张没有网关的网卡就能让日志永远以 5s 一条的速度长下去 ——
+    //   实测 512s 刷了 102 行同一句话（装了 Docker 的机器人手一堆 veth，全都命中），
+    //   真正有信息的行被淹掉。NdpSpoofer::configure 早就是边沿触发的，这边一直漏着。
+    //   措辞也一并改：这多半不是「配置错了」，而是**这张卡所在链路上就没有网关**
+    //   （veth/netns/docker0 之类），属正常情况，不该报得像故障。
+    const bool ok = configured();
+    if (ok != m_lastConfigOk || !m_configLogged) {
+        m_lastConfigOk = ok;
+        m_configLogged = true;
+        if (!ok)
+            qWarning() << "ArpSpoofer: 该卡无可用网关，v4 劫持在此卡停用（正常：veth/netns 等无网关链路）"
+                       << "local=" << localMac << "gatewayIp=" << gatewayIp
+                       << "gatewayMac=" << gatewayMac;
+    }
 }
 
 void ArpSpoofer::startSpoof(const QString &victimMac, const QString &victimIp)
