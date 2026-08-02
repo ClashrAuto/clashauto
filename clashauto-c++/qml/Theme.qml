@@ -44,8 +44,10 @@ QtObject {
     readonly property int inset: 5 // mac 上主内容离窗顶/右 5px，透出玻璃
 
     // —— 字体 ——
-    // uiFont：正文/UI（MiSans）。已在 main_qml 里设为全局默认字体，故绝大多数 Text 无需显式指定；
-    //         此常量供 Canvas 等不继承应用默认字体的场景显式引用（如 BandwidthChart）。
+    // uiFont：正文/UI（MiSans）。已在 main_qml 里设为全局默认字体，故**所有** Text 都无需显式指定。
+    //         此常量留给不继承应用默认字体的场景（Canvas 的 ctx.font 之类）；目前 QML 里没有这种
+    //         用法——BandwidthChart 的文字曾经走 ctx.fillText，因性能问题已全部改成 QML Text，
+    //         见该文件头部注释。要往 Canvas 里写字之前，先读那段。
     // iconFont：图标字体（logo/流量卡图标）。全 UI 统一 MiSans，不再用等宽字体。
     readonly property string uiFont: "MiSans"
     readonly property string iconFont: "iconfont"
