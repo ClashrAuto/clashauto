@@ -31,6 +31,9 @@ extern "C" {
 #include "coast_lwip_diag.h"
 #include "lwip/stats.h"
 #include "lwip/tcp.h"
+// 内部头：closeDeviceConns 要遍历 tcp_active_pcbs（换址时关掉旧 IP 的孤儿连接）。
+// 公共 lwip/tcp.h 不导出活动 pcb 链表。本项目已 vendor lwIP 并打过补丁，port 层引 priv 头是常规做法。
+#include "lwip/priv/tcp_priv.h"
 #include "lwip/timeouts.h"
 #include "netif/ethernet.h"
 }
@@ -1422,9 +1425,34 @@ void NetStack::addDevice(const QString &ip, const QByteArray &mac6, const QStrin
     }
 }
 
+// ★ 关掉所有「设备侧 = ip」的 TCP 连接。**换址/移除设备时必须调**，否则旧地址的连接成孤儿：
+//   设备换到新 IP 后再也不对它们发包、靶机回包又发往旧地址收不到，lwIP 的 established 超时
+//   是**24 小时**，于是这些 PCB 实质永久占着。真机实测（40 条连接、换址后静置 60s）PCB
+//   卡在 43 纹丝不动 —— 反复换址（DHCP 续约 / Wi-Fi 漫游）就是慢性 PCB 泄漏，最终把
+//   MEMP_NUM_TCP_PCB 吃光、新连接建不了。
+//   拓扑：被劫持连接里 lwIP 冒充靶机当"服务器"，设备是"客户端" → `pcb->remote_ip` = 设备 IP。
+//   先收集再关：closeConn 会改 tcp_active_pcbs 链表，边遍历边关是 use-after-free。
+static void closeDeviceConns(NetStack::Impl *d, const QString &ip)
+{
+    Q_UNUSED(d);
+    ip4_addr_t want;
+    if (!ip4addr_aton(ip.toLatin1().constData(), &want))
+        return;
+    QVector<TcpConn *> victims;
+    for (struct tcp_pcb *p = tcp_active_pcbs; p; p = p->next) {
+        if (!IP_IS_V4_VAL(p->remote_ip))
+            continue;
+        if (ip4_addr_cmp(ip_2_ip4(&p->remote_ip), &want) && p->callback_arg)
+            victims.push_back(static_cast<TcpConn *>(p->callback_arg));
+    }
+    for (TcpConn *c : victims)
+        closeConn(c, true); // abort：设备已经不在这个地址了，没有优雅关闭的对端
+}
+
 void NetStack::removeDevice(const QString &ip)
 {
     d->devices.remove(ip);
+    closeDeviceConns(d, ip); // 先把该 IP 的 TCP 连接关掉，别让它们成孤儿泄漏 PCB
     if (auto *s = d->udp.take(ip))
         destroyUdpSess(d, s);
     if (d->inited) {
