@@ -40,22 +40,28 @@ struct VisualEffectBackground: NSViewRepresentable {
 ///   一块和背景色差不多的灰。实测：不设的话把窗口挪到屏幕两端，侧栏像素只从
 ///   #3C4045 变到 #3B3D3C —— 几乎不动，那不是玻璃，是灰底。
 struct WindowConfigurator: NSViewRepresentable {
-    /// 是否把标题栏抬到与页面顶栏同高（挂空 toolbar）。**只有主窗要**：
-    /// 它的页面顶栏就钉在那条带子里。附属窗的顶栏浮在标题栏下面，带子空着当拖动区，
-    /// 抬高只是白占一截 —— 连接窗上实测抬完 54、顶栏再 44，480 高的窗顶上先去掉 98。
+    /// 是否把标题栏抬到与页面顶栏同高（挂空 toolbar）。主窗和连接窗都要 ——
+    /// 它们的顶栏就钉在那条带子里。不需要的窗传 false，保持标准 28。
     var unifiesTitleBar = true
+
+    final class Coordinator {
+        var tokens: [NSObjectProtocol] = []
+        deinit { tokens.forEach(NotificationCenter.default.removeObserver) }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        DispatchQueue.main.async { configure(view.window) }
+        DispatchQueue.main.async { configure(view.window, context.coordinator) }
         return view
     }
 
     func updateNSView(_ view: NSView, context: Context) {
-        DispatchQueue.main.async { configure(view.window) }
+        DispatchQueue.main.async { configure(view.window, context.coordinator) }
     }
 
-    private func configure(_ window: NSWindow?) {
+    private func configure(_ window: NSWindow?, _ coordinator: Coordinator) {
         guard let window else { return }
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -64,9 +70,9 @@ struct WindowConfigurator: NSViewRepresentable {
         window.hasShadow = true
 
         if #available(macOS 26.0, *) {
-            // 26：标题栏加高到与页面顶部导航栏一带同高（≈ 顶距 10 + 栏高 28 那一带）。
-            // 做法是挂一个**空的** NSToolbar —— 这是把标题栏抬到统一工具栏高度、
-            // 让红绿灯在其中垂直居中的受支持写法；transparent 保证不画任何工具栏底。
+            // 26：标题栏加高到与页面顶栏同高。做法是挂一个**空的** NSToolbar ——
+            // 这是把标题栏抬到统一工具栏高度、让红绿灯在其中垂直居中的受支持写法；
+            // transparent 保证不画任何工具栏底。
             window.titlebarAppearsTransparent = true
             guard unifiesTitleBar else { return }
             if window.toolbar == nil {
@@ -75,7 +81,36 @@ struct WindowConfigurator: NSViewRepresentable {
                 window.toolbar = toolbar
             }
             window.toolbarStyle = .unified
+            hideToolbarInFullScreen(window, coordinator)
         }
+    }
+
+    /// 进全屏时把那个空 toolbar 收起来，退出再放回去。
+    ///
+    /// ★ **不做的话全屏后窗口顶上是一条纯白的空带**。窗口模式下这个 toolbar 是空的没关系
+    ///   —— 它只负责把标题栏抬到 50，我们自己的顶栏正好铺在那条带子上，谁也看不见它。
+    ///   可全屏时系统把标题栏收走、却**把 toolbar 留下**并单独给它画一条不透明的底：
+    ///   于是顶上多出一条白带，里面一个东西都没有（它本来就是空的），
+    ///   而我们的顶栏被挤到白带下面。主窗和连接窗都中招。
+    ///
+    ///   收起 toolbar 之后全屏就没有这条带子了，安全区归零，顶栏直接顶到屏幕上沿 ——
+    ///   也正是全屏该有的样子（那 50 本来就是为了让红绿灯有地方待，全屏没有红绿灯）。
+    @available(macOS 26.0, *)
+    private func hideToolbarInFullScreen(_ window: NSWindow, _ coordinator: Coordinator) {
+        guard coordinator.tokens.isEmpty else { return }
+        let center = NotificationCenter.default
+        coordinator.tokens = [
+            center.addObserver(forName: NSWindow.willEnterFullScreenNotification,
+                               object: window, queue: .main) { note in
+                MainActor.assumeIsolated { (note.object as? NSWindow)?.toolbar?.isVisible = false }
+            },
+            center.addObserver(forName: NSWindow.willExitFullScreenNotification,
+                               object: window, queue: .main) { note in
+                MainActor.assumeIsolated { (note.object as? NSWindow)?.toolbar?.isVisible = true }
+            },
+        ]
+        // 挂上观察者的这一刻可能已经在全屏里（窗口恢复、或者观察者装晚了）。
+        if window.styleMask.contains(.fullScreen) { window.toolbar?.isVisible = false }
     }
 }
 
