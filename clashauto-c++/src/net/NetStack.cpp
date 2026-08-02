@@ -28,6 +28,10 @@ extern "C" {
 #include "lwip/memp.h"
 #include "lwip/nd6.h"
 #include "lwip/netif.h"
+// 内部头：只为 `tcp_ack_now()`（强制立刻 ACK 的标志位宏）。公共 lwip/tcp.h 没有对外暴露
+// 「现在就把 ACK 发出去」的入口，而这条链路必须要（理由见 lwipTcpRecv 末尾）。
+// 本项目已经 vendor 了 lwIP 并打过 tcp_in.c 的补丁，port 层引 priv 头是这类集成的常规做法。
+#include "lwip/priv/tcp_priv.h"
 #include "lwip/stats.h"
 #include "lwip/tcp.h"
 #include "lwip/timeouts.h"
@@ -64,6 +68,8 @@ struct TcpConn {
     bool socksClosed = false;  // socks 侧已关闭：等 toLwip 排空后再优雅关 lwIP 侧
     bool established = false;
     bool lwipClosed = false;
+    // 这条连接的第一段设备上行数据是否已经强制 ACK 过（见 lwipTcpRecv 末尾的论证）。
+    bool ackedFirstUpSegment = false;
 };
 
 } // namespace
@@ -751,6 +757,28 @@ err_t lwipTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
     if (!watch.alive())
         return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
     flushRecvWindow(c);
+    // ★ 每条连接的**第一段**设备上行数据，强制立刻 ACK 一次。
+    //
+    //   不这么做的话，这个 ACK 要等 lwIP 的延迟 ACK 定时器（`tcp_fasttmr`，最长 250ms），
+    //   而 Linux 客户端的 **RTO 下限就是 200ms**（TCP_RTO_MIN）。两者同一量级，于是只要
+    //   上游（SOCKS → 目标）在 200ms 内没回数据、我们没有下行数据可以捎带这个 ACK，
+    //   客户端就必然把请求**重发一遍**。跨境节点、慢站点、以及网关自己被打满的时候，
+    //   「上游超过 200ms」根本不是小概率。
+    //
+    //   真机抓包（Pi 网关，四设备并发、Pi 已 CPU 饱和）的一条慢连接：
+    //     +0.002s GET 发出 → +0.215s GET **重传** → +0.216s 我们才 ACK → +2.720s 响应
+    //   那次重传纯属白跑：ACK 只比它晚 1ms，请求根本没丢。代价是双份的请求帧
+    //   （在已经饱和的网关上尤其亏），以及客户端把 cwnd 收掉。
+    //
+    //   为什么不是「每段都立刻 ACK」：那会废掉延迟 ACK 的批量效果 —— 设备**上传**大文件时
+    //   每个数据段都回一帧，在 118 MB/s 的量级上是实打实的额外开销。只对第一段做，
+    //   刚好覆盖「请求-响应」这个占绝大多数的形态，每条连接只多一帧，可以忽略。
+    //   后续段仍走原来的路径：由 `flushRecvWindow` 的窗口更新或下行数据捎带。
+    if (!c->ackedFirstUpSegment && c->pcb && !c->lwipClosed) {
+        c->ackedFirstUpSegment = true;
+        tcp_ack_now(c->pcb);
+        tcp_output(c->pcb);
+    }
     return ERR_OK;
 }
 
