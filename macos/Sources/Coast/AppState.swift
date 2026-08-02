@@ -317,17 +317,56 @@ public final class AppState {
         }
         // 历史库消费**同一份** /connections 快照，不为此多发一次请求。
         clash.onConnectionsSnapshot = { [weak self] connections in
-            self?.history.observe(connections)
+            guard let self else { return }
+            // 历史记录**任何时候都要落**：它是「昨天访问过什么」的唯一来源，
+            // 窗口收起来的那段时间照样得记，否则历史上会出现一段空白。
+            self.history.observe(connections)
+
+            // 下面全是**只喂界面**的加工。窗口都收起来时一律跳过 —— 算完没人看，
+            // 而每一次赋值还会把隐藏着的整棵视图树重算一遍（见 `WindowRestore.anyWindowVisible`）。
+            //
+            // 代价说清楚：`deviceTraffic` 与 `composition` 是**会话累计**，隐藏期间不累加，
+            // 所以它们统计的是「界面开着的这段时间」。真正的用量账在历史库里，不受影响。
+            guard self.uiVisible else { return }
             let rows = ConnectionRow.parse(connections)
-            self?.connections = rows
-            self?.connectionLedger.merge(rows)
+            self.connections = rows
+            self.connectionLedger.merge(rows)
             // 本机自己发出的连接归到「本机」那一行 —— 否则全机器最忙的一台恒显示 0。
-            self?.deviceTraffic.observe(rows, localIP: DeviceStore.localLANAddress() ?? "")
+            self.deviceTraffic.observe(rows, localIP: DeviceStore.localLANAddress() ?? "")
             // 「用量最多」那一列要显示设备名，而设备名只有 AppState 认得（台账在它手上）。
-            let proxied = self?.proxiedDeviceLabels ?? []
-            self?.composition.observe(connections) { sourceIP, _ in
+            let proxied = self.proxiedDeviceLabels
+            self.composition.observe(connections) { sourceIP, _ in
                 ConnectionRow.deviceLabel(sourceIP: sourceIP, proxied: proxied)
             }
+        }
+    }
+
+    // MARK: 界面可见性
+
+    /// 自家窗口里还有没有正被人看着的。
+    ///
+    /// 点 ✕ 走的是 `orderOut`（收进托盘）而不是销毁：视图树仍然活着，于是每秒的更新照旧把
+    /// 整棵**隐藏的**树重算一遍。所有「只喂界面」的活儿都按这个开关停：连接解析、账本、
+    /// 流量构成、每设备速率、采样节拍、今日流量聚合、延迟探测、节点/模式轮询。
+    ///
+    /// 不停的是：核心进程管理、`/traffic`（托盘菜单要）、`/connections` → 历史落库、
+    /// ARP 巡检与地址跟随（安全与接管的正确性不能挂在「窗口开没开」上）、
+    /// 以及**设备发现**（新设备通知恰恰是窗口关着时才有意义，见 `startDeviceDiscovery`）。
+    public private(set) var uiVisible = true
+
+    /// 每拍同步一次可见性，并处理两个方向的边沿。
+    private func syncUIVisibility() {
+        let visible = WindowRestore.anyWindowVisible
+        guard visible != uiVisible else { return }
+        uiVisible = visible
+        clash.uiActive = visible
+        if visible {
+            // 转为可见：把停掉的那几路立刻催一次，别让用户对着上一次的旧数据发呆。
+            clash.refreshNodes()
+            refreshTodayTraffic()
+            latency.start()
+        } else {
+            latency.stop()
         }
     }
 
@@ -343,6 +382,7 @@ public final class AppState {
         startSystemAppearanceObserver()   // 之后系统外观变了也跟上
         startSubscriptionAutoUpdate()     // 定时自动更新订阅
         startArpWatch()                   // 盯着有没有别人在做 ARP 欺骗
+        startDeviceDiscovery()            // 局域网设备发现（常驻：新设备通知靠它）
         startLatencyMonitor()             // 直连 / 到路由 / DNS / 代理 四个延迟
         refreshHistoryDeviceMap()         // 历史库落盘时才认得出「这条连接是哪台设备的」
         // 启动就查一次更新 —— 侧栏的 "new" / "core" 角标是**不进关于页也要看得见**的，
@@ -459,6 +499,13 @@ public final class AppState {
         Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                // 这一路每 5 秒要 fork 一个 `netstat` 子进程取默认网关，而它只服务
+                // 状态页那张延迟卡。窗口收起来时整段跳过（探测本身也由
+                // `syncUIVisibility` 一并 stop 掉）。
+                guard self.uiVisible else {
+                    try? await Task.sleep(for: .seconds(5))
+                    continue
+                }
                 self.latency.gatewayIP = LanTopology.defaultGateway()?.ip ?? ""
                 // 当前选中节点的延迟直接取核心的测速结果，不自己再连一遍。
                 if let current = self.clash.nodes.first(where: { $0.active }) {
@@ -684,7 +731,9 @@ public final class AppState {
         Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                self.refreshTodayTraffic()
+                // 几条 GROUP BY 聚合，只给状态页那张卡看。窗口收起来时不跑，
+                // 重新可见的那一刻 `syncUIVisibility` 会立刻补一次。
+                if self.uiVisible { self.refreshTodayTraffic() }
                 try? await Task.sleep(for: .seconds(10))
             }
         }
@@ -705,6 +754,13 @@ public final class AppState {
         Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
+                // 可见性就搭在这条 1Hz 的循环上：多一次属性读取，省掉一套窗口通知的订阅
+                // （`orderOut` / 最小化 / 附属窗开关要盖全，通知那条路容易漏）。
+                self.syncUIVisibility()
+                guard self.uiVisible else {
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
                 self.pollTick &+= 1
                 self.bandwidthSamples.append((Double(self.clash.up), Double(self.clash.down)))
                 if self.bandwidthSamples.count > Self.bandwidthWindow {
@@ -730,6 +786,79 @@ public final class AppState {
     public func setNewDeviceAlert(_ on: Bool) {
         config.newDeviceAlert = on
         AppConfigLoader.persist(key: "newDevice", bool: on)
+    }
+
+    // MARK: 局域网设备发现
+
+    /// 最近一轮扫到的设备。设备页直接读它 —— 页面自己不再持有扫描结果。
+    public private(set) var discoveredDevices: [LanBrowser.Device] = []
+    public private(set) var deviceScanning = false
+    /// 当前网络的网关 / 本机网卡 MAC / 本机所在网段前缀。三样都要跑子进程或读网卡表，
+    /// **在扫描那一拍算一次**给全页用 —— 放在视图里现算的话，每次渲染都要来一遍。
+    public private(set) var deviceGateway: LanTopology.Gateway?
+    public private(set) var localMACs: Set<String> = []
+    public private(set) var localSubnetPrefix = ""
+    /// 设备页是不是正开着（由页面自己设）。只影响扫描**快慢**，不影响扫不扫。
+    public var devicesPageVisible = false
+
+    private let lanBrowser = LanBrowser()
+    /// 没有任何用户配置的台账记录的保留期：30 天没再见到就删。
+    /// 「不再显示」（离线行 24 小时）和「彻底忘掉」是两件事 —— 一台每周只开一次的设备
+    /// 不该每次都算新设备，那会让「新设备提醒」变成每周一次的假警报。
+    private static let deviceLedgerRetention: TimeInterval = 30 * 24 * 3600
+
+    /// 扫描间隔：设备页开着 10 秒一轮（列表要跟得上），否则 60 秒一轮。
+    private var deviceScanInterval: Double { devicesPageVisible && uiVisible ? 10 : 60 }
+
+    /// 局域网设备发现。**必须常驻后台，不能挂在设备页上。**
+    ///
+    /// ★ 原来 `LanBrowser.scan()` 全项目只有一个调用点，在 `DevicesPage` 的 `.task` 里 ——
+    ///   于是「新设备提醒」只有在**你正开着设备页**时才可能弹，而那恰恰是最不需要通知的时候：
+    ///   人就在看着列表。窗口一关就再也不扫，通知永远不会来。开关默认是开的，用户不会知道
+    ///   它其实没在工作。
+    ///
+    /// 顺带解决另外两件：列表不再只在「进页面/手点重扫」时才更新；台账的地址跟随也不必
+    /// 再指望用户去打开那一页。
+    ///
+    /// 扫描本身是**被动**的：只读系统已有的邻居表（`arp -an`），不发探测包，所以 60 秒一轮
+    /// 的常驻开销就是一个短命子进程 + 几次反查主机名。
+    private func startDeviceDiscovery() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.rescanDevices()
+                try? await Task.sleep(for: .seconds(self.deviceScanInterval))
+            }
+        }
+    }
+
+    /// 扫一轮：刷新拓扑三件套 → 读邻居表 → 落库 → 判新设备 → 清过期台账。
+    /// 设备页右上角那颗「重扫」也走这里（同一条路，不另开一份实现）。
+    public func rescanDevices() async {
+        guard !deviceScanning else { return }
+        deviceScanning = true
+        defer { deviceScanning = false }
+
+        deviceGateway = LanTopology.defaultGateway()
+        localMACs = LanTopology.localMACs()
+        localSubnetPrefix = DeviceStore.subnetPrefix(DeviceStore.localLANAddress() ?? "")
+
+        let found = await lanBrowser.scan()
+        discoveredDevices = found
+        // 身份落库（列表跨重启还在）+ 清掉用户没动过又很久没见的记录。
+        devices.recordSeen(found)
+        _ = devices.purgeStale(before: Date().addingTimeInterval(-Self.deviceLedgerRetention))
+        // 有没有没见过的设备（首轮只记基线、不提醒）
+        noticeDevices(found.map(\.mac))
+        ledgerDidChange()
+    }
+
+    /// 把某台设备从台账里删掉（设备页右键「忘记此设备」）。
+    /// 也从本轮扫描结果里去掉，那一行立刻消失；设备还在网上的话下一轮会作为新设备回来。
+    public func forgetDevice(mac: String) {
+        _ = devices.remove(mac: mac)
+        discoveredDevices.removeAll { $0.mac == mac }
+        ledgerDidChange()
     }
 
     /// 已经见过的设备 MAC。首轮扫描**只记录不提醒** ——

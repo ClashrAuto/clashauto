@@ -180,6 +180,7 @@ public final class ClashService {
     /// 或「模式被外部改过」时它会一直停在默认 Rule —— 下游据此判 Direct/Global 的逻辑就全错。
     /// 拿不到就不动，绝不把模式猜成别的。
     private func pollMode() async {
+        guard uiActive else { return }
         guard let raw = try? await api.configs()["mode"] as? String, !raw.isEmpty else { return }
         let normalized: String
         switch raw.lowercased() {
@@ -195,7 +196,19 @@ public final class ClashService {
         await pollNodes()
     }
 
+    /// 界面此刻有没有人在看（由 `AppState` 按窗口可见性同步过来）。
+    ///
+    /// 只挡**纯给界面看**的那两条轮询：节点列表（1 秒一次 `/proxies`，几百个节点的 JSON，
+    /// 是这里最贵的一条）和当前模式。流量与连接照旧 —— 前者喂托盘菜单，后者是历史记录的
+    /// 唯一数据源，停了会丢数据。
+    ///
+    /// 挡在**发请求之前**而不是取消整个 Task：循环留着，恢复可见时下一拍就自动接上，
+    /// 不必重建任务，也不会有「窗口打开后要等一个周期才有数据」的空窗（`AppState`
+    /// 在转为可见的那一刻还会主动催一次 `refreshNodes`）。
+    public var uiActive = true
+
     private func pollNodes() async {
+        guard uiActive else { return }
         let proxies: [String: [String: Any]]
         do {
             proxies = try await api.proxies()

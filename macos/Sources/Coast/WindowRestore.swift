@@ -43,9 +43,7 @@ enum WindowRestore {
         purgeLeakedKeys()
         closeRestoredAuxiliaryWindows()
 
-        guard let window = NSApplication.shared.windows
-            .first(where: { $0.canBecomeMain && !isAuxiliary($0) })
-        else {
+        guard let window = findMainWindow() else {
             openMainWindow()
             return
         }
@@ -82,6 +80,21 @@ enum WindowRestore {
     /// SwiftUI 会把 `Window(id:)` 的 id 原样写进 `NSWindow.identifier`。
     private static let auxiliaryPrefix = "coast."
 
+    /// 找出主窗。**按 scene id 认**（SwiftUI 把 `Window(id:)` 原样写进 `NSWindow.identifier`），
+    /// 认不出来时才退回原来的「能当主窗且不是附属窗」这条启发式。
+    ///
+    /// ★ 只有启发式那一条是不够的：`canBecomeMain` 在窗口被 `orderOut` 之后是 **false**，
+    ///   于是「启动静默到托盘」(`mini`) 这条路会在这里认不出主窗 → 走兜底 `openMainWindow()`
+    ///   → **把刚收起来的窗口又开了出来**。实测就是这样：勾了静默启动，窗口照样弹在脸上。
+    ///   同一个坑还让 `mainWindow` 停在 nil，`anyWindowVisible` 只好一直 fail-open，
+    ///   于是「收进托盘就别算界面数据」那套门控整个不生效。
+    private static func findMainWindow() -> NSWindow? {
+        let byIdentifier = NSApplication.shared.windows
+            .first { $0.identifier?.rawValue == MainWindowID.value }
+        return byIdentifier ?? NSApplication.shared.windows
+            .first { $0.canBecomeMain && !isAuxiliary($0) }
+    }
+
     static func isAuxiliary(_ window: NSWindow) -> Bool {
         guard let id = window.identifier?.rawValue else { return false }
         return id.hasPrefix(auxiliaryPrefix) && id != MainWindowID.value
@@ -112,6 +125,25 @@ enum WindowRestore {
 
     /// 主窗此刻是不是看得见。点 Dock 图标该不该把它拉回来，看的是这个。
     static var mainWindowIsVisible: Bool { mainWindow?.isVisible ?? false }
+
+    /// 自家窗口里还有没有一个**正被人看着**的（主窗，或更新/详情/连接三个附属窗）。
+    ///
+    /// 用来决定「只喂界面的那些计算还要不要继续做」：点 ✕ 是 `orderOut`（收进托盘）而不是
+    /// 销毁，视图树仍然活着 —— 于是每秒的流量/连接/节点更新照旧把整棵隐藏的树重算一遍，
+    /// 算完没有任何人看。实测托盘态下 `NSHostingView.layout()` 仍占 1.1%，外加一堆
+    /// AttributeGraph 的更新。
+    ///
+    /// 附属窗要算进来：主窗收起来了、连接窗还开着的时候，那份数据仍然有人在看。
+    ///
+    /// **认领到主窗之前一律算「可见」** —— 宁可多算一秒，也不能因为判定不出来就把界面
+    /// 数据停在那儿（那会变成「打开窗口一片空白」这种没法排查的毛病）。
+    static var anyWindowVisible: Bool {
+        guard mainWindow != nil else { return true }
+        return NSApplication.shared.windows.contains { window in
+            window.isVisible && !window.isMiniaturized
+                && (window === mainWindow || isAuxiliary(window))
+        }
+    }
 
     /// 兜底：主窗一个都没有时，把它**开出来**。
     ///

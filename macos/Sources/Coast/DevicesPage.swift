@@ -18,11 +18,12 @@ struct DevicesPage: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
 
-    @State private var discovered: [LanBrowser.Device] = []
     @State private var ledger: [String: DeviceStore.Device] = [:]
+    /// 扫描结果与拓扑三件套都在 `AppState` 里 —— 扫描是**常驻后台**的（新设备通知
+    /// 要在窗口关着时也能弹），页面只是它的一个读者。
+    private var discovered: [LanBrowser.Device] { state.discoveredDevices }
     /// 今日每台设备的累计字节。只用来**排序**，不显示 —— 跟着扫描那一拍刷新即可。
     @State private var todayByDevice: [String: Int64] = [:]
-    @State private var scanning = false
     /// 打开设备详情窗用。窗口显示的是 `AppState.selectedDevice`，
     /// 所以「点开某一行」= 先写选中、再开窗（与 Qt 的 `openFor(mac)` 完全一致：
     /// `devices.select(mac)` 然后 show + raise）。
@@ -37,16 +38,13 @@ struct DevicesPage: View {
     /// （✕ 清空并收起）—— 单行顶栏里常驻输入框会把左右两组挤到一起。
     @State private var searchShown = false
 
-    private let browser = LanBrowser()
-
-    /// 当前网络的网关（概览头显示 + 判定哪些设备不可接管）。
-    /// 只在 `rows` 变化时重算，不在每行里各查一次。
-    @State private var gateway: LanTopology.Gateway?
-    @State private var localMACs: Set<String> = []
-    /// 本机所在网段的 /24 前缀，判「离线行是不是这个网络的」用。
-    /// 与 `gateway`/`localMACs` 同理**在扫描那一拍算一次** —— `allRows` 每次渲染都会跑，
-    /// 在那里现查网卡地址等于每帧几次 `getifaddrs`。
-    @State private var localPrefix = ""
+    /// 当前网络的网关（概览头显示 + 判定哪些设备不可接管）、本机网卡 MAC、本机网段前缀。
+    /// **在扫描那一拍算一次**（`AppState.rescanDevices`）—— `allRows` 每次渲染都会跑，
+    /// 在那里现查等于每帧几次 `getifaddrs` / `netstat` 子进程。
+    private var gateway: LanTopology.Gateway? { state.deviceGateway }
+    private var localMACs: Set<String> { state.localMACs }
+    private var localPrefix: String { state.localSubnetPrefix }
+    private var scanning: Bool { state.deviceScanning }
     private var gatewayIP: String { gateway?.ip ?? "" }
 
     private func rejection(for row: Row) -> RedirectTargets.Rejection? {
@@ -167,10 +165,13 @@ struct DevicesPage: View {
         // 而那几台设备明明上一秒还在。
         .task {
             reloadLedger()
-            await scan()
+            state.devicesPageVisible = true   // 这一页开着时扫描提速到 10 秒一轮
+            await state.rescanDevices()
         }
-        // 详情窗改完台账后立刻重读（否则列表要等下一轮扫描才更新图标/名字）
-        .onChange(of: state.ledgerRevision) { _, _ in reloadLedger() }
+        .onDisappear { state.devicesPageVisible = false }
+        // 台账每变一次就重读快照：后台扫描每轮结束会 +1，详情窗改完备注名/类型/策略也会 +1
+        // （否则列表要等下一轮扫描才更新图标和名字）。
+        .onChange(of: state.ledgerRevision) { _, _ in refreshDerived() }
     }
 
     /// 概览条。**逐元素对齐** `qml/DevicesPage.qml` 顶部那一行：
@@ -299,7 +300,7 @@ struct DevicesPage: View {
             .help("仅显示在线设备".t)
 
             Button {
-                Task { await scan() }
+                Task { await state.rescanDevices() }
             } label: {
                 Text("\u{F064}") // refresh-line —— 与状态页延迟卡的刷新同一枚字形
                     .font(.custom(IconFont.remix, size: 15))
@@ -351,7 +352,7 @@ struct DevicesPage: View {
         SquareToggle(symbol: "circle.fill", on: onlineOnly) { onlineOnly.toggle() }
         SquareToggle(symbol: "arrow.clockwise", remixGlyph: "\u{F064}",
                      on: false, accent: true, spinning: scanning) {
-            Task { await scan() }
+            Task { await state.rescanDevices() }
         }
         .disabled(scanning)
     }
@@ -496,30 +497,10 @@ struct DevicesPage: View {
 
     // MARK: 动作
 
-    private func scan() async {
-        scanning = true
-        defer { scanning = false }
-        gateway = LanTopology.defaultGateway()
-        localMACs = LanTopology.localMACs()
-        localPrefix = DeviceStore.subnetPrefix(DeviceStore.localLANAddress() ?? "")
-        discovered = await browser.scan()
-        // 每轮扫描后交给 AppState 判断有没有没见过的设备（首轮只记基线、不提醒）
-        state.noticeDevices(discovered.map(\.mac))
-        // ★ 把这一轮的身份落库 —— 「设备列表持久化」就是这一句。没有它，列表只是
-        //   系统邻居表的一次投影：重启后一片空白，设备睡一觉就什么都不剩。
-        //   身份列与用户列在库里是分开写的，这里不会覆盖任何用户设置。
-        state.devices.recordSeen(discovered)
-        // 顺手清掉用户从没动过、又很久没再出现的记录，台账才不会只增不减。
-        _ = state.devices.purgeStale(before: Date().addingTimeInterval(-Self.ledgerRetention))
-        state.ledgerDidChange()   // 台账变了：本页重读快照，历史库的 IP→MAC 映射也跟着更新
+    private func refreshDerived() {
         reloadLedger()
         todayByDevice = state.history.todayByDevice()
     }
-
-    /// 没有任何用户配置的记录在台账里的保留期。比离线行的 24 小时长得多 ——
-    /// 「不再显示」和「彻底忘掉」是两件事：一台每周只开一次的设备不该每次都算新设备
-    /// （那会让「新设备提醒」变成每周一次的假警报）。
-    private static let ledgerRetention: TimeInterval = 30 * 24 * 3600
 
     private func reloadLedger() {
         ledger = Dictionary(uniqueKeysWithValues: state.devices.all().map { ($0.mac, $0) })
@@ -543,9 +524,7 @@ struct DevicesPage: View {
     /// 否则接管还挂着、记录却没了）。
     private func forget(_ row: Row) {
         guard !row.proxyEnabled else { return }
-        _ = state.devices.remove(mac: row.discovered.mac)
-        discovered.removeAll { $0.mac == row.discovered.mac }
-        state.ledgerDidChange()
+        state.forgetDevice(mac: row.discovered.mac)
         reloadLedger()
     }
 
