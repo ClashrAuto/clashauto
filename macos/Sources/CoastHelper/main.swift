@@ -158,6 +158,8 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
                 return
             }
             core = process
+            // 落盘 pid + exe：helper 换命之后靠它认回核心（见 reapRecordedCoreIfAlive）。
+            Self.writeCoreRecord(pid: process.processIdentifier, executable: executable)
             reply(true, "")
         }
     }
@@ -235,6 +237,12 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
 
     /// 调用方必须已持有 `queue`。
     private func stopCoreLocked() {
+        // ★ 顺序要紧：先收掉本实例**追踪得到**的那个，再按记录收「上一条命留下的」，最后才清记录。
+        //   两步都要 —— helper 是按需 daemon，多数时候 `core` 是 nil 而记录里那个还活着。
+        defer {
+            Self.reapRecordedCoreIfAlive { Audit.log($0) }
+            Self.clearCoreRecord()
+        }
         guard let process = core, process.isRunning else {
             core = nil
             return
@@ -248,6 +256,81 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
         }
         if process.isRunning { kill(process.processIdentifier, SIGKILL) }
         core = nil
+    }
+
+    // MARK: - 孤儿核心
+
+    /// 核心是 helper 的**子进程**，而 helper 是**按需 daemon** —— `launchctl print` 上
+    /// 常态是 `state = not running`（实测 `runs = 7`）：它被 XPC 连接拉起、干完活空闲就退。
+    /// 于是「核心 ppid 变成 1（被 launchd 收养）」**是常态而非异常**，`kickstart -k` 只是
+    /// 让它发生得更明显而已。后果是新一条命的 helper 里 `core` 恒为 nil：
+    ///   · app 调 `stopCore` 变成空操作，**一个 root 进程永久残留**；
+    ///   · 再 `startCore` 会起第二个核心，而端口可能还被孤儿占着 —— 新核心绑不上，
+    ///     真正在服务的是**拿着旧配置**的那个孤儿，界面上却什么都看不出来。
+    ///   真机实测确实见到过两个核心同时活着（一个 ppid=1）。
+    ///
+    /// 所以要一条不依赖父子关系的回收路径：起核心时把 pid 和**可执行文件路径**落到 `/var/db/`。
+    ///
+    /// ★ **但绝不能在 helper 启动时回收** —— 那正是这个坑最容易踩反的地方。既然 helper
+    ///   本来就反复起落，「启动时看到记录里有个活着的核心」的**常见情形恰恰是它正在正常服役**，
+    ///   启动即回收等于每次被唤醒都把用户的核心杀一遍。只在两个语义明确的时刻收：
+    ///   `startCore`（要起新的，旧的按定义已作废）和 `stopCore`（用户/app 就是要它停）。
+    ///
+    /// ★ **落 exe 路径不是冗余** —— pid 会被系统复用，只凭 pid 就 `kill` 等于以 root 身份
+    ///   随机杀一个无辜进程。回收前必须用 `proc_pidpath` 核对当前占用该 pid 的进程确实是
+    ///   我们那个核心，对不上就只删记录、不动任何进程。
+    private static var coreRecordPath: String {
+        ProcessInfo.processInfo.environment["COAST_CORE_RECORD"]
+            ?? "/var/db/com.yuehongsun.coast.helper.core"
+    }
+
+    private static func writeCoreRecord(pid: pid_t, executable: String) {
+        try? "pid=\(pid)\nexe=\(executable)\n"
+            .write(toFile: coreRecordPath, atomically: true, encoding: .utf8)
+    }
+
+    private static func clearCoreRecord() {
+        try? FileManager.default.removeItem(atPath: coreRecordPath)
+    }
+
+    /// 取 pid 当前对应的可执行文件路径；进程不存在或取不到返回 nil。
+    private static func executablePath(ofPID pid: pid_t) -> String? {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    /// 按记录回收：记录里那个核心若还活着且身份对得上，就收掉它。
+    /// **只在 startCore / stopCore 里调**，理由见上方注释。
+    static func reapRecordedCoreIfAlive(log: (String) -> Void) {
+        guard let text = try? String(contentsOfFile: coreRecordPath, encoding: .utf8) else { return }
+        var fields: [String: String] = [:]
+        for line in text.split(separator: "\n") {
+            let parts = line.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 {
+                fields[String(parts[0]).trimmingCharacters(in: .whitespaces)] =
+                    String(parts[1]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        guard let pidText = fields["pid"], let pid = pid_t(pidText), pid > 1,
+              let expected = fields["exe"] else { return }
+        // ★ 身份核对：pid 会复用，对不上就什么都别做。
+        guard let actual = executablePath(ofPID: pid) else { return }   // 进程早没了
+        guard actual == expected else {
+            log("发现上次的核心记录 pid=\(pid)，但该 pid 现在是 \(actual)，不是我们的核心 —— 不动它")
+            return
+        }
+        log("记录里的核心 pid=\(pid) 仍在运行（helper 已换过一条命），正在收回")
+        kill(pid, SIGTERM)
+        let deadline = Date().addingTimeInterval(3)
+        while kill(pid, 0) == 0, Date() < deadline { usleep(50_000) }
+        if kill(pid, 0) == 0 {
+            kill(pid, SIGKILL)
+            log("孤儿核心 pid=\(pid) 未响应 SIGTERM，已 SIGKILL")
+        } else {
+            log("孤儿核心 pid=\(pid) 已退出")
+        }
     }
 }
 
@@ -319,6 +402,9 @@ enum Audit {
 // ip.forwarding 这些**内核状态**原样留着，而新实例的 `active` 是 false，
 // 走正常的 stop 路径会直接提前返回 —— 不在这里主动收拾就永远收拾不掉。
 Redirector.recoverFromCrashIfNeeded { Audit.log($0) }
+
+// ★ 这里**故意不回收遗留的核心**：helper 是按需 daemon，反复起落是常态，
+//   启动时看到「记录里有个活着的核心」多半是它正在正常服役（详见 reapRecordedCoreIfAlive）。
 
 Audit.log("Coast helper 启动 版本=\(HelperVersion.current) "
           + "路径=\(Bundle.main.executableURL?.path ?? "?")")
