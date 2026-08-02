@@ -473,7 +473,78 @@ public final class AppState {
             }
         }
         startProxiedAddressFollow()
+        startPowerWatch()
     }
+
+    /// 系统睡眠 / 唤醒。**Swift 版此前一行都没有**（Qt 版有 `PowerWatcher_mac.mm`），
+    /// 而 MacBook 合盖睡眠恰恰是这个功能最高频的场景。
+    ///
+    /// 不处理的后果不是「慢一点」：本机一睡，转发就停了，而被接管设备的 ARP 还钉在本机 MAC 上、
+    /// PF 的 rdr 规则也还挂着 —— 那些设备**直接断网**，而且要等 ARP 老化才恢复（macOS 的表项能
+    /// 存活十几分钟）。关机路径早就有还原，睡眠这条一直是空的。
+    ///
+    /// `NSWorkspace.willSleepNotification` 是**同步**投递的：系统会等观察者回调返回后才真正挂起
+    /// （有几秒预算），所以在回调里把「撤接管 + 发复原 ARP」做完是安全的，这正是我们要的。
+    /// 两个通知都只在真正的系统睡眠/唤醒时发，不含屏幕休眠。
+    private func startPowerWatch() {
+        let center = NSWorkspace.shared.notificationCenter
+        center.addObserver(forName: NSWorkspace.willSleepNotification,
+                           object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.suspended = true   // 置位后周期性任务不再把接管挂回去（见 resume 侧说明）
+                self.append(log: "系统即将睡眠：撤销设备接管，让它们回到真网关")
+            }
+            // 撤销要在挂起**之前**完成。通知是同步投递的，这里等它做完再返回。
+            let semaphore = DispatchSemaphore(value: 0)
+            Task { @MainActor [weak self] in
+                await self?.controller.withdrawTakeoverForSleep()
+                semaphore.signal()
+            }
+            _ = semaphore.wait(timeout: .now() + 3)
+        }
+        center.addObserver(forName: NSWorkspace.didWakeNotification,
+                           object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.suspended = false  // 先解封，否则下面这次重挂会被自己拦掉
+                self.append(log: "系统已唤醒：重新接管设备")
+                Task { await self.controller.resumeDeviceTakeover() }
+            }
+        }
+        installPowerTestHook()
+    }
+
+    /// `COAST_POWER_TESTHOOK=1` 时用 SIGUSR1/SIGUSR2 手动触发睡眠/唤醒路径（与 Qt 版同名同语义）。
+    ///
+    /// 为什么必须有：这条路只有真让机器睡下去才走得到，而**真睡一台远程测试机是有去无回的赌**
+    /// （SSH 断开，唤不回来就没了）。有了这个钩子，撤接管/复原 ARP/重新接管这几步都能在
+    /// 不睡机器的前提下验证。只在设了环境变量时安装，正式使用不受影响。
+    private func installPowerTestHook() {
+        guard ProcessInfo.processInfo.environment["COAST_POWER_TESTHOOK"] == "1" else { return }
+        // signal(2) 的处理器里能做的事极少，所以只用 DispatchSource 把信号转成主线程上的回调。
+        for (sig, isSleep) in [(SIGUSR1, true), (SIGUSR2, false)] {
+            signal(sig, SIG_IGN) // 交给 DispatchSource 处理，别让默认行为把进程杀了
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in
+                guard let self else { return }
+                let center = NSWorkspace.shared.notificationCenter
+                self.append(log: isSleep ? "SIGUSR1(testhook) → 模拟睡眠" : "SIGUSR2(testhook) → 模拟唤醒")
+                center.post(name: isSleep ? NSWorkspace.willSleepNotification
+                                          : NSWorkspace.didWakeNotification, object: nil)
+            }
+            source.resume()
+            powerTestSources.append(source)
+        }
+    }
+
+    /// DispatchSource 必须被持有，否则 setEventHandler 之后就被回收、信号再也不触发。
+    private var powerTestSources: [DispatchSourceSignal] = []
+
+    /// 是否处于「已挂起」状态。置位期间周期性的地址跟随/重挂一律跳过 ——
+    /// 否则刚发出去的复原帧会被自己的重挂盖掉（Linux 那侧真机抓包实测过：复原后 961ms
+    /// 重投毒帧就上来了，设备最终仍指着睡着的本机）。
+    private var suspended = false
 
     /// 跟随被代理设备的地址变化（DHCP 续约 / 断线重连）。
     ///
@@ -496,6 +567,7 @@ public final class AppState {
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(5))
                 guard let self else { return }
+                guard !self.suspended else { continue } // 挂起期间不跟随、不重挂
                 let proxied = self.devices.proxiedDevices()
                 guard !proxied.isEmpty else { continue }
                 // 系统邻居表是 ip→mac；这里要的是「某个 MAC 现在在哪个 IP」，反过来建一张。

@@ -153,6 +153,19 @@ public final class CoastController {
         await resumeDeviceTakeover()
     }
 
+    /// 系统即将睡眠：撤销设备接管并让 helper 发复原 ARP，好让设备回到真网关。
+    ///
+    /// 与 `stopCore()` 的区别是**不动核心**：睡眠只是暂停，醒来还要接着用；
+    /// 也**不动台账里的开关**（那是持久意图，`resumeDeviceTakeover()` 醒来会补回去）。
+    /// 只把运行时的接管撤掉 —— 本机一睡就不转发了，设备的 ARP 还钉在这儿等于直接断网。
+    public func withdrawTakeoverForSleep() async {
+        guard !activeRedirectIPs.isEmpty else { return }
+        log("撤销 \(activeRedirectIPs.count) 台设备的接管（系统即将睡眠）")
+        try? await helper.stopRedirect()
+        activeRedirectIPs = []
+        v6GatewayActive = false
+    }
+
     /// 连续自动重启的次数上限，以及「活多久算稳住了」。理由见 `handleUnexpectedCoreExit`。
     private static let kMaxRestarts = 3
     private static let kStableSeconds: TimeInterval = 60
