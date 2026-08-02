@@ -13,7 +13,14 @@ import PackageDescription
 // 开发期（swift run）由 Resources.swift 回退到仓库相对路径。见该文件注释。
 let package = Package(
     name: "Coast",
-    platforms: [.macOS(.v14)],
+    // macOS 26 起步：整套界面建立在 Liquid Glass 上（`VisualEffect.swift` 的
+    // `.glassEffect` / `.buttonStyle(.glass)`），26 以下只能跑回落观感，与设计不是一回事。
+    // 需要在老系统上用的走 **Qt 版 mac 包**（release 里的 `…-macos-universal-qt.dmg`，
+    // 部署目标 13.0、Intel + Apple Silicon 胖包）——两条线并存，各自独立更新。
+    //
+    // 写字符串而不是 `.macOS(.v26)`：那个枚举成员要 swift-tools-version 6.2+ 才可见，
+    // 而字符串重载从 5.0 就有 —— 用它就不必为了一个版本号把整份 manifest 的工具链下限抬上去。
+    platforms: [.macOS("26.0")],
     products: [
         .executable(name: "Coast", targets: ["Coast"]),
         .executable(name: "com.yuehongsun.coast.helper", targets: ["CoastHelper"]),

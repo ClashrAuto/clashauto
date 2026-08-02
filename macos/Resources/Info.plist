@@ -16,8 +16,10 @@
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
+    <!-- 与 Package.swift 的 platforms 同步。低于此版本的机器请用 Qt 版 mac 包
+         （release 里的 …-macos-universal-qt.dmg，部署目标 13.0、Intel + Apple Silicon）。 -->
     <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
+    <string>26.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <!-- 托盘常驻应用：关掉窗口不等于退出，但仍要出现在 Dock 与 Cmd-Tab 里

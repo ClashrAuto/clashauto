@@ -19,11 +19,11 @@ CI 的 `gateway-selftest` 只用 TAP + 静态邻居验证了**用户态栈的转
 
 ## 1. 拿包 & 起程序
 
-从最新 Release 下 `ClashAuto-*-linux-x64-portable.tar.gz`，解开：
+从最新 Release 下 `Coast-*-linux-x64-portable.tar.gz`，解开：
 
 ```bash
-tar xzf ClashAuto-*-linux-x64-portable.tar.gz
-cd ClashAuto
+tar xzf Coast-*-linux-x64-portable.tar.gz
+cd Coast
 # 方式 A：直接 root 跑
 sudo ./coast
 # 方式 B：给权限后普通用户跑（更符合日常）

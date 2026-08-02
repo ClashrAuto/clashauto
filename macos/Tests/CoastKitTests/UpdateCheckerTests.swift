@@ -67,6 +67,26 @@ struct UpdateAssetTests {
         let assets = [("Coast-1.2.3-windows-x64.zip", "u1")]
         #expect(UpdateChecker.macAsset(from: assets) == nil)
     }
+
+    @Test("★ 排除 Qt 那条线：-qt 的 mac 包是另一个 app，不是自己的更新")
+    func skipsQtLine() {
+        // Qt 包排在前面 —— 「取第一个 .dmg」的老写法在这里正好挑错
+        let assets = [("Coast-1.2.3-macos-universal-qt.dmg", "qt"),
+                      ("Coast-1.2.3-macos-universal.dmg", "swift")]
+        #expect(UpdateChecker.macAsset(from: assets)?.url == "swift")
+
+        // 只有 Qt 包 → 宁可报「没有可用更新」，也不能把用户换成另一条产品线
+        #expect(UpdateChecker.macAsset(from: [("Coast-1.2.3-macos-universal-qt.dmg", "qt")]) == nil)
+    }
+
+    @Test("qt 的判定要带分隔符，别把名字里恰好有 qt 字母的资源误伤")
+    func qtDetectionIsNotASubstringMatch() {
+        #expect(UpdateChecker.isQtLine("Coast-1.2.3-macos-universal-qt.dmg"))
+        #expect(UpdateChecker.isQtLine("Coast-macos-qt-1.2.3-universal.dmg"))
+        #expect(UpdateChecker.isQtLine("Coast-1.2.3-macos-universal.dmg") == false)
+        // 「quic」「qtest」这种含 qt 字母的名字不该被当成 Qt 线
+        #expect(UpdateChecker.isQtLine("Coast-1.2.3-macos-universal-quic.dmg") == false)
+    }
 }
 
 @Suite("发布列表解析")

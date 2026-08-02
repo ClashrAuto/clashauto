@@ -26,6 +26,22 @@ struct AppUpdaterTests {
         #expect(AppUpdater.pickAsset(from: noMac) == nil)
     }
 
+    @Test("★ 同一 release 上的 Qt 版 mac 包绝不能被当成自己的更新")
+    func pickAssetSkipsQtLine() {
+        // 真实形态：Qt 版（macOS 13+，另一套界面）与本版并列躺在同一个 release 上。
+        // 顺序刻意把 Qt 那个放前面 —— 「取第一个 .dmg」的老写法在这里就会翻车。
+        let both: [(name: String, url: String)] = [
+            ("Coast-1.0.600-macos-universal-qt.dmg", "qt"),
+            ("Coast-1.0.600-macos-universal-qt.dmg.sha256", "u"),
+            ("Coast-1.0.600-macos-universal.dmg", "swift"),
+        ]
+        #expect(AppUpdater.pickAsset(from: both)?.name == "Coast-1.0.600-macos-universal.dmg")
+
+        // 只有 Qt 包时宁可「没有更新」也不能推 Qt 包（那是把用户换成另一个 app）
+        let qtOnly: [(name: String, url: String)] = [("Coast-1.0.600-macos-universal-qt.dmg", "qt")]
+        #expect(AppUpdater.pickAsset(from: qtOnly) == nil)
+    }
+
     @Test("★ 不是 .app 形态直接抛 notInAppBundle——别浪费几十 MB 流量")
     func devBuildBailsOutEarly() async {
         let release = UpdateChecker.Release(tag: "v9.9.9", name: "", notes: "",

@@ -170,8 +170,22 @@ public struct UpdateChecker: Sendable {
     ///
     /// **按扩展名 + 关键词挑，绝不按文件名前缀** —— 前缀是品牌串，改过一次名（ClashAuto → Coast）
     /// 就会让所有老版本的一键更新失效。C++ 版正是靠这条才敢改资源名。
+    ///
+    /// ★ 同一个 release 上有**两个** mac 包：本（Swift）版的 `…-macos-universal.dmg`
+    ///   和 Qt 版的 `…-macos-universal-qt.dmg`。后者部署目标 13.0、是给装不了 macOS 26 的
+    ///   机器准备的另一条产品线，把它当成自己的更新包装下去 = 用户被静默换成另一个 app。
+    ///   所以先把带 qt 标记的滤掉再挑。
     public static func macAsset(from assets: [(name: String, url: String)]) -> (name: String, url: String)? {
-        assets.first { $0.name.lowercased().hasSuffix(".dmg") }
-            ?? assets.first { $0.name.lowercased().contains("macos") }
+        let mine = assets.filter { !isQtLine($0.name) }
+        return mine.first { $0.name.lowercased().hasSuffix(".dmg") }
+            ?? mine.first { $0.name.lowercased().contains("macos") }
+    }
+
+    /// 资源名是否属于 **Qt 那条线**（`…-qt.dmg` / `…-qt-…` / `…qt-…`）。
+    /// 只认带分隔符的 `qt`，不裸匹配子串 —— 否则 "…-quic-…" 这类名字会被误伤。
+    public static func isQtLine(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower.contains("-qt.") || lower.contains("-qt-") || lower.contains("qt-")
+            || lower.hasSuffix("-qt")
     }
 }

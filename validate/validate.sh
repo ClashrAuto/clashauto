@@ -27,7 +27,7 @@ echo "release: $NAME  tag: $TAG"
 [ -n "$TAG" ] || { echo "没解析到 tag_name"; exit 2; }
 VER="${TAG#v}"
 # 缓存卷可能残留上一次 release 的产物；清掉非本版本的，避免 glob 抓到旧文件。
-for f in ClashAuto-*; do case "$f" in *"$VER"*) ;; *) rm -f "$f";; esac; done
+for f in Coast-*; do case "$f" in *"$VER"*) ;; *) rm -f "$f";; esac; done
 
 echo "$J" | jq -r '.assets[] | [.name, .browser_download_url] | @tsv' > assets.tsv
 echo "资产 $(wc -l < assets.tsv) 个，下载中…"
@@ -46,7 +46,7 @@ for s in *.sha256; do
 done
 
 sec "Windows 便携包 — 扁平 / 瘦身(-GL DLL) / 自包含"
-WZ=$(pick 'ClashAuto-*-windows-x64-portable.zip')
+WZ=$(pick 'Coast-*-windows-x64-portable.zip')
 if [ -n "$WZ" ]; then
   echo "  包大小: $(du -h "$WZ" | cut -f1)"
   rm -rf win; mkdir win; unzip -q "$WZ" -d win
@@ -59,32 +59,45 @@ if [ -n "$WZ" ]; then
 else bad "没找到 windows x64 便携 zip"; fi
 
 sec "macOS DMG — Coast.app + com.yuehongsun.coast（best-effort，7z 解 DMG）"
-DMG=$(pick 'ClashAuto-*-macos-universal.dmg')
-if [ -n "$DMG" ]; then
-  echo "  DMG 大小: $(du -h "$DMG" | cut -f1)"
-  rm -rf macx; mkdir macx
-  7z x -y -omacx "$DMG" >/dev/null 2>&1
-  HFS=$(find macx -iname '*.hfs*' 2>/dev/null | head -1)
-  [ -n "$HFS" ] && 7z x -y -omacx2 "$HFS" >/dev/null 2>&1 || true
-  APP=$(find macx macx2 -maxdepth 5 -name 'Coast.app' -type d 2>/dev/null | head -1)
+# release 上有**两个** mac 包，逐个验（结构要求相同）：
+#   Coast-<ver>-macos-universal.dmg      —— Swift 版（macOS 26+，外部仓库签名公证后 clobber 上来）
+#   Coast-<ver>-macos-universal-qt.dmg   —— Qt 版（macOS 13+，Intel + Apple Silicon，本 CI 打）
+# 少一个不判失败：Swift 那个由外部仓库异步上传，本仓库的 run 结束时可能还没到。
+MACDMGS=( Coast-*-macos-*.dmg )
+if [ ${#MACDMGS[@]} -eq 0 ]; then
+  bad "没找到任何 macos dmg"
+else
+  case " ${MACDMGS[*]} " in *-qt.dmg*) ;; *) skip "没见到 Qt 版 mac 包（…-macos-universal-qt.dmg）";; esac
+fi
+for i in "${!MACDMGS[@]}"; do
+  DMG="${MACDMGS[$i]}"
+  echo "  ── $DMG（$(du -h "$DMG" | cut -f1)）"
+  rm -rf "macx$i" "macx2$i"; mkdir "macx$i"
+  7z x -y -o"macx$i" "$DMG" >/dev/null 2>&1
+  HFS=$(find "macx$i" -iname '*.hfs*' 2>/dev/null | head -1)
+  [ -n "$HFS" ] && 7z x -y -o"macx2$i" "$HFS" >/dev/null 2>&1 || true
+  APP=$(find "macx$i" "macx2$i" -maxdepth 5 -name 'Coast.app' -type d 2>/dev/null | head -1)
   if [ -z "$APP" ]; then
-    skip "7z 解不出 DMG 内 Coast.app（p7zip 对 DMG 支持有限，非产物问题）——请在 Mac 上挂载手动核对"
-  else
-    ok "Coast.app 存在"
-    PL="$APP/Contents/Info.plist"
-    grep -aq "com.yuehongsun.coast" "$PL" && ok "Info.plist 含 com.yuehongsun.coast（bundle id 已改）" || bad "Info.plist 没有新 bundle id"
-    grep -aq "com.yuehongsun.auto" "$PL" && bad "Info.plist 仍含旧 com.yuehongsun.auto" || ok "无旧 bundle id 残留"
-    [ -e "$APP/Contents/MacOS/Coast" ] && ok "Contents/MacOS/Coast" || bad "缺 MacOS/Coast"
-    [ -e "$APP/Contents/MacOS/com.yuehongsun.coast.helper" ] && ok "helper = com.yuehongsun.coast.helper" || skip "没见到 helper 可执行（7z 可能没解全）"
-    [ ! -e "$APP/Contents/Clashr-Auto" ] && ok "无 Contents/Clashr-Auto（自包含）" || bad "仍塞了 Contents/Clashr-Auto"
-    # 内核集成是 make_app.sh 的默认行为；外部签名仓库若自己组装 .app 可能没带——
-    # 7z 对 DMG 的解包也不完整，所以缺失只 skip 提示人工核对，不判失败。
-    [ -e "$APP/Contents/Resources/core" ] && ok "Resources/core 内核已集成" || skip "未见 Resources/core（7z 可能没解全；或外部签名包未走 make_app.sh——请人工核对）"
+    skip "7z 解不出 $DMG 内的 Coast.app（p7zip 对 DMG 支持有限，非产物问题）——请在 Mac 上挂载手动核对"
+    continue
   fi
-else bad "没找到 macos universal dmg"; fi
+  ok "Coast.app 存在（$DMG）"
+  PL="$APP/Contents/Info.plist"
+  grep -aq "com.yuehongsun.coast" "$PL" && ok "Info.plist 含 com.yuehongsun.coast（bundle id 已改）" || bad "Info.plist 没有新 bundle id"
+  grep -aq "com.yuehongsun.auto" "$PL" && bad "Info.plist 仍含旧 com.yuehongsun.auto" || ok "无旧 bundle id 残留"
+  [ -e "$APP/Contents/MacOS/Coast" ] && ok "Contents/MacOS/Coast" || bad "缺 MacOS/Coast"
+  [ -e "$APP/Contents/MacOS/com.yuehongsun.coast.helper" ] && ok "helper = com.yuehongsun.coast.helper" || skip "没见到 helper 可执行（7z 可能没解全）"
+  [ ! -e "$APP/Contents/Clashr-Auto" ] && ok "无 Contents/Clashr-Auto（自包含）" || bad "仍塞了 Contents/Clashr-Auto"
+  # 两条线都默认集成内核（Swift 走 make_app.sh，Qt 走 CI 的 Bundle 步骤）。
+  # 7z 对 DMG 的解包不完整，所以缺失只 skip 提示人工核对，不判失败。
+  [ -e "$APP/Contents/Resources/core" ] && ok "Resources/core 内核已集成" || skip "未见 Resources/core（7z 可能没解全——请人工核对）"
+  # 两条线的最低系统版本不同（Swift 26.0 / Qt 13.0），装错的人双击没反应且毫无提示，
+  # 所以把 plist 里的值原样打出来供人眼核对（值的位置随 plist 格式而异，不做断言）。
+  echo "     LSMinimumSystemVersion: $(grep -a -A1 'LSMinimumSystemVersion' "$PL" | tr -d '\0' | tail -1 | tr -d ' \t' || true)"
+done
 
 sec "Linux .deb — 扁平安装布局"
-DEB=$(pick 'ClashAuto-*-linux-x64.deb')
+DEB=$(pick 'Coast-*-linux-x64.deb')
 if [ -n "$DEB" ]; then
   dpkg-deb -c "$DEB" > deb-contents.txt 2>/dev/null
   grep -q '/opt/coast/coast'                    deb-contents.txt && ok "装到 /opt/coast/coast（扁平）"        || bad "deb 布局不是 /opt/coast/coast"
@@ -139,12 +152,12 @@ if [ -n "$DEB" ]; then
 fi
 
 sec "Linux 便携 tar.gz — 扁平"
-TG=$(pick 'ClashAuto-*-linux-x64-portable.tar.gz')
+TG=$(pick 'Coast-*-linux-x64-portable.tar.gz')
 if [ -n "$TG" ]; then
   tar tzf "$TG" > tar-list.txt 2>/dev/null
-  grep -q '^ClashAuto/coast$' tar-list.txt && ok "tar 内 ClashAuto/coast（扁平，二进制在包根）" || bad "tar 布局不对（期望 ClashAuto/coast）"
+  grep -q '^Coast/coast$' tar-list.txt && ok "tar 内 Coast/coast（扁平，二进制在包根）" || bad "tar 布局不对（期望 Coast/coast）"
   grep -q 'clashauto-c++' tar-list.txt && bad "tar 仍含 clashauto-c++" || ok "tar 无 clashauto-c++ 子目录"
-  grep -q '^ClashAuto/core$' tar-list.txt && ok "tar 内已集成内核 ClashAuto/core" || bad "tar 缺 core（打包应默认集成内核）"
+  grep -q '^Coast/core$' tar-list.txt && ok "tar 内已集成内核 Coast/core" || bad "tar 缺 core（打包应默认集成内核）"
 else skip "没找到 linux x86_64 便携 tar.gz"; fi
 
 sec "汇总"

@@ -175,7 +175,18 @@ int UpdateController::recommendedIndex(int tab) const
         idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive); });
     }
 #elif defined(Q_OS_MACOS)
-    int idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive); });
+    // ★ mac 上同一个 release 有**两个** dmg：Qt 版（本程序）名里带 -qt，Swift 版没有。
+    //   Swift 版部署目标是 macOS 26 且是另一套界面/另一条产品线 —— 挑错了，用户在
+    //   macOS 13/14 上装完会直接双击没反应（系统版本不够），且毫无提示。所以先找带 qt 的，
+    //   找不到才退回任意 dmg（老 release 上只有一个包，那时还没分线）。
+    int idx = firstMatch([](const QString &n) {
+        return n.endsWith(QStringLiteral("-qt.dmg"), Qt::CaseInsensitive)
+               || (n.contains(QStringLiteral("-qt-"), Qt::CaseInsensitive)
+                   && n.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive));
+    });
+    if (idx < 0) {
+        idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive); });
+    }
 #else
     int idx = firstMatch([](const QString &n) { return n.endsWith(QStringLiteral(".deb"), Qt::CaseInsensitive); });
 #endif

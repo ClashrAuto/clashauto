@@ -122,8 +122,14 @@ public struct AppUpdater: Sendable {
     /// 挑 macOS 该装的产物：优先 zip（解压比挂载快、无提权触点）→ dmg。
     /// 现在的发布物只有 dmg，zip 分支是给将来留的。
     /// **按扩展名 + 关键词挑，绝不按文件名前缀**（品牌串改过一次名，见 `UpdateChecker.macAsset`）。
+    /// 同样要把 Qt 那条线的 `…-macos-universal-qt.dmg` 排除掉 —— 它是另一个 app，
+    /// 下下来会把用户从 Swift 版静默换成 Qt 版。理由见 `UpdateChecker.isQtLine`。
     static func pickAsset(from assets: [(name: String, url: String)]) -> (name: String, url: String)? {
-        let mac = assets.filter { $0.name.lowercased().contains("macos") && !$0.name.hasSuffix(".sha256") }
+        let mac = assets.filter {
+            $0.name.lowercased().contains("macos")
+                && !$0.name.hasSuffix(".sha256")
+                && !UpdateChecker.isQtLine($0.name)
+        }
         return mac.first { $0.name.lowercased().hasSuffix(".zip") }
             ?? mac.first { $0.name.lowercased().hasSuffix(".dmg") }
     }
