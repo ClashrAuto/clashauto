@@ -233,7 +233,7 @@ struct BreathingDot: View {
                 //   拆成 if/else 之后两支的结构标识不同，关掉时脉动那支**整个从视图树上
                 //   消失**，它身上的动画随之作废；静态灰环是另一个视图，从来没有过动画。
                 if isOn {
-                    PulsingRing()
+                    PulsingRing(color: theme.accent, diameter: 12)
                 } else {
                     Circle().stroke(Color(white: 0.4, opacity: 0.15), lineWidth: 3)
                 }
@@ -256,34 +256,112 @@ struct BreathingDot: View {
 ///
 /// **独立成一个视图不是为了整洁**，是靠它被销毁来终止那条永不结束的循环动画
 /// —— 理由见 `BreathingDot` 里那段注释，别把它合回去。
-private struct PulsingRing: View {
-    @Environment(Theme.self) private var theme
+///
+/// ★ **这圈光晕必须由 CoreAnimation 驱动，不能用 SwiftUI 的 `phaseAnimator`。** 观感一模一样，
+///   代价差一个数量级 —— 这是本应用最贵的一处开销，实测数据在下面。
+///
+///   页脚在**每一页都常驻**，而只要有一个开关是开着的（核心开着就是常态），这里就有一条
+///   永不结束的动画。SwiftUI 的动画是**由视图图驱动**的：每一帧都要走一遍
+///   `NSHostingView.layout()`，于是**整个窗口的视图树每帧重排一次**，开销正比于当前页
+///   有多少视图 —— 与这颗 12×12 的圆点毫无关系。
+///
+///   实测（core 不启动、零流量、稳态 CPU）：
+///     · 关于页(几乎没内容)  6.5%    · 日志页 9.4%
+///     · 设备页 11.2%        · 状态页 12.7~14.8%
+///   采样也对得上：主线程 94% 空闲，剩下的**全部**在
+///   `stepTransactionFlush → CA::Transaction::commit → NSHostingView.layout()` 这一条上。
+///   顺带证伪过两个更像的嫌疑：把带宽图的 20fps `TimelineView` 降到 1fps 只省 1 个点
+///   （帧率本来就被这条动画顶满了），`WindowConfigurator` 每轮重设窗口属性也无影响。
+///
+///   CA 的关键字动画跑在**渲染服务进程**里：提交一次之后 app 进程每帧零工作，SwiftUI
+///   视图图完全不参与。关键帧与原来的三段相位逐值对齐（见下），像素上看不出区别。
+private struct PulsingRing: NSViewRepresentable {
 
     /// (缩放, 不透明度)。1.0 = 正好贴着圆点边缘（半径 6）。
     ///
-    /// 最大只到 1.8：`scaleEffect` 连描边一起放大，1.8 时外缘落在半径
+    /// 最大只到 1.8：缩放连描边一起放大，1.8 时外缘落在半径
     /// ≈ 6×1.8 + 1.8 ≈ 12.6 —— 而标签文字从圆心 12 处开始（圆点半径 6 + HStack 间距 6）。
     /// 再大就压到字上去了（2.05 实测能探到 15）。
-    private static let phases: [(scale: CGFloat, opacity: Double)] = [
+    static let phases: [(scale: CGFloat, opacity: Double)] = [
         (1.00, 0.00),   // 起点：贴着圆点、看不见
         (1.30, 0.55),   // 浮现
         (1.80, 0.00),   // 张开到最大、淡尽
     ]
 
-    var body: some View {
-        Circle()
-            .stroke(theme.accent, lineWidth: 2)
-            .phaseAnimator(Array(Self.phases.indices)) { ring, index in
-                ring
-                    .scaleEffect(Self.phases[index].scale)
-                    .opacity(Self.phases[index].opacity)
-            } animation: { index in
-                switch index {
-                // 回到第 0 段是**重置**，必须瞬时：给了时长就成了「缩回去」。
-                case 0: .linear(duration: 0)
-                case 1: .easeOut(duration: 0.35)
-                default: .easeOut(duration: 1.05)
-                }
-            }
+    /// 两段的时长（原 `phaseAnimator` 的 0.35 + 1.05），回到起点是**瞬时重置**：
+    /// 给了时长就成了「缩回去」，那半程读起来是闪。
+    static let riseDuration = 0.35
+    static let fallDuration = 1.05
+    static var cycleDuration: Double { riseDuration + fallDuration }
+
+    let color: Color
+    /// 圆点直径。环的路径就画在这个尺寸上（描边居中压线），与 SwiftUI 版一致。
+    let diameter: CGFloat
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        // 环要张开到 1.8 倍、超出这 12×12 的框 —— 不关掉裁剪就只能看见中间一小截。
+        view.layer?.masksToBounds = false
+        let ring = CAShapeLayer()
+        ring.fillColor = nil
+        ring.lineWidth = 2
+        view.layer?.addSublayer(ring)
+        context.coordinator.ring = ring
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        guard let ring = context.coordinator.ring else { return }
+        let box = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+        // 每次布局都要摆一遍：视图刚建好时 bounds 还是 0，位置得等真实尺寸下来。
+        // 隐式动画必须关掉，否则改 frame 会被 CA 自己补一段 0.25s 的过渡。
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        ring.frame = box
+        ring.path = CGPath(ellipseIn: box, transform: nil)
+        ring.strokeColor = NSColor(color).cgColor
+        CATransaction.commit()
+        context.coordinator.installAnimationIfNeeded()
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        var ring: CAShapeLayer?
+        private var installed = false
+
+        /// 只挂一次。`updateNSView` 每轮布局都会跑，重挂会让光晕每次从头开始
+        /// （切页面时一起「咯噔」一下）。
+        func installAnimationIfNeeded() {
+            guard let ring, !installed else { return }
+            installed = true
+
+            let phases = PulsingRing.phases
+            // 关键时刻：0 → 浮现(0.35s) → 淡尽(1.05s)。最后一帧回到起点是瞬时的，
+            // 靠 `repeatCount: .infinity` 直接从头再来，不占时间。
+            let rise = PulsingRing.riseDuration / PulsingRing.cycleDuration
+            let keyTimes: [NSNumber] = [0, NSNumber(value: rise), 1]
+            let easing = [CAMediaTimingFunction(name: .easeOut),
+                          CAMediaTimingFunction(name: .easeOut)]
+
+            let scale = CAKeyframeAnimation(keyPath: "transform.scale")
+            scale.values = phases.map(\.scale)
+            scale.keyTimes = keyTimes
+            scale.timingFunctions = easing
+
+            let fade = CAKeyframeAnimation(keyPath: "opacity")
+            fade.values = phases.map(\.opacity)
+            fade.keyTimes = keyTimes
+            fade.timingFunctions = easing
+
+            let group = CAAnimationGroup()
+            group.animations = [scale, fade]
+            group.duration = PulsingRing.cycleDuration
+            group.repeatCount = .infinity
+            // 窗口失焦/最小化后 CA 会暂停图层动画，恢复时要接着跑而不是停在最后一帧。
+            group.isRemovedOnCompletion = false
+            ring.add(group, forKey: "pulse")
+        }
     }
 }

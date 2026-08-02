@@ -51,9 +51,6 @@ struct BandwidthChart: View {
         return peak > base ? (peak / step).rounded(.up) * step : base
     }
 
-    /// 上一拍进点的时刻。
-    @State private var lastPush = Date()
-
     var body: some View {
         ZStack {
             // 背景：线色极淡的底。
@@ -62,12 +59,6 @@ struct BandwidthChart: View {
             }
 
             GeometryReader { geo in
-                // 50ms ≈ 20fps，与 QML 那个 `Timer { interval: 50 }` 同一档。
-                // **按「距上次入点的真实经过时间」算相位**，而不是每帧固定推进一点点 ——
-                // 采样节拍会飘（轮询、节流都会让它偏离 1s），固定步长滑到位的时刻就对不上
-                // 下一拍，曲线仍旧一顿一顿。
-                TimelineView(.periodic(from: .now, by: 0.05)) { context in
-                    let phase = min(1, max(0, context.date.timeIntervalSince(lastPush)))
                 ZStack(alignment: .topLeading) {
                     if !minimal {
                         grid(in: geo.size)
@@ -77,17 +68,24 @@ struct BandwidthChart: View {
                     // 否则文字会被那层填充糊掉。
                     if minimal {
                         minimalTicks(in: geo.size)
-                        // 平铺一层淡填充（Qt 是 `rgba(lc, 0.16)` 的**实色**，不是渐变）：
-                        // 只有一条细线的话，在卡片底纹这个尺度上几乎看不见。
-                        areaPath(in: geo.size, phase: phase).fill(lineColor.opacity(0.16))
                     }
-                    linePath(in: geo.size, phase: phase)
-                        // 线宽与透明度**两种模式不同**（Qt：`minimal ? 2.0 : 3.0`、
-                        // `minimal ? 0.55 : 0.70`）—— 底纹要压得住卡片上的数字，
-                        // 原来两处都按独立成图那一档画，线又粗又实，抢了标题的注意力。
-                        .stroke(lineColor.opacity(minimal ? 0.55 : 0.70),
-                                style: StrokeStyle(lineWidth: minimal ? 2 : 3,
-                                                   lineCap: .round, lineJoin: .round))
+
+                    // 会动的那一层（折线 + 线下填充）交给 CoreAnimation 平移，
+                    // 理由与实测数据见 `SlidingCurve` —— 原来这里是 20fps 的
+                    // `TimelineView` 每帧重算路径，代价是整窗视图树跟着每帧重排。
+                    //
+                    // 线宽与透明度**两种模式不同**（Qt：`minimal ? 2.0 : 3.0`、
+                    // `minimal ? 0.55 : 0.70`）—— 底纹要压得住卡片上的数字。
+                    // 填充只有底纹模式有：Qt 是 `rgba(lc, 0.16)` 的**实色**，不是渐变，
+                    // 只有一条细线的话在卡片底纹这个尺度上几乎看不见。
+                    SlidingCurve(samples: padded,
+                                 scale: scale,
+                                 headroom: headroom,
+                                 lineColor: lineColor,
+                                 lineWidth: minimal ? 2 : 3,
+                                 lineOpacity: minimal ? 0.55 : 0.70,
+                                 fill: minimal ? .solid(opacity: 0.16) : .none,
+                                 tick: tick)
 
                     if minimal {
                         minimalTickLabels(in: geo.size)
@@ -101,11 +99,8 @@ struct BandwidthChart: View {
                             .offset(x: 10, y: Self.topForBaseline(18, size: 11))
                     }
                 }
-                }
-                .clipped()   // 左滑出去的那一小段别画到控件外面
             }
         }
-        .onChange(of: tick) { _, _ in lastPush = Date() }
     }
 
     /// 底纹模式的刻度：**必须按曲线的实际高度定位**，不能沿用「整高四等分」——
@@ -170,36 +165,4 @@ struct BandwidthChart: View {
         }
     }
 
-    /// 折线的顶点。整条按 `dx * phase` 左移 —— 新点从右边缘外进入、匀速滑到位，
-    /// 相位归零时正好接上下一拍。
-    private func points(in size: CGSize, phase: Double) -> [CGPoint] {
-        let values = padded
-        guard values.count > 1 else { return [] }
-        let usable = size.height * headroom
-        // 多留一格宽度给「滑进来的那一点」，否则最后一点滑到位时右边会空出一条缝。
-        let dx = size.width / CGFloat(values.count - 2 > 0 ? values.count - 2 : 1)
-        let shift = dx * CGFloat(phase)
-        return values.enumerated().map { index, value in
-            CGPoint(x: CGFloat(index) * dx - shift,
-                    y: size.height - usable * CGFloat(min(1, value / scale)))
-        }
-    }
-
-    private func linePath(in size: CGSize, phase: Double) -> Path {
-        var path = Path()
-        let pts = points(in: size, phase: phase)
-        guard let first = pts.first else { return path }
-        path.move(to: first)
-        for point in pts.dropFirst() { path.addLine(to: point) }
-        return path
-    }
-
-    private func areaPath(in size: CGSize, phase: Double) -> Path {
-        var path = linePath(in: size, phase: phase)
-        guard !path.isEmpty else { return path }
-        path.addLine(to: CGPoint(x: size.width, y: size.height))
-        path.addLine(to: CGPoint(x: 0, y: size.height))
-        path.closeSubpath()
-        return path
-    }
 }
