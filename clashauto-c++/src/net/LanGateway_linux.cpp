@@ -47,6 +47,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMutex>
+#include <QNetworkInterface>
 #include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
@@ -55,6 +56,7 @@
 #include "GatewayDiag.h" // 帧分流计数（落盘采样；与 gwDbgOn 的 stderr 抽样打印互补）
 #include <QVector>
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -296,6 +298,19 @@ private:
     // 被隔离（policy=reject）设备的 MAC 打包键。它们去局域网的流量按方向过滤，见 forwardIsolatedLan。
     QSet<quint64> m_isolatedMacs;
     bool isIsolatedMac(const uchar *mac6) const { return m_isolatedMacs.contains(macKey(mac6)); }
+    // 本机**自己**的全部地址（所有网卡，不只我们接管的那几张）。用途见帧分流里的「本机地址旁路」。
+    // 每轮 configureLocal（扫描约 5s 一轮）重建一次；查询在帧分流热路径上，故 v4 用哈希集、
+    // v6 用定长数组的线性 memcmp（一台主机的 v6 地址数是个位数，比建 QByteArray 便宜得多）。
+    QSet<quint32> m_localIp4;
+    QVector<std::array<quint8, 16>> m_localIp6;
+    void refreshLocalAddrs();
+    bool isLocalIp6(const uchar *a) const
+    {
+        for (const auto &x : m_localIp6)
+            if (std::memcmp(x.data(), a, 16) == 0)
+                return true;
+        return false;
+    }
     void forwardIsolatedLan(GwNic *n, const QByteArray &frame, const uchar *f);
     void pushIsolatedMacs(GwNic *n) const;
     // src MAC 打包键 → 最后一次看到「台账上那个 IP」发帧的时刻（uptime ms）。
@@ -706,8 +721,28 @@ void GatewayWorker::publishSnapshot()
     m_shared->active = active;
 }
 
+// 重建「本机自己的地址」集合。**必须枚举所有网卡**，不能只看我们接管的那几张：
+// 会撞上这个问题的恰恰是没被接管的第二块网卡（无线、docker0、VPN tun、veth…）。
+void GatewayWorker::refreshLocalAddrs()
+{
+    m_localIp4.clear();
+    m_localIp6.clear();
+    const auto all = QNetworkInterface::allAddresses();
+    for (const QHostAddress &a : all) {
+        if (a.protocol() == QAbstractSocket::IPv4Protocol) {
+            m_localIp4.insert(a.toIPv4Address());
+        } else if (a.protocol() == QAbstractSocket::IPv6Protocol) {
+            const Q_IPV6ADDR v6 = a.toIPv6Address();
+            std::array<quint8, 16> x{};
+            std::memcpy(x.data(), &v6, 16);
+            m_localIp6.append(x);
+        }
+    }
+}
+
 void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, quint16 socksPort)
 {
+    refreshLocalAddrs(); // 网卡/地址可能刚变（DHCP 续约、插拔、VPN 起落），每轮重建
     m_socksPort = socksPort;
 
     // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。都在工作线程上创建。
@@ -897,6 +932,11 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     if (n->prefix6Len >= 0 && ip6Len >= 40
                         && ip6InPrefix(p6 + 24, n->prefix6Net, n->prefix6Len))
                         return;
+                    // 本机自己的 v6 地址（任意网卡、任意前缀）——与上面 v4 那条同因同解：
+                    // 内核已经收过一份，再进 lwIP 就是两套栈抢答。上面「同前缀」只挡得住本卡这一段，
+                    // 挡不住无线/VPN 上那些属于**别的**前缀的本机全局地址。
+                    if (ip6Len >= 40 && isLocalIp6(p6 + 24))
+                        return;
                     ++GatewayDiag::c.fedLwip;
                     if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
                         std::fprintf(stderr, "[GW] -> lwIP fed(v6)=%lld\n", m_dbgFedLwip),
@@ -960,6 +1000,24 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                         return;
                     }
                     const bool sameSubnet = (dst & n->netMask4) == (n->localIp4 & n->netMask4);
+                    // ★ 本机地址旁路（跨网段的那一档）。
+                    //   下面同网段那条旁路的理由是「设备发回本机 LAN IP 的包若被 lwIP 终结会触发
+                    //   RST」——但**本机在别的网段上的地址一样会踩到它**，而那一档一直漏着：
+                    //   网关机器上的第二块网卡（无线）、docker0、VPN tun、veth… 任何一个都算。
+                    //   这类帧的 dst MAC 是我们、dst IP 也是我们，宿主内核本来就会正确收下并处理；
+                    //   我们再喂进 lwIP 就成了**两套栈同时应答**同一个连接。真机实测（树莓派同时接
+                    //   有线 eth0 192.168.20.91 与无线 wlan0 192.168.31.66，另有 veth-h 10.99.0.1）：
+                    //     · 被接管的设备 ping 10.99.0.1 / 192.168.31.66 → 每个请求收到 2 个应答
+                    //       （ping 报 "+2 duplicates"）；同网段的 192.168.20.91 无重复（已被旁路）。
+                    //     · TCP 更糟：三次握手能成，发出请求后直接 RST（"Connection reset by peer"），
+                    //       且核心侧连一条日志都没有——因为压根不是核心的问题。
+                    //   注意帧到达我们这里时**宿主内核已经收到过一份**（AF_PACKET 是旁路复制，原帧
+                    //   照常进协议栈），所以旁路不会放宽任何访问权限：能不能访问由内核决定，与这里
+                    //   放不放行无关。对 policy=reject 的隔离设备同理——它本来就拦不住内核那一份。
+                    if (!sameSubnet && m_localIp4.contains(dst)) {
+                        ++GatewayDiag::c.bypassLan;
+                        return;
+                    }
                     // ★ 局域网隔离（policy=reject 的设备）：按**方向**决定放不放。
                     //   依据是「A 主动发起的第一个包有可识别特征」：
                     //     · TCP 纯 SYN（有 SYN 无 ACK）= A 在发起 → 丢。既然纯 SYN 一律丢，
