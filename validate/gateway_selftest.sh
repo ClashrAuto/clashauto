@@ -22,6 +22,17 @@ fail() { echo "SELFTEST-HARNESS: FAIL — $*" >&2; exit 1; }
 [ -e /dev/net/tun ] || fail "无 /dev/net/tun"
 [ -x "$BIN" ] || fail "找不到可执行文件: $BIN"
 
+# ── NDP RA 解析自测（纯逻辑，不碰网络，毫秒级）─────────────────────────────
+# runNdpRaSelfTest 早就写好、也有 COAST_NDP_RA_SELFTEST 钩子，但**从来没被任何发布验证
+# 触发**（此前 validate 只跑下面的数据面自测）。而 parseRouterAdvert 是「从 RA 学 v6 路由器」
+# 的核心、也是「双栈设备 v6 漏代理」这类静默故障的唯一防线 —— 回归它，门禁却毫无察觉。
+# 它无需 TAP/网络，在这里顺手跑掉，把它纳入发布门禁。返回非 0 即整体失败。
+echo "SELFTEST-HARNESS: 先跑 NDP RA 解析自测（纯逻辑）"
+if ! COAST_NDP_RA_SELFTEST=1 QT_QPA_PLATFORM=offscreen "$BIN" >/dev/null 2>&1; then
+  fail "NDP RA 解析自测失败（parseRouterAdvert 回归）"
+fi
+echo "SELFTEST-HARNESS: NDP RA 解析自测 PASS"
+
 cleanup() {
   [ -n "${COAST_PID:-}" ] && kill "$COAST_PID" 2>/dev/null
   ip link del "$TAP" 2>/dev/null
