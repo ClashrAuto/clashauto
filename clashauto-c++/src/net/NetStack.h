@@ -83,6 +83,8 @@ private:
     //（常是网关/路由器 IP，经用户态栈中继到它走不通 → 名字解析时断时通）。见 .cpp。v6=true 按 v6 回封。
     void hijackDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
                    const QByteArray &query, bool v6);
+    // 那条常驻 DNS socket 的收包处理：按事务 ID 找回上下文并回封给设备。见 .cpp。
+    void onDnsResponse();
 
     Impl *d;
 };

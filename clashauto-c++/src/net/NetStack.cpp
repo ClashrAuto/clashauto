@@ -263,6 +263,24 @@ struct NetStack::Impl {
     UdpLru udpLruShort;                      // 短档(DNS 类)流的 LRU
     UdpLru udpLruLong;                       // 长档(一般 UDP)流的 LRU
     int udpFlowCount = 0;                    // 全局流数（对上限用，省得遍历）
+    // ★ DNS 劫持的**唯一**一个 socket（原来是「每条查询新建一个 QUdpSocket」）。
+    //   旧写法在 DNS 洪水下的代价是实测出来的：每条查询 = 1 个 QUdpSocket + 2 个 connect +
+    //   1 个 shared_ptr + 1 个 5s singleShot，全压在跑 lwIP 泵的那个工作线程上 ——
+    //   经 coast 3047qps/91.5% 成功，而直打 mihomo :1053 是 3693qps/100%，且洪水期并发 TCP
+    //   从 ~1200 掉到 ~150 conn/s（**一台设备的 DNS 能拖垮所有设备**）。
+    //   现在改成一条常驻 socket + **事务 ID 多路复用**：给每条查询换上我们自己分配的 txid，
+    //   回来时按 txid 查上下文、把原始 txid 还原回去再回封给设备（正是 DNS 代理的标准做法）。
+    QUdpSocket *dnsSock = nullptr;
+    quint16 dnsNextId = 0;
+    struct DnsPending {
+        QString victimIp;
+        quint16 vport = 0;
+        QHostAddress origServer; // 设备原本查的那个 DNS，回封时要伪装成它
+        bool v6 = false;
+        quint16 origId = 0;      // 设备自己的事务 ID，回封前必须还原
+        qint64 sentMs = 0;
+    };
+    QHash<quint16, DnsPending> dnsPending;
     QTimer *timer = nullptr;
     int pumpTick = 0;        // 泵的拍数计数器，给「老化 + 池诊断」分频用（见 init() 里的说明）
     QElapsedTimer pumpClock; // 量每一拍的真实间隔 → 迟到量 = 工作线程饱和度
@@ -298,12 +316,27 @@ void destroyUdpFlow(NetStack::Impl *d, UdpFlow *f)
 }
 
 // 老化：只看两条链的链尾，过期就摘，没过期立刻停（链按 lastUsed 有序，链尾即最旧）。
+// DNS 在途查询的兜底超时。原来是每条查询挂一个 5s singleShot，现在统一在这里扫 ——
+// 少掉「每查询一个定时器」正是去掉 DNS 洪水开销的一部分。
+constexpr qint64 kDnsPendingTimeoutMs = 5000;
+
 void reapUdpFlows(NetStack::Impl *d)
 {
     const qint64 now = monoMs();
     for (UdpLru *l : {&d->udpLruShort, &d->udpLruLong}) {
         while (l->tail && now - l->tail->lastUsed > l->tail->idleMs)
             destroyUdpFlow(d, l->tail);
+    }
+    // 超时未应答的 DNS 查询：清掉上下文并记 dnsNoReply（语义与旧的 5s 定时器完全一致 ——
+    // 这一栏涨 = 解析在**核心那一侧**就断了，用来把「解析不出来」和「解析出来但连不上」分开）。
+    // 200ms 一扫，最坏比 5s 晚一拍，无所谓。
+    for (auto it = d->dnsPending.begin(); it != d->dnsPending.end();) {
+        if (now - it.value().sentMs > kDnsPendingTimeoutMs) {
+            ++GatewayDiag::c.dnsNoReply;
+            it = d->dnsPending.erase(it);
+        } else {
+            ++it;
+        }
     }
 }
 
@@ -1871,36 +1904,78 @@ void NetStack::hijackDns(const QString &victimIp, quint16 vport, const QHostAddr
                          const QByteArray &query, bool v6)
 {
     ++GatewayDiag::c.dnsHijacked;
-    // 「有没有等到应答」要在两个 lambda 之间共享，而它们的生命周期都挂在 ds 上 —— 用 shared_ptr
-    // 而不是捕获裸 bool 的引用：5s 那条定时器可能在 readyRead 之后才跑，栈上的东西早没了。
-    auto answered = std::make_shared<bool>(false);
-    auto *ds = new QUdpSocket(this);
-    connect(ds, &QUdpSocket::readyRead, this, [this, ds, victimIp, vport, origServer, v6, answered]() {
-        *answered = true;
-        while (ds->hasPendingDatagrams()) {
-            QByteArray resp;
-            resp.resize(int(ds->pendingDatagramSize()));
-            const qint64 n = ds->readDatagram(resp.data(), resp.size());
-            if (n < 0)
-                break;
-            resp.truncate(int(n));
-            UdpSess *s = d->udp.value(victimIp);
-            if (s && s->nic) {
-                if (v6)
-                    sendUdpResponse6(s, vport, origServer, 53, resp);
-                else
-                    sendUdpResponse4(s, vport, origServer, 53, resp);
-            }
+    if (query.size() < 2) // 连事务 ID 都没有，不是合法 DNS 报文
+        return;
+
+    // 首次用到时建那条常驻 socket，并**只**接一次 readyRead。
+    if (!d->dnsSock) {
+        d->dnsSock = new QUdpSocket(this);
+        // 不 bind 具体端口：writeDatagram 会自动绑一个临时端口，回包也从那里进来。
+        connect(d->dnsSock, &QUdpSocket::readyRead, this, [this]() { onDnsResponse(); });
+    }
+
+    // 分配一个当前没被占用的 txid。空间 65536，而 5s 内的在途量级最多上万，找得到空位；
+    // 万一真的绕了一整圈都占着（异常情况），就放弃这条查询而不是覆盖掉别人的上下文。
+    quint16 id = 0;
+    bool got = false;
+    for (int i = 0; i < 65536; ++i) {
+        const quint16 cand = d->dnsNextId++;
+        if (!d->dnsPending.contains(cand)) {
+            id = cand;
+            got = true;
+            break;
         }
-        ds->deleteLater(); // 一问一答即弃
-    });
-    ds->writeDatagram(query, QHostAddress(QStringLiteral("127.0.0.1")), kDnsHijackPort);
-    // 无应答兜底回收（mihomo 没起 / 解析失败）：5s 后无论如何删掉 socket，防泄漏。
-    // dnsNoReply 涨 = 名字解析在核心那一侧就断了，这时再怎么查网关的数据面都是白费——
-    // 有这一栏才分得清「解析不出来」和「解析出来了但连不上」。
-    QTimer::singleShot(5000, ds, [ds, answered] {
-        if (!*answered)
-            ++GatewayDiag::c.dnsNoReply;
-        ds->deleteLater();
-    });
+    }
+    if (!got) {
+        ++GatewayDiag::c.dnsNoReply; // 记一笔，别静默丢
+        return;
+    }
+
+    Impl::DnsPending p;
+    p.victimIp = victimIp;
+    p.vport = vport;
+    p.origServer = origServer;
+    p.v6 = v6;
+    p.origId = (quint8(query[0]) << 8) | quint8(query[1]);
+    p.sentMs = monoMs();
+    d->dnsPending.insert(id, p);
+
+    // 换上我们的 txid 再发给 mihomo（只动前两字节，其余原样透传）。
+    QByteArray q = query;
+    q[0] = char((id >> 8) & 0xFF);
+    q[1] = char(id & 0xFF);
+    d->dnsSock->writeDatagram(q, QHostAddress(QStringLiteral("127.0.0.1")), kDnsHijackPort);
+}
+
+// mihomo 的 DNS 应答回来了：按 txid 找回上下文，还原设备原始 txid，回封给设备。
+// 一次 readyRead 可能攒了多条，全部排空 —— 洪水下这里是热路径，别一条一条来。
+void NetStack::onDnsResponse()
+{
+    while (d->dnsSock && d->dnsSock->hasPendingDatagrams()) {
+        QByteArray resp;
+        resp.resize(int(d->dnsSock->pendingDatagramSize()));
+        const qint64 n = d->dnsSock->readDatagram(resp.data(), resp.size());
+        if (n < 0)
+            break;
+        resp.truncate(int(n));
+        if (resp.size() < 2)
+            continue;
+        const quint16 id = (quint8(resp[0]) << 8) | quint8(resp[1]);
+        const auto it = d->dnsPending.constFind(id);
+        if (it == d->dnsPending.constEnd())
+            continue; // 迟到的重复应答 / 已被超时回收：丢掉即可
+        const Impl::DnsPending p = it.value();
+        d->dnsPending.erase(d->dnsPending.find(id));
+        // 还原设备自己的事务 ID —— 否则设备的解析器认不出这是它那条查询的应答。
+        resp[0] = char((p.origId >> 8) & 0xFF);
+        resp[1] = char(p.origId & 0xFF);
+        // 设备可能中途被摘除，按 victimIp **重新查**会话（防悬垂），与旧实现一致。
+        UdpSess *s = d->udp.value(p.victimIp);
+        if (s && s->nic) {
+            if (p.v6)
+                sendUdpResponse6(s, p.vport, p.origServer, 53, resp);
+            else
+                sendUdpResponse4(s, p.vport, p.origServer, 53, resp);
+        }
+    }
 }
