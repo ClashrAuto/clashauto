@@ -102,11 +102,13 @@ public final class TrayController {
             renderedProxyEnabled = proxyEnabled
             proxyItem.title = proxyEnabled ? "关闭网页代理".t : "打开网页代理".t
             proxyItem.state = proxyEnabled ? .on : .off
+            redraw()        // 角标字母跟着变（W）
         }
         if renderedTunEnabled != tunEnabled {
             renderedTunEnabled = tunEnabled
             tunItem.title = tunEnabled ? "关闭增强模式".t : "打开增强模式".t
             tunItem.state = tunEnabled ? .on : .off
+            redraw()        // 角标字母跟着变（T）
         }
     }
 
@@ -126,14 +128,86 @@ public final class TrayController {
     private func redraw() {
         guard let button = statusItem.button else { return }
         let dark = button.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let drawn = Self.trayImage(thickness: NSStatusBar.system.thickness,
+        let thickness = NSStatusBar.system.thickness
+        let drawn = Self.trayImage(thickness: thickness,
                                    coreRunning: coreRunningForDraw,
                                    up: upText, down: downText,
-                                   icon: NSApp.applicationIconImage,
+                                   icon: globeIcon(side: floor(thickness) - 3, dark: dark),
                                    dark: dark)
         button.image = drawn.image
         button.imagePosition = .imageOnly
         statusItem.length = drawn.width
+    }
+
+    /// 角标字母。优先级与侧栏 logo 上那颗 `StatusBadge` 一致：
+    /// 增强 T > 网页 W > 核心开 C > 核心关 N。
+    private var badgeLetter: String {
+        if renderedTunEnabled == true { return "T" }
+        if renderedProxyEnabled == true { return "W" }
+        return coreRunningForDraw ? "C" : "N"
+    }
+
+    /// 上一次画好的地球（按边长/角标/明暗缓存）。`redraw()` 每秒都会被流量刷一次，
+    /// 而这张图只在这三样变了时才需要重画。
+    private var cachedGlobe: (side: CGFloat, badge: String, dark: Bool, image: NSImage?)?
+
+    private func globeIcon(side: CGFloat, dark: Bool) -> NSImage? {
+        let badge = badgeLetter
+        if let c = cachedGlobe, c.side == side, c.badge == badge, c.dark == dark { return c.image }
+        let image = Self.globeImage(side: side, badge: badge, dark: dark)
+        cachedGlobe = (side, badge, dark, image)
+        return image
+    }
+
+    /// 托盘图标：**一个地球字形 + 右下角状态角标**，对齐 Qt 的
+    /// `TrayController.cpp::renderTrayGlobe()`（mac 那一路）。
+    ///
+    /// 以前这里画的是 `NSApp.applicationIconImage` —— 整个 app 图标缩到 19pt 塞进菜单栏，
+    /// 细节糊成一团，也看不出核心/代理/增强开着没有。Qt 版早就不这么干了。
+    ///
+    /// 逐项照抄 Qt：字形 U+E600（`iconfont.ttf`，与侧栏那颗 logo 同一个）、字号 = 边长 ×0.94、
+    /// **按墨迹居中**（不是按字体度量盒 —— 这个字形的墨迹在盒内偏右约 2%，按盒居中会明显偏）；
+    /// 角标是边长一半的圆角方块压在右下，圆角 = 角标边长 ×0.28，字号 ×0.66、加粗
+    /// （托盘只有十几 pt，不加粗根本认不出字母）。
+    ///
+    /// 配色上没照抄 Qt，理由见函数体里那段。
+    ///
+    /// 字体没注册（`IconFont.registerAll()` 没跑过）时返回 nil，调用方会退回兜底灰块。
+    static func globeImage(side: CGFloat, badge: String, dark: Bool) -> NSImage? {
+        guard side > 0, let glyphFont = NSFont(name: "iconfont", size: side * 0.94) else { return nil }
+        let accent = NSColor(srgbRed: 0x48 / 255, green: 0x98 / 255, blue: 0xF8 / 255, alpha: 1)
+        // 地球跟着菜单栏明暗走；角标**恒为品牌蓝底白字**。
+        //
+        // ★ 这一处没照抄 Qt。Qt 那边 mac 是白地球 + **白**角标 + 蓝字母：放在浅色菜单栏上
+        //   白的部分整个看不见；就算在深色栏上，白角标压在白地球上也糊成一坨白，
+        //   看不出那是个角标（渲染出来像地球被咬了一口）。蓝底白字在两种菜单栏、
+        //   压在黑地球或白地球上都拎得出来。
+        let inkColor: NSColor = dark ? .white : .black
+        let badgeFill = accent
+        let badgeInk = NSColor.white
+
+        return NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+            let glyph = NSAttributedString(string: "\u{E600}",
+                                           attributes: [.font: glyphFont, .foregroundColor: inkColor])
+            // `.usesDeviceMetrics` 拿到的是**墨迹**盒（不是行盒），照它居中。
+            let ink = glyph.boundingRect(with: .zero, options: [.usesDeviceMetrics])
+            glyph.draw(at: NSPoint(x: (side - ink.width) / 2 - ink.minX,
+                                   y: (side - ink.height) / 2 - ink.minY))
+
+            guard !badge.isEmpty else { return true }
+            let bs = side * 0.5
+            let box = NSRect(x: side - bs, y: 0, width: bs, height: bs)   // 右下角
+            badgeFill.set()
+            NSBezierPath(roundedRect: box, xRadius: bs * 0.28, yRadius: bs * 0.28).fill()
+
+            let letter = NSAttributedString(string: badge, attributes: [
+                .font: NSFont.systemFont(ofSize: bs * 0.66, weight: .bold),
+                .foregroundColor: badgeInk,
+            ])
+            let ls = letter.size()
+            letter.draw(at: NSPoint(x: box.midX - ls.width / 2, y: box.midY - ls.height / 2))
+            return true
+        }
     }
 
     /// 纯函数版，好让测试量得到宽度（`NSStatusItem` 在测试进程里造不出来）。
