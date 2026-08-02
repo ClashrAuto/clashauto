@@ -173,7 +173,13 @@ public final class CoastController {
     /// 端口没人听和进程没了对使用者是同一件事，而 REST 一次往返本来就是本地回环、成本可忽略。
     /// 连续失败 `kProbeFailsToDeclareDead` 次才判死 —— 单次超时可能只是核心在忙（比如正在
     /// 热重载一份大配置），一次抖动就宣布死亡会把自动重启变成自伤。
-    private static let kProbeIntervalSeconds: UInt64 = 5
+    ///
+    /// ★ 但**失败之后要马上复查，别再等一个整轮**：判死之前的这段时间里，设备的流量还在被
+    ///   rdr 到一个没人监听的端口上（connection refused，比超时更刺眼），窗口有多长就断多久。
+    ///   稳态 5s 一次是为了省；一旦出现第一次失败，说明八成真出事了，改用 1s 间隔连查。
+    ///   于是检测窗口从 5×3=15s 收到约 5+1+1=7s，而稳态的探测频率一点没变。
+    private static let kProbeIntervalSeconds: Double = 5
+    private static let kProbeRetryIntervalSeconds: Double = 1
     private static let kProbeFailsToDeclareDead = 3
 
     private func startCoreLivenessProbe() {
@@ -181,7 +187,10 @@ public final class CoastController {
         coreProbeTask = Task { [weak self] in
             var consecutiveFailures = 0
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Double(Self.kProbeIntervalSeconds)))
+                // 上一拍失败过就贴紧复查，否则按稳态节奏歇着。
+                let wait = consecutiveFailures > 0 ? Self.kProbeRetryIntervalSeconds
+                                                   : Self.kProbeIntervalSeconds
+                try? await Task.sleep(for: .seconds(wait))
                 guard let self else { return }
                 // 只在「我们认为核心正在跑、且是 helper 拥有的」时候探测。非特权那条路有
                 // terminationHandler，不需要这一层；核心本来就停着时更不该探。
