@@ -132,7 +132,7 @@ public final class TrayController {
         let drawn = Self.trayImage(thickness: thickness,
                                    coreRunning: coreRunningForDraw,
                                    up: upText, down: downText,
-                                   icon: globeIcon(side: floor(thickness) - 3, dark: dark),
+                                   icon: globeIcon(side: floor(thickness) - 3),
                                    dark: dark)
         button.image = drawn.image
         button.imagePosition = .imageOnly
@@ -147,15 +147,15 @@ public final class TrayController {
         return coreRunningForDraw ? "C" : "N"
     }
 
-    /// 上一次画好的地球（按边长/角标/明暗缓存）。`redraw()` 每秒都会被流量刷一次，
-    /// 而这张图只在这三样变了时才需要重画。
-    private var cachedGlobe: (side: CGFloat, badge: String, dark: Bool, image: NSImage?)?
+    /// 上一次画好的地球（按边长/角标缓存）。`redraw()` 每秒都会被流量刷一次，
+    /// 而这张图只在这两样变了时才需要重画。
+    private var cachedGlobe: (side: CGFloat, badge: String, image: NSImage?)?
 
-    private func globeIcon(side: CGFloat, dark: Bool) -> NSImage? {
+    private func globeIcon(side: CGFloat) -> NSImage? {
         let badge = badgeLetter
-        if let c = cachedGlobe, c.side == side, c.badge == badge, c.dark == dark { return c.image }
-        let image = Self.globeImage(side: side, badge: badge, dark: dark)
-        cachedGlobe = (side, badge, dark, image)
+        if let c = cachedGlobe, c.side == side, c.badge == badge { return c.image }
+        let image = Self.globeImage(side: side, badge: badge)
+        cachedGlobe = (side, badge, image)
         return image
     }
 
@@ -165,44 +165,42 @@ public final class TrayController {
     /// 以前这里画的是 `NSApp.applicationIconImage` —— 整个 app 图标缩到 19pt 塞进菜单栏，
     /// 细节糊成一团，也看不出核心/代理/增强开着没有。Qt 版早就不这么干了。
     ///
-    /// 逐项照抄 Qt：字形 U+E600（`iconfont.ttf`，与侧栏那颗 logo 同一个）、字号 = 边长 ×0.94、
+    /// 画法对齐 Qt：字形 U+E600（`iconfont.ttf`，与侧栏那颗 logo 同一个）、
     /// **按墨迹居中**（不是按字体度量盒 —— 这个字形的墨迹在盒内偏右约 2%，按盒居中会明显偏）；
-    /// 角标是边长一半的圆角方块压在右下，圆角 = 角标边长 ×0.28，字号 ×0.66、加粗
+    /// 右下角圆角方块角标，圆角 = 角标边长 ×0.28，字号 ×0.66、加粗
     /// （托盘只有十几 pt，不加粗根本认不出字母）。
     ///
-    /// 配色上没照抄 Qt，理由见函数体里那段。
+    /// 与 Qt 的三处不同（前两处是实拍后改的）：
+    ///   · 字号 ×0.80（Qt 是 ×0.94）。0.94 的圆几乎贴满整张图，在菜单栏里上缘直接
+    ///     顶到栏边，看着像溢出去了 —— 0.80 上下各留出约 2pt，和系统图标一个节奏。
+    ///   · 角标边长 ×0.42（Qt 是 ×0.5）。一半的角标把地球右下角整个盖掉，喧宾夺主。
+    ///   · 地球**恒为白色**（这一点其实是回到 Qt：它在 mac 上就是白的）。中间试过跟
+    ///     `effectiveAppearance` 走明暗 —— 26 的透明菜单栏把状态图标画成白色一套，
+    ///     `bestMatch` 却报 aqua，按它画出来是黑地球压在深色栏上。别信它。
+    ///     角标恒为品牌蓝底白字（Qt 的白底蓝字压在白地球上糊成一坨，见上一条提交）。
     ///
     /// 字体没注册（`IconFont.registerAll()` 没跑过）时返回 nil，调用方会退回兜底灰块。
-    static func globeImage(side: CGFloat, badge: String, dark: Bool) -> NSImage? {
-        guard side > 0, let glyphFont = NSFont(name: "iconfont", size: side * 0.94) else { return nil }
+    static func globeImage(side: CGFloat, badge: String) -> NSImage? {
+        guard side > 0, let glyphFont = NSFont(name: "iconfont", size: side * 0.80) else { return nil }
         let accent = NSColor(srgbRed: 0x48 / 255, green: 0x98 / 255, blue: 0xF8 / 255, alpha: 1)
-        // 地球跟着菜单栏明暗走；角标**恒为品牌蓝底白字**。
-        //
-        // ★ 这一处没照抄 Qt。Qt 那边 mac 是白地球 + **白**角标 + 蓝字母：放在浅色菜单栏上
-        //   白的部分整个看不见；就算在深色栏上，白角标压在白地球上也糊成一坨白，
-        //   看不出那是个角标（渲染出来像地球被咬了一口）。蓝底白字在两种菜单栏、
-        //   压在黑地球或白地球上都拎得出来。
-        let inkColor: NSColor = dark ? .white : .black
-        let badgeFill = accent
-        let badgeInk = NSColor.white
 
         return NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
             let glyph = NSAttributedString(string: "\u{E600}",
-                                           attributes: [.font: glyphFont, .foregroundColor: inkColor])
+                                           attributes: [.font: glyphFont, .foregroundColor: NSColor.white])
             // `.usesDeviceMetrics` 拿到的是**墨迹**盒（不是行盒），照它居中。
             let ink = glyph.boundingRect(with: .zero, options: [.usesDeviceMetrics])
             glyph.draw(at: NSPoint(x: (side - ink.width) / 2 - ink.minX,
                                    y: (side - ink.height) / 2 - ink.minY))
 
             guard !badge.isEmpty else { return true }
-            let bs = side * 0.5
+            let bs = side * 0.42
             let box = NSRect(x: side - bs, y: 0, width: bs, height: bs)   // 右下角
-            badgeFill.set()
+            accent.set()
             NSBezierPath(roundedRect: box, xRadius: bs * 0.28, yRadius: bs * 0.28).fill()
 
             let letter = NSAttributedString(string: badge, attributes: [
                 .font: NSFont.systemFont(ofSize: bs * 0.66, weight: .bold),
-                .foregroundColor: badgeInk,
+                .foregroundColor: NSColor.white,
             ])
             let ls = letter.size()
             letter.draw(at: NSPoint(x: box.midX - ls.width / 2, y: box.midY - ls.height / 2))
