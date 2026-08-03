@@ -77,6 +77,27 @@ public:
     /// 环境是否具备（pfctl 在不在、/dev/pf 能不能开）。不具备时 install 必然失败。
     static bool available(QString *why = nullptr);
 
+    struct Spec {
+        quint16 redirPort = 0;   ///< 核心的 redir 入站端口（rdr 的目的地）
+        quint16 dnsPort = 0;     ///< 核心的 DNS 监听端口；0 = 不劫持 DNS
+        QStringList ifnames;     ///< 网关接管的网卡名（rdr 规则按网卡限定）
+    };
+
+    ~PfRules();
+    PfRules() = default;
+    PfRules(const PfRules &) = delete;
+    PfRules &operator=(const PfRules &) = delete;
+
+    /// 装载 pf 规则（anchor 内的 table + rdr）并打开转发。失败时**不留半成品**（内部会 remove）。
+    bool install(const Spec &spec, QString *err = nullptr);
+    /// 拆除本实例装的一切（anchor 规则 + sysctl 还原）。幂等。
+    void remove();
+    bool isInstalled() const { return m_installed; }
+
+    /// 把「当前应当被接管的设备 IPv4 全集」同步进 pf table。**整体替换**，不做增量 diff：
+    /// 调用方给的就是全集，逐个 diff 既容易漏，也会在中间态出现「刚删又加回」的抖动。
+    bool syncDevices(const QStringList &ipv4, QString *err = nullptr);
+
     /// 无条件清掉本类可能留下的一切（anchor 规则 + sysctl 还原）。**幂等**。
     /// 启动时必须调一次：上次若被 kill -9，anchor 与 forwarding 还留在系统里。
     static void removeStale();
@@ -94,4 +115,8 @@ public:
 
     /// 固定 anchor 名。**别用带 pid/随机串的名字**：崩溃后要靠这个名字把陈旧规则删掉。
     static const char *anchorName();
+
+private:
+    Spec m_spec;
+    bool m_installed = false;
 };

@@ -4,6 +4,7 @@
 
 #if defined(Q_OS_MACOS)
 
+#include <QCoreApplication>
 #include <QFile>
 #include <QProcess>
 #include <QStandardPaths>
@@ -177,6 +178,154 @@ void PfRules::removeStale()
     sysctlStateRestoreAll();
 }
 
+PfRules::~PfRules()
+{
+    remove();
+}
+
+bool PfRules::install(const Spec &spec, QString *err)
+{
+    if (m_installed) {
+        if (err)
+            *err = QStringLiteral("已经装过了");
+        return false;
+    }
+    QString why;
+    if (!available(&why)) {
+        if (err)
+            *err = why;
+        return false;
+    }
+    if (spec.redirPort == 0) {
+        if (err)
+            *err = QStringLiteral("redirPort 未设置");
+        return false;
+    }
+    m_spec = spec;
+
+    removeStale(); // 上一次可能是被 kill -9 打死的
+
+    // 打开转发。原值落盘存档：SIGKILL 不走析构，只靠成员变量的话 ip.forwarding 会被永久留成 1。
+    const QString fwd = sysctlRead(QStringLiteral("net.inet.ip.forwarding"));
+    sysctlStateSave(QStringLiteral("net.inet.ip.forwarding"), fwd);
+    sysctlWrite(QStringLiteral("net.inet.ip.forwarding"), QStringLiteral("1"));
+
+    // ── anchor 内的规则 ────────────────────────────────────────────────────
+    //  table <coast_proxied>：被接管设备的 IPv4。**空表时 rdr 一条都不命中**，等价于「没开
+    //    代理」，所以装规则本身是安全的 —— 真正决定谁被接管的是 syncDevices()。
+    //  DNS 那条必须排在前面：否则 53 会被下面那条通配 rdr 一起截走，DNS 就走不到核心的
+    //    DNS 监听上（与 Linux 侧 prerouting 里 DNS 先 return 同理）。
+    QString rules = QStringLiteral("table <coast_proxied> persist\n");
+    const QStringList ifs = spec.ifnames.isEmpty() ? QStringList{QStringLiteral("en0")}
+                                                   : spec.ifnames;
+    for (const QString &ifn : ifs) {
+        if (spec.dnsPort != 0) {
+            rules += QStringLiteral("rdr pass on %1 inet proto udp from <coast_proxied> "
+                                    "to any port 53 -> 127.0.0.1 port %2\n")
+                             .arg(ifn)
+                             .arg(spec.dnsPort);
+        }
+        rules += QStringLiteral("rdr pass on %1 inet proto tcp from <coast_proxied> "
+                                "to any -> 127.0.0.1 port %2\n")
+                         .arg(ifn)
+                         .arg(spec.redirPort);
+    }
+
+    // ★ **必须写临时文件，不能用 `pfctl -f -` 从 stdin 喂**。真机实测（macOS 13.7.8）：
+    //   同样的规则内容，`pfctl -a coast -f 文件` 装上 1 条；`pfctl -a coast -f -` 从 stdin 喂
+    //   则**静默失败** —— 不报错、退出码 0、规则数 0。照 Linux 那边 `nft -f -` 的习惯写就会
+    //   踩这个坑，而且因为没有任何错误输出，会表现为「install 返回成功但设备完全没被接管」。
+    //   （Linux 的 nft 从 stdin 读是正常工作的，所以这是 pfctl 独有的行为差异。）
+    QString tmpPath = QStringLiteral("/tmp/coast-pf-%1.conf").arg(QCoreApplication::applicationPid());
+    {
+        QFile tf(tmpPath);
+        if (!tf.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            if (err)
+                *err = QStringLiteral("无法写临时规则文件 %1").arg(tmpPath);
+            remove();
+            return false;
+        }
+        tf.write(rules.toUtf8());
+        tf.close();
+    }
+    QString out;
+    const int rc = run(QStringLiteral("/sbin/pfctl"),
+                       {QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-f"),
+                        tmpPath},
+                       &out);
+    QFile::remove(tmpPath);
+    if (rc != 0) {
+        if (err)
+            *err = QStringLiteral("pfctl 装载 anchor 失败：%1").arg(out);
+        remove(); // 不留半成品
+        return false;
+    }
+    // pf 本身可能是关的（macOS 默认 Disabled）。-e 在已启用时返回非 0，属正常，不当失败。
+    run(QStringLiteral("/sbin/pfctl"), {QStringLiteral("-e")});
+
+    // ★ 回读核实：pfctl 退出码为 0 **不代表规则真装上了**（上面 stdin 那个坑就是退出码 0
+    //   却一条没装）。这里把 anchor 里的规则读回来数一遍，装不上就当失败并拆干净 ——
+    //   否则上层会以为接管成功、而设备实际全裸奔。
+    QString check;
+    run(QStringLiteral("/sbin/pfctl"),
+        {QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-s"),
+         QStringLiteral("nat")},
+        &check);
+    if (!check.contains(QStringLiteral("rdr"))) {
+        if (err)
+            *err = QStringLiteral("规则装载后回读为空（anchor 未生效？主规则集需有 "
+                                  "`rdr-anchor \"coast\"` 与 `anchor \"coast\"` 引用）");
+        remove();
+        return false;
+    }
+
+    m_installed = true;
+    return true;
+}
+
+void PfRules::remove()
+{
+    // ★ **只拆自己装过的**。原先这里是 `if (!m_installed && !存档存在) return;` —— 于是任何
+    //   没 install 过的临时实例，只要系统里存在别人留下的存档文件，析构时就会把**正在生效的**
+    //   anchor 规则清掉。真机踩到过：一个只用来做静态 lookup 的驱动进程退出时，把刚装好的
+    //   rdr 规则整条删了（rdr 规则数 1 → 0），表现为"规则莫名其妙消失"，极难定位。
+    //   崩溃残留的清理有专门入口 removeStale()（启动时调一次），不该由析构越权代劳。
+    if (!m_installed)
+        return;
+    run(QStringLiteral("/sbin/pfctl"),
+        {QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-F"),
+         QStringLiteral("all")});
+    // ★ **不执行 `pfctl -d`**：pf 可能是用户自己开着在用的（防火墙规则、其它 anchor），
+    //   我们只负责把自己的 anchor 清掉。关掉整个 pf 等于替用户关防火墙。
+    sysctlStateRestoreAll();
+    m_installed = false;
+}
+
+bool PfRules::syncDevices(const QStringList &ipv4, QString *err)
+{
+    if (!m_installed) {
+        if (err)
+            *err = QStringLiteral("规则未安装");
+        return false;
+    }
+    // 整体替换而不是逐个增删：调用方给的是「当前应当被代理的全集」。
+    // 空集合要用 -T flush（-T replace 不接受空参数列表）。
+    QStringList args{QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-t"),
+                     QStringLiteral("coast_proxied"), QStringLiteral("-T")};
+    if (ipv4.isEmpty()) {
+        args << QStringLiteral("flush");
+    } else {
+        args << QStringLiteral("replace") << ipv4;
+    }
+    QString out;
+    if (run(QStringLiteral("/sbin/pfctl"), args, &out) != 0) {
+        if (err)
+            *err = QStringLiteral("pfctl 更新 table 失败：%1").arg(out);
+        return false;
+    }
+    return true;
+}
+
 bool PfRules::lookupOriginalDest(const QString &clientIp, quint16 clientPort,
                                  const QString &proxyIp, quint16 proxyPort, QString *origIp,
                                  quint16 *origPort, QString *err)
@@ -230,6 +379,24 @@ bool PfRules::available(QString *why)
 }
 
 void PfRules::removeStale() {}
+
+PfRules::~PfRules() = default;
+
+bool PfRules::install(const Spec &, QString *err)
+{
+    if (err)
+        *err = QStringLiteral("pf 数据面仅 macOS 可用");
+    return false;
+}
+
+void PfRules::remove() {}
+
+bool PfRules::syncDevices(const QStringList &, QString *err)
+{
+    if (err)
+        *err = QStringLiteral("pf 数据面仅 macOS 可用");
+    return false;
+}
 
 bool PfRules::lookupOriginalDest(const QString &, quint16, const QString &, quint16, QString *,
                                  quint16 *, QString *err)
