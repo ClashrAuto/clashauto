@@ -59,17 +59,26 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled, bool ipv6Enabled)
     //
     //    直连（完全不经代理）的基线是 p50 0.97ms —— 也就是说代理这一跳本身只值 ~0.8ms，
     //    而 always **每条新连接多花约 5.6ms**。
-    //    ★ 这 5.6ms **不是"扫 /proc"**（一开始我是这么写的，错了）。核心侧已经有精确查询：
-    //      fork 的 82d8c4f0「精确查询取代全表 dump」用完整四元组走 inet_diag_dump_one，
-    //      实测 0.022ms，而全表 dump 要遍历整张 ehash、恒定 5.3ms —— 差 240 倍，且该优化确实
-    //      已在我们跑的 v1.10.4392 里。可是**透明网关这条路上它没生效**：/connections 显示
-    //      TProxy 连接的 inboundIP='::'、inboundPort=7898，即 metadata.InIP 填的是**监听器的
-    //      通配绑定地址**而不是这条连接的本地端点。精确查询的前置判据是
-    //      `InIP.Is4() == SrcIP.Is4()`：IPv4 客户端下一真一假直接跳过；IPv6 客户端下判据虽过，
-    //      但拿 `::` 当对端去查必然查不到 —— 两条路都回落到 5.3ms 的 dump。
-    //      所以这里量到的 5.6ms ≈ dump 的固定成本。核心侧的正解是让 InIP 取 accept 之后那条
-    //      连接的真实本地端点（NewSocket 本来就是这么做的，是后续 addition 把它覆盖成了监听
-    //      地址）；那属于 clash fork 的改动、要重新发核心，本文件这条按角色分档的开关与它不冲突。
+    //
+    //    ★ 这 5.6ms 花在哪：**inode → 进程那一步的 /proc 全扫**，不是 netlink。
+    //      核心查进程分两步：① netlink inet_diag 由四元组拿到 socket 的 uid/inode；
+    //      ② 拿 inode 去 `/proc/<pid>/fd/*` 里 readlink 匹配 `socket:[inode]`。
+    //      第 ① 步 fork 已经优化过（82d8c4f0，精确查询 0.022ms 取代全表 dump 5.3ms），
+    //      第 ② 步照旧是 os.ReadDir("/proc") 逐 PID 逐 fd 扫。真机 strace 计数（25 次代理请求）：
+    //          readlinkat 21202（每连接 848）  getdents64 7575（303）  newfstatat 5151（206）
+    //          openat 3800（152）  close 3900（156）   —— 每连接约 1565 次 /proc 相关系统调用
+    //          而 netlink 侧 sendto 只有 143 次（每连接 5.7）
+    //      结论很清楚：代价在 ②。（我一度据 fork 那条注释把它改口成"netlink dump"，错了，
+    //      按 strace 计数改回来。）
+    //
+    //    ★★ 而在**透明网关这条路上它还注定失败**：被代理设备的 socket 在设备自己机器上，
+    //      网关本机的 /proc 里根本不存在 —— 扫完整棵 /proc 只为得到"没找到"。
+    //      另外 TProxy 入站的 metadata.InIP 是**监听器的通配地址**（实测 /connections 里
+    //      inboundIP='::'、inboundPort=7898；listener/tproxy/tproxy.go 里显式
+    //      `WithInAddr(l.listener.Addr())`，因为 TProxy 下 conn.LocalAddr() 是原始目的地），
+    //      于是第 ① 步的精确查询判据 `InIP.Is4()==SrcIP.Is4()` 也不成立，连 netlink 都退回 dump。
+    //      核心侧的正解是**对 TPROXY/redir 入站直接跳过查进程**（客户端 socket 可证不在本机）；
+    //      那属于 clash fork 的改动、要重新发核心，与本文件这条按角色分档的开关不冲突。
     //    偏偏这只对**本机发起**的连接有意义：局域网设备的进程跑在别人机器上，本机表里查不到，
     //    网关代理的连接查到的会是 Coast 自己 —— QmlBridge 那边按 inboundUser=dev-* 主动丢弃。
     //    **也就是说当网关时，我们花 5.6ms 算出一个随后被扔掉的值。**
