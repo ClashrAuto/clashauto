@@ -511,13 +511,33 @@ void CoreController::startCore()
         }
         // 经 helper 起失败：不再静默退回——讲清楚原因，再以非 root QProcess 兜底（TUN 将不可用）。
         emit logUpdated(tr("经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效").arg(herr));
-    } else if (m_tunEnabled) {
-        // TUN 开着、但免密 helper 还没启用（未安装/待批准）：核心只能非 root 冷启动，建不了 utun，
-        // TUN **不会生效**。以前这里是**静默**回退（用户只看到「增强灯亮着却不全局」，无从查起）——
-        // 明确记一条，把「去设置装并批准免密助手」这条出路讲清楚。这正是「mac 上启用 TUN 却不全局」
-        // 在冷启动路径下的根因提示。
-        emit logUpdated(tr("增强(TUN) 已开启，但免密 helper 未启用——核心将以非 root 启动、TUN 不会生效。"
-                           "请在「设置 → 系统」安装并批准免密助手后重开增强。"));
+        if (m_config.gatewayPf) {
+            // ★ pf 数据面同样要 root，而它失效时**没有任何外部症状可循**，必须显式说明。
+            //   真机验证过这个失效形态：/dev/pf 是 crw------- root:wheel，核心的 darwin redir
+            //   实现要打开它做 DIOCNATLOOK 才能还原原始目的地；非 root 时它**不报错、不打日志**，
+            //   只是 accept 之后把连接丢掉 —— 被接管设备表现为「TCP 握手成功、随后 http=000」，
+            //   核心日志一行都没有，而 pf 侧规则计数照常在涨、状态表也正常。三边看着都对却不通。
+            emit logUpdated(tr("网关(pf) 需要 root 才能读 /dev/pf 还原原始目的地——"
+                               "核心非 root 时被接管设备将连不上网且无任何报错。"
+                               "请在「设置 → 系统」安装并批准免密助手。"));
+        }
+    } else if (m_tunEnabled || m_config.gatewayPf) {
+        // TUN 或 pf 网关开着、但免密 helper 还没启用（未安装/待批准）：核心只能非 root 冷启动。
+        // 以前这里是**静默**回退（用户只看到「增强灯亮着却不全局」，无从查起）——明确记一条，
+        // 把「去设置装并批准免密助手」这条出路讲清楚。
+        // 两种失效的**症状完全不同**，所以分开措辞，别让用户拿着 TUN 的说明去查网关问题：
+        //   · TUN：建不了 utun，表现为「增强灯亮着却不全局」；
+        //   · pf 网关：读不了 /dev/pf，核心 accept 后静默丢连接，被接管设备「握手成功但 http=000」，
+        //     且**核心日志一行都没有**、pf 规则计数还照常在涨（真机踩过，极难定位）。
+        if (m_tunEnabled) {
+            emit logUpdated(tr("增强(TUN) 已开启，但免密 helper 未启用——核心将以非 root 启动、TUN 不会生效。"
+                               "请在「设置 → 系统」安装并批准免密助手后重开增强。"));
+        }
+        if (m_config.gatewayPf) {
+            emit logUpdated(tr("网关(pf) 已启用，但免密 helper 未启用——核心将以非 root 启动，"
+                               "读不了 /dev/pf 还原原始目的地，被接管设备会连不上网且无任何报错。"
+                               "请在「设置 → 系统」安装并批准免密助手。"));
+        }
     }
 #endif
 

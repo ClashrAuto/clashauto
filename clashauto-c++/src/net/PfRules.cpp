@@ -154,11 +154,19 @@ bool PfRules::available(QString *why)
             *why = QStringLiteral("缺少 /sbin/pfctl");
         return false;
     }
-    // /dev/pf 需要 root 才能打开；打不开就取不到原始目的地，整条路走不通。
-    const int fd = ::open("/dev/pf", O_RDWR);
+    // /dev/pf 需要 root 才能打开。真机实测（macOS 13.7.8，/dev/pf 权限 crw------- root:wheel）：
+    //     普通用户：O_RDWR 与 **O_RDONLY 都** Permission denied；`pfctl -s info` 同样失败
+    //     root    ：O_RDONLY 成功（只读即够，DIOCNATLOOK 是 _IOWR 但设备只需读权限打开）
+    // 所以 root 是**两侧都要**的硬门槛，不是只有核心需要：
+    //   · 本进程（App）要 root —— install/remove/syncDevices 全靠 pfctl；
+    //   · 核心进程也要 root —— 它自己打开 /dev/pf 做 DIOCNATLOOK 还原原始目的地
+    //     （见 PfRules.h 里那段：非 root 时它不报错、只是静默丢连接）。
+    // 用 O_RDONLY 探测：够用且不会因为写权限问题误判成"不可用"。
+    const int fd = ::open("/dev/pf", O_RDONLY);
     if (fd < 0) {
         if (why)
-            *why = QStringLiteral("/dev/pf 打不开（需要 root）：%1")
+            *why = QStringLiteral("/dev/pf 打不开（%1）——pf 网关要求 App 与核心均以 root 运行，"
+                                  "请在「设置 → 系统」安装并批准免密助手")
                            .arg(QString::fromLocal8Bit(strerror(errno)));
         return false;
     }
