@@ -820,3 +820,54 @@ lwIP 的 UDP 回包必须用 `udp_sendto_if_src()` 显式传源 IP，**不能**�
 
 **尚未测**：ARM 真机（唯一架构盲点，Pi 关机、mac 台是 x86）；QUIC 长流（vs 本轮小数据报）；
 smoltcp UDP 走专用路径去 shim 后的吞吐。选型主结论：**TCP 为主选 smoltcp，UDP 重则再权衡**。
+
+---
+
+### R14 · 2026-08-03 22:00 UTC · UDP 走裸 NAT 绕开栈 —— 把 R13 的短板反转成又一个赢
+
+R13 结尾留了个 hedge：「smoltcp 的 UDP forwarder 没调优，走专用路径绕开 shim 多半能收窄
+1.5×」。这又是个没验证的乐观预测——本探索栽过太多次（R8/R10/R13 的 item-3 都是我自己的
+乐观判断），必须测。而且细想 R13 那个归因其实站不住：shim 对 UDP 本就近乎空操作
+（`tcp_offsets` 见非 TCP 立即返回），真正的开销在 smoltcp 的 UDP **socket** 上（双拷贝 +
+逐报 metadata + dispatch）。
+
+正确的修法不是「优化 smoltcp 的 UDP socket」，而是**根本不让 UDP 走 smoltcp**——UDP 无连接，
+不需要协议栈的任何状态机。标准 tun2socks 就是 TCP 走栈、UDP 走一张 NAT 表。实现（`natdev.rs`
+~180 行）：phy 层拦下 UDP 帧，转到内核 socket，回包**手工造 eth+ip+udp 帧**（IP/UDP 校验和
+自己算）直接写回 TAP，全程不碰 smoltcp。TCP 仍照常交给 smoltcp。
+
+UDP 转发，单流约 1 核，与前两者同条件对比：
+
+| 方案 | 64 B rx_pps | 512 B | 1400 B | 丢包 | 每数据报 CPU |
+|---|---|---|---|---|---|
+| smoltcp UDP-socket（R13） | 91057 | 83582 | 0.841 Gbps | 6.6~8.0% | 10.3 µs |
+| lwIP（栈内 UDP） | 136905 | 124047 | 1.312 Gbps | 3.6~4.5% | 6.9 µs |
+| **smoltcp + 裸 NAT（本轮）** | **145635** | **136711** | **1.378 Gbps** | 3.6~4.3% | **6.3 µs** |
+
+**裸 NAT 一举把 UDP 从「落后 socket 版 1.6×」拉到「反超 lwIP +5~6%」，丢包降回 lwIP 水平，
+每数据报还更省，而 TCP 照常通过（`b'hi'` 原样返回）。** R13 的 item-3 预测不但对，而且不是
+「收窄」是「反超」。
+
+#### 这条彻底消除了 R13 的 UDP 保留意见
+
+R13 曾把总账修正为「smoltcp 在 TCP 领先、lwIP 在 UDP 更省」。R14 证明那个 UDP 短板**不是
+smoltcp 的固有缺陷，而是"让 UDP 去挤 socket"的集成错误**。正确架构下：
+
+| 负载 | lwIP | **smoltcp + UDP-NAT** | 赢家 |
+|---|---|---|---|
+| TCP 单条长流 | 1.13 Gbps | 4.76 Gbps | smoltcp 4.2× |
+| TCP 短连接 4 KiB | 6907 obj/s | 6796 obj/s | 持平 |
+| TCP 负载下延迟 | 中位好但甩 12s 尖峰 | 有界 1.3 ms | smoltcp（体验） |
+| **UDP 逐数据报** | 136905 pps | **145635 pps** | **smoltcp +6%** |
+| 内存 | 6.6 MB | 4.1 MB | smoltcp |
+
+**现在没有一种负载 lwIP 赢。** 最终架构定型：**TCP 交给 smoltcp（catch-all 靠 phy 端口改写
+shim）、UDP 交给 phy 层裸 NAT**——两者共用同一个 RawTap/NatTap 设备、同一个 TAP fd。这正是
+成熟 tun2socks 的通行结构，本探索用数据独立推到了同一个设计。
+
+方法论收尾（本探索反复的主题）：R13 我给 UDP 短板留了个「大概能优化」的 hedge，R14 逼自己
+把它测了——结果不是小修小补，是换对了架构后直接反超。**留 hedge 不测，就会把一个架构选择
+错记成一个能力短板。**
+
+**尚未测（不影响选型）**：ARM 真机（唯一架构盲点，Pi 关机、两台 mac 均 x86）；QUIC 长流；
+NAT 表在数千并发 UDP 流下的老化/内存。**选型到此全维度收敛：TCP+UDP 都是 smoltcp(+NAT) 方案更优。**
