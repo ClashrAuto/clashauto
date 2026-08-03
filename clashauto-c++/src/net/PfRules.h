@@ -10,6 +10,32 @@
 //      即 open("/dev/pf") + ioctl(DIOCNATLOOK, struct pfioc_natlook)。
 // Linux 的 TPROXY 不改地址（靠 fwmark + 策略路由把包留在本机），所以那边不需要这一步。
 //
+// ═══ macOS 26 实测：Apple 把 pf 裁剪过，"把包交给另一条路"的关键字全都不存在 ═══
+//
+// 2026-08-04 在 macOS 26.5.2 上用 `pfctl -n -f` 逐条验证语法（不是查文档，是真机解析）：
+//     rdr ... ->          ✅ 支持   ← 我们现在用的这条
+//     rdr-anchor/nat-anchor ✅ 支持
+//     nat / scrub / tag   ✅ 支持
+//     divert-to           ❌ syntax error
+//     route-to            ❌ syntax error（OpenBSD 3.x/4.x 旧式带括号、无括号、放 action 后
+//                                        三种写法**全试过**，一律拒绝，不是写法问题）
+//     dup-to / reply-to   ❌ syntax error
+//     divert-packet       ❌ syntax error
+//
+// ★ 为什么这件事值得记：`divert-to` 本来是**最理想**的那条路 —— 它等价于 Linux 的 TPROXY，
+//   保留原始目的地址、支持 UDP、纯内核转发，一举解决我们这套 rdr 方案的两个硬伤
+//   （只代理 TCP；IPv6 因核心侧拿不回原始目的地而受阻）。所以它一定会被反复想起来。
+//   **它在 macOS 上不存在。别再试了。**
+//
+// ★ 那还剩什么（都查过一遍）：
+//   · NetworkExtension 的 NETransparentProxyProvider —— Apple 官方立场是「pf 不是 API」
+//     （TN3165），推荐用 NE。但 NE 只能代理**本机**流量：局域网里别的设备的包根本不经过
+//     本机 socket 层，**做不了网关**。对我们这个场景无解。
+//   · utun + 核心自带 TUN（stack: system 已验证三端可跑）—— 同样只接管本机流量，
+//     要做网关仍然缺「把设备的包转发进 TUN」那一段。
+//   → 结论：macOS 做**局域网网关**目前只有 rdr 这一条路（即本文件实现的这套）。
+//     要突破 TCP-only，方向是**在核心侧补 IPv6 的 DIOCNATLOOK 支持**，不是换 pf 关键字。
+//
 // ★ pf 的 rdr **只作用于转发流量，不影响运行 pf 的机器自身的出站流量**。
 //   这条常被当成限制（mitmproxy 文档专门提醒"拦不到本机流量"），但对**透明网关**恰恰是
 //   我们要的语义：只接管别的设备，不动 Mac 自己 —— 省掉了 Linux 那边"本机地址旁路"的一堆判断。
