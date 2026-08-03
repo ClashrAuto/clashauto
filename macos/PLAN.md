@@ -3539,6 +3539,38 @@ n=20 时中位 2.00%、均值 6.15%、**p90 19.20%**，而 Qt 端 p90 只有 2.5
 
 回归：连接正常建立（核心侧连接数一致）、App 日志零错误。
 
+### 系统排查：其余同类位置**实测不构成开销**，故未改动
+
+按上面的通用规则把所有高频属性（`connections` / `composition` / `deviceTraffic` /
+`logs` / `coreLogs` / `todayHourly` / `todayTop` / `securityAlerts` / `pollTick` /
+`bandwidthUp/Down`）的读取点全查了一遍，形式上仍有两处"父视图算好再传下去"：
+
+- `Pages.swift` 日志页：`LogTimeline(entries: tab == 0 ? state.logs : state.coreLogs)`
+- `DevicesPage.swift` 设备行：`DeviceRow(sample: state.deviceTraffic.sample(ip:), tick: state.pollTick, …)`
+
+**但逐页实测（n=15）各页 CPU 都在 0.80~0.90%，没有哪一页更贵**：
+
+| 页面 | 中位 | 均值 | p90 |
+|---|---|---|---|
+| 状态页 | 0.90% | 1.31% | 4.10% |
+| 第 2 页 | 0.80% | 1.52% | 4.20% |
+| 第 3 页 | 0.90% | 0.99% | 1.40% |
+| 第 4 页 | 0.80% | 0.87% | 1.10% |
+| 第 6 页 | 0.90% | 1.04% | 1.40% |
+
+原因：本机设备库有 21 台设备但**已代理 0 台**，`deviceTraffic.sample` 恒空、设备行不随拍变化；
+日志空载时也不产生新条目。**形式上的反模式 ≠ 实际开销** —— 没有证据就不改，
+避免为"看起来不对"付出回归风险。
+
+★ 留给将来：**真正接管了设备之后**（设备行每拍都有新样本）这两处才会显形，
+届时按同一手法下沉即可（`DeviceRow` 自己读 `state.deviceTraffic` / `state.pollTick`）。
+
+### Qt 端也查过：`ConnectionsModel` 那处 `dataChanged` 不传 roles 是**已知且可接受**
+
+`ConnectionsModel.cpp` 的 Step B 里 `emit dataChanged(index(i), index(i))` 不传 roles
+（= 通知"所有角色都变了"），但它外面裹着 `if (!m_rows.at(i).sameFields(nw))` ——
+**只在字段真变化时才发**，且连接窗默认不开、状态页只显示最近 5 条。同样不构成实测开销。
+
 ★ **通用规则**：`@Observable` 的依赖按 View 的 body 记录。**凡是变化的读取，都要落在真正
 用得到它的那一层**；在父视图里算好再当参数传下去，等于把整棵父子树都绑上这个依赖。
 排查手法：看某个 View 的 body 里有没有读会频繁变化的 state —— 有就往下沉。
