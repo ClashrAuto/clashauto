@@ -86,7 +86,13 @@ void ClashService::start()
     pollConnections();
     pollNodes();
     m_trafficTimer.start(2000);      // 看门狗：流断了就重连（核心重启/端口变更）
-    m_connectionsTimer.start(2000);  // /connections 全量拉取开销大、只用到数量与 downloadTotal，2s 足够
+    // /connections 全量拉取开销大、只用到数量与 downloadTotal，2s 足够。
+    // ★ 但这一拍**同时**是 HistoryStore 的唯一数据来源，而它靠「上拍见过、这拍不见了」判断
+    //   连接结束 —— 于是短连接会被整条漏掉。真机实测捕获率只有 3.4%（1497 条短连接只入库 51 条）。
+    //   **调小这个值不是解法**：捕获率 ≈ 连接寿命 / 本间隔，要到 95% 得压到 ~5ms（每秒 200 次
+    //   全量快照）。真解在核心侧加「连接关闭」事件推送，详见 HistoryStore.h 顶部那段。
+    //   改这个数字之前请先读它，别以为是参数没调好。
+    m_connectionsTimer.start(2000);
     if (m_uiActive)
         m_nodesTimer.start(1000); // 1s 实时拉取节点列表状态（对齐旧项目 getProxies 每秒轮询）
 }
