@@ -25,7 +25,12 @@ use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpListe
 // 与候选 A 对齐：lwIP 的 TCP_WND / TCP_SND_BUF 都是 128 KiB
 const WND: usize = 128 * 1024;
 const PORTS: [u16; 2] = [5201, 5202];
-const BACKLOG: usize = 4; // 每个端口预挂几个监听 socket
+// ★ 每个端口预挂的监听 socket 数 = **能同时接住的并发连接数上限**。
+//   smoltcp 的缓冲是预分配的，一个监听 socket 就吃掉 2×WND=256 KiB，**空着也占**。
+//   这正是并发测试要量的东西，所以做成 env 可配，免得为改一个数重编。
+fn backlog() -> usize {
+    std::env::var("SMOL_BACKLOG").ok().and_then(|v| v.parse().ok()).unwrap_or(64)
+}
 
 struct Conn {
     up: TcpStream,
@@ -83,10 +88,13 @@ fn main() {
 
     let mut sockets = SocketSet::new(vec![]);
     let mut listeners: HashMap<SocketHandle, u16> = HashMap::new();
-    for p in PORTS { for _ in 0..BACKLOG { listeners.insert(new_listener(&mut sockets, p), p); } }
+    let bl = backlog();
+    for p in PORTS { for _ in 0..bl { listeners.insert(new_listener(&mut sockets, p), p); } }
     let mut conns: HashMap<SocketHandle, Conn> = HashMap::new();
 
-    eprintln!("smoltcp2socks up on {tap_name} ip={ip_str} wnd={WND} ports={PORTS:?}");
+    eprintln!("smoltcp2socks up on {tap_name} ip={ip_str} wnd={WND} ports={PORTS:?} \
+               backlog={bl} prealloc={}MiB",
+              (PORTS.len() * bl * 2 * WND) / (1024 * 1024));
 
     loop {
         let now = Instant::now();
