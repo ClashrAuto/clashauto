@@ -66,27 +66,29 @@ struct UpdateView: View {
         notes
             .safeAreaBar(edge: .top, spacing: 0) { navBar }
             .safeAreaBar(edge: .bottom, spacing: 0) { bottomBar }
+            // 顶栏就钉在标题栏那条带子里 —— 整列越过顶部安全区才盖得上去。
+            .ignoresSafeArea(.container, edges: .top)
             .scrollEdgeEffectStyle(.soft, for: .all)
             .frame(minWidth: 460, minHeight: 420)
             .windowGlass(.sidebar, movableByBackground: true)
             .task { await load() }
+            .task { await fakeProgressIfRequested() }
     }
 
-    // MARK: 导航栏（50，钉在标题栏那条 50 的下面）
+    // MARK: 导航栏 = 标题栏那条带子（50）
 
-    /// ★ 导航栏是**标题栏之下单独的一条**，不是塞进标题栏那条带子里。两个理由：
-    ///   ① 塞进去的话左边 20 正好是红绿灯的位置，版本号会**压在三颗灯上**（第一版就是这样）；
-    ///   ② 标题栏那条是 macOS 上的拖动区，占满了窗口就不好拖（连接窗当初正是为此把顶栏靠右排）。
-    ///   于是让系统标题栏（空 toolbar 抬到 50）继续当安全区，这一条 50 紧跟其下 ——
-    ///   **不要**再给内容加 `ignoresSafeArea(.top)`：那会把标题栏那 50 的安全区也一起抹掉，
-    ///   正文就从 y=0 画起、连红绿灯和版本号都被盖住（试过，截图里正文直接压在版本号上）。
+    /// 红绿灯占掉的宽度。版本号从它右边**再让 20** 起排 —— 直接从 20 起排的话
+    /// 会压在三颗灯上（第一版截图就是这样）。
+    private static let trafficLightsWidth: CGFloat = 78
+
     private var navBar: some View {
         HStack(spacing: 12) {
             versionLine
             Spacer(minLength: 12)
             tabPicker
         }
-        .padding(.horizontal, 20)
+        .padding(.leading, Self.trafficLightsWidth + 20)
+        .padding(.trailing, 20)
         .frame(height: Self.bandHeight)
     }
 
@@ -106,25 +108,22 @@ struct UpdateView: View {
         .lineLimit(1)
     }
 
-    /// 右侧：一颗胶囊里的三段。选中段的底压在整组玻璃**里面**，
-    /// 不会给整组带来额外圆角（与页脚模式组同一画法）。
+    /// 右侧的三段，**并成一颗胶囊**。
+    ///
+    /// 做法是系统的 `GlassEffectContainer`：容器里相邻的玻璃元素靠得够近时会**自己融成
+    /// 一块连续的玻璃**（间距给 0，留 2 还看得见缝）——这是 macOS 26 上「连体按钮组」的原生写法。
+    /// 选中态用系统的 `.glassProminent`，**不自己铺任何底色**：手铺的色块压在玻璃上会糊成
+    /// 一片，而且和系统在别处的选中态长得不一样。
     private var tabPicker: some View {
-        HStack(spacing: 0) {
-            ForEach(Tab.allCases) { item in
-                Button { tab = item } label: {
-                    Text(item.title)
-                        .font(.system(size: 12))
-                        .foregroundStyle(tab == item ? .white : theme.textSecondary)
-                        .frame(width: 56, height: 28)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background {
-                    if tab == item { Capsule().fill(theme.accent.opacity(0.8)) }
+        GlassEffectContainer(spacing: 0) {
+            HStack(spacing: 0) {
+                ForEach(Tab.allCases) { item in
+                    Button(item.title) { tab = item }
+                        .glassButton(prominent: tab == item)
                 }
             }
         }
-        .glassCapsule()
+        .font(.system(size: 12))
     }
 
     // MARK: 内容：更新说明
@@ -145,8 +144,9 @@ struct UpdateView: View {
 
     // MARK: 底栏
 
+    /// 底栏。内容**一律靠右**。
     private var bottomBar: some View {
-        VStack(spacing: 6) {
+        VStack(alignment: .trailing, spacing: 6) {
             if let progress {
                 HStack(spacing: 10) {
                     progressBar(progress)
@@ -159,14 +159,13 @@ struct UpdateView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textMuted)
                     .lineLimit(1)
-                    .frame(maxWidth: .infinity)          // 居中
             } else if hasUpdate {
                 Button(busy ? "更新中…".t : "更新".t) { startUpdate() }
-                    .glassButton(prominent: true)
+                    .glassButton()
                     .disabled(busy)
             } else {
                 Button(checking ? "检查中…".t : "获取更新".t) { Task { await check() } }
-                    .glassButton(prominent: true)
+                    .glassButton()
                     .disabled(checking || busy)
             }
 
@@ -175,12 +174,12 @@ struct UpdateView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(theme.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity)          // 居中
+                    .multilineTextAlignment(.trailing)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
-        .frame(maxWidth: .infinity)
     }
 
     /// ★ 底栏这几颗按钮走**系统的玻璃按钮样式**，不用本文件原来那两个手绘按钮。
@@ -188,27 +187,18 @@ struct UpdateView: View {
     ///   标签文字会被**旋转 180°** 画出来（截图里「Close」是倒着的，稳定复现；换成
     ///   `.glassButton()` 立刻正常）。系统按钮样式不受影响，`safeAreaBar` 本来也是给它们用的。
 
-    /// 高 22、半径 4、1px 描边，进度条本体内缩 1，百分比压在正中。
+    /// 细进度条：高 5、**全圆角**、不写百分比（百分比在下面那行「下载量/总量」里已经有了，
+    /// 5 高的条也塞不下字）。定宽 220 —— 底栏内容是靠右排的，条本身不能撑满整行。
     private func progressBar(_ percent: Int) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(theme.dark ? Color(hex: 0x0D_0D_0D) : Color(hex: 0xEE_EE_EE))
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
+        ZStack(alignment: .leading) {
+            Capsule().fill(theme.dark ? Color(hex: 0x0D_0D_0D) : Color(hex: 0xE4_E4_E4))
+            GeometryReader { geo in
+                Capsule()
                     .fill(theme.accent)
-                    .frame(width: max(0, (geo.size.width - 2) * Double(percent) / 100))
-                    .padding(1)
-                Text("\(percent)%")
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textPrimary)
-                    .frame(maxWidth: .infinity)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .stroke(theme.divider, lineWidth: 1)
+                    .frame(width: max(0, geo.size.width * Double(percent) / 100))
             }
         }
-        .frame(height: 22)
+        .frame(width: 220, height: 5)
     }
 
     /// 「12.3 MB/s (5.2 MB / 40.1 MB)」。一个字节都还没来时是「0 B/s (0 B / 0 B)」——
@@ -269,6 +259,21 @@ struct UpdateView: View {
     }
 
     // MARK: 动作
+
+    /// `COAST_UPDATE_FAKEPROGRESS=1`：走一遍假的下载进度。
+    ///
+    /// 与 `COAST_OPEN_UPDATE` / `COAST_MODE_EXPANDED` 同类的 UI 调试钩子 —— 下载态
+    /// （进度条 + 关闭 + 速度行）**只能靠真的下点什么才看得到**，而这个窗的「程序」页
+    /// 真下完是要退出进程去装的，没法拿来截图核对版式。默认不触发，正式使用零影响。
+    private func fakeProgressIfRequested() async {
+        guard ProcessInfo.processInfo.environment["COAST_UPDATE_FAKEPROGRESS"] == "1" else { return }
+        try? await Task.sleep(for: .seconds(2))
+        busy = true
+        for step in stride(from: 0, through: 100, by: 5) {
+            note(percent: step, received: Int64(step) * 431_000, total: 43_100_000)
+            try? await Task.sleep(for: .milliseconds(400))
+        }
+    }
 
     private func load() async {
         coreLocalVersion = CoreVersion.local()
