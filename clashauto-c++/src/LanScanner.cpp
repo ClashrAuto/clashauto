@@ -335,9 +335,11 @@ void LanScanner::detectLocalTopology()
     detectIpv6Topology();
 }
 
-#ifdef Q_OS_LINUX
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
 namespace {
 // 同步跑一条命令收全部 stdout（短超时；失败/超时返回空）。仅供 v6 拓扑发现这类轻量只读命令用。
+// ★ Linux 与 macOS 共用：两边的 v6 拓扑发现都是"跑一条只读命令再解析"（Linux 用 ip、
+//   macOS 用 netstat/ndp/ifconfig）。Windows 那边走 IP Helper API，不需要它。
 QString runCmd(const QString &program, const QStringList &args)
 {
     QProcess p;
@@ -351,7 +353,9 @@ QString runCmd(const QString &program, const QStringList &args)
     }
     return QString::fromLocal8Bit(p.readAllStandardOutput());
 }
+#ifdef Q_OS_LINUX
 // /proc/net/if_inet6 里 32 位十六进制地址串（无冒号）→ 规范化 v6 串（"2408:...")。
+// 只有 Linux 用得上（macOS 那边从 ifconfig 直接拿到可读地址），单独守卫免得 mac 上告警未使用。
 QString hex32ToV6(const QString &hex32)
 {
     if (hex32.size() != 32)
@@ -365,12 +369,15 @@ QString hex32ToV6(const QString &hex32)
     }
     return QHostAddress(raw).toString();
 }
+#endif // Q_OS_LINUX
 } // namespace
 #endif
 
-// Linux：用 `ip -6 route`/`ip -6 neigh` + /proc/net/if_inet6 尽力填 v6 字段；解析失败留空（v6 no-op）。
-// 其它平台暂不实现（留空即安全降级）：mac 可日后用 `netstat -rn -f inet6`/`ndp -an`，win 用
-// GetIpForwardTable2/GetIpNetTable2，结构留在此处一目了然。
+// 三端都要实现，缺一端就等于**那一端的 IPv6 完全绕过代理**（见各分支里的说明）：
+//   Linux：`ip -6 route` / `ip -6 neigh` + /proc/net/if_inet6
+//   macOS：`netstat -rn -f inet6` / `ndp -an` / `ifconfig <dev> inet6`
+//   Windows：GetIpForwardTable2 / GetIpNetTable2（IP Helper）
+// 解析失败留空 → NdpSpoofer no-op（安全降级，但 v6 就不受管了，所以别把"留空"当成可接受的常态）。
 void LanScanner::detectIpv6Topology()
 {
 #ifdef Q_OS_LINUX
@@ -442,6 +449,98 @@ void LanScanner::detectIpv6Topology()
                             lf.prefix6 = v6 + QStringLiteral("/") + QString::number(plen);
                     }
                 }
+            }
+        }
+    }
+#elif defined(Q_OS_MACOS)
+    // macOS：等价于 Linux 那边的 `ip -6 route` + `ip -6 neigh`，用 `netstat -rn -f inet6`
+    // 取 v6 默认路由器的链路本地地址，再用 `ndp -an` 查它的 MAC。
+    //
+    // ★ 为什么非补这一段不可（与 Windows 那段是**同一个 bug 的第三次**）：这个函数原本只有
+    //   Linux 与 Windows 两个分支，macOS 落进空实现 —— NicSpec 的 routerLinkLocal6/routerMac6
+    //   恒空，NdpSpoofer 直接停用（真机日志：`NdpSpoofer: 无可用 v6 路由器，该卡 v6 劫持停用`），
+    //   于是**被接管设备的 IPv6 完全绕过网关**：它的 v6 默认路由器仍是真路由器，v6 流量既不
+    //   经代理、也不受每设备策略约束（"禁网"的设备照样能用 v6 上网）。
+    //   真机实证（2026-08-03，Mac 做网关接管 Windows .51）：接管后 Windows 的 v6 网关 MAC
+    //   仍是真路由器 70-A7-41-A4-19-7B，`ipv6.baidu.com` 照常 200 —— 而 v4 已经走了 pf。
+    //   现代 App 大量优先走 v6，所以表现就是"开了代理却像没生效"。
+    {
+        // (a) v6 默认路由：`netstat -rn -f inet6` 里以 default 开头的行，
+        //     形如：default   fe80::72a7:41ff:fea4:197b%en0   UGcg   en0
+        //     网关列带 %网卡 后缀，网卡名也可从最后一列拿到；两者取其一即可。
+        const QString out = runCmd(QStringLiteral("netstat"),
+                                   {QStringLiteral("-rn"), QStringLiteral("-f"),
+                                    QStringLiteral("inet6")});
+        const QStringList lines = out.split('\n', Qt::SkipEmptyParts);
+        for (const QString &ln : lines) {
+            if (!ln.startsWith(QStringLiteral("default")))
+                continue;
+            const QStringList tok = ln.split(' ', Qt::SkipEmptyParts);
+            if (tok.size() < 2)
+                continue;
+            QString via = tok.at(1);
+            const int pct = via.indexOf(QLatin1Char('%'));
+            QString dev = pct >= 0 ? via.mid(pct + 1) : QString();
+            if (pct >= 0)
+                via = via.left(pct);
+            // 只要链路本地下一跳（fe80::/10）—— NDP 投毒的目标就是它；utun/隧道那些跳过。
+            if (!via.startsWith(QStringLiteral("fe80"), Qt::CaseInsensitive))
+                continue;
+            if (dev.isEmpty())
+                dev = tok.last();
+            for (LocalIface &f : m_physIfaces)
+                if (f.name == dev && f.gatewayLL6.isEmpty())
+                    f.gatewayLL6 = via;
+        }
+    }
+    // (b) 路由器 MAC：`ndp -an` 形如
+    //     fe80::72a7:41ff:fea4:197b%en0   70:a7:41:a4:19:7b   en0  23h59m56s  S  R
+    {
+        const QString out = runCmd(QStringLiteral("ndp"), {QStringLiteral("-an")});
+        const QStringList lines = out.split('\n', Qt::SkipEmptyParts);
+        for (const QString &ln : lines) {
+            const QStringList tok = ln.split(' ', Qt::SkipEmptyParts);
+            if (tok.size() < 3)
+                continue;
+            QString addr = tok.at(0);
+            const int pct = addr.indexOf(QLatin1Char('%'));
+            QString dev = pct >= 0 ? addr.mid(pct + 1) : QString();
+            if (pct >= 0)
+                addr = addr.left(pct);
+            const QString mac = DeviceStore::normalizeMac(tok.at(1));
+            if (mac.isEmpty())
+                continue; // "(incomplete)" 之类
+            if (dev.isEmpty())
+                dev = tok.at(2);
+            for (LocalIface &f : m_physIfaces)
+                if (f.name == dev && f.gatewayLL6.compare(addr, Qt::CaseInsensitive) == 0)
+                    f.gatewayMac6 = mac;
+        }
+    }
+    // (c) 本机全局 v6 + 前缀长度：`ifconfig <dev> inet6`，取第一个非链路本地、非临时地址。
+    {
+        for (LocalIface &f : m_physIfaces) {
+            if (!f.global6.isEmpty() || f.name.isEmpty())
+                continue;
+            const QString out = runCmd(QStringLiteral("ifconfig"), {f.name, QStringLiteral("inet6")});
+            for (const QString &ln : out.split('\n', Qt::SkipEmptyParts)) {
+                const QStringList tok = ln.split(' ', Qt::SkipEmptyParts);
+                const int i6 = tok.indexOf(QStringLiteral("inet6"));
+                if (i6 < 0 || i6 + 1 >= tok.size())
+                    continue;
+                QString a = tok.at(i6 + 1);
+                const int pct = a.indexOf(QLatin1Char('%'));
+                if (pct >= 0)
+                    a = a.left(pct);
+                if (a.startsWith(QStringLiteral("fe80"), Qt::CaseInsensitive))
+                    continue; // 链路本地不是我们要的"本机全局地址"
+                if (ln.contains(QStringLiteral("temporary")))
+                    continue; // 临时地址会轮换，拿它做前缀没意义
+                f.global6 = a;
+                const int pl = tok.indexOf(QStringLiteral("prefixlen"));
+                if (pl >= 0 && pl + 1 < tok.size())
+                    f.prefix6 = a + QStringLiteral("/") + tok.at(pl + 1);
+                break;
             }
         }
     }
