@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QtGlobal>  // Q_OS_LINUX：下面 gatewayTproxy 的默认值按平台分
 #include <QRect>
 #include <QString>
 #include <QStringList>
@@ -35,17 +36,40 @@ struct AppConfig {
     // dns.fake-ip-range6 三件套。注意三者缺一不可：只开 dns.ipv6 而没有 v6 fake-ip 池时，
     // fake-ip 模式下核心对 AAAA 照样回空答案（见 mihomo dns/middleware.go 的 withFakeIP）。
     bool ipv6 = false;
-    // 透明网关的**数据面**走哪条路。默认 false = 现有的 lwIP 用户态栈。
+    // 透明网关的**数据面**走哪条路。
+    //   true  = 「内核转发 + nftables TPROXY」：ARP 劫持照旧（那是「设备什么都不用改」的来源），
+    //           但劫持来的帧不再喂进 lwIP，而是由内核转发、TPROXY 投给核心。
+    //   false = 传统的 lwIP 用户态栈。
+    // 需要 nftables + iproute2 + root。
     //
-    // 打开后改走「内核转发 + nftables TPROXY」：ARP 劫持照旧（那是「设备什么都不用改」的来源），
-    // 但劫持来的帧不再喂进 lwIP，而是由内核转发、TPROXY 投给核心。树莓派 5 实测同机同靶：
-    //   lwIP 0.89 Gbps @ 82%（单线程,换网卡也过不去）  vs  TPROXY 10.6 Gbps @ 0.73 核。
-    // 仅 Linux 有效（需要 nftables + iproute2 + root）；其它平台恒为 lwIP。
+    // ★ **Linux 默认 true**（2026-08-03）。产品目标是「万兆路由/交换机级性能」，而实测证明
+    //   lwIP 在架构上到不了：
+    //     千兆链路满速对照（内网 iperf3 打网关上的 netns 假外网，确保真穿数据面；
+    //     纯链路基准 941 Mb/s 零重传）
+    //       lwIP    944 Mb/s   coast 0.90 核 + 核心 ~0      = 0.90 核 → 0.95 核/Gbps
+    //       TPROXY  940 Mb/s   coast 0.06 核 + 核心 0.18 核 = 0.24 核 → 0.25 核/Gbps
+    //   lwIP 跑满千兆就吃掉 0.9 个核，而它是**单线程**的（见 NetStack.h 顶部），单核封顶
+    //   ≈1.05 Gbps —— 万兆要在一个线程里做约 9.5 核的活，物理上做不到，换 CPU 也没用。
+    //   TPROXY 0.25 核/Gbps、万兆约 2.5 核，且内核转发天然按 CPU 队列并行 → 可行。
     //
-    // ★ 默认 false 是刻意的：这条路一旦装了规则却没人接管，被覆盖的设备会**完全断网**，
-    //   所以在它跑够久之前，默认必须是可回退的那一条。环境变量 COAST_GATEWAY_DATAPATH=tproxy
-    //   可临时覆盖（供测试；见 AppConfigLoader::load）。
+    //   之前默认 false 的两个理由现在都不成立了：
+    //   ① 「跑够久之前要可回退」—— 这几轮把正确性缺口逐个补完并真机验证过：ICMP 重定向把
+    //      流量赶出代理、Docker 的 FORWARD policy DROP 吃掉内核转发、局域网隔离在 TPROXY 下
+    //      失效、崩溃后 route_localnet/ip_forward/send_redirects 残留（见 TproxyRules.cpp）。
+    //   ② 「TPROXY 会丢 IPv6，相对 lwIP 是功能回归」—— 上一次改动已补齐（proxied6 集合 +
+    //      prerouting6 链 + ip -6 策略路由 + forward_accept 的 v6 两条 + listener 听 `::` +
+    //      邻居表播种），真机验证 curl -6 / ping6 / 禁网策略在 v6 上全部正确。
+    //
+    //   失败仍是安全的：install 失败时 configureLocal **原地返回、保持未接管状态**，设备继续
+    //   用真网关上网，而不是半开着把人打断网。回退一键可用：配置键 gatewayTproxy: false，
+    //   或环境变量 COAST_GATEWAY_DATAPATH=lwip。
+    //   仅 Linux 有效；Windows/macOS 这个字段恒被忽略，仍走 lwIP —— 它们的替代数据面
+    //   （Windows 自写 WFP 驱动、macOS BPF）尚未实现，那之前 lwIP 不能删。
+#if defined(Q_OS_LINUX)
+    bool gatewayTproxy = true;
+#else
     bool gatewayTproxy = false;
+#endif
     // 无可用代理节点时的兜底行为。默认 false = 回落直连（clash 既定语义：普通代理设备跟随
     // 规则、规则最终回落 DIRECT）。true = fail-closed：无订阅节点时把"该走代理"的流量导向
     // REJECT,避免被劫持设备在机场跑路/订阅过期时**静默裸奔**(真实 IP 泄露、翻墙失效)。
