@@ -135,12 +135,10 @@ struct NodesPage: View {
 
     var body: some View {
         content
-            // 左贴侧栏（0），右离窗缘 10。
-            //
-            // ★ 这条内距加在 `content` 上、**在 `pageHeaderBar` 之前** —— 26 上
-            //   `pageHeaderBar` 是 `safeAreaBar`，加在它后面会和顶栏自己那份
-            //   叠成 20（见 `topBar`）。
-            .padding(.trailing, 10)
+            // ★ 右边这 10 加在**滚动内容里**，不加在 `content` 外面 —— 加外面的话整个
+            //   滚动区跟着内缩，**滚动条就悬在离窗缘 10 的空中**，与状态页对不齐
+            //   （状态页一直是把内距加在滚动内容上的，见 `StatusPage.body`）。
+            //   内容的右内距不变，变的只是滚动条落点：贴住窗口右缘。
             .pageHeaderBar(spacing: 8) { topBar }
     }
 
@@ -279,6 +277,7 @@ struct NodesPage: View {
                                     onDisable: { state.disableCurrentNode(node) })
                         }
                     }
+                    .padding(.trailing, 10)
                     .padding(.bottom, 10)
                 }
             }
@@ -406,9 +405,8 @@ struct LogsPage: View {
 
     var body: some View {
         LogTimeline(entries: tab == 0 ? state.logs : state.coreLogs)
-            // 左贴侧栏（0），右离窗缘 10。加在时间线上、**不是**加在整页上 ——
-            // 后者会和标签栏自己那份内距叠起来（见 NodesPage 的说明）。
-            .padding(.trailing, 10)
+            // ★ 右边那 10 加在**滚动内容里**（见 `LogTimeline`），不加在这里 ——
+            //   加在这里整个滚动区跟着内缩，滚动条就悬在离窗缘 10 的空中，与状态页对不齐。
             .pageHeaderBar(spacing: 8) {
                 HStack(spacing: 6) {
                     if #available(macOS 26.0, *) {
@@ -510,6 +508,8 @@ struct LogTimeline: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 6)
                     .padding(.bottom, 10)
+                    // 右边这 10 在**滚动内容里**：滚动条要贴窗缘，与状态页一致（见 NodesPage）。
+                    .padding(.trailing, 10)
                 }
                 // 新日志插在第 0 行 → 把视图拉回顶部（QML 的 `positionViewAtBeginning()`）。
                 .onChange(of: entries.count) {
