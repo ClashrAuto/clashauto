@@ -57,12 +57,31 @@
 //   listener type: tproxy         ←→  listener type: **redir**（核心已支持，见下）
 //
 // ★ 核心侧**不需要改**：mihomo 的 `redir` 入站就是为「目的地已被 REDIRECT/rdr 改写」这类
-//   场景设计的，官方文档写明它适用于 Linux 与 **macOS**；实测本仓库随包的 coast 1.10.0
-//   二进制里也确实带 `redir`。所以 macOS 这条路是「PfRules 装 rdr 规则 + 核心开 redir
-//   listener」，与 Linux 的「TproxyRules 装 tproxy 规则 + 核心开 tproxy listener」完全对称，
-//   ConfigBuilder 只需按平台写不同的 listener type。
-//   （曾一度以为「核心只有 Linux TPROXY 语义、macOS 拿不到原始目的地」是阻塞项 —— 查证后
-//     证伪，记在这里免得下次再绕。）
+//   场景设计的，且它的 **darwin 实现（listener/redir/tcp_darwin.go）自己就打开 /dev/pf 做
+//   DIOCNATLOOK**，与本类的 lookupOriginalDest 是同一套机制。所以 macOS 这条路是
+//   「PfRules 装 rdr 规则 + 核心开 redir listener」，与 Linux 的「TproxyRules + tproxy
+//   listener」完全对称，ConfigBuilder 只需按平台写不同的 listener type。
+//
+// ★★★ **核心必须以 root 运行，否则 redir 静默失效** —— 这是 macOS 这条路最要命的一个点。
+//   /dev/pf 的权限是 `crw------- root:wheel`，非 root 打不开。而 mihomo 的 darwin redir
+//   在拿不到原始目的地时**不报错、不打日志**，只是 accept 之后把连接丢掉：
+//     · 设备侧表现：TCP 握手成功（因为 accept 了），随后 http=000；
+//     · 核心日志：**一行都没有**（连接根本没进入路由匹配）；
+//     · pf 侧一切正常：rdr 规则 Packets 在涨、状态表里能看到
+//       `127.0.0.1:17897 <- 93.184.216.34:80 <- 192.168.20.203`。
+//   三边"看起来都对"，唯独不通 —— 真机上为此绕了很久，试了 rdr 目标改 LAN IP、listener 改
+//   IPv4/IPv6 等一堆方向，全是错的。**先确认核心是不是 root。**
+//   真机对照（同一套 pf 规则，只改核心的运行用户）：
+//     非 root：http=000，核心日志无任何记录
+//     root   ：http=200 559B，核心日志
+//              `[TCP] 192.168.20.203:41056 --> 93.184.216.34:80 match Match using DIRECT`
+//              —— 原始目的地被正确还原（不是被改写后的 127.0.0.1:17897）。
+//   产品影响：macOS 上 CoreController 必须经特权 helper 以 root 启核心（helper 已存在，
+//   见 MacHelperClient / helper/），不能沿用普通用户启动那条路。
+//
+// ★ 另一个真机确认的平台行为：**rdr 到 127.0.0.1 对"来自其它主机的转发流量"是可行的**
+//   （上面 root 那次就是 -> 127.0.0.1 port 17897 成功的）。网上常见「macOS 不允许外部流量
+//   rdr 到 loopback」的说法在本机 13.7.8 上不成立 —— 那类报告多半也是踩了 root 这个坑。
 //
 // ★ 真正待做的下一步：实现 install/remove（写 anchor + 开关 forwarding + sysctl 存档还原）、
 //   ConfigBuilder 按平台产出 redir listener、以及 LanGateway 的 macOS 实现接上
