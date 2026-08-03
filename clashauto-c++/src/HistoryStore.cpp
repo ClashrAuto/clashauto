@@ -246,7 +246,15 @@ void HistoryStore::purgeOld()
     QSqlQuery q(m_db);
     q.prepare(QStringLiteral("DELETE FROM conn WHERE ended_at < ?"));
     q.addBindValue(cutoff);
-    q.exec();
+    // ★ 必须查 exec() 的返回值。这是**唯一**会让库无限膨胀的路径：它失败了没有任何外部
+    //   症状（历史照常写、查询照常返回），只有磁盘一天天变大，等有人发现时库已经很大了。
+    //   本文件的 flush() 早就在做失败告警，这里一直漏着。
+    //   （真机验证过删除逻辑本身是对的：往生产库副本注入一条 35 天前的记录，purge 后超期归零；
+    //     EXPLAIN QUERY PLAN 显示走 conn_ended 索引，不是全表扫，所以大库上也不会卡住。）
+    if (!q.exec()) {
+        qWarning("HistoryStore: 历史清理失败（库可能持续增大）: %s",
+                 q.lastError().text().toUtf8().constData());
+    }
 }
 
 QVector<HistoryStore::DomainTotal> HistoryStore::topDomains(const QString &mac, int days,
