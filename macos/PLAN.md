@@ -3492,13 +3492,32 @@ CPU 就从 1.80% 掉到 0.60%。而"内部清空但参数照旧变"仍是 1.85%�
 这也解释了 Qt 端为什么只要 0.60%：QML 的 `Canvas` 重绘不参与布局，
 数据变化不会让父链失效。**这是 3 倍差距的结构性来源。**
 
-**下一步的正确方向**（本轮仍未落地）：
-让每拍变化的数据**不再经由 `TrafficCard` 的初始化参数传入**，从而不使其子树失效。可选：
-- 把曲线做成 `NSViewRepresentable`（内部持 CALayer 自更新），`samples` 只在
-  `updateNSView` 里灌进去，不进 SwiftUI 的 layout pass；
-- 或让数字与曲线各自成为独立的小 `@Observable` 观察点，把失效范围缩到 `Text` 那一层，
-  不牵动卡片外壳 —— 但要确认 SwiftUI 是否真能把失效限制在叶子（本轮实验提示
-  "内部清空仍 1.85%"，说明失效是整棵子树，未必缩得住）。
+**已修复：把每拍变化的读取下沉到叶子子视图（开窗 CPU -53%）**
+
+`TrafficCard` 原先从父视图接收 `value` / `samples` / `tick` 三个每拍都变的参数，
+于是整棵卡片子树每拍失效。改法是**让卡片不再接收这些参数**：
+
+- 卡片只收静态参数（`glyph`/`title`/`accent`/`lineColor`）+ 一个 `isUp: Bool`；
+- 变化的读取放进两个 `private` 叶子子视图：`RateText` 读 `state.upText/downText`，
+  `CurveLayer` 读 `state.bandwidthUp/Down` 与 `state.pollTick`。
+  `@Observable` 的依赖是**按 View 的 body 记录**的，读取落在哪个 body 里，
+  失效就只到哪一层 —— 卡片外壳（`frame`/`background`/`clipShape`）从此不再参与。
+
+实测（n=20，同机同法）：
+
+| 配置 | 中位 CPU |
+|---|---|
+| 改前 | 1.80% |
+| **改后** | **0.85%（-53%）** |
+| 参数换常量（理论最好） | 0.60% |
+| 空循环（下限） | 0.50% |
+| 对照：Qt 端 | 0.60% |
+
+回归验证三段都正常（静止低 → 有流量时出现 2.1%/3.6% 的刷新峰值 → 停止后回落），
+数据映射逐项核对过：上行卡 → `upText`/`bandwidthUp`，下行卡 → `downText`/`bandwidthDown`，语义无变化。
+
+**仍留的 0.25% 差距**（0.85% vs 0.60%）：叶子层自身的失效与重绘，属于合理开销；
+若还要压，得让曲线彻底脱离 SwiftUI 的 layout（`NSViewRepresentable` + CALayer 自更新）。
 
 ★ 方法论：**逐项停无效、整块移除才有效**。原因是一拍之内只发生一次 layout pass，
 停掉单项时其余参数照变，pass 照走。要定位这类成本，必须用"整块移除 / 参数换常量"

@@ -50,17 +50,13 @@ struct StatusPage: View {
                     //   `speedText(up)`（带 `/s`）。原来写的是 `Formatting.bytes(...)`，
                     //   于是把「1.2 MB/s」显示成了「1.2 MB」—— 一个把速率读成总量的错。
                     TrafficCard(glyph: "\u{F24A}", title: "上传".t, // upload-2-line
-                                value: state.upText,
                                 accent: theme.uploadAccent,
                                 lineColor: theme.uploadLine,
-                                samples: state.bandwidthUp,
-                                tick: state.pollTick)
+                                isUp: true)
                     TrafficCard(glyph: "\u{EC54}", title: "下载".t, // download-2-line
-                                value: state.downText,
                                 accent: theme.downloadAccent,
                                 lineColor: theme.downloadLine,
-                                samples: state.bandwidthDown,
-                                tick: state.pollTick)
+                                isUp: false)
                 }
                 HStack(alignment: .top, spacing: 10) {
                     ConnectionsCard(recent: recentRows,
