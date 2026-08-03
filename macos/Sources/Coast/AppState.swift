@@ -387,7 +387,13 @@ public final class AppState {
 
     /// 每拍同步一次可见性，并处理两个方向的边沿。
     private func syncUIVisibility() {
-        let visible = WindowRestore.anyWindowVisible
+        // 顺带把「是不是正看着节点页」同步给 ClashService —— 它据此决定 /proxies 的
+        // 轮询频率（见 `ClashService.nodesVisible`）。搭在这条 1Hz 循环上，
+        // 与可见性同源，省掉一套页面切换的通知订阅。
+        let visibleNow = WindowRestore.anyWindowVisible
+        let onNodes = visibleNow && currentPage == .nodes
+        if clash.nodesVisible != onNodes { clash.nodesVisible = onNodes }
+        let visible = visibleNow
         guard visible != uiVisible else { return }
         uiVisible = visible
         clash.uiActive = visible

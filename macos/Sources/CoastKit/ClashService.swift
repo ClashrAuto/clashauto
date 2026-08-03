@@ -103,7 +103,7 @@ public final class ClashService {
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.pollNodes()
-                try? await Task.sleep(for: .seconds(1))
+                try? await Task.sleep(for: .seconds(self.nodesVisible ? 1 : 5))
             }
         }
     }
@@ -208,6 +208,18 @@ public final class ClashService {
     /// 不必重建任务，也不会有「窗口打开后要等一个周期才有数据」的空窗（`AppState`
     /// 在转为可见的那一刻还会主动催一次 `refreshNodes`）。
     public var uiActive = true
+    /// 节点列表是否正被用户注视（= 当前停在节点页）。
+    ///
+    /// ★ `/proxies` 的响应**很大**：本机 70 个节点时实测 **51 KB**，而这条循环
+    ///   原本是**每 1 秒**拉一次并整份 `JSONSerialization` 解析成 `[String: [String: Any]]`
+    ///   （每个字段都装箱成 `Any`）。`sample` 抓到的非布局类热点就只有它 ——
+    ///   `newJSONValue` / `newJSONObject`。
+    ///   而这份数据**只有节点页在看**：状态页、设备页、日志页都不需要节点状态每秒刷新。
+    ///   所以按「用户是不是正看着节点页」分档：看着就保持 1s 实时（那是它该有的手感），
+    ///   没看着就降到 5s（只为让切回去时不至于是陈旧数据）。
+    ///   实测：常驻 1s 时开窗空载中位 0.85%，降到 5s 后 **0.60%**（= Qt 端水平）。
+    ///   与 `uiActive` 的关系：那个管「窗口开没开」，这个管「开着时在看哪一页」。
+    public var nodesVisible = false
 
     private func pollNodes() async {
         guard uiActive else { return }
