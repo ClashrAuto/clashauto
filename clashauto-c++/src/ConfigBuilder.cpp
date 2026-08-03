@@ -760,7 +760,21 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         //   但 QUIC-only 的流量在 macOS 网关下确实绕过代理 —— 记在这里，别当 bug 反复查。
         block += "  - name: coast-redir\n";
         block += "    type: redir\n";
-        block += "    listen: 0.0.0.0\n";
+        // ★★ **必须写 127.0.0.1，不能写 0.0.0.0。** 写 0.0.0.0 时 mihomo 建出来的是**IPv6
+        //   通配套接字**（真机 lsof：`core IPv6 *:7897 (LISTEN)`），v4 连接以 v4-mapped 形式
+        //   到达；随后核心用 /dev/pf 的 DIOCNATLOOK 还原原始目的地时地址族对不上，查不到那条
+        //   状态 —— 而 mihomo 的 darwin redir 在拿不到原始目的地时**不报错、不打日志**，
+        //   accept 之后直接把连接丢掉。表现就是"三边看起来都对，唯独不通"。
+        //   真机对照（同一条路由、同一个 pf 表，只改这一行）：
+        //       listen: 0.0.0.0    → lsof 显示 IPv6 *:7897   → 设备请求 http=000，核心日志 0 行
+        //       listen: 127.0.0.1  → lsof 显示 IPv4 127.0.0.1:7897 → 设备请求 http=404（真实响应）
+        //     两次 pf 的 rdr 计数都在涨（Packets/States 有值），也就是说流量确实被重定向进来了，
+        //     区别只在核心还不还得出原始目的地。
+        //   绑 127.0.0.1 够用且更严：rdr 的目标本来就是 127.0.0.1，没有任何流量需要从别的
+        //   地址进这个口；绑通配反而把 redir 口暴露给整个局域网。
+        //   （与 TPROXY 那条相反——那边**必须**写 `::`，因为 TPROXY 保留原始目的地址、要靠双栈
+        //     套接字同时收 v4/v6。两条数据面的约束正好相反，别照抄。）
+        block += "    listen: 127.0.0.1\n";
         block += QString("    port: %1\n").arg(DeviceStore::kRedirPort);
     }
 
