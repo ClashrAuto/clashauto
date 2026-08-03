@@ -4381,3 +4381,45 @@ Qt 端组合场景实测：
 `grep assert` 命中 `re-assert`、抓包网卡选错、这次 `scp` 静默失败）：
 **把 stderr 重定向到 /dev/null 会把"命令失败"变成"结果为空"**，
 而空结果又常常长得像"没问题"。给会失败的命令留一条能看见的错误路径。
+
+## 产品自带的自检钩子：一直没用过的验证通道
+
+两条线各自带了一套 `COAST_*_SELFTEST` 无头自检，这一系列测试**从头到尾没用过**，
+一直在手写脚本。跑一遍发现它们既能通过、又给出了此前缺的信息。
+
+### Swift 端（跑了 4 项非侵入的）
+
+| 自检 | 结果 |
+|---|---|
+| `COAST_PATHS_SELFTEST` | 目录与 4 个种子 yaml 齐全（开发期从仓库回退） |
+| `COAST_TOPO_SELFTEST` | 网关 `192.168.20.1` / `70:a7:41:a4:19:7b` / 接口 **`en1`** —— 接管三要素齐全 |
+| `COAST_DEVICES_SELFTEST` | 扫到 11 台设备，MAC/IP/厂商都对 |
+| `COAST_LATENCY_SELFTEST` | 直连 2ms / 到路由 6ms / DNS 4ms |
+
+★ **`TOPO_SELFTEST` 直接报出接口是 `en1`** —— 前面某轮我抓包时想当然写了 `en0`、
+抓到 0 帧、差点判成"修复无效"。**先跑一句自检就能省掉那次弯路。**
+
+### Qt 端（跑了 4 项）
+
+| 自检 | 结果 |
+|---|---|
+| `COAST_DEVICEDB_SELFTEST` | devices.json → coast.db 迁移 + 读回 + 代理策略，全对 |
+| `COAST_HISTORY_SELFTEST` | 驱动 ok、"0 字节连接不入库"的过滤生效（parsed=3 → records=2） |
+| `COAST_CONNSTATS_SELFTEST` | 连接统计按设备归属、直连/代理分类都对 |
+| `COAST_SCAN_SELFTEST` | 三轮快照设备数一致，**最坏事件循环阻塞仅 24ms** |
+
+### 两条线的自检覆盖**互有缺失**（新的镜像维度）
+
+| 只有 Qt 有 | 只有 Swift 有 |
+|---|---|
+| `CONNSTATS` / `GATEWAY` / `HISTORY` / `ISSUE` | `HELPER` / `XPC` |
+| `NDP_RA` / `PF` / `SCAN` / `TPROXY` | `LATENCY` / `PATHS` / `SYSPROXY` / `TOPO` |
+
+共有的只有 `DEVICEDB` / `QUIT`。这不一定都要补齐（有些是平台专属，
+比如 `TPROXY` 只对 Linux 有意义、`XPC` 只对 Swift 的 helper 架构有意义），
+但 **`SCAN` / `CONNSTATS` / `HISTORY` 这三项是平台无关的业务逻辑**，
+Swift 端缺了，值得后续补。
+
+★ 教训：**动手写验证脚本之前，先看看被测对象自己带没带自检。**
+这一系列前面几十轮全在手写 curl/tcpdump/ps 组合，
+而产品里现成的钩子既权威（用的是产品自己的代码路径）又省事。
