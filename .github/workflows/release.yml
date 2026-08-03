@@ -172,7 +172,21 @@ jobs:
 
       - name: Build
         shell: pwsh
-        run: cmake --build $env:BUILD_DIR --config Release --parallel
+        # 失败时把 MSVC 的报错行**作为 annotation 吐出来**（`::error::`）。
+        # 为什么值得这么写：作业日志的下载接口要仓库 admin 权限（未授权访问返回
+        # "Must have admin rights to Repository"），而 annotation 是公开可读的。Windows 构建
+        # 曾在 v1.1 上连红 14 次没人发现具体原因，就是因为「看得到红灯、看不到报错」。
+        run: |
+          $log = "$env:RUNNER_TEMP\build.log"
+          cmake --build $env:BUILD_DIR --config Release --parallel 2>&1 | Tee-Object -FilePath $log
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0) {
+            $errs = Select-String -Path $log -Pattern 'error [A-Z]+[0-9]+|fatal error|LNK[0-9]+' |
+                    Select-Object -First 25
+            foreach ($e in $errs) { Write-Host "::error::$($e.Line.Trim())" }
+            if (-not $errs) { Write-Host "::error::构建失败但日志里没有可识别的报错行（见完整日志）" }
+            exit $rc
+          }
 
       - name: Stage portable app
         shell: pwsh
