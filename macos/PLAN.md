@@ -3615,3 +3615,30 @@ macOS 的 `top` 要**两次采样做差**才有 CPU 百分比，`-l 1` 只采一
 
 先前把 Qt 端跑在 .34（Intel i7-7567U / 4 核 / load 1.5）、Swift 端跑在本机（arm64 / 8 核），
 得出的任何差异都是机器差异。本机装上 Qt 6.11.1 后重测才有意义。
+
+## 两条线的 macOS 网关：架构对比（2026-08-04 核对）
+
+一度以为 Swift 端**没有**网关数据面（`Sources/CoastKit/` 下只有 `ArpWatch`/`LanBrowser`/
+`LanTopology`，没有 `ArpSpoofer`/`PfRules`/`LanGateway` 这些 Qt 端的同名文件）。
+**是误判** —— Swift 端的网关整个在 helper 里：`Sources/CoastHelper/Redirector.swift`（864 行），
+做三件事：`ip.forwarding=1`、装 PF anchor、周期发 ARP 欺骗应答，抓包走 **BPF**（`openBPF`）。
+
+| | Qt 端 | Swift 端 |
+|---|---|---|
+| 数据面 | pf `rdr-to` + `/dev/pf` 的 `DIOCNATLOOK` 取原始目的 | pf anchor + BPF |
+| 欺骗循环跑在 | app 进程（BPF fd 传回 app） | **helper 进程** |
+| 崩溃还原 | `GatewayPanic`（SIGSEGV/BUS/ILL/FPE/ABRT）+ 下次启动 `healPending()` 自愈 | helper 的 XPC `invalidationHandler` |
+| 代码位置 | `src/net/`（多文件） | `CoastHelper/Redirector.swift`（单文件） |
+
+**关于 Swift 注释里那句对 Qt 的批评**（"像 Qt 版那样把 BPF fd 传回 app，app 被 SIGKILL 时
+没有任何人来发复原包，设备就那么挂着"）—— 对**当前**的 Qt 端**已不成立**：
+- `GatewayPanic` 覆盖 SIGSEGV/SIGBUS/SIGILL/SIGFPE/SIGABRT（**SIGKILL 捕获不到，这是
+  操作系统限制，任何方案都一样**）；
+- SIGKILL 那个缺口由**下次启动时的 `healPending()`** 补上：把上一世还欠着复原的设备
+  记在案，起来后先发复原帧（且会跳过"现在又被正常劫持着"的设备，避免把刚投的毒解掉）。
+
+Swift 端把欺骗循环放 helper 的设计**确实更优**（XPC 连接一断就能立刻复原，不必等下次启动），
+但两条线都不存在"设备永久挂着"的问题。
+
+★ 记这一条是因为：这类跨线的架构批评注释很容易**过期**（写的时候对，对面修好了就不对了），
+读到时要**先核对当前代码**再采信 —— 我这次就差点照单全收。
