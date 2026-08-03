@@ -2,6 +2,8 @@
 
 #import <AppKit/AppKit.h>
 
+#include <QGuiApplication>
+
 namespace {
 
 // 幂等标记：毛玻璃层在窗框视图子树中的标识，重复调用只查找复用、不重复插入。
@@ -9,8 +11,21 @@ NSString *const kBlurViewId = @"CoastBlurEffectView";
 
 // winId() 在 macOS 上是 NSView*；由它取到承载它的 NSWindow。
 // ARC 下禁止整数直接转 Obj-C 指针，先转 void* 再 __bridge（不转移所有权）。
+//
+// ★★ **必须先确认平台插件是 cocoa。** 「winId 是 NSView*」只对 cocoa 平台成立；
+//    换成 offscreen / minimal 这些插件时 winId() 是个**合成 id**（实测为 1），
+//    照旧强转再发 -window 就是把消息发给碰巧落在那个地址上的对象，进程当场段错误：
+//        -[__NSTaggedDate window]: unrecognized selector sent to instance 0x1
+//    真机踩到过，而且代价不只是"少个毛玻璃"：**macOS 上一切 headless 自测都跑不起来**
+//    （offscreen 是唯一能在无图形会话下起 GUI 的路，而以 root 跑又只能走 offscreen），
+//    等于把 mac 端的自动化验证整条堵死。返回 nil 即可 —— 下面几个调用方都是给 nil 发消息，
+//    Obj-C 下是安全的 no-op，非 cocoa 平台本来也没有窗口装饰可言。
 NSWindow *windowForWId(WId winId)
 {
+    if (winId == 0)
+        return nil;
+    if (QGuiApplication::platformName() != QLatin1String("cocoa"))
+        return nil;
     NSView *view = (__bridge NSView *)reinterpret_cast<void *>(static_cast<quintptr>(winId));
     return view.window;
 }

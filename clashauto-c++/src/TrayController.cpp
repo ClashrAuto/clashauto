@@ -1,4 +1,6 @@
 #include "TrayController.h"
+
+#include <QGuiApplication>
 #include "MainWindow.h"
 
 #include <QAction>
@@ -77,6 +79,14 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
     updateMacTrayIcon(); // mac 托盘用白色地球(+状态角标) PNG 喂原生层（先缓存，install 时渲染）
     macTraySetStatus(false, false, false);
     QTimer::singleShot(0, this, [this] {
+        // ★ 没有窗口服务器就别建状态项。NSStatusItem 的初始化会走到
+        //   SLSRegisterConnectionNotifyProc → CGSConnectionByID，而 offscreen/minimal 平台
+        //   （以及以 root 运行时）根本没有那条连接，**直接断言 abort 整个进程**：
+        //       Assertion failed: (CGAtomicGet(&is_initialized)), function CGSConnectionByID
+        //   与 MacWindow 里那个 winId 强转是同一类问题：把「cocoa 才成立的前提」当成了无条件成立。
+        //   代价同样不止是"少个托盘图标"——它让 macOS 上的 headless 自测整条跑不起来。
+        if (QGuiApplication::platformName() != QLatin1String("cocoa"))
+            return;
         MacTrayHandlers h{this, &macCbOpen, &macCbCore, &macCbProxy, &macCbTun, &macCbQuit};
         macTrayInstall(h); // 幂等；安装时按缓存的图标/状态/速率渲染
     });
