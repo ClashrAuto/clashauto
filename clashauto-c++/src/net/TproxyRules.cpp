@@ -59,11 +59,57 @@ void sysctlWrite(const QString &key, const QString &value)
     run(QStringLiteral("sysctl"), {QStringLiteral("-qw"), key + QLatin1Char('=') + value});
 }
 
-// send_redirects 原值的存档文件。放 /run（tmpfs，重启即空）：重启后 sysctl 本来就回到系统
-// 默认，没有陈旧值要还原。
-QString redirStatePath()
+// 被 install 改动过的 sysctl 的原值存档（key=value 一行一条）。放 /run（tmpfs，重启即空）：
+// 重启后 sysctl 本来就回到系统默认，没有陈旧值要还原；只需覆盖「同一次开机内 kill -9 后重来」。
+//
+// ★ 为什么要落盘、而不只靠成员变量：SIGKILL / OOM / 拔电这类退出不会走析构,内存里存的原值
+//   随进程一起没了。而 install 会把 ip_forward=1、route_localnet=1、send_redirects=0 全写进
+//   内核；其中 route_localnet 尤其危险 —— 它让「目的地写成 127/8 的外来包」能被路由进本机只
+//   绑回环的服务(核心 API 9191、混合口 7890、网关 socks 7899、DNS 1053…)，本来靠 rawpre 那条
+//   raw-hook 链兜着，可 nft 表随崩溃一起没了，防护和风险就此解耦。真机实测复现过:崩在 tproxy、
+//   再以 lwIP 重启后 route_localnet 一直是 1、rawpre 链却不在了。所以这三个 sysctl 的原值必须
+//   落盘,下次启动无论以哪种模式起来都先把存档吃掉、还原干净。
+QString sysctlStatePath()
 {
-    return QStringLiteral("/run/coast-tproxy-redirects");
+    return QStringLiteral("/run/coast-tproxy-sysctl");
+}
+
+// 追加一条 key=value 到存档（存在则不重复，保留最早那次的原值）。
+void sysctlStateSave(const QString &key, const QString &value)
+{
+    QFile f(sysctlStatePath());
+    QStringList lines;
+    if (f.exists() && f.open(QIODevice::ReadOnly)) {
+        lines = QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        f.close();
+    }
+    for (const QString &l : lines)
+        if (l.startsWith(key + QLatin1Char('=')))
+            return; // 已记过原值，别用「我们写进去的值」覆盖它
+    lines.append(key + QLatin1Char('=') + value);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        f.write(lines.join(QLatin1Char('\n')).toUtf8());
+        f.close();
+    }
+}
+
+// 把存档里记下的每个 sysctl 原值写回，然后删掉存档。**幂等**：存档不存在就什么都不做。
+// remove()（正常拆除）与 removeStale()（启动时的崩溃清理）都调它，所以无论上次是优雅退出
+// 还是 SIGKILL、无论这次以 tproxy 还是 lwIP 模式启动，被改过的 sysctl 都能回到真正的原值。
+void sysctlStateRestoreAll()
+{
+    QFile f(sysctlStatePath());
+    if (!f.exists() || !f.open(QIODevice::ReadOnly))
+        return;
+    const QStringList lines = QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'),
+                                                                    Qt::SkipEmptyParts);
+    f.close();
+    for (const QString &l : lines) {
+        const int eq = l.indexOf(QLatin1Char('='));
+        if (eq > 0)
+            sysctlWrite(l.left(eq), l.mid(eq + 1));
+    }
+    QFile::remove(sysctlStatePath());
 }
 
 } // namespace
@@ -103,22 +149,11 @@ void TproxyRules::removeStale()
                                QStringLiteral("table"), QStringLiteral("99")});
     // iptables 侧那条放行也要清 —— 它按 comment 找，静态调用也删得掉（kill -9 之后就靠这个）。
     TproxyRules().removeIptablesForward();
-    // send_redirects 的崩溃恢复：把上次留下的存档还原掉。装载路径里也有一份（见
-    // saveAndDisableRedirects），这里覆盖的是"启动时不进 tproxy 模式"的情况 —— 上次崩在
-    // tproxy 模式、这次以 lwIP 起来，没人会去调 install，存档就得在这儿吃掉。
-    QFile prev(redirStatePath());
-    if (prev.exists() && prev.open(QIODevice::ReadOnly)) {
-        const QStringList lines = QString::fromUtf8(prev.readAll()).split(QLatin1Char('\n'),
-                                                                         Qt::SkipEmptyParts);
-        prev.close();
-        for (const QString &l : lines) {
-            const int eq = l.indexOf(QLatin1Char('='));
-            if (eq > 0)
-                sysctlWrite(QStringLiteral("net.ipv4.conf.%1.send_redirects").arg(l.left(eq)),
-                            l.mid(eq + 1));
-        }
-        QFile::remove(redirStatePath());
-    }
+    // sysctl 的崩溃恢复：把上次改动过的 ip_forward / route_localnet / 逐网卡 send_redirects
+    // 全部还原。装载路径（install）在改这些之前也会走到这里，所以此处覆盖的是"上次崩在 tproxy、
+    // 这次以 lwIP 模式起来、没人会调 install"的情况 —— 那时 route_localnet=1 正裸露着本机回环
+    // 服务（保护它的 rawpre 链已随 nft 表消失），必须在这儿吃掉存档还原。真机确认过这个残留。
+    sysctlStateRestoreAll();
 }
 
 bool TproxyRules::runIp(const QStringList &args, QString *err)
@@ -171,26 +206,8 @@ table inet %1 {
 // 内核取 all 与 per-device 的或，逐网卡关才有效。
 void TproxyRules::saveAndDisableRedirects()
 {
-    m_savedRedirects.clear();
-    // ★ 崩溃恢复必须放在读取当前值**之前**。
-    //   上一次若是被 kill -9 打死的，网卡上留着的是我们写下的 0；这时再"记录原值"就会把 0
-    //   当成用户的设置存档，remove() 还原回 0 —— 于是 send_redirects 被我们永久改掉，
-    //   而代码里到处承诺"不擅自改变用户的系统设置"。真机踩到过：一轮 kill -9 测试之后，
-    //   eth0 的 send_redirects 就再也回不到 1 了。
-    //   所以先把上次的存档吃掉、还原真正的原值，再重新采样。
-    QFile prev(redirStatePath());
-    if (prev.exists() && prev.open(QIODevice::ReadOnly)) {
-        const QStringList lines = QString::fromUtf8(prev.readAll()).split(QLatin1Char('\n'),
-                                                                         Qt::SkipEmptyParts);
-        prev.close();
-        for (const QString &l : lines) {
-            const int eq = l.indexOf(QLatin1Char('='));
-            if (eq > 0)
-                sysctlWrite(QStringLiteral("net.ipv4.conf.%1.send_redirects").arg(l.left(eq)),
-                            l.mid(eq + 1));
-        }
-        QFile::remove(redirStatePath());
-    }
+    // 无需在此做崩溃恢复：install() 一进来就先调 removeStale()，那里已经把 /run 存档里的
+    // 一切（含上一条命的 send_redirects）还原并清空，所以此刻读到的就是真正的原值。
     QDir dir(QStringLiteral("/proc/sys/net/ipv4/conf"));
     const QStringList ifs = dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
     for (const QString &n : ifs) {
@@ -198,26 +215,9 @@ void TproxyRules::saveAndDisableRedirects()
         const QString cur = sysctlRead(key);
         if (cur.isEmpty())
             continue;
-        m_savedRedirects.insert(n, cur);
+        sysctlStateSave(key, cur); // 与 ip_forward / route_localnet 共用同一份崩溃安全存档
         sysctlWrite(key, QStringLiteral("0"));
     }
-    // 落盘，供下次启动做崩溃恢复。
-    QFile f(redirStatePath());
-    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        QString body;
-        for (auto it = m_savedRedirects.constBegin(); it != m_savedRedirects.constEnd(); ++it)
-            body += it.key() + QLatin1Char('=') + it.value() + QLatin1Char('\n');
-        f.write(body.toUtf8());
-        f.close();
-    }
-}
-
-void TproxyRules::restoreRedirects()
-{
-    for (auto it = m_savedRedirects.constBegin(); it != m_savedRedirects.constEnd(); ++it)
-        sysctlWrite(QStringLiteral("net.ipv4.conf.%1.send_redirects").arg(it.key()), it.value());
-    m_savedRedirects.clear();
-    QFile::remove(redirStatePath()); // 正常还原完就把存档撤掉，别让下次启动重复还原
 }
 
 
@@ -320,7 +320,11 @@ bool TproxyRules::install(const Spec &spec, QString *err)
     removeStale();
 
     // 记下并打开转发（只在需要时打开，remove() 还原——不擅自改变用户的系统设置）。
+    // ★ 原值同时**落盘**到 /run 存档：SIGKILL/OOM 不走析构，只靠成员变量 remove() 时会丢，
+    //   于是 ip_forward=1 永久留下（下面 route_localnet 更危险，见那段）。存档让下次启动无论
+    //   以哪种模式起来都能还原。见 sysctlStatePath() 上方那段论证。
     m_savedIpForward = sysctlRead(QStringLiteral("net.ipv4.ip_forward"));
+    sysctlStateSave(QStringLiteral("net.ipv4.ip_forward"), m_savedIpForward);
     sysctlWrite(QStringLiteral("net.ipv4.ip_forward"), QStringLiteral("1"));
     // ★ 必须同时关掉 ICMP 重定向的**发送**，否则我们会亲手把流量赶出代理。
     //
@@ -366,6 +370,9 @@ bool TproxyRules::install(const Spec &spec, QString *err)
         //   **早于 nat/dstnat**，所以只挡真正"从网卡进来就写着 127/8"的包；我们自己在 dstnat 里
         //   改写出来的目的地是在它之后产生的，不受影响。两者缺一不可，别只留一个。
         m_savedRouteLocalnet = sysctlRead(QStringLiteral("net.ipv4.conf.all.route_localnet"));
+        // 同样落盘：这是三个 sysctl 里最危险的一个。它开着而保护它的 rawpre 链随崩溃消失后，
+        // 局域网任意机器都能把包路由进本机只绑回环的服务。真机确认过这个残留(见 sysctlStatePath)。
+        sysctlStateSave(QStringLiteral("net.ipv4.conf.all.route_localnet"), m_savedRouteLocalnet);
         sysctlWrite(QStringLiteral("net.ipv4.conf.all.route_localnet"), QStringLiteral("1"));
     }
 
@@ -526,10 +533,9 @@ void TproxyRules::remove()
                                QStringLiteral("fwmark"), mark, QStringLiteral("lookup"), table});
     run(QStringLiteral("ip"), {QStringLiteral("route"), QStringLiteral("flush"),
                                QStringLiteral("table"), table});
-    sysctlWrite(QStringLiteral("net.ipv4.ip_forward"), m_savedIpForward);
-    sysctlWrite(QStringLiteral("net.ipv4.conf.all.route_localnet"), m_savedRouteLocalnet);
-    // 还原重定向开关：不擅自留下改动过的系统设置（关掉它对普通路由器是有害的）。
-    restoreRedirects();
+    // 三个 sysctl（ip_forward / route_localnet / 逐网卡 send_redirects）统一从 /run 存档还原。
+    // 不再各自留成员变量：存档是唯一真相，且能跨 SIGKILL（那时本对象根本不会被析构）。
+    sysctlStateRestoreAll();
     removeIptablesForward();
     m_savedIpForward.clear();
     m_savedRouteLocalnet.clear();

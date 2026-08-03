@@ -108,16 +108,14 @@ private:
 
     Spec m_spec;
     bool m_installed = false;
-    // ip_forward 原值，remove() 时还原（我们只在需要时打开，不擅自改变用户的系统设置）。
+    // ★ 被 install 改过的 sysctl（ip_forward / route_localnet / 逐网卡 send_redirects）的原值
+    //   不再各留一份成员变量，而是**统一落盘**到 /run 存档（见 .cpp 的 sysctlState*）。原因：
+    //   SIGKILL / OOM / 断电不走析构，内存里的原值随进程消失，remove() 就永远还原不回去 ——
+    //   route_localnet 那条尤其危险（裸露本机回环服务）。存档是崩溃安全的唯一真相。
+    //   这两个成员只作 remove() 的「装过没」哨兵短暂留用，真正的还原走 sysctlStateRestoreAll()。
     QString m_savedIpForward;
-    // route_localnet 原值（只有开了 DNS 劫持才会动它；见 install/remove 里的说明）。
     QString m_savedRouteLocalnet;
-    // 装载前每张网卡的 send_redirects 原值（网卡名 → 值）。见 install() 里那段：透明网关必须
-    // 关掉它，否则内核会替我们向真实路由器和被劫持设备广播「别走这条路」，把流量赶出代理；
-    // 而内核取 all 与 per-device 的或，只能逐网卡关、逐网卡还原。
-    QHash<QString, QString> m_savedRedirects;
-    void saveAndDisableRedirects();
-    void restoreRedirects();
+    void saveAndDisableRedirects(); // 逐网卡关 send_redirects，原值进 /run 存档
     // 往 iptables 侧插/删「放行本网关转发」的 ACCEPT。**不能只靠 nft 的 forward_accept 链**：
     // iptables 的 filter/FORWARD 是**另一个** base chain，我们在自己的 nft 链里 accept 只结束
     // 本链遍历，另一条链的 DROP 仍是最终裁决。真机实测证据见 .cpp。
