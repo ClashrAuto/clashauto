@@ -57,4 +57,9 @@ if [ -d gvnet ]; then
         go build -o "$BENCH_DIR/bin/gvnet2socks" . ) && echo "[build] gvnet2socks ok"
 fi
 
+if [ -d smol ]; then
+    ( cd smol && PATH=$HOME/.cargo/bin:$PATH cargo build --release 2>&1 | tail -5 \
+        && cp target/release/smoltcp2socks "$BENCH_DIR/bin/" ) && echo "[build] smoltcp2socks ok"
+fi
+
 ls -l bin/

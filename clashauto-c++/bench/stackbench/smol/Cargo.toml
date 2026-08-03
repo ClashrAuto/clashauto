@@ -1,0 +1,25 @@
+[package]
+name = "smoltcp2socks"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = "0.2"
+
+[dependencies.smoltcp]
+version = "0.12"
+default-features = false
+features = [
+    "std", "alloc", "log",
+    "medium-ethernet",
+    "phy-tuntap_interface",
+    "proto-ipv4",
+    "socket-tcp",
+]
+
+# 与候选 A/B 一致：优化开满，别让「Rust 默认 debug」这种事混进结论里
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
