@@ -177,6 +177,42 @@ void DeviceStore::ensureSchema()
                           "is_self INTEGER NOT NULL DEFAULT 0,"
                           "is_gateway INTEGER NOT NULL DEFAULT 0,"
                           "last_seen TEXT NOT NULL DEFAULT '')"));
+    // —— 老库/异构库补列 ——
+    //
+    // ★ `CREATE TABLE IF NOT EXISTS` 对**已存在但列不全**的表**什么都不做**，
+    //   于是之后每条 `SELECT … total_up …` 都以「no such column」整条失败，
+    //   台账**一台都读不出来**。本机真机遇到过：Swift 产品线建的 device 表
+    //   没有 `total_up` 等列，Qt 端读它直接报错、界面显示空设备列表。
+    //
+    //   `ALTER TABLE … ADD COLUMN` 在列已存在时会报错，而 SQLite 没有
+    //   `ADD COLUMN IF NOT EXISTS` —— 直接执行、忽略失败即可
+    //   （比先查 `PRAGMA table_info` 再判断少一次往返，语义一样）。
+    //   Swift 线的 `DeviceStore.createSchema()` 早就是这么做的，这里对齐。
+    //
+    //   只补**本端要读的**列，不去动对方独有的列 —— 两条线各读各的那一套，
+    //   同一张表容得下两组列，历史数据一行都不用迁。
+    for (const char *column : {"alias TEXT NOT NULL DEFAULT ''",
+                               "type_override TEXT NOT NULL DEFAULT ''",
+                               "first_seen TEXT NOT NULL DEFAULT ''",
+                               "proxy_enabled INTEGER NOT NULL DEFAULT 0",
+                               "policy_mode TEXT NOT NULL DEFAULT ''",
+                               "policy_target TEXT NOT NULL DEFAULT ''",
+                               "total_up INTEGER NOT NULL DEFAULT 0",
+                               "total_down INTEGER NOT NULL DEFAULT 0",
+                               "today_up INTEGER NOT NULL DEFAULT 0",
+                               "today_down INTEGER NOT NULL DEFAULT 0",
+                               "today_date TEXT NOT NULL DEFAULT ''",
+                               "ip TEXT NOT NULL DEFAULT ''",
+                               "auto_name TEXT NOT NULL DEFAULT ''",
+                               "model TEXT NOT NULL DEFAULT ''",
+                               "vendor TEXT NOT NULL DEFAULT ''",
+                               "auto_type TEXT NOT NULL DEFAULT ''",
+                               "is_self INTEGER NOT NULL DEFAULT 0",
+                               "is_gateway INTEGER NOT NULL DEFAULT 0",
+                               "last_seen TEXT NOT NULL DEFAULT ''"}) {
+        q.exec(QStringLiteral("ALTER TABLE device ADD COLUMN %1").arg(QLatin1String(column)));
+    }
+
     // ConfigBuilder 每次生成配置都要查「谁开着代理」，给它一条索引。
     q.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS device_proxy ON device(proxy_enabled)"));
 }
