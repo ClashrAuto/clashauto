@@ -396,10 +396,21 @@ public final class AppState {
         let visibleNow = WindowRestore.anyWindowVisible
         let onNodes = visibleNow && currentPage == .nodes
         if clash.nodesVisible != onNodes { clash.nodesVisible = onNodes }
-        // 切回状态页立刻补一拍今日流量，别让用户对着 10 秒前的旧数字。
+        // 状态页专属的两件周期活：今日流量重算（几条 GROUP BY）与延迟探测。
+        // 判据都是「窗口看得见 **且** 正停在状态页」——只判窗口开着不够，
+        // 人在节点页/日志页时这两样照跑就是白烧（Qt 线的 StatusPage.qml 里
+        // `bridge.setStatusActive(page.visible)` / `latency.setActive(page.visible)`
+        // 判的就是页面显隐，这里对齐）。
         let onStatus = visibleNow && currentPage == .status
-        if onStatus && !lastOnStatus { refreshTodayTraffic() }
-        lastOnStatus = onStatus
+        if onStatus != lastOnStatus {
+            lastOnStatus = onStatus
+            if onStatus {
+                refreshTodayTraffic()   // 切回来立刻补一拍，别让用户对着 10 秒前的旧数字
+                latency.start()
+            } else {
+                latency.stop()
+            }
+        }
         let visible = visibleNow
         guard visible != uiVisible else { return }
         uiVisible = visible
@@ -407,8 +418,9 @@ public final class AppState {
         if visible {
             // 转为可见：把停掉的那几路立刻催一次，别让用户对着上一次的旧数据发呆。
             clash.refreshNodes()
-            refreshTodayTraffic()
-            latency.start()
+            // 今日流量与延迟探测**不在这里恢复** —— 它们是状态页专属的，
+            // 由上面那段「在不在状态页」的判断统一负责（窗口刚可见时
+            // lastOnStatus 仍是 false，那段会立刻把它们拉起来）。
         } else {
             latency.stop()
         }
