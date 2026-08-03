@@ -27,8 +27,32 @@ gcc -O2 -w -I"$LW/include" -I"$BENCH_DIR/lwip_port" \
     -o bin/lwip2socks lwip2socks.c lwip_port/coast_lwip_diag.c $LWSRC
 echo "[build] lwip2socks ok"
 
+# —— 候选 F：同一份 lwIP，只把窗口从 128 KiB 提到 1 MiB ——
+# 存在的意义：gVisor 是自动调窗（可到 MB 级），lwIP 被 MEM_SIZE 钉在 128 KiB，
+# 两者吞吐差里混着「窗口大小」这个因子。这个变体把它单独拆出来量。
+# lwipopts 由生产那份 **sed 派生**，不是手抄——避免两份配置悄悄走散。
+# 改动量的硬约束（init.c 会 #error 的那几条）：
+#   TCP_WND(1M) >> TCP_RCV_SCALE(5) = 32768 != 0            ✓
+#   TCP_WND(1M) <= 0xFFFF << 5 = 2,097,120                   ✓
+#   TCP_SND_QUEUELEN = 4*1M/1460 = 2872 <= MEMP_NUM_TCP_SEG(16384) ✓
+#   TCP_WND(1M) <= PBUF_POOL_SIZE(2048) * (1600-54) = 3.1 MB ✓
+#   MEM_SIZE 同步 16M→64M：tcp_write 是 COPY 进 PBUF_RAM，发送缓冲直接压这个堆
+rm -rf lwip_port_big && cp -r lwip_port lwip_port_big
+sed -i -e 's/^#define TCP_WND  *(128 \* 1024).*/#define TCP_WND (1024 * 1024)/' \
+       -e 's/^#define TCP_SND_BUF  *(128 \* 1024).*/#define TCP_SND_BUF (1024 * 1024)/' \
+       -e 's/^#define TCP_RCV_SCALE  *2\b.*/#define TCP_RCV_SCALE 5/' \
+       -e 's/^#define MEM_SIZE  *(16 \* 1024 \* 1024).*/#define MEM_SIZE (64 * 1024 * 1024)/' \
+       lwip_port_big/lwipopts.h
+grep -E '^#define (TCP_WND|TCP_SND_BUF|TCP_RCV_SCALE|MEM_SIZE) ' lwip_port_big/lwipopts.h
+gcc -O2 -w -I"$LW/include" -I"$BENCH_DIR/lwip_port_big" \
+    -o bin/lwip2socks_big lwip2socks.c lwip_port_big/coast_lwip_diag.c $LWSRC
+echo "[build] lwip2socks_big ok"
+
 if [ -d gvnet ]; then
-    ( cd gvnet && PATH=/usr/local/go/bin:$PATH GOFLAGS=-mod=mod \
+    # 不要 -mod=mod：它会让 go 重新解析依赖，把 go.mod 里钉住的 gvisor 版本换成另一个
+    # 快照（gvisor 的 pkg/tcpip/stack 在某些快照里 package 名冲突，直接编不过）。
+    # 版本必须钉死，否则「同一个候选 B」在两轮之间偷偷变了。
+    ( cd gvnet && PATH=/usr/local/go/bin:$PATH GOFLAGS=-mod=readonly \
         GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn \
         go build -o "$BENCH_DIR/bin/gvnet2socks" . ) && echo "[build] gvnet2socks ok"
 fi

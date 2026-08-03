@@ -33,7 +33,10 @@
 #include "lwip/timeouts.h"
 #include "netif/ethernet.h"
 
-#define BUFSZ (512 * 1024)          // ≥ TCP_WND / TCP_SND_BUF(各 128 KiB)，留足余量
+// ★ 必须跟着 lwipopts 走，不能写死：只有落地到 socket 后才 tcp_recved，所以「已收下但
+//   还没还窗口」的字节数上界就是 TCP_WND。写死 512K 的话，候选 F 把 TCP_WND 提到 1 MiB
+//   之后每条连接都会在 on_recv 里撞上界直接被 abort —— 而且症状是「吞吐变 0」而不是编译错。
+#define BUFSZ (2 * (TCP_WND > TCP_SND_BUF ? TCP_WND : TCP_SND_BUF))
 #define MAXFRAME 2048
 
 static int g_tap = -1;
@@ -277,7 +280,10 @@ int main(int argc, char **argv)
     struct epoll_event tev = {.events = EPOLLIN, .data.ptr = NULL};
     epoll_ctl(g_ep, EPOLL_CTL_ADD, g_tap, &tev);
 
-    fprintf(stderr, "lwip2socks up on %s ip=%s\n", argv[1], argv[2]);
+    // ★ 把窗口配置打进 banner：候选 A 和 F 是同一份 .c 编两次，产物大小都一样，
+    //   光看文件名分不出跑的是哪个配置。让程序自己报，比对着 Makefile 猜可靠。
+    fprintf(stderr, "lwip2socks up on %s ip=%s TCP_WND=%d TCP_SND_BUF=%d MEM_SIZE=%d\n",
+            argv[1], argv[2], (int)TCP_WND, (int)TCP_SND_BUF, (int)MEM_SIZE);
 
     struct epoll_event evs[256];
     char frame[MAXFRAME];

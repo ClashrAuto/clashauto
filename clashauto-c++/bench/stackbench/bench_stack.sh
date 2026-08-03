@@ -24,7 +24,12 @@ STACK_IP=10.99.0.2
 TARGET=203.0.113.5
 
 teardown() {
+    # setsid 起的栈自成一个进程组，杀组不杀单进程——Go 那种多线程/多子进程的栈
+    # 只 kill 主 pid 会留下孤儿。留下来的孤儿会空转满一个核，污染**后面每一轮**。
+    kill -- -"$SPID" 2>/dev/null
     kill "$SPID" 2>/dev/null
+    sleep 0.3
+    kill -9 -- -"$SPID" 2>/dev/null
     "$BENCH_DIR/clean.sh" >/dev/null 2>&1
 }
 
