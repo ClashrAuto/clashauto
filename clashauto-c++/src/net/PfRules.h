@@ -28,9 +28,11 @@
 //   · /dev/pf 存在（crw------- root:wheel），需 root 打开；
 //   · DIOCNATLOOK 通路正常：用一条不存在的连接查询返回 ENOENT(2)，说明 ioctl 号与结构体
 //     布局都正确（若布局错会是 EINVAL 或读到垃圾）；
-//   · pf anchor 可独立加载/清空：`pfctl -a coast -f -` 写入、`pfctl -a coast -F all` 清掉，
+//   · pf anchor 可独立加载/清空：`pfctl -a com.apple/coast -f 文件` 写入、`-F all` 清掉，
 //     **不碰用户 /etc/pf.conf 的主规则集**（直接 -f 主规则集会把系统启动时加的规则冲掉，
 //     pfctl 自己会警告）；
+//   · ★ anchor **必须挂在 `com.apple/` 下**：主规则集只引用了 `com.apple/*` 这一组通配挂载点，
+//     顶层 anchor 装了也永远不会被求值（且 pfctl 不报任何错）。对照实验见 PfRules.cpp kAnchor；
 //   · net.inet.ip.forwarding / net.inet6.ip6.forwarding 可读写（默认 0，需要我们打开并在
 //     退出时还原 —— 与 Linux 侧 sysctl 存档同理，见 TproxyRules 的 /run 存档机制）。
 //
@@ -132,7 +134,9 @@ public:
                                    const QString &proxyIp, quint16 proxyPort, QString *origIp,
                                    quint16 *origPort, QString *err = nullptr);
 
-    /// 固定 anchor 名。**别用带 pid/随机串的名字**：崩溃后要靠这个名字把陈旧规则删掉。
+    /// 固定 anchor 名，当前是 **"com.apple/coast"**。**别用带 pid/随机串的名字**：崩溃后要靠
+    /// 这个名字把陈旧规则删掉。**也别改成顶层名字**——顶层 anchor 不被 macOS 默认 /etc/pf.conf
+    /// 引用，规则装得进去却永远不会被求值（真机对照实验见 PfRules.cpp 里 kAnchor 处）。
     static const char *anchorName();
 
     // ── ★ 人工核对 pf 状态时的三个坑（真机上连续踩过，都会让你误判成"代码没生效"）──

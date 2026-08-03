@@ -25,7 +25,26 @@ namespace {
 
 // 固定 anchor 名。**别改成带 pid/随机串的名字**：崩溃后要靠这个名字把陈旧规则删掉，
 // 名字对不上就删不掉，而残留的 rdr 规则会把被覆盖设备的流量一直往一个没人监听的口送。
-constexpr const char *kAnchor = "coast";
+//
+// ★★ **必须挂在 `com.apple/` 下，不能用顶层名字。** macOS 默认的 /etc/pf.conf 主规则集里
+//    只有一组 `com.apple/*` 引用：
+//        scrub-anchor/nat-anchor/rdr-anchor/dummynet-anchor/anchor "com.apple/*"
+//    没有被主规则集引用的 anchor **永远不会被求值** —— 而 pfctl 照样让你把规则装进去、
+//    `pfctl -s nat` 照样列得出来。于是 install() 的回读检查（"有没有 rdr"）会通过，上层
+//    以为接管成功，实际一个包都不会被重定向，**被接管设备全裸奔**。
+//    真机对照实验（macOS 13.7.8，lo0 上 rdr 9999→9998，连得通=被求值）：
+//        anchor "coast"            装入 1 条 rdr，探测 9999 = 拒绝 → **未被求值**
+//        anchor "com.apple/coast"  装入 1 条 rdr，探测 9999 = 连通 → **被求值**
+//    这就是为什么必须写成 "com.apple/coast"：借用系统已经引用好的通配挂载点，
+//    **不用改用户的 /etc/pf.conf**（改它既要 root，又会在系统升级时被覆盖，还容易把系统
+//    启动时加的规则一起冲掉 —— pfctl 自己就会警告这件事）。
+//    代价：若某个系统服务重载了 com.apple anchor，我们这一支可能被一并清掉；靠上层的周期
+//    重装兜底（与 Linux 侧 nft 被外部 flush 后的重装同理）。
+constexpr const char *kAnchor = "com.apple/coast";
+
+// 早期版本用过的顶层名字。它装了也不会被求值（见上），但 `pfctl -s nat` 里会留着，
+// 既误导排查、也可能在用户手工把它引用起来后突然生效。启动清理时一并抹掉。
+constexpr const char *kLegacyAnchor = "coast";
 
 // ── Apple XNU 的 pf 用户态定义 ──────────────────────────────────────────────
 // Apple **不在 SDK 里导出 net/pfvar.h**（实测 MacOSX.sdk 与 /usr/include 都没有），
@@ -183,6 +202,10 @@ void PfRules::removeStale()
     run(QStringLiteral("/sbin/pfctl"),
         {QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-F"),
          QStringLiteral("all")});
+    // 顺手清掉早期版本留在顶层 "coast" 里的规则（那批规则不会被求值，但会留在 pfctl 输出里）。
+    run(QStringLiteral("/sbin/pfctl"),
+        {QStringLiteral("-a"), QString::fromLatin1(kLegacyAnchor), QStringLiteral("-F"),
+         QStringLiteral("all")});
     sysctlStateRestoreAll();
 }
 
@@ -281,8 +304,24 @@ bool PfRules::install(const Spec &spec, QString *err)
         &check);
     if (!check.contains(QStringLiteral("rdr"))) {
         if (err)
-            *err = QStringLiteral("规则装载后回读为空（anchor 未生效？主规则集需有 "
-                                  "`rdr-anchor \"coast\"` 与 `anchor \"coast\"` 引用）");
+            *err = QStringLiteral("规则装载后回读为空（pfctl 报成功却一条没装）");
+        remove();
+        return false;
+    }
+
+    // ★ 回读到 rdr **仍不等于规则会被求值**：没有被主规则集引用的 anchor，pfctl 照样让你装、
+    //   照样列得出来，但内核根本不会走到它（真机对照实验见文件顶部 kAnchor 处）。这正是
+    //   上面那条 contains("rdr") 检查曾经漏掉的失效形态 —— 装载成功、UI 显示已接管、设备全裸奔。
+    //   所以这里再核一次挂载点：主规则集必须有 `rdr-anchor "com.apple/*"`（macOS 默认就有；
+    //   用户把 /etc/pf.conf 改过才会没有）。查不到就**失败并拆干净**，而不是留个假的成功。
+    QString mainNat;
+    run(QStringLiteral("/sbin/pfctl"), {QStringLiteral("-s"), QStringLiteral("nat")}, &mainNat);
+    if (!mainNat.contains(QStringLiteral("rdr-anchor \"com.apple/"))) {
+        if (err)
+            *err = QStringLiteral("pf 主规则集没有 `rdr-anchor \"com.apple/*\"` 挂载点，"
+                                  "装进 %1 的规则不会被求值（/etc/pf.conf 被改过？）。"
+                                  "恢复默认 pf.conf 后重试。")
+                           .arg(QString::fromLatin1(kAnchor));
         remove();
         return false;
     }
