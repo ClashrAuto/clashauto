@@ -209,16 +209,6 @@ final class Redirector: @unchecked Sendable {
             ?? "/var/db/com.yuehongsun.coast.helper.redirect"
     }
 
-    /// 记录格式是两行 `v4=<0/1>` / `v6=<0/1>`。`forwarding6WasOn == nil` 表示这次没启用 v6
-    /// （不写 `v6=` 行 → 恢复时不碰 ip6.forwarding）。
-    ///
-    /// 兼容旧格式:早于 v6 支持的记录是**单个字符** `"1"`/`"0"`,`recoverFromCrashIfNeeded` 里
-    /// 找不到 `v4=` 时会退回按整串解读。旧记录必然没有 v6（功能是新加的），无需为它写 `v6=`。
-    private static func writeCrashRecord(forwardingWasOn: Bool, forwarding6WasOn: Bool?) {
-        var text = "v4=\(forwardingWasOn ? 1 : 0)"
-        if let v6 = forwarding6WasOn { text += "\nv6=\(v6 ? 1 : 0)" }
-        try? text.write(toFile: crashRecordPath, atomically: true, encoding: .utf8)
-    }
 
     /// 崩溃记录的**完整版**：除两个转发开关外，再落下**重发还原 ARP 所需的一切**。
     ///
