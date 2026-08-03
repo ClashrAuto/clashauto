@@ -4115,3 +4115,43 @@ Qt 用 `GatewayPanic`（信号处理器，覆盖 SIGSEGV/BUS/ILL/FPE/ABRT，**�
 靠下次启动的 `healPending()` 补）；Swift 把欺骗循环放在 helper 里，
 靠 XPC 的 `invalidationHandler` —— **app 被 SIGKILL 时连接照样断，立刻就能复原**，
 不必等下次启动。这一处 Swift 更好，不需要对齐。
+
+## 第九处镜像差异（**已确证，本轮未修**）：Swift 崩溃恢复不发还原 ARP
+
+两条线都有"helper/app 崩溃后下次启动自愈"的设施：
+Qt 是 `GatewayWorker::healPending()`，Swift 是 `Redirector.recoverFromCrashIfNeeded()`
+（helper 启动时调，`main.swift:404`）。**但两者做的事不一样**：
+
+| | 回滚内核状态 | 给设备重发还原 ARP |
+|---|---|---|
+| Qt `healPending` | ✔ | **✔**（存了完整拓扑） |
+| Swift `recoverFromCrashIfNeeded` | ✔（清 pf anchor、还原 `ip.forwarding`） | **✘** |
+
+根因在**崩溃记录存了什么**：
+
+- Qt 存完整拓扑 —— `mac` / `ifname` / `gatewayIp` / `gatewayMac` / `routerLL6` / `routerMac6`；
+- Swift 只存**两个布尔** —— `v4=<0/1>` / `v6=<0/1>`（见 `writeCrashRecord`），
+  恢复时**根本不知道该把还原帧发给谁**。
+
+**后果**：helper 崩溃或被强杀后，被投毒设备的 ARP 缓存仍指着本机 MAC，
+而本机已不再转发 —— **设备直接断网十几分钟**，直到 ARP 缓存自然老化。
+这正是 `Redirector` 文件头那段注释自己强调的风险
+（"丢一个包就意味着一台设备断网十几分钟"），只是崩溃路径漏了。
+
+注意 `stopLocked()` 里的**正常**还原是完备的（重发 3 轮、v4 ARP + v6 NDP 都覆盖、
+单播优先），缺的只是**崩溃路径**能复用它所需的那份数据。
+
+### 修复方案（下轮做）
+
+1. 新增 `writeCrashRecordFull`：在现有 `v4=`/`v6=` 之外追加
+   `if=` / `gwip=` / `gwmac=` / `selfmac=` / `devs=<ip|mac,ip|mac,…>`，
+   仍用逐行 `key=value`，旧记录读不到新字段时**退化成只回滚内核状态**（与今日行为一致）；
+2. 新增 `openBPFStatic(interface:)` —— 恢复发生在任何 `Redirector` 实例之前，
+   现有 `openBPF` 是实例方法用不了（`runPfctlStatic` 已是同样理由的先例）；
+3. `recoverFromCrashIfNeeded` 里**先重发还原 ARP（3 轮）再回滚内核状态** ——
+   顺序要紧：先把设备放回真网关，它们才不会卡在"我们已停止转发"的断网里。
+
+★ 本轮**没有落地**：改动涉及记录格式、静态 BPF、恢复顺序三处，
+中途发现原 `writeCrashRecord` 的文本与我的替换目标不完全一致、`openBPFStatic` 也需新写，
+时间不够做完整验证。**宁可留一个证据确凿的待办，也不提交半成品。**
+工作区已还原干净（`git status` 无改动，重新编译通过）。
