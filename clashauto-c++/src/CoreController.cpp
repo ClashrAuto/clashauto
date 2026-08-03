@@ -231,8 +231,16 @@ CoreController::CoreController(AppConfig config, QObject *parent)
         a->flags |= kCreateNoWindow;
     });
 #endif
-    // ★ 先擦上一世的残留系统代理（详见 clearStaleSystemProxy）。必须在**任何**启动动作之前：
-    //   我们自己接下来若要开代理，会把它重新设成正确值；若不开，用户至少能正常上网。
+    // ★ 启动期自愈的**顺序不能反**：先收孤儿核心，再擦残留系统代理。
+    //
+    //   `clearStaleSystemProxy()` 的判据之一是「我们的 mixedPort **无人监听**」
+    //   （有人在听就说明不是残留、一律不动，防误删用户自配的公司代理）。
+    //   而上一世遗留的孤儿核心**正占着那个端口** —— 于是先清代理的话，
+    //   那步必然读到"有人在听"直接跳过，**两项自愈单独都对、凑在一起互相抵消**。
+    //   Swift 线真机实测过这个组合场景：2 个孤儿占着 7890/9191 时残留代理擦不掉，
+    //   这里是同一个缺陷（本文件原先也是构造函数里清代理、startCore() 里才收孤儿）。
+    //   reapOrphanCore() 自己解析核心路径、不依赖 startCore 的局部状态，可直接前置。
+    reapOrphanCore();
     clearStaleSystemProxy();
     // mihomo 的 stdout/stderr 是 UTF-8：必须用 fromUtf8，否则中文 Windows 会按 GBK 解码成乱码
     connect(&m_core, &QProcess::readyReadStandardOutput, this, [this] {
