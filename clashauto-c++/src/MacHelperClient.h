@@ -32,7 +32,12 @@ void openLoginItemsSettings();
 QString pingVersion(QString *err);
 
 // 便捷判断：helper 是否已装好且能应答（status==Enabled 且 ping 成功）
-bool isReady();
+// helper 能不能用。`attempts` 是 ping 的次数：默认 3 次是给**刚注册**的 daemon 留冷启动时间
+// （launchd 按需拉起，首个 XPC 连接可能比单次 5s 超时更慢）。
+// ★ **退出/关代理这类路径要传 1**：那时 daemon 早就该是热的，而「注册着但不应答」时每次 ping
+//   都要等满 5 秒 —— 3 次就是 15 秒的界面冻结，卡在用户点了退出之后。这个组合并不罕见：
+//   自更新替换 .app 之后 helper 的代码签名要求对不上，status 仍是 Enabled，XPC 却没人应答。
+bool isReady(int attempts = 3);
 
 // 经 helper 以 root 设/清系统代理。返回是否成功。
 bool setSystemProxy(bool enable, const QString &host, int port, const QStringList &bypass, QString *err);

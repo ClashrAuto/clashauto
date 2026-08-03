@@ -15,6 +15,9 @@
 #include "LatencyProbe.h" // 状态页延迟卡：直连/路由/DNS/代理四个数
 #include "SubscriptionStore.h"
 #include "TrayController.h"
+#if defined(Q_OS_MACOS)
+#include "MacWindow.h"
+#endif
 #include "qml/QmlBridge.h"
 #include "qml/I18n.h"
 #include "qml/SubscriptionsController.h"
@@ -203,6 +206,20 @@ int main(int argc, char *argv[])
         uiFont.setHintingPreference(QFont::PreferNoHinting);
         uiFont.setStyleStrategy(QFont::PreferAntialias);
         app.setFont(uiFont);
+    }
+
+    // 退出自检（COAST_QUIT_SELFTEST=1）：起来 3 秒后自己走一遍退出流程（与托盘「退出程序」、
+    // 自更新那条“必须退出”的路同一条）。外面量「进程多久真的没了」就能验：退出没被拦下、
+    // aboutToQuit 那串清理（还原 ARP/落盘/停核心/还原系统代理）不会把退出拖住。
+    // mac 上顺带打印应用菜单里绑着 ⌘Q 的是哪一项 —— Swift 端那个 bug 正是这一项被换掉了。
+    // 这条路没法用单测覆盖：它要的正是一个真的应用生命周期。
+    if (qEnvironmentVariableIsSet("COAST_QUIT_SELFTEST")) {
+        QTimer::singleShot(3000, &app, [] {
+#if defined(Q_OS_MACOS)
+            qInfo().noquote() << "QUIT-SELFTEST menuItem=" + macQuitMenuItemDescription();
+#endif
+            qApp->quit();
+        });
     }
 
     // 扫描耗时自检（COAST_SCAN_SELFTEST=1）：只跑一轮局域网发现，把每一版快照的时刻/设备数

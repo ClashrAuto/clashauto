@@ -99,13 +99,13 @@ QString pingVersion(QString *err)
     return QString();
 }
 
-bool isReady()
+bool isReady(int attempts)
 {
     if (status() != RegStatus::Enabled) return false;
     // 刚注册/批准的 daemon 由 launchd 按需拉起：首个 XPC 连接会触发 spawn，可能比单次 ping 的
     // 5s 超时更慢。只 ping 一次就判 false，会让「已安装、Enabled」的 helper 被误判不可用，于是
     // 代理/核心静默退回非 root。这里重试几次给冷启动留出时间，任一次拿到版本即视为就绪。
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < qMax(1, attempts); ++i) {
         QString err;
         if (!pingVersion(&err).isEmpty()) return true;
     }

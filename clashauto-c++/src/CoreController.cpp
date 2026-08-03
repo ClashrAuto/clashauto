@@ -848,7 +848,9 @@ void CoreController::stopProxy()
     }
 #if defined(Q_OS_MACOS)
     // helper 就绪：以 root 清代理（免密）。否则回退 Option B（复用本会话已持有的授权）。
-    if (MacHelper::isReady()) {
+    // **只 ping 一次**（见 isReady 的说明）：这条路会在退出时跑，而「注册着但不应答」的 helper
+    // 会让默认的 3 次重试把退出卡住 15 秒。开代理那侧仍用默认重试，冷启动要留时间。
+    if (MacHelper::isReady(1)) {
         QString herr;
         if (!MacHelper::setSystemProxy(false, m_config.host, m_config.mixedPort, {}, &herr)) {
             emit logUpdated(tr("还原系统代理失败（helper）：%1").arg(herr));

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QString>
 #include <qwindowdefs.h> // WId
 
 // macOS 专用：把系统标题栏做成「透明 + 内容延伸到顶」，标题栏文字隐藏、内容铺满整窗
@@ -19,3 +20,7 @@ void enableMacBlur(WId winId, bool dark);
 // macOS 专用：控制 Dock 图标是否显示。窗口打开时用 Regular（有 Dock 图标+顶部菜单栏，并激活到前台）；
 // 关闭主窗（隐藏）时用 Accessory（无 Dock 图标，仅保留菜单栏状态项）——即「关闭窗口不留 Dock」。
 void setMacDockIconVisible(bool visible);
+
+// 应用菜单里绑着 ⌘Q 的那一项是什么（"标题 / action"）。只给退出自检用 ——
+// mac 上「⌘Q 到底退不退得掉」没法用单测覆盖，而它坏掉的表现（退不掉、更新装不上）很重。
+QString macQuitMenuItemDescription();

@@ -95,3 +95,18 @@ void setMacDockIconVisible(bool visible)
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     }
 }
+
+QString macQuitMenuItemDescription()
+{
+    for (NSMenuItem *top in [[NSApp mainMenu] itemArray]) {
+        for (NSMenuItem *item in [[top submenu] itemArray]) {
+            if ([[item keyEquivalent] isEqualToString:@"q"]
+                && ([item keyEquivalentModifierMask] & NSEventModifierFlagCommand)) {
+                return QStringLiteral("%1 / %2")
+                    .arg(QString::fromNSString([item title]),
+                         QString::fromNSString(NSStringFromSelector([item action])));
+            }
+        }
+    }
+    return QStringLiteral("<none>");
+}
