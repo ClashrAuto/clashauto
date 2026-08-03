@@ -168,6 +168,29 @@ bool stopCore(QString *err)
     });
 }
 
+bool pfInstall(int redirPort, int dnsPort, const QStringList &ifnames, QString *err)
+{
+    NSString *ifs = ifnames.join(QStringLiteral(",")).toNSString();
+    return callBoolReply(err, ^(id<CAHelperProtocol> proxy, void (^reply)(BOOL, NSString *)) {
+        [proxy pfInstallRedirPort:redirPort dnsPort:dnsPort ifnamesCommaSep:ifs withReply:reply];
+    });
+}
+
+bool pfSyncProxied(const QStringList &ipv4, QString *err)
+{
+    NSString *ips = ipv4.join(QStringLiteral(",")).toNSString();
+    return callBoolReply(err, ^(id<CAHelperProtocol> proxy, void (^reply)(BOOL, NSString *)) {
+        [proxy pfSyncProxiedCommaSep:ips withReply:reply];
+    });
+}
+
+bool pfRemove(QString *err)
+{
+    return callBoolReply(err, ^(id<CAHelperProtocol> proxy, void (^reply)(BOOL, NSString *)) {
+        [proxy pfRemoveWithReply:reply];
+    });
+}
+
 int openBpf(const QString &ifname, QString *err)
 {
     NSXPCConnection *conn =

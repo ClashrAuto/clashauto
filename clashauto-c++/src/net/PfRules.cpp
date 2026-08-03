@@ -4,6 +4,8 @@
 
 #if defined(Q_OS_MACOS)
 
+#include "../MacHelperClient.h" // 非 root 时 pfctl/sysctl 一律经特权 helper 执行
+
 #include <QCoreApplication>
 #include <QFile>
 #include <QProcess>
@@ -182,19 +184,41 @@ bool PfRules::available(QString *why)
     //     （见 PfRules.h 里那段：非 root 时它不报错、只是静默丢连接）。
     // 用 O_RDONLY 探测：够用且不会因为写权限问题误判成"不可用"。
     const int fd = ::open("/dev/pf", O_RDONLY);
-    if (fd < 0) {
-        if (why)
-            *why = QStringLiteral("/dev/pf 打不开（%1）——pf 网关要求 App 与核心均以 root 运行，"
-                                  "请在「设置 → 系统」安装并批准免密助手")
-                           .arg(QString::fromLocal8Bit(strerror(errno)));
-        return false;
+    if (fd >= 0) {
+        ::close(fd);
+        return true; // 本进程就是 root（headless 自测 / sudo 运行）：直接自己干
     }
-    ::close(fd);
-    return true;
+    // ★ 打不开是**常态而非异常**：正式的 .app 是普通用户 uid 启动的 GUI，真机实测
+    //   （macOS 13.7.8，uid 501）open("/dev/pf", O_RDONLY) = Permission denied、
+    //   `pfctl -s info` 同样 Permission denied。若就此判 available()=false，pf 网关对
+    //   **每一个正常用户**都是不可用的 —— 那这条数据面等于没做。
+    //   正确出路是走已有的特权 helper（它是 root，已经在替我们起核心/开 BPF）。
+    if (MacHelper::isReady(1)) // 1 次 ping：这里是可用性探测，不该为冷启动等满 3 次超时
+        return true;
+    if (why)
+        *why = QStringLiteral("/dev/pf 打不开（%1）且免密助手未就绪——pf 网关需要 root，"
+                              "请在「设置 → 系统」安装并批准免密助手")
+                       .arg(QString::fromLocal8Bit(strerror(errno)));
+    return false;
 }
+
+namespace {
+/// 本进程是不是 root。false 时 pfctl/sysctl 一律走 helper（见 available() 的说明）。
+bool selfIsRoot()
+{
+    return ::geteuid() == 0;
+}
+} // namespace
 
 void PfRules::removeStale()
 {
+    if (!selfIsRoot()) {
+        // 非 root：pfctl 连 /dev/pf 都打不开，自己清是空转。交给 helper（它是 root）。
+        // helper 没装/没批准时清不了残留 —— 但那种情况下我们也从没装成功过，无残留可言。
+        QString err;
+        MacHelper::pfRemove(&err);
+        return;
+    }
     // 幂等清理：anchor 里的规则 + sysctl 还原。上次若被 kill -9，这些都还留在系统里。
     // ★ 只清我们自己的 anchor，**绝不碰主规则集**：`pfctl -f` 主规则集会把系统启动时
     //   加的规则一起冲掉（pfctl 自己会警告 "could result in flushing of rules present
@@ -233,6 +257,16 @@ bool PfRules::install(const Spec &spec, QString *err)
         return false;
     }
     m_spec = spec;
+
+    if (!selfIsRoot()) {
+        // 正式 .app 走的就是这条：pfctl / 写 forwarding 都要 root，GUI 进程一件都做不了。
+        // helper 端做的事与下面进程内那套**逐条对应**（含临时文件、回读核实、挂载点检查），
+        // 改任何一边都要同步另一边。
+        if (!MacHelper::pfInstall(spec.redirPort, spec.dnsPort, spec.ifnames, err))
+            return false;
+        m_installed = true;
+        return true;
+    }
 
     removeStale(); // 上一次可能是被 kill -9 打死的
 
@@ -339,6 +373,12 @@ void PfRules::remove()
     //   崩溃残留的清理有专门入口 removeStale()（启动时调一次），不该由析构越权代劳。
     if (!m_installed)
         return;
+    if (!selfIsRoot()) {
+        QString err;
+        MacHelper::pfRemove(&err);
+        m_installed = false;
+        return;
+    }
     run(QStringLiteral("/sbin/pfctl"),
         {QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-F"),
          QStringLiteral("all")});
@@ -355,6 +395,8 @@ bool PfRules::syncDevices(const QStringList &ipv4, QString *err)
             *err = QStringLiteral("规则未安装");
         return false;
     }
+    if (!selfIsRoot())
+        return MacHelper::pfSyncProxied(ipv4, err);
     // 整体替换而不是逐个增删：调用方给的是「当前应当被代理的全集」。
     // 空集合要用 -T flush（-T replace 不接受空参数列表）。
     QStringList args{QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-t"),

@@ -42,4 +42,24 @@
 - (void)openBpfForInterface:(NSString *)ifname
                   withReply:(void (^)(NSFileHandle *_Nullable fh, NSString *_Nullable error))reply;
 
+// ── 透明网关的 pf 数据面（rdr 重定向）。三件事都要 root，故整条生命周期由 helper 拥有 ──
+//  · pfctl 要 root（/dev/pf 是 crw------- root:wheel，普通用户连 O_RDONLY 都打不开）；
+//  · net.inet.ip.forwarding 要 root 才能写；
+//  · 故 App（GUI，普通用户 uid）自己一件都做不了 —— 这不是"体验降级"而是功能完全不可用。
+//
+// ★ 接口只收**端口号 + 网卡名 + IP 列表**，规则文本由 helper 自己拼。不接受客户端传规则原文：
+//   helper 是 root，放任客户端喂任意 pf 规则等于把整台机器的包过滤交出去。helper 还会校验
+//   网卡名/IP 的字符集，避免被拼进规则文件里做注入。
+- (void)pfInstallRedirPort:(int)redirPort
+                   dnsPort:(int)dnsPort
+           ifnamesCommaSep:(NSString *)ifnamesCommaSep
+                 withReply:(void (^)(BOOL ok, NSString *error))reply;
+
+// 把「当前应被接管的设备 IPv4 全集」整体替换进 pf table。空串 = 清空（等价于没开代理）。
+- (void)pfSyncProxiedCommaSep:(NSString *)ipv4CommaSep
+                    withReply:(void (^)(BOOL ok, NSString *error))reply;
+
+// 拆掉 anchor 规则并还原 forwarding。幂等；helper 自身启动时也会先跑一遍清残留。
+- (void)pfRemoveWithReply:(void (^)(BOOL ok, NSString *error))reply;
+
 @end

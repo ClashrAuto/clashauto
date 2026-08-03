@@ -18,6 +18,75 @@
 
 // ---- 以 root 用 SCPreferences 在所有已启用网络服务上设/清 HTTP/HTTPS/SOCKS 代理 ----
 // 与应用侧 Option B 的 macApplyProxies 同逻辑，但去掉 AuthorizationRef：root 直接提交即可。
+// ── pf 数据面用到的常量与小工具 ──────────────────────────────────────────────
+// anchor **必须挂在 com.apple/ 下**：macOS 默认 /etc/pf.conf 只引用了 `com.apple/*` 这一组
+// 挂载点，顶层 anchor 装了也永远不会被求值（pfctl 全程不报错）。详见 src/net/PfRules.cpp。
+#define kPfAnchor "com.apple/coast"
+// forwarding 原值存档。放 /var/run：root 可写、重启即清（重启后本来也不需要还原）。
+static NSString *const kPfSysctlArchive = @"/var/run/coast-pf-fwd";
+
+// 跑一个外部命令，合并 stdout/stderr 到 *outStr（可传 NULL），返回退出码；失败返回 -1。
+static int runTool(NSString *path, NSArray<NSString *> *args, NSString **outStr)
+{
+    NSTask *t = [[NSTask alloc] init];
+    t.executableURL = [NSURL fileURLWithPath:path];
+    t.arguments = args;
+    NSPipe *pipe = [NSPipe pipe];
+    t.standardOutput = pipe;
+    t.standardError = pipe;
+    NSError *e = nil;
+    if (![t launchAndReturnError:&e]) {
+        if (outStr) *outStr = e.localizedDescription ?: @"启动失败";
+        return -1;
+    }
+    // 先读干净再 wait：管道缓冲满时子进程会阻塞在写上，先 wait 会死锁。
+    NSData *d = [pipe.fileHandleForReading readDataToEndOfFile];
+    [t waitUntilExit];
+    if (outStr)
+        *outStr = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding] ?: @"";
+    return t.terminationStatus;
+}
+
+static NSString *sysctlReadStr(NSString *key)
+{
+    NSString *out = nil;
+    if (runTool(@"/usr/sbin/sysctl", @[@"-n", key], &out) != 0) return nil;
+    return [out stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+static void sysctlWriteStr(NSString *key, NSString *value)
+{
+    runTool(@"/usr/sbin/sysctl", @[@"-w", [NSString stringWithFormat:@"%@=%@", key, value]], NULL);
+}
+
+// 网卡名白名单：字母数字 + . : -。拼进 pf 规则文件前必须过一遍（helper 是 root）。
+static BOOL pfNameIsSafe(NSString *s)
+{
+    static NSCharacterSet *bad = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        bad = [[NSCharacterSet characterSetWithCharactersInString:
+                    @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.:-"] invertedSet];
+    });
+    return [s rangeOfCharacterFromSet:bad].location == NSNotFound;
+}
+
+// 严格的点分四段 IPv4 校验（不接受前导零以外的任何花样，也不接受主机名）。
+static BOOL ipv4IsSafe(NSString *s)
+{
+    NSArray<NSString *> *parts = [s componentsSeparatedByString:@"."];
+    if (parts.count != 4) return NO;
+    for (NSString *p in parts) {
+        if (!p.length || p.length > 3) return NO;
+        for (NSUInteger i = 0; i < p.length; ++i) {
+            const unichar c = [p characterAtIndex:i];
+            if (c < '0' || c > '9') return NO;
+        }
+        if (p.intValue > 255) return NO;
+    }
+    return YES;
+}
+
 static void cfDictSetInt(CFMutableDictionaryRef d, CFStringRef key, int v)
 {
     CFNumberRef n = CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &v);
@@ -228,6 +297,138 @@ static BOOL applyProxies(BOOL enable, NSString *host, int port, NSArray<NSString
     // 传 fd 给应用；closeOnDealloc:YES —— reply 序列化(dup)后本 fh 释放即关闭 helper 侧 fd。
     NSFileHandle *fh = [[NSFileHandle alloc] initWithFileDescriptor:fd closeOnDealloc:YES];
     reply(fh, nil);
+}
+
+#pragma mark - pf 数据面（透明网关的 rdr 重定向）
+
+- (void)pfInstallRedirPort:(int)redirPort
+                   dnsPort:(int)dnsPort
+           ifnamesCommaSep:(NSString *)ifnamesCommaSep
+                 withReply:(void (^)(BOOL, NSString *))reply
+{
+    if (redirPort <= 0 || redirPort > 65535) { reply(NO, @"redirPort 非法"); return; }
+    if (dnsPort < 0 || dnsPort > 65535) { reply(NO, @"dnsPort 非法"); return; }
+
+    // 网卡名要拼进规则文件，先做字符集校验（只允许字母数字和 .:-）。helper 是 root，
+    // 放任任意字符串进 pf 规则等于让客户端间接改写整台机器的包过滤。
+    NSMutableArray<NSString *> *ifs = [NSMutableArray array];
+    for (NSString *raw in [ifnamesCommaSep componentsSeparatedByString:@","]) {
+        NSString *s = [raw stringByTrimmingCharactersInSet:
+                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!s.length) continue;
+        if (s.length > 24 || !pfNameIsSafe(s)) {
+            reply(NO, [NSString stringWithFormat:@"网卡名非法：%@", s]);
+            return;
+        }
+        [ifs addObject:s];
+    }
+    if (!ifs.count) [ifs addObject:@"en0"];
+
+    [self pfTeardown]; // 上次可能被 kill -9 打死，先清干净
+
+    // 打开转发；原值存档，SIGKILL 走不到 remove 时靠它还原。
+    NSString *oldFwd = sysctlReadStr(@"net.inet.ip.forwarding");
+    [[NSFileManager defaultManager] createFileAtPath:kPfSysctlArchive
+                                            contents:[(oldFwd ?: @"0") dataUsingEncoding:NSUTF8StringEncoding]
+                                          attributes:@{NSFilePosixPermissions: @0600}];
+    sysctlWriteStr(@"net.inet.ip.forwarding", @"1");
+
+    // DNS 那条必须排在通配 rdr 之前，否则 53 会被一起截走、到不了核心的 DNS 监听。
+    NSMutableString *rules = [NSMutableString stringWithString:@"table <coast_proxied> persist\n"];
+    for (NSString *ifn in ifs) {
+        if (dnsPort > 0) {
+            [rules appendFormat:@"rdr pass on %@ inet proto udp from <coast_proxied> "
+                                 "to any port 53 -> 127.0.0.1 port %d\n", ifn, dnsPort];
+        }
+        [rules appendFormat:@"rdr pass on %@ inet proto tcp from <coast_proxied> "
+                             "to any -> 127.0.0.1 port %d\n", ifn, redirPort];
+    }
+
+    // ★ 必须写临时文件，**不能 `pfctl -f -` 从 stdin 喂** —— 后者静默失败（退出码 0、装 0 条）。
+    //   与应用侧 PfRules.cpp 同一个坑，改这里时两边要一起看。
+    NSString *tmp = @"/var/run/coast-pf-helper.conf";
+    NSError *werr = nil;
+    if (![rules writeToFile:tmp atomically:YES encoding:NSUTF8StringEncoding error:&werr]) {
+        [self pfTeardown];
+        reply(NO, werr.localizedDescription ?: @"写临时规则文件失败");
+        return;
+    }
+    NSString *out = nil;
+    const int rc = runTool(@"/sbin/pfctl", @[@"-a", @kPfAnchor, @"-f", tmp], &out);
+    [[NSFileManager defaultManager] removeItemAtPath:tmp error:nil];
+    if (rc != 0) {
+        [self pfTeardown];
+        reply(NO, [NSString stringWithFormat:@"pfctl 装载 anchor 失败：%@", out ?: @""]);
+        return;
+    }
+    // pf 可能是关的（macOS 默认 Disabled）。已启用时 -e 返回非 0，属正常。
+    runTool(@"/sbin/pfctl", @[@"-e"], NULL);
+
+    // 回读核实：退出码 0 不代表真装上了（stdin 那个坑就是 0 却装 0 条）。
+    NSString *check = nil;
+    runTool(@"/sbin/pfctl", @[@"-a", @kPfAnchor, @"-s", @"nat"], &check);
+    if (![check containsString:@"rdr"]) {
+        [self pfTeardown];
+        reply(NO, @"规则装载后回读为空");
+        return;
+    }
+    // ★ 再核挂载点：没被主规则集引用的 anchor 装了也**永远不会被求值**，而 pfctl 全程不报错。
+    //   macOS 默认 /etc/pf.conf 有 `rdr-anchor "com.apple/*"`，所以我们挂在 com.apple/ 下。
+    NSString *mainNat = nil;
+    runTool(@"/sbin/pfctl", @[@"-s", @"nat"], &mainNat);
+    if (![mainNat containsString:@"rdr-anchor \"com.apple/"]) {
+        [self pfTeardown];
+        reply(NO, @"pf 主规则集缺少 `rdr-anchor \"com.apple/*\"` 挂载点，规则不会被求值");
+        return;
+    }
+    reply(YES, @"");
+}
+
+- (void)pfSyncProxiedCommaSep:(NSString *)ipv4CommaSep withReply:(void (^)(BOOL, NSString *))reply
+{
+    NSMutableArray<NSString *> *ips = [NSMutableArray array];
+    for (NSString *raw in [ipv4CommaSep componentsSeparatedByString:@","]) {
+        NSString *s = [raw stringByTrimmingCharactersInSet:
+                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (!s.length) continue;
+        if (!ipv4IsSafe(s)) { reply(NO, [NSString stringWithFormat:@"IP 非法：%@", s]); return; }
+        [ips addObject:s];
+    }
+    // 整体替换（调用方给的是全集）。空集合要用 -T flush：-T replace 不接受空参数列表。
+    NSMutableArray<NSString *> *args =
+        [@[@"-a", @kPfAnchor, @"-t", @"coast_proxied", @"-T"] mutableCopy];
+    if (!ips.count) [args addObject:@"flush"];
+    else { [args addObject:@"replace"]; [args addObjectsFromArray:ips]; }
+
+    NSString *out = nil;
+    if (runTool(@"/sbin/pfctl", args, &out) != 0) {
+        reply(NO, [NSString stringWithFormat:@"pfctl 更新 table 失败：%@", out ?: @""]);
+        return;
+    }
+    reply(YES, @"");
+}
+
+- (void)pfRemoveWithReply:(void (^)(BOOL, NSString *))reply
+{
+    [self pfTeardown];
+    reply(YES, @"");
+}
+
+// 拆规则 + 还原 forwarding。幂等。
+// ★ **不执行 `pfctl -d`**：pf 可能是用户自己开着在用的（防火墙/其它 anchor），
+//   关掉整个 pf 等于替用户关防火墙。只清我们自己的 anchor。
+- (void)pfTeardown
+{
+    runTool(@"/sbin/pfctl", @[@"-a", @kPfAnchor, @"-F", @"all"], NULL);
+    runTool(@"/sbin/pfctl", @[@"-a", @"coast", @"-F", @"all"], NULL); // 早期顶层名字的残留
+    NSString *saved = [NSString stringWithContentsOfFile:kPfSysctlArchive
+                                                encoding:NSUTF8StringEncoding error:nil];
+    if (saved.length) {
+        sysctlWriteStr(@"net.inet.ip.forwarding",
+                       [saved stringByTrimmingCharactersInSet:
+                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]]);
+        [[NSFileManager defaultManager] removeItemAtPath:kPfSysctlArchive error:nil];
+    }
 }
 
 @end

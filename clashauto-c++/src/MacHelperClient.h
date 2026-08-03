@@ -52,4 +52,11 @@ bool stopCore(QString *err);
 // 失败返回 -1 并把原因写入 err。透明网关(L2Endpoint_mac)非 root 运行时用它拿二层收发能力。
 int openBpf(const QString &ifname, QString *err);
 
+// ── 透明网关的 pf 数据面。三件事（pfctl / 写 forwarding / 读 /dev/pf）**都要 root**，
+//    而 GUI 应用是普通用户 uid，一件都做不了 —— 所以整条生命周期交给 helper。
+//    规则文本由 helper 自己拼，这里只给端口/网卡名/IP 列表（见 HelperProtocol.h 的说明）。
+bool pfInstall(int redirPort, int dnsPort, const QStringList &ifnames, QString *err);
+bool pfSyncProxied(const QStringList &ipv4, QString *err);
+bool pfRemove(QString *err);
+
 } // namespace MacHelper
