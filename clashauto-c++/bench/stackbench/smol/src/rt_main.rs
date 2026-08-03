@@ -8,15 +8,20 @@ mod rawtap;
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, UdpSocket};
 use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 
-use smoltcp::socket::tcp;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpListenEndpoint};
+use smoltcp::wire::{EthernetAddress, HardwareAddress, IpAddress, IpCidr, IpListenEndpoint,
+                    IpEndpoint};
+
+// UDP 转发（固定端口，与 lwIP 那侧对齐做对比）。smoltcp UDP 收任意目的 IP 靠 addr:None 绑定，
+// 回包源 IP 靠 UdpMetadata.local_address 显式指定——正是伪造网关需要的。
+const UDP_PORT: u16 = 5203;
 
 use rawtap::{RawTap, PortMap, FIXED_PORT};
 
@@ -68,6 +73,19 @@ fn main() {
     let bl = backlog();
     let mut listeners: Vec<SocketHandle> = (0..bl).map(|_| new_listener(&mut sockets)).collect();
     let mut conns: HashMap<SocketHandle, Conn> = HashMap::new();
+
+    // UDP：一个 socket 收发（addr:None 收任意目的 IP:UDP_PORT），外加每个客户端 endpoint
+    // 一个内核 UdpSocket 转发到 127.0.0.1:UDP_PORT。回包源用收包时记下的 local_address。
+    let udp_h = {
+        let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 512], vec![0u8; 1 << 20]);
+        let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 512], vec![0u8; 1 << 20]);
+        let mut u = udp::Socket::new(rx, tx);
+        u.bind(IpListenEndpoint { addr: None, port: UDP_PORT }).unwrap();
+        sockets.add(u)
+    };
+    // 客户端 endpoint -> (内核 socket, 原始目的 IP)。原始目的 IP 用作回包源。
+    let mut uflows: HashMap<IpEndpoint, (UdpSocket, IpAddress)> = HashMap::new();
+    let mut ubuf = [0u8; 2048];
 
     eprintln!("smoltcp2socks_rt up on {tap_name} ip={ip_str} FIXED_PORT={FIXED_PORT} backlog={bl} (真 catch-all)");
 
@@ -159,12 +177,58 @@ fn main() {
             if drop_it { sockets.remove(h); conns.remove(&h); }
         }
 
+        // ---- UDP 转发 ----
+        // 设备 → 上游：把 smoltcp udp socket 里的数据报逐个转给对应客户端的内核 socket
+        loop {
+            let (n, client, dst) = {
+                let u = sockets.get_mut::<udp::Socket>(udp_h);
+                match u.recv() {
+                    Ok((data, meta)) => {
+                        let n = data.len().min(ubuf.len());
+                        ubuf[..n].copy_from_slice(&data[..n]);
+                        (n, meta.endpoint, meta.local_address)
+                    }
+                    Err(_) => break,
+                }
+            };
+            let dst = match dst { Some(d) => d, None => continue };
+            let ent = uflows.entry(client).or_insert_with(|| {
+                let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+                s.connect(("127.0.0.1", UDP_PORT)).unwrap();
+                s.set_nonblocking(true).ok();
+                (s, dst)
+            });
+            let _ = ent.0.send(&ubuf[..n]);
+        }
+        // 上游 → 设备：读每个客户端内核 socket 的回包，用记下的原始目的 IP 作源发回设备
+        {
+            let u = sockets.get_mut::<udp::Socket>(udp_h);
+            for (client, (ks, dst)) in uflows.iter() {
+                loop {
+                    match ks.recv(&mut ubuf) {
+                        Ok(n) if n > 0 => {
+                            let meta = udp::UdpMetadata {
+                                endpoint: *client,
+                                local_address: Some(*dst), // 回包源 = 原始目的 IP
+                                meta: Default::default(),
+                            };
+                            let _ = u.send_slice(&ubuf[..n], meta);
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+
         let mut fds: Vec<libc::pollfd> = Vec::with_capacity(conns.len() + 1);
         fds.push(libc::pollfd { fd: tap_fd, events: libc::POLLIN, revents: 0 });
         for c in conns.values() {
             if let Some(up) = c.up.as_ref() {
                 fds.push(libc::pollfd { fd: up.as_raw_fd(), events: libc::POLLIN, revents: 0 });
             }
+        }
+        for (ks, _) in uflows.values() {
+            fds.push(libc::pollfd { fd: ks.as_raw_fd(), events: libc::POLLIN, revents: 0 });
         }
         let timeout_ms = match iface.poll_delay(Instant::now(), &sockets) {
             Some(d) => (d.total_millis() as i32).clamp(0, 10), None => 10 };

@@ -770,3 +770,53 @@ lwIP 续命的调优，不改变 smoltcp 已在「有界延迟 + 4.6× 吞吐」
 
 **尚未测**：ARM 真机（Pi 上线后补，唯一架构盲点）；三端 phy 落地后的端到端。
 选型结论不变：**smoltcp**，且 R12 让「负载下体验」这一维也倒向它。
+
+---
+
+### R13 · 2026-08-03 21:56 UTC · UDP 转发（QUIC/HTTP3 的形状）—— lwIP 在这一项反赢
+
+**前 12 轮全是 TCP。** 而真实网关约三成流量是 UDP：QUIC(HTTP3)、DNS、视频。给两个栈
+都加上 UDP 转发（固定端口单流，与 R5 的 TCP 直连同思路），用自定义 UDP echo 打（不用
+iperf3，因为 `iperf3 -u` 仍要一条同端口 TCP 控制连接，会把 TCP 路径混进来）。
+
+两栈各约 1 核，单流，三种包长：
+
+| 栈 | 64 B rx_pps | 512 B rx_pps | 1400 B | 丢包率 | 每数据报 CPU |
+|---|---|---|---|---|---|
+| **lwIP** | **136905** | **124047** | **1.312 Gbps** | 3.6~4.5% | **6.9 µs** |
+| smoltcp | 91057 | 83582 | 0.841 Gbps | 6.6~8.0% | 10.3 µs |
+
+**UDP 上 lwIP 反赢——pps 高约 1.5×、丢包只有 smoltcp 的一半、每数据报便宜 1.5×。
+这和 TCP 完全相反（TCP bulk smoltcp 赢 4×）。**
+
+原因清楚：**UDP 是逐数据报的，没有 TCP 那种批量化/GRO 可吃**（smoltcp 4× 的一大来源，
+见 R5）。lwIP 的 UDP 路径是一个 `udp_recv` 回调直接转发，极瘦；smoltcp 的 UDP 走
+`PacketBuffer` + 每数据报一条 metadata + 还要过 phy 层那个（对 UDP 是空操作但仍执行的）
+改写 shim。逐包场景下 smoltcp 的固定开销摊不掉，反而吃亏——和 R7 洪水下 lwIP 每包更省
+是同一个道理。
+
+对选型的意义：**这是 TCP 之外第一个 lwIP 明确赢的负载，且赢在正在快速增长的 QUIC 上。**
+但它不推翻结论，原因有三：
+
+1. **量级仍是可用的**：smoltcp UDP 单核也有 9 万 pps / 0.84 Gbps，对家用网关的 QUIC/DNS
+   量足够；差距是「更好 vs 够用」，不是「行 vs 不行」。
+2. **吞吐大头仍是 TCP**：大文件/视频流即便走 QUIC 也是长流，长流的每字节成本 smoltcp 仍
+   可能靠聚合追回（本轮是小数据报最坏情形，没测 QUIC 长流）。
+3. **smoltcp 的 UDP forwarder 是本轮临时写的、没调优**（多过一层 shim、每报一次 metadata）；
+   给 UDP 走一条绕开 shim 的专用路径，多半能收窄这 1.5×。属落地可优化项。
+
+诚实修正：选型总账从「smoltcp 全面领先」修正为**「smoltcp 在 TCP（吞吐/延迟/短连接）全面
+领先，lwIP 在 UDP 逐包上更省」**。对以 TCP 为主的网关，smoltcp 仍是正解；若目标流量
+QUIC 占比很高，则要么优化 smoltcp 的 UDP 路径、要么重新权衡。
+
+#### 一个真实的集成陷阱（记下来，落地 UDP 网关会撞）
+
+lwIP 的 UDP 回包必须用 `udp_sendto_if_src()` 显式传源 IP，**不能**用 `udp_sendto`/
+`udp_sendto_if`：后者有一道检查——源 IP 不等于 netif 自己的地址就返回 `ERR_RTE(-4)` 丢包
+（`udp.c`：「local_ip doesn't match, drop the packet」）。而透明网关回包的源 IP 恰恰是
+「原始目的 IP」、不是本机地址，必撞这道墙。症状：设备→上游全通（echo 靶收到全部包）、
+但回包一个都不出栈、100% 丢包、且**没有任何错误日志**（err 码被吞在转发循环里）。
+排查靠的是 tcpdump 看方向 + strace 数 echo 靶的 recvfrom + 给 sendto 返回值加打印。
+
+**尚未测**：ARM 真机（唯一架构盲点，Pi 关机、mac 台是 x86）；QUIC 长流（vs 本轮小数据报）；
+smoltcp UDP 走专用路径去 shim 后的吞吐。选型主结论：**TCP 为主选 smoltcp，UDP 重则再权衡**。

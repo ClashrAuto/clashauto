@@ -27,6 +27,7 @@ features = [
     "phy-tuntap_interface",
     "proto-ipv4",
     "socket-tcp",
+    "socket-udp",
 ]
 
 # 与候选 A/B 一致：优化开满，别让「Rust 默认 debug」这种事混进结论里

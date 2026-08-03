@@ -30,6 +30,7 @@
 #include "lwip/netif.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
+#include "lwip/udp.h"
 #include "lwip/timeouts.h"
 #include "netif/ethernet.h"
 
@@ -51,7 +52,13 @@ u32_t sys_now(void)
     return (u32_t)(ts.tv_sec * 1000ULL + ts.tv_nsec / 1000000ULL);
 }
 
+// epoll data.ptr 的第一个字段一律是 kind：0=TCP 连接、1=UDP 流。NULL=TAP。
+// 这样一个 epoll 循环同时喂 TCP 上游 socket 和 UDP 上游 socket，不必开两套。
+#define KIND_TCP 0
+#define KIND_UDP 1
+
 struct conn {
+    int kind;                 // = KIND_TCP（calloc 清零即是）
     struct tcp_pcb *pcb;
     int sock;
     char up[BUFSZ];   int up_len, up_off;   // 设备 → 上游
@@ -232,6 +239,77 @@ static err_t tap_netif_init(struct netif *nif)
     return ERR_OK;
 }
 
+// ===== UDP 转发（固定端口 UDP_PORT，单流/少流，够测吞吐+丢包）=====
+// lwIP 的 UDP 绑到 IP_ANY:UDP_PORT 就能收任意目的 IP 的 UDP（udp_input_local_match 里
+// local_ip isany → 匹配任何 dst ip），所以 **不用** 像 TCP 那样打 catch-all 补丁。
+#define UDP_PORT 5203
+#define UDP_MAXFLOW 256
+
+struct uflow {
+    int kind;              // = KIND_UDP
+    int sock;              // 上游内核 UDP socket
+    ip_addr_t cip;         // 设备侧客户端 IP
+    u16_t cport;           // 设备侧客户端端口
+    ip_addr_t dip;         // 原始目的 IP（回包要以它为源）
+};
+static struct uflow *g_uflows[UDP_MAXFLOW];
+static int g_nuflow = 0;
+static struct udp_pcb *g_udp_tx;   // 回包用：每次发前把 local 设成原始目的 (IP,port)
+
+static struct uflow *uflow_find(const ip_addr_t *cip, u16_t cport) {
+    for (int i = 0; i < g_nuflow; i++)
+        if (g_uflows[i]->cport == cport && ip_addr_cmp(&g_uflows[i]->cip, cip))
+            return g_uflows[i];
+    return NULL;
+}
+
+// 设备 → 上游：lwIP 收到 UDP → 找/建流 → sendto 内核 127.0.0.1:UDP_PORT
+static void udp_dev_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
+                         const ip_addr_t *addr, u16_t port) {
+    (void)arg; (void)pcb;
+    struct uflow *f = uflow_find(addr, port);
+    if (!f && g_nuflow < UDP_MAXFLOW) {
+        f = calloc(1, sizeof(*f));
+        f->kind = KIND_UDP;
+        f->sock = socket(AF_INET, SOCK_DGRAM, 0);
+        f->cip = *addr; f->cport = port;
+        f->dip = *ip_current_dest_addr();   // 原始目的 IP（回包源）
+        struct sockaddr_in up = {0};
+        up.sin_family = AF_INET; up.sin_port = htons(UDP_PORT);
+        inet_pton(AF_INET, "127.0.0.1", &up.sin_addr);
+        connect(f->sock, (struct sockaddr *)&up, sizeof(up));
+        fcntl(f->sock, F_SETFL, fcntl(f->sock, F_GETFL, 0) | O_NONBLOCK);
+        struct epoll_event ev = {.events = EPOLLIN, .data.ptr = f};
+        epoll_ctl(g_ep, EPOLL_CTL_ADD, f->sock, &ev);
+        g_uflows[g_nuflow++] = f;
+    }
+    if (f) {
+        static char b[2048];
+        int n = p->tot_len > sizeof(b) ? sizeof(b) : p->tot_len;
+        pbuf_copy_partial(p, b, n, 0);
+        (void)!write(f->sock, b, n);
+    }
+    pbuf_free(p);
+}
+
+// 上游 → 设备：内核 UDP 回包 → 以「原始目的 (IP,UDP_PORT)」为源 udp_sendto 回客户端
+static void udp_reply(struct uflow *f) {
+    static char b[2048];
+    for (;;) {
+        ssize_t n = read(f->sock, b, sizeof(b));
+        if (n <= 0) break;
+        struct pbuf *p = pbuf_alloc(PBUF_RAW, (u16_t)n, PBUF_POOL);
+        if (!p) break;
+        pbuf_take(p, b, (u16_t)n);
+        // 回包源必须是原始目的 (IP, UDP_PORT)——但 udp_sendto_if 有道检查：源 IP 不等于
+        // netif 的 IP 就 ERR_RTE 丢包（udp.c：local_ip doesn't match）。伪造网关的整个前提就是
+        // 源 IP 不是本机地址，所以必须用 udp_sendto_if_src 显式传源、绕过那道检查。
+        g_udp_tx->local_port = UDP_PORT;
+        udp_sendto_if_src(g_udp_tx, p, &f->cip, f->cport, &g_nif, &f->dip);
+        pbuf_free(p);
+    }
+}
+
 static int tap_open(const char *name)
 {
     int fd = open("/dev/net/tun", O_RDWR);
@@ -276,6 +354,12 @@ int main(int argc, char **argv)
     lp->local_port = 0;
     tcp_accept(lp, on_accept);
 
+    // UDP 转发：一个收 pcb（IP_ANY:UDP_PORT，收任意目的 IP）、一个发 pcb（回包前改 local）
+    struct udp_pcb *urx = udp_new();
+    udp_bind(urx, IP_ANY_TYPE, UDP_PORT);
+    udp_recv(urx, udp_dev_recv, NULL);
+    g_udp_tx = udp_new();
+
     g_ep = epoll_create1(0);
     struct epoll_event tev = {.events = EPOLLIN, .data.ptr = NULL};
     epoll_ctl(g_ep, EPOLL_CTL_ADD, g_tap, &tev);
@@ -291,6 +375,10 @@ int main(int argc, char **argv)
         int n = epoll_wait(g_ep, evs, 256, 10);
         for (int i = 0; i < n; i++) {
             struct conn *c = evs[i].data.ptr;
+            if (c && c->kind == KIND_UDP) {            // UDP 上游回包
+                udp_reply((struct uflow *)c);
+                continue;
+            }
             if (!c) {                                  // TAP 可读：把已到的帧全喂进去
                 for (;;) {
                     ssize_t r = read(g_tap, frame, sizeof(frame));
