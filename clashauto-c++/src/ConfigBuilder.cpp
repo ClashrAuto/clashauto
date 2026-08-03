@@ -58,7 +58,18 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled, bool ipv6Enabled)
     //        off / strict       1.3ms  1.7ms   2.3ms  2.5ms
     //
     //    直连（完全不经代理）的基线是 p50 0.97ms —— 也就是说代理这一跳本身只值 ~0.8ms，
-    //    而 always **每条新连接多花约 5.6ms**（本机 ARM 上扫 /proc 的代价；x86 会低些）。
+    //    而 always **每条新连接多花约 5.6ms**。
+    //    ★ 这 5.6ms **不是"扫 /proc"**（一开始我是这么写的，错了）。核心侧已经有精确查询：
+    //      fork 的 82d8c4f0「精确查询取代全表 dump」用完整四元组走 inet_diag_dump_one，
+    //      实测 0.022ms，而全表 dump 要遍历整张 ehash、恒定 5.3ms —— 差 240 倍，且该优化确实
+    //      已在我们跑的 v1.10.4392 里。可是**透明网关这条路上它没生效**：/connections 显示
+    //      TProxy 连接的 inboundIP='::'、inboundPort=7898，即 metadata.InIP 填的是**监听器的
+    //      通配绑定地址**而不是这条连接的本地端点。精确查询的前置判据是
+    //      `InIP.Is4() == SrcIP.Is4()`：IPv4 客户端下一真一假直接跳过；IPv6 客户端下判据虽过，
+    //      但拿 `::` 当对端去查必然查不到 —— 两条路都回落到 5.3ms 的 dump。
+    //      所以这里量到的 5.6ms ≈ dump 的固定成本。核心侧的正解是让 InIP 取 accept 之后那条
+    //      连接的真实本地端点（NewSocket 本来就是这么做的，是后续 addition 把它覆盖成了监听
+    //      地址）；那属于 clash fork 的改动、要重新发核心，本文件这条按角色分档的开关与它不冲突。
     //    偏偏这只对**本机发起**的连接有意义：局域网设备的进程跑在别人机器上，本机表里查不到，
     //    网关代理的连接查到的会是 Coast 自己 —— QmlBridge 那边按 inboundUser=dev-* 主动丢弃。
     //    **也就是说当网关时，我们花 5.6ms 算出一个随后被扔掉的值。**
