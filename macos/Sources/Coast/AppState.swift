@@ -289,10 +289,6 @@ public final class AppState {
     /// 用计数器而不是让视图自己比对数组：数组到了上限之后长度不再变，`onChange(of:count)`
     /// 从此再也不触发；而末位的值经常连着好几拍都是 0，比值也认不出「来了新的一拍」。
     public private(set) var pollTick: UInt64 = 0
-    /// 上一拍看到的累计下行字节数。用来判"真的没有流量在动" —— 核心的 /traffic
-    /// 瞬时字段在某些路径上恒为 0（本机回环实测），只有累计量可信。非 @Observable
-    /// 语义无关的内部状态，写它不该触发视图重排，故不放进任何被观察的属性里。
-    private var lastTotalSeen: Int64 = -1
 
     /// 带宽图的采样序列。长度与图上的点数一致（`BandwidthChart.pointCount` = 42，
     /// 即 40 个可见 + 2 个富余）—— **横轴就是「最近 40 秒」，与 Qt 相同**。
@@ -801,41 +797,15 @@ public final class AppState {
                     try? await Task.sleep(for: .seconds(1))
                     continue
                 }
-                // ★ **完全静止时这一拍必须整拍跳过。**
-                //   pollTick / bandwidthSamples / displayedUp / displayedDown 都是 @Observable
-                //   的公开属性，**写一次就让 SwiftUI 把整棵视图树重排一遍**。原先它们是
-                //   1Hz **无条件**写的，于是核心没跑、速率恒 0、连接恒空的空载状态下，
-                //   界面明明一个像素都不会变，却仍在每秒重排一次整树。
-                //   真机实测（macOS 26.5.2 / arm64，COAST_NO_AUTOSTART=1 只跑 UI）：
-                //     空载 CPU 稳态 1.3~2.2%，`sample` 的热点 100% 落在 SwiftUI 布局引擎上
-                //     （LayoutEngineBox.sizeThatFits / StackLayout.placeChildren /
-                //       ViewLayoutEngine.sizeThatFits），即"纯重排、没有别的活"。
-                //   判据与 Qt 端页脚那颗呼吸圆点那次完全相同：**可见运动要值得它的代价**，
-                //   而"放着不管"才是这个窗口的常态。速率没变、也没有新连接快照要落，
-                //   这一拍就没有任何东西可显示，写它纯属自费。
-                //   注意 pollTick 也要一起跳过 —— 它本身就是给视图当"该刷新了"的信号用的，
-                //   照写等于把刚省下的重排又请回来。
+                // ★ **窗口开着时这一拍无条件走完，不做任何"静止就跳过"的省电判断。**
+                //   曾经加过一版"上下行为 0 就跳过整拍"，实测界面**一卡一卡**：省下的那点
+                //   CPU 远不值这个观感代价。分档的正确位置是**窗口可见性**，而不是流量高低——
+                //   上面 `guard self.uiVisible` 已经做了：收进托盘/最小化时整拍跳过（那时没人看，
+                //   省电优先）；窗口开着就老老实实每秒刷一次（有人在看，流畅优先）。
+                //   要在"窗口开着"这一档继续降 CPU，方向是让**单次刷新更便宜**
+                //   （少写被观察属性、缩小重排范围），不是降低刷新频率。
                 let up = self.clash.up
                 let down = self.clash.down
-                // ★ 判"是否真的完全静止"**不能只看 clash.up/down**。真机实测（本机回环、
-                //   经代理拉 1.5 GB）核心的 /traffic **瞬时字段恒为 0**，只有 upTotal/downTotal
-                //   在涨 —— 只信瞬时速率，会在正传着大流量时把这一拍误判成静止跳过，
-                //   界面就此不再刷新。累计量是确凿在动的，用它的**增量**兜底。
-                let total = self.clash.downloadTotal
-                let moved = total != self.lastTotalSeen
-                self.lastTotalSeen = total
-                // 完全静止 = 瞬时 0 + 累计没动 + 没有待落的连接快照 + 上一拍也是 0。
-                // 少任何一条都可能是"有流量但瞬时字段不准"，宁可多刷一拍也不能不刷。
-                let idle = up == 0 && down == 0 && !moved
-                    && self.displayedUp == 0 && self.displayedDown == 0
-                    && self.pendingSnapshot == nil
-                    // 冷启动时数组是空的：`last` 为 nil，此时**不能**算静止 ——
-                    // 否则第一拍就被跳过，图表永远拿不到起始样本。
-                    && (self.bandwidthSamples.last.map { $0.up == 0 && $0.down == 0 } ?? false)
-                if idle {
-                    try? await Task.sleep(for: .seconds(1))
-                    continue
-                }
                 self.pollTick &+= 1
                 self.bandwidthSamples.append((Double(up), Double(down)))
                 if self.bandwidthSamples.count > Self.bandwidthWindow {
