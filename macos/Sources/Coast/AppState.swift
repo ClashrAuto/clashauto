@@ -289,6 +289,10 @@ public final class AppState {
     /// 用计数器而不是让视图自己比对数组：数组到了上限之后长度不再变，`onChange(of:count)`
     /// 从此再也不触发；而末位的值经常连着好几拍都是 0，比值也认不出「来了新的一拍」。
     public private(set) var pollTick: UInt64 = 0
+    /// 上一拍看到的累计下行字节数。用来判"真的没有流量在动" —— 核心的 /traffic
+    /// 瞬时字段在某些路径上恒为 0（本机回环实测），只有累计量可信。非 @Observable
+    /// 语义无关的内部状态，写它不该触发视图重排，故不放进任何被观察的属性里。
+    private var lastTotalSeen: Int64 = -1
 
     /// 带宽图的采样序列。长度与图上的点数一致（`BandwidthChart.pointCount` = 42，
     /// 即 40 个可见 + 2 个富余）—— **横轴就是「最近 40 秒」，与 Qt 相同**。
@@ -813,10 +817,21 @@ public final class AppState {
                 //   照写等于把刚省下的重排又请回来。
                 let up = self.clash.up
                 let down = self.clash.down
-                let idle = up == 0 && down == 0
+                // ★ 判"是否真的完全静止"**不能只看 clash.up/down**。真机实测（本机回环、
+                //   经代理拉 1.5 GB）核心的 /traffic **瞬时字段恒为 0**，只有 upTotal/downTotal
+                //   在涨 —— 只信瞬时速率，会在正传着大流量时把这一拍误判成静止跳过，
+                //   界面就此不再刷新。累计量是确凿在动的，用它的**增量**兜底。
+                let total = self.clash.downloadTotal
+                let moved = total != self.lastTotalSeen
+                self.lastTotalSeen = total
+                // 完全静止 = 瞬时 0 + 累计没动 + 没有待落的连接快照 + 上一拍也是 0。
+                // 少任何一条都可能是"有流量但瞬时字段不准"，宁可多刷一拍也不能不刷。
+                let idle = up == 0 && down == 0 && !moved
                     && self.displayedUp == 0 && self.displayedDown == 0
                     && self.pendingSnapshot == nil
-                    && self.bandwidthSamples.last.map { $0.up == 0 && $0.down == 0 } == true
+                    // 冷启动时数组是空的：`last` 为 nil，此时**不能**算静止 ——
+                    // 否则第一拍就被跳过，图表永远拿不到起始样本。
+                    && (self.bandwidthSamples.last.map { $0.up == 0 && $0.down == 0 } ?? false)
                 if idle {
                     try? await Task.sleep(for: .seconds(1))
                     continue
