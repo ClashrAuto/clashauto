@@ -111,6 +111,13 @@ AppConfig AppConfigLoader::load()
         config.gatewayTproxy = true;
     else if (dpEnv == "lwip")
         config.gatewayTproxy = false;
+    // 无节点兜底行为（默认回落直连，见 AppConfig.h 的说明）。环境变量优先，供测试/应急。
+    config.noNodeReject = boolFromYaml(yaml, "noNodeReject", config.noNodeReject);
+    const QByteArray nnrEnv = qgetenv("COAST_NO_NODE_REJECT").trimmed();
+    if (nnrEnv == "1")
+        config.noNodeReject = true;
+    else if (nnrEnv == "0")
+        config.noNodeReject = false;
     config.nodeSwitchNote = boolFromYaml(yaml, "note", config.nodeSwitchNote);
     config.autoUpdateMinutes = intFromYaml(yaml, "autoUpdate", config.autoUpdateMinutes);
     config.allowRule = nestedValueFromYaml(yaml, "use_rule", "allow", config.allowRule);

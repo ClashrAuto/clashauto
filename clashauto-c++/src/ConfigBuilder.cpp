@@ -290,6 +290,26 @@ QString ConfigBuilder::applySubscriptions(QString yaml, const QVector<Subscripti
     }
 
     if (allNames.isEmpty()) {
+        // 无任何订阅节点。默认（noNodeReject=false）维持 clash 既定语义：原样返回，"该走代理"
+        // 的流量最终经「节点选择→自动选择」回落 DIRECT —— 即被劫持设备静默直连（真机实测出口
+        // IP = 网关本地公网 IP）。这是用户 2026-08-03 明确要保留的默认（见 AppConfig.h）。
+        //
+        // fail-closed（noNodeReject=true）：把第一个组「🚀 节点选择」的成员改成 [REJECT]。
+        //   · 它是 proxy-groups 的第一个组，也正是有节点时下面 300+ 行往里填节点列表的同一个组；
+        //   · 它是 **select** 组，填 REJECT 后直接选 REJECT，不像 url-test「♻️ 自动选择」那样
+        //     会对 REJECT 做健康检查而行为不定 —— 所以改这个组而不是自动选择组；
+        //   · 所有"该走代理"的路径最终都经它：直接 →节点选择 的 580 条规则、以及 MATCH→漏网之鱼
+        //     (默认首选=节点选择)。一处改动全覆盖。
+        //   · **不碰「🎯 全球直连」组**（仍是 DIRECT）：803 条 CN/私网 →全球直连 的规则照常直连，
+        //     局域网互访、国内站点不受影响。reject 设备指内置 REJECT，也与此无关。
+        // 范围：只覆盖"订阅完全无节点"这个静态可判、也最常见的场景（机场没配/跑路/订阅过期解析空）。
+        //   "有节点但运行时全部测速失败回落 DIRECT" 是运行时状态，静态配置抓不到，本项不拦。
+        if (m_config.noNodeReject) {
+            const qsizetype g = yaml.indexOf("\nproxy-groups:");
+            const qsizetype fp = g >= 0 ? yaml.indexOf("\n    proxies:", g) : -1;
+            if (fp >= 0)
+                yaml = replaceProxyListAt(yaml, fp + 1, {QStringLiteral("REJECT")});
+        }
         return yaml;
     }
 

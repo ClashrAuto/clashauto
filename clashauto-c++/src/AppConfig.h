@@ -46,6 +46,15 @@ struct AppConfig {
     //   所以在它跑够久之前，默认必须是可回退的那一条。环境变量 COAST_GATEWAY_DATAPATH=tproxy
     //   可临时覆盖（供测试；见 AppConfigLoader::load）。
     bool gatewayTproxy = false;
+    // 无可用代理节点时的兜底行为。默认 false = 回落直连（clash 既定语义：普通代理设备跟随
+    // 规则、规则最终回落 DIRECT）。true = fail-closed：无订阅节点时把"该走代理"的流量导向
+    // REJECT,避免被劫持设备在机场跑路/订阅过期时**静默裸奔**(真实 IP 泄露、翻墙失效)。
+    // ★ 默认 false 是用户 2026-08-03 明确拍板的:能上网优先于防泄露,且真实用户几乎总配了节点,
+    //   无节点只是配置未完成的中间态;fail-closed 会因节点抖动误伤断网。隐私优先的用户可开。
+    // 配置键 noNodeReject;环境变量 COAST_NO_NODE_REJECT=1/0 覆盖(供测试/应急)。
+    // 已知范围:只覆盖"订阅完全无节点"这个静态可判场景(最常见);"有节点但运行时全部测速失败
+    //   回落 DIRECT"是运行时状态,本项不拦(见 ConfigBuilder 注入处的说明)。
+    bool noNodeReject = false;
     QString language = "zh-CN";
 
     QString clashExecutable() const;
