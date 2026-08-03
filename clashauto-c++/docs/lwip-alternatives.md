@@ -965,3 +965,41 @@ R15 用 FIFO（按**创建顺序**淘汰）给 NAT 表止血，末尾又留一�
 **尚未测（均不影响选型）**：ARM 真机（唯一架构盲点，Pi 关机、两台 mac 均 x86）；QUIC 长流
 的字节吞吐（vs 本轮小报 pps）。**选型全维度收敛，两条数据面（smoltcp-TCP / 裸NAT-UDP）均已
 churn 加固到生产级：替换 lwIP 用 smoltcp(TCP) + 裸 NAT(UDP)。**
+
+---
+
+### R17 · 2026-08-03 22:22 UTC · IPv6 —— 最后一个真选型风险（双栈漏代理）
+
+前 16 轮全是 IPv4。而这个网关有个**文档级隐患**：双栈设备的 v6 流量若不被接管就会「漏代理」
+（见 CLAUDE.md 的 NDP 投毒防线、[gateway] 那条）。lwipopts 早开了 v6 + ip6 accept-all 补丁；
+smoltcp 这边我的 harness 一直是纯 v4（shim 只认 ethertype 0x0800、NAT 只处理 v4、Cargo 只开
+`proto-ipv4`）。**若选 smoltcp，它到底能不能转发 v6，是必须回答的**——不测就是把「mature stack
+大概支持」当结论，而本探索栽过太多这种。
+
+做法：给 smoltcp 开 `proto-ipv6`，做一个双到 v6 的直连变体（`v6_main.rs`：v6 地址 fd99::2/64、
+v6 any_ip、v6 默认路由 next-hop=自身、上游连 `::1`），把测试 v6 目的 `2001:db8::/32` 路由到栈。
+
+| 检查项 | 结果 |
+|---|---|
+| NDP（邻居请求 NS → 通告 NA） | **自动通**（`ping6 fd99::2` 通，邻居 REACHABLE） |
+| any_ip 收外部 v6 目的 | **通**（`ping6 2001:db8::5` 0% 丢包——非本机 v6 地址也接） |
+| v6 TCP 转发（功能） | **通**（`v6hello` 经 catch-all 完整往返到 `::1` 又回来） |
+| v6 TCP 吞吐 | **4.509 Gbps / 0 重传 / ~1 核** |
+
+**smoltcp 的 IPv6 TCP 转发在功能和性能上都与 v4 等同**（4.5 vs v4 的 4.6~4.8 Gbps，同样单核）。
+NDP、any_ip、catch-all 监听（`addr:None` 天然跨家族）全部开箱即用。**双栈漏代理这个最后的
+选型风险，在栈层面清除了。**
+
+一个复现坑（和 v4 的 ARP 首包丢是同一个）：v6 首包会在 NDP 邻居解析期丢，症状是
+`No route to host`。第一次跑没预热就发 TCP，被这个假象骗了一下——**ping6 预热解析邻居后
+一切正常**。别拿冷启动的第一个 v6 包判「不支持」。
+
+诚实的剩余范围（都是工程、非选型）：本轮用的是**无 shim 的固定端口直连变体**，证明的是
+smoltcp 的 v6 栈本身可用。生产的 `rt_main`（带端口改写 shim）和 `natdev`（UDP NAT）目前
+**只解析 0x0800**，要覆盖 v6 得让 shim/NAT 也认 0x86dd（v6 头 40 字节定长、偏移不同）——
+和 v4 是同一套代码换个 ethertype/偏移，是明确的工作量、不是未知风险。双栈同时跑（一网卡
+v4+v6 并存）本轮也没测（只测了 v6-only）。
+
+**选型维度到此全部覆盖**：吞吐 / 延迟（空载+负载）/ CPU / 并发 / 内存 / 崩溃韧性 / 短连接 /
+UDP / NAT 老化 / **IPv6**。结论稳定：**替换 lwIP 用 smoltcp(TCP)+裸NAT(UDP)，v4/v6 双栈可行。**
+**尚未测**：ARM 真机（唯一架构盲点，非功能风险）；v6 版 shim/NAT 与双栈并存（工程量，非选型）。

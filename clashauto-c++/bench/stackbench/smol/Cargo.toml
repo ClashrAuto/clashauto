@@ -19,6 +19,10 @@ path = "src/rt_main.rs"
 name = "smoltcp2socks_nat"
 path = "src/nat_main.rs"
 
+[[bin]]
+name = "smoltcp2socks_v6"
+path = "src/v6_main.rs"
+
 [dependencies]
 libc = "0.2"
 
@@ -30,6 +34,7 @@ features = [
     "medium-ethernet",
     "phy-tuntap_interface",
     "proto-ipv4",
+    "proto-ipv6",
     "socket-tcp",
     "socket-udp",
 ]
