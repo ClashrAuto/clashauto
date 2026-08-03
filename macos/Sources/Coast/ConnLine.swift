@@ -75,7 +75,14 @@ struct ConnectionsCard: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
 
-    let recent: [ConnectionRow]
+    /// ★ **不再从父视图接收 `recent`**（原来是 `ConnectionRow.recent(state.connections, 5)`
+    ///   在状态页自己的 body 里算好再传进来）。那样一来负载下连接列表每拍都变，
+    ///   **整张状态页的 body 跟着失效**，两张流量卡、延迟卡、页面外壳全被拉进 layout pass。
+    ///   与 `TrafficCard` 那次同因同解：变化的读取必须落在**用得到它的那一层**，
+    ///   `@Observable` 的依赖是按 View 的 body 记录的。
+    ///   真机实测（负载下 n=20）：改前 Swift 端均值 6.15%、p90 高达 19.20%，
+    ///   而 Qt 端 p90 只有 2.50% —— 尖峰就来自这条整页失效链。
+    private var recent: [ConnectionRow] { ConnectionRow.recent(state.connections, limit: 5) }
     let onOpenAll: () -> Void
     let onClearAll: () -> Void
     let deviceName: (ConnectionRow) -> String

@@ -10,8 +10,6 @@ struct StatusPage: View {
     /// 是下限不是定值 —— 理由见 `body` 里那段注释。
     private static let cardRowHeight: CGFloat = 268
 
-    /// 最近建立的 5 条。
-    private var recentRows: [ConnectionRow] { ConnectionRow.recent(state.connections, limit: 5) }
     /// 发起方的设备名。判定逻辑在 `ConnectionRow.deviceLabel` —— 状态页两张卡共用一份。
     private func deviceName(for row: ConnectionRow) -> String {
         ConnectionRow.deviceLabel(for: row, proxied: state.proxiedDeviceLabels)
@@ -59,7 +57,7 @@ struct StatusPage: View {
                                 isUp: false)
                 }
                 HStack(alignment: .top, spacing: 10) {
-                    ConnectionsCard(recent: recentRows,
+                    ConnectionsCard(
                                     onOpenAll: { openWindow(id: ConnectionsWindowID.value) },
                                     onClearAll: { state.closeAllConnections() },
                                     deviceName: deviceName(for:))

@@ -3516,6 +3516,33 @@ CPU 就从 1.80% 掉到 0.60%。而"内部清空但参数照旧变"仍是 1.85%�
 回归验证三段都正常（静止低 → 有流量时出现 2.1%/3.6% 的刷新峰值 → 停止后回落），
 数据映射逐项核对过：上行卡 → `upText`/`bandwidthUp`，下行卡 → `downText`/`bandwidthDown`，语义无变化。
 
+**同一手法的第二处：`ConnectionsCard` 也在从父视图收变化数据（负载 p90 -79%）**
+
+修完 `TrafficCard` 后做负载对比，发现 Swift 端**负载下有严重 CPU 尖峰**：
+n=20 时中位 2.00%、均值 6.15%、**p90 19.20%**，而 Qt 端 p90 只有 2.50%。
+（注意：小样本 n=8 时曾量到"负载下 Swift 反而更省"，是假象，n=20 才现原形。）
+
+`sample` 显示热点仍在布局引擎。查下来是状态页 body 里的
+`private var recentRows: [ConnectionRow] { ConnectionRow.recent(state.connections, 5) }` ——
+读 `state.connections` 落在**状态页自己的 body** 里，负载下连接列表每拍都变，
+于是整张状态页失效：两张流量卡、延迟卡、页面外壳全被拉进 layout pass。
+`ConnectionsCard` 明明已有 `@Environment(AppState.self)`，却仍从父视图接收算好的 `recent`。
+
+改法与 `TrafficCard` 完全相同：把 `recent` 改成 `ConnectionsCard` 内部的计算属性，
+父视图不再读 `state.connections`。
+
+| 负载下 App CPU（n=20） | 改前 | 改后 | Qt 端 |
+|---|---|---|---|
+| 中位 | 2.00% | **1.00%** | 2.00% |
+| 均值 | 6.15% | **1.44%**（-77%） | 2.11% |
+| p90 | 19.20% | **4.10%**（-79%） | 2.50% |
+
+回归：连接正常建立（核心侧连接数一致）、App 日志零错误。
+
+★ **通用规则**：`@Observable` 的依赖按 View 的 body 记录。**凡是变化的读取，都要落在真正
+用得到它的那一层**；在父视图里算好再当参数传下去，等于把整棵父子树都绑上这个依赖。
+排查手法：看某个 View 的 body 里有没有读会频繁变化的 state —— 有就往下沉。
+
 **仍留的 0.25% 差距**（0.85% vs 0.60%）：叶子层自身的失效与重绘，属于合理开销；
 若还要压，得让曲线彻底脱离 SwiftUI 的 layout（`NSViewRepresentable` + CALayer 自更新）。
 
