@@ -73,6 +73,8 @@ public final class CoastController {
                 Task { await self?.handleRedirectLost() }
             }
         }
+        // ★ 先擦上一世的残留系统代理，必须在任何启动动作之前（详见该函数）。
+        clearStaleSystemProxy()
     }
 
     public var isCoreInstalled: Bool { core.isCoreInstalled }
@@ -317,6 +319,58 @@ public final class CoastController {
             log("Start sysproxy ok!", .routine)
         } catch {
             log("设置系统代理失败：\(error)")
+        }
+    }
+
+    /// 启动自愈：上一次会话被强杀/崩溃时来不及还原系统代理，会把整机流量指向一个
+    /// **已经没人监听**的本机端口 —— 用户表现为"什么都打不开"，且完全无从得知原因。
+    ///
+    /// `stopProxy()` 开头那个 `guard systemProxyActive` 只看**本会话**是否设过代理，
+    /// 上一世留下的残留它永远擦不掉。与 Qt 线的 `CoreController::clearStaleSystemProxy()`
+    /// 同一设计（那边已修，本机实测有效：残留 `Enabled: Yes` → 启动后 `Enabled: No`），
+    /// 这里对齐 —— 本机实测 Swift 端在同一场景下残留**依然还在**，是真缺口。
+    ///
+    /// 判据要求**两条同时成立**才动手，避免误删用户自己配的公司代理：
+    ///   ① 系统代理指向 127.0.0.1，且端口 == 我们自己的 mixedPort；
+    ///   ② 该端口当前**没有任何进程在监听**（连得上就说明有人在用，一律不动）。
+    ///
+    /// ★ 与 Qt 线的判据有一处**有意的不同**：这里用 `SCDynamicStoreCopyProxies` 读
+    ///   **当前生效**的代理（即默认路由所在那条链路的设置），而 Qt 线是遍历
+    ///   `networksetup -listallnetworkservices` 的**每一个**服务逐个查。
+    ///   两者各有取舍：
+    ///     · 读生效值：只处理真正影响上网的那一份，不会去碰用户在别的
+    ///       （当前不活动的）网络服务上自己配的代理 —— **更保守、误伤面更小**；
+    ///     · 遍历所有服务：能把不活动服务上的残留也擦掉，但那份残留本来也不影响上网。
+    ///   本机实测踩到过这个差异：在 Wi-Fi 服务上造残留，而默认路由其实走 `utun4`
+    ///   （另一个 VPN 的 TUN），于是 `scutil --proxy` 是 `HTTPEnable: 0`，
+    ///   这里判定"没有生效的代理"直接返回 —— **是正确行为，不是漏修**。
+    private func clearStaleSystemProxy() {
+        let port = config.mixedPort
+        guard port > 0 else { return }
+        guard let cur = SystemProxy.currentHTTPProxy() else { return }
+        guard cur.host == "127.0.0.1", cur.port == port else { return }   // 不是我们的，别碰
+        // 条件②：能连上就说明有人在听（可能是用户手动起的核心），一律不动。
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = UInt16(port).bigEndian
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        if fd >= 0 {
+            var tv = timeval(tv_sec: 0, tv_usec: 150_000)
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+            let connected = withUnsafePointer(to: &addr) {
+                $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+                }
+            }
+            close(fd)
+            if connected { return }   // 有人在听 → 不是残留
+        }
+        do {
+            try systemProxy.disable()
+            log("已清除上次异常退出残留的系统代理（127.0.0.1:\(port) 无人监听）")
+        } catch {
+            log("清除残留系统代理失败：\(error)")
         }
     }
 

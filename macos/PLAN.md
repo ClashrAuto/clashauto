@@ -4010,3 +4010,36 @@ Swift `AppState.deviceScanInterval` 按 `devicesPageVisible` 分档 —— 同�
 `pfctl -d` 还原（只关 pf 本身，不动任何规则集，系统的 `com.apple` 锚点保持原样）。
 锚点也要 `-F all` 清干净。**在别人正在用的机器上测网络组件，"还原到测试前状态"
 和"测出结果"同等重要。**
+
+## 第六处镜像差异：Swift 端缺"残留系统代理"自愈（已补，但本机只验证了一半）
+
+之前给 Qt 端修过「上一次被强杀留下的系统代理永远擦不掉」——
+`stopProxy()` 开头的 `guard systemProxyActive` 只看**本会话**，上一世的残留擦不掉，
+用户表现为"什么都打不开"且无从得知原因。**Swift 端没有对应自愈**，本轮补上
+（`CoastController.clearStaleSystemProxy()`，在 `init` 里、任何启动动作之前调用）。
+
+### Qt 端的修复：本机实测**有效**
+
+造残留（`networksetup -setwebproxy Wi-Fi 127.0.0.1 7890`，该端口无人监听）→
+启动 Qt 端 → **`Enabled: Yes` 变成 `Enabled: No`**，web/secure 两条都被清掉。
+
+### Swift 端：**本机构造不出可验证的场景**
+
+两条线的判据有一处**有意的不同**：
+
+| | 读取方式 | 取舍 |
+|---|---|---|
+| Qt | 遍历 `networksetup -listallnetworkservices` **每个**服务 | 能擦掉不活动服务上的残留 |
+| Swift | `SCDynamicStoreCopyProxies` 读**当前生效**的代理 | 只碰真正影响上网的那份，误伤面更小 |
+
+本机踩到了这个差异：在 Wi-Fi 服务上造残留，但**默认路由其实走 `utun4`**
+（Surge 的 TUN），于是 `scutil --proxy` 是 `HTTPEnable: 0`，
+Swift 判定"没有生效的代理"直接返回 —— **这是正确行为，不是漏修**。
+（一开始我把它当成"修复没生效"，加打点才看清 `currentHTTPProxy()` 返回 nil 的真实原因。）
+
+而本机的活动链路是 VPN 的 `utun4`，**没有对应的 `networksetup` 服务**，
+所以无法在"当前生效链路"上构造残留 —— Swift 端这一半**本机验不了**。
+
+**已验证的一半**：有人监听 7890 时**不动**系统代理（防误删），实测通过。
+**未验证的一半**：真残留场景下能清除。逻辑与 Qt 端同构、且 Qt 端已实测有效，
+但**不当作已验证** —— 待在一台系统代理走真实网口的机器上补测。
