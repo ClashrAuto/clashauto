@@ -1247,10 +1247,31 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             n->arp = new ArpSpoofer(n->ep, this);
             n->arp->configure(spec.localMac, spec.gatewayIp, spec.gatewayMac);
         }
+        // ★★ macOS 上**根本不建 NdpSpoofer**：能劫持 v6 但载不动，比不劫持更糟。
+        //   pf 数据面目前只有 inet(v4) 的 rdr、net.inet6.ip6.forwarding 也没开，
+        //   redir 入站本身又只代理 TCP/v4。一旦把设备的 v6 默认路由指到本机，真机实测
+        //   （Mac 网关接管 Windows，每 20s 采一次）会**反复跳**：
+        //       Probe→FAIL / Probe→FAIL / Stale→200 / Probe→FAIL / Probe→FAIL / Stale→200
+        //   —— NDP 处于 Probe 时 v6 断（我们收下却转不出去），退回 Stale 时又走真路由器通
+        //   （那部分流量**照旧绕过代理**）。即同时具备"间歇断网"和"间歇泄漏"，
+        //   严格劣于"只泄漏但 v6 稳定可用"。所以在能真正承载 v6 之前，这里不建。
+        //
+        //   ★ 为什么是"不建"而不是"配置成空"：NdpSpoofer 还有两条会**自行启用**的路径 ——
+        //     从线上观察到的 RA 学到路由器后 reconfigure（见本文件 ~line 626），以及每轮
+        //     configureLocal 用 effectiveRouterLL6() 重配（~line 982）。只堵初始 configure
+        //     挡不住它们（我第一版就是这么写的，真机日志里照样出现"v6 拓扑就绪，投毒启用"）。
+        //     留 n->ndp 为空最干净：所有使用点本来就带 `if (n->ndp)` 判空。
+        //   ★ 上游的 v6 拓扑发现（LanScanner 的 macOS 分支）**要保留**：ArpWatch 的邻居安全
+        //     监视用它，将来补 v6 数据面时直接可用；停的只是"投毒"这一步。
+        //   放开条件（三样都要）：pf 侧加 inet6 rdr（实测 pfctl 接受该语法）、打开
+        //   net.inet6.ip6.forwarding、核心的 redir 能对 v6 还原原始目的地（DIOCNATLOOK
+        //   的 af=AF_INET6 尚未验证）。届时删掉这个 #ifndef 即可。
+#ifndef Q_OS_MACOS
         if (!n->ndp) {
             n->ndp = new NdpSpoofer(n->ep, this);
             n->ndp->configure(spec.localMac, n->effectiveRouterLL6(), n->effectiveRouterMac6());
         }
+#endif
         if (!n->watch) {
             n->watch = new ArpWatch(this);
             n->watch->setLocal(spec.localMac, spec.localIp, spec.localGlobal6);
