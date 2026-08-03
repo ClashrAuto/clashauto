@@ -1642,6 +1642,14 @@ void GatewayWorker::teardownLocal()
     // 的流量 = 被覆盖的设备完全断网。析构里也有一道（TproxyRules 的析构调 remove），这里显式
     // 再来一次是因为 teardownLocal 是「还原一切」的正式出口,不该依赖对象生命周期的时机。
     m_tproxy.remove();
+    // ★ pf 同理，而且**这一条原先漏了**：pf 数据面是后加的，只补了 install 没补这里的 remove。
+    //   真机实测（macOS，台账里有设备开着代理 → pf 装上后 SIGTERM 结束进程）：
+    //       退出后 `pfctl -a com.apple/coast -s nat` 仍有 2 条 rdr、net.inet.ip.forwarding 仍是 1
+    //   后果与 TPROXY 那条同构：规则还在、却没有进程在 127.0.0.1 上接管重定向过来的流量，
+    //   被接管设备的 TCP 会被送进一个没人监听的口；forwarding 被永久留在打开状态也是系统级残留。
+    //   （PfRules 的析构里也有一道 remove，但那要等工作线程 finished→deleteLater 真正跑完，
+    //     进程退出时机不保证轮得到 —— 与上面那句「不该依赖对象生命周期」是同一个理由。）
+    m_pf.remove();
 }
 
 // ———————————————————————————— LanGateway（GUI 线程的编排入口）————————————————————————————
