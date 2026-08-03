@@ -82,8 +82,16 @@ private:
     bool m_sysproxyActive = false; // 本会话是否真的应用过系统代理：stopProxy 据此跳过无谓的还原动作
     // —— 核心意外退出后的有界自愈（见 .cpp 里 QProcess::finished 那段）——
     bool m_stopRequested = false;  // 是不是我们主动停的：主动停不重启，崩溃才重启
+    bool m_userStopped = false;    // 用户希望核心**保持**停着（m_stopRequested 只管一次退出）
     int m_coreRestarts = 0;        // 本轮连续自动重启次数，起来一阵子就清零
     qint64 m_coreStartedMs = 0;    // 上次拉起核心的时刻，用来判断「这次算不算稳住了」
+    // 快速重试预算用尽后的**慢速兜底重试**。见 .cpp 里那段：快速预算耗尽就彻底停手的话，
+    // 这台机器（多半是没人盯着的网关盒子）会静默停摆到有人去点界面为止，而设备主人只会
+    // 莫名其妙地失去代理与每设备策略。慢速重试让「端口被占/ 内存瞬时不足 / 订阅暂时坏了」
+    // 这类**会自己好**的故障能自动恢复，代价是每 5 分钟一次失败的拉起。
+    QTimer *m_slowRetryTimer = nullptr;
+    void startSlowRetry();  // 快速预算耗尽后转入 5 分钟一次的无限期兜底重试
+    void stopSlowRetry();   // 核心稳住 / 用户主动停 时撤掉兜底
 #if defined(Q_OS_MACOS)
     const void *m_macAuthRef = nullptr; // 实为 AuthorizationRef(=const AuthorizationOpaqueRef*)；const void* 避免引 Security 头且不丢 const
     bool m_helperCoreRunning = false;  // 核心是否由特权 helper（root）启动（TUN 依赖此）

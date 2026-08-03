@@ -258,11 +258,24 @@ CoreController::CoreController(AppConfig config, QObject *parent)
         const qint64 aliveMs = m_coreStartedMs > 0
                                    ? QDateTime::currentMSecsSinceEpoch() - m_coreStartedMs
                                    : 0;
-        if (aliveMs >= kCoreStableMs)
+        if (aliveMs >= kCoreStableMs) {
             m_coreRestarts = 0; // 上一次是长期稳定运行后才崩的，预算重新开始
+            stopSlowRetry();    // 稳住了就撤掉兜底
+        }
         if (m_coreRestarts >= kMaxCoreRestarts) {
-            emit logUpdated(tr("核心连续 %1 次异常退出，已停止自动重启——请检查配置或内核")
-                                .arg(m_coreRestarts));
+            // ★ 快速预算用尽 —— 但**不能就此彻底停手**。
+            //
+            //   真机实测过停手之后是什么样（连杀核心到预算耗尽，再静置 90 秒）：核心进程 0、
+            //   9191 与网关 socks 7899 都不再监听、ARP 劫持被撤回（被代理设备的网关 MAC 秒回
+            //   真路由器），而 coast 进程还活着、台账里 9 台设备仍标着「已开代理」。
+            //   也就是说：**网关静默死亡，每设备策略（含「禁网」）全部失效，界面上一切照旧。**
+            //   本产品的典型形态就是一台没人盯着的网关盒子，指望「用户去界面点一下」等于不修。
+            //
+            //   所以改成两级：快的那级维持原样（2s × 3，防崩溃循环刷屏、防反复扰动设备），
+            //   之后降级为 5 分钟一次的慢速兜底，**无限期**重试。端口被别的进程短暂占用、
+            //   内存瞬时不足、订阅拉坏了下次更新又好了 —— 这些都是会自己恢复的故障，慢速
+            //   重试能自动救回来；真正坏死的配置也只是每 5 分钟失败一次，既不刷屏也不扰动。
+            startSlowRetry();
             return;
         }
         ++m_coreRestarts;
@@ -408,6 +421,7 @@ void CoreController::startCore()
     // 是的话就把自动重启的预算清零（见那段注释）。
     m_coreStartedMs = QDateTime::currentMSecsSinceEpoch();
     m_stopRequested = false;
+    m_userStopped = false; // 有人（用户或兜底）要它跑起来，解除「保持停着」的意愿
 
     // 集成内核先落位再取 clashExecutable()：它的「扁平优先、回退旧路径」判定依赖文件是否存在
     seedBundledCore();
@@ -598,10 +612,47 @@ void CoreController::reapOrphanCore()
 #endif
 }
 
+// 兜底重试：5 分钟一次，不设次数上限。只在「核心不在跑」且「不是用户主动停的」时才拉。
+void CoreController::startSlowRetry()
+{
+    if (!m_slowRetryTimer) {
+        m_slowRetryTimer = new QTimer(this);
+        m_slowRetryTimer->setInterval(5 * 60 * 1000);
+        connect(m_slowRetryTimer, &QTimer::timeout, this, [this] {
+            // 已经在跑（自己救回来了，或用户手动起了）→ 兜底功成身退，别每 5 分钟空转一次。
+            // 之后若再崩，快速预算会重新走一遍，需要时会重新 startSlowRetry()。
+            if (isRunning()) {
+                stopSlowRetry();
+                return;
+            }
+            if (m_userStopped)
+                return;
+            // 不打日志刷屏：真坏死的配置会每 5 分钟走一次这里，进入 startCore 后失败自会记一条。
+            startCore();
+        });
+    }
+    if (!m_slowRetryTimer->isActive()) {
+        m_slowRetryTimer->start();
+        emit logUpdated(tr("核心连续 %1 次异常退出，快速重启已停止；转为每 5 分钟重试一次")
+                            .arg(m_coreRestarts));
+    }
+}
+
+void CoreController::stopSlowRetry()
+{
+    if (m_slowRetryTimer && m_slowRetryTimer->isActive())
+        m_slowRetryTimer->stop();
+}
+
 void CoreController::stopCore()
 {
     // 主动停：finished 槽据此**不**触发自动重启（否则用户点"停止"会被我们又拉起来）。
+    // ★ m_stopRequested 在 finished 槽里会被立刻清掉（它只表达「这一次退出是主动的」），
+    //   所以另用 m_userStopped 记住「用户希望它保持停着」——否则慢速兜底会在 5 分钟后
+    //   把用户刚停掉的核心又拉起来。
     m_stopRequested = true;
+    m_userStopped = true;
+    stopSlowRetry();
     m_coreRestarts = 0;
     stopProxy();
 #if defined(Q_OS_MACOS)
