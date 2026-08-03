@@ -4229,3 +4229,27 @@ Qt 是 `GatewayWorker::healPending()`，Swift 是 `Redirector.recoverFromCrashIf
 | — | pf 规则组织方式 | 不同 | 实测差 9ms，**判定不改** |
 | — | 设备在线态双档 | 都有 | 无差异 |
 | — | 崩溃还原 ARP 机制 | Swift 更优 | 无需对齐 |
+
+## ★ 跨平台编译验证（这一系列改动的**首次**全平台检查）
+
+本地任务口径是"本机测 macOS 两条线"，但 **Qt 线是跨平台的** ——
+这一系列改动碰过的文件里，有些在 macOS 上**根本不参与编译**：
+
+| 文件 | 只在哪编 |
+|---|---|
+| `src/net/L2Endpoint_win.cpp` | Windows |
+| `src/net/LanGateway_linux.cpp` | Linux |
+| `src/net/WfpRedirect.h` | Windows |
+
+只在 macOS 编译通过 ≠ 没破坏另外两个平台。补做真机全平台构建：
+
+| 平台 | 机器 | 结果 |
+|---|---|---|
+| macOS | 本机（Qt 6.11.1 homebrew arm64 + Swift 6.3.3） | 两条线均通过 |
+| **Windows** | 192.168.20.51（MinGW + Qt 6.8.3） | **`BUILD_RC=0`** |
+| **Linux arm64** | 192.168.20.91（Pi，Ninja） | **`rc=0`，78/78 链接成功** |
+
+★ **教训**：改跨平台代码时，"本机编译通过"只覆盖了 `#if` 的一个分支。
+本系列前面十几轮都只在 macOS 上验证，直到这轮才补 —— **应该在第一次碰到
+带平台前缀的文件（`*_win.cpp` / `*_linux.cpp`）时就去另外两台上编一次**，
+而不是攒到最后。
