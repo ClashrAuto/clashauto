@@ -147,10 +147,9 @@ struct DevicesPage: View {
         VStack(spacing: 10) {
             if rows.isEmpty { emptyState } else { list }
         }
-        // 左贴侧栏（0），右离窗缘 10。加在内容上、**在 `pageHeaderBar` 之前** ——
-        // 26 上那是 `safeAreaBar`，加在它后面会和顶栏/告警条自己那份内距叠成 20
-        // （见 `header` / `securityBanner`）。
-        .padding(.trailing, 10)
+        // ★ 右边这 10 加在**列表的滚动内容里**（见 `list`），不加在这里 —— 加在这里的话
+        //   整个滚动区跟着内缩，滚动条就悬在离窗缘 10 的空中，与状态页对不齐。
+        //   行的几何不变（照旧右让 10），变的只是滚动条落点：贴住窗口右缘。
         // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 列表）——
         // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。26 上它和概览条
         // 一起进顶部导航栏（告警钉着不随滚动走，只会更醒目）。
@@ -443,6 +442,7 @@ struct DevicesPage: View {
                               onForget: { forget(row) })
                 }
             }
+            .padding(.trailing, 10)
         }
     }
 

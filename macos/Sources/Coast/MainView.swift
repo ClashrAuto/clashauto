@@ -13,6 +13,10 @@ struct MainView: View {
         ProcessInfo.processInfo.environment["COAST_MODE_EXPANDED"] == "1"
     /// 打开独立窗口用（更新窗）。
     @Environment(\.openWindow) private var openWindow
+    /// 启动即打开更新窗（`COAST_OPEN_UPDATE=1`）。与 `COAST_MODE_EXPANDED` 同类的 UI 调试钩子：
+    /// 那个窗只能点出来，而无头截图验证它的版式时需要一个不经交互的入口。
+    private let opensUpdateWindow =
+        ProcessInfo.processInfo.environment["COAST_OPEN_UPDATE"] == "1"
 
     var body: some View {
         HStack(spacing: 0) {
@@ -57,6 +61,14 @@ struct MainView: View {
         // mac 上窗体本身透明、露出毛玻璃（见 CoastApp 的 .windowGlass(.sidebar)）
         .background(.clear)
         .preferredColorScheme(theme.dark ? .dark : .light)
+        .task {
+            // 延一拍再开：启动时 `WindowRestore.adopt()` 会把「系统恢复出来的附属窗」一律关掉
+            // （见那边），不等它跑完就开，窗会被当成恢复出来的当场关回去 —— 时序不定，
+            // 表现就是这个钩子时灵时不灵。
+            guard opensUpdateWindow else { return }
+            try? await Task.sleep(for: .seconds(2))
+            openWindow(id: UpdateWindowID.value)
+        }
     }
 
     // MARK: 侧栏

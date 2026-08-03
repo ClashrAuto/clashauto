@@ -24,3 +24,10 @@ void setMacDockIconVisible(bool visible);
 // 应用菜单里绑着 ⌘Q 的那一项是什么（"标题 / action"）。只给退出自检用 ——
 // mac 上「⌘Q 到底退不退得掉」没法用单测覆盖，而它坏掉的表现（退不掉、更新装不上）很重。
 QString macQuitMenuItemDescription();
+
+// 这个窗口顶部被系统标题栏占掉的高度（`frame.height - contentLayoutRect.height`）。
+// ★ 用途：Qt 的场景**按 contentLayoutRect 起排**，即便已经开了 fullSizeContentView
+//   （NSView 确实铺满整窗，探针量过：contentView 600×560 而 contentLayoutRect 600×528）。
+//   想把内容摆进标题栏那条带子里，就得用**负的上边距**把这 32 顶回去 —— 这个函数给的就是它。
+//   非 mac / 拿不到窗口时返回 0。
+int macTitleBarInset(WId winId);

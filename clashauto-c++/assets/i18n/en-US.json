@@ -455,5 +455,14 @@
   "当前不是从 .app 运行，已打开发布页请手动安装": "Not running from a .app — opened the release page, please install manually",
   "程序更新失败：%@": "App update failed: %@",
   "查看详情": "View details",
-  "忘记此设备": "Forget this device"
+  "忘记此设备": "Forget this device",
+  "当前 %@": "Current %@",
+  "最新 %@": "Latest %@",
+  "获取更新": "Check for updates",
+  "暂无更新说明": "No release notes",
+  "已取消下载": "Download canceled",
+  "结束下载": "Stop download",
+  "退出 Coast？": "Quit Coast?",
+  "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Quitting stops the core and restores the system proxy; proxied connections will drop.",
+  "退出": "Quit"
 }

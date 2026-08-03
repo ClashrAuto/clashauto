@@ -50,6 +50,10 @@ struct CoastApp: App {
         }
         .defaultSize(width: 600, height: 560)
         .keyboardShortcut(nil)
+        // 顶栏（版本号 + 三段玻璃组）钉在标题栏那条带子里，所以系统标题栏必须让位 ——
+        // 与连接窗同一处理：透明 + 内容铺满整窗（fullSizeContentView）+ 不画标题文字。
+        // 带子的**高度**由 `windowGlass(unifiesTitleBar:)` 的空 toolbar 抬到 50。
+        .windowStyle(.hiddenTitleBar)
 
         // 设备详情同理：Qt 是 600×720 的独立窗（最小 420×420），比主窗默认的 510 高得多，
         // 做成 sheet 一样会被裁。显示的永远是 `AppState.selectedDevice`（与 Qt 的
@@ -130,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 外面量「进程多久真的没了」就能验两件事：⌘Q/托盘/自更新那条路**没有被拦下**，
         // 以及清理卡住时看门狗兜得住。这条路没法用单测覆盖 —— 它要的正是一个真的
         // NSApplication 生命周期；而它坏掉的表现（退不掉、更新装不上）又足够重。
-        if ProcessInfo.processInfo.environment["COAST_QUIT_SELFTEST"] == "1" {
+        if !(ProcessInfo.processInfo.environment["COAST_QUIT_SELFTEST"] ?? "").isEmpty {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
                 // 顺带验菜单里**有**⌘Q 那一项：这个 bug 的另一半正是它被整组换掉了
                 // （`CommandGroup(replacing: .appTermination)`），于是 ⌘Q 绑的是收窗口。
@@ -143,7 +147,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let title = quit?.title ?? "<none>"
                 let action = quit?.action.map { NSStringFromSelector($0) } ?? "-"
                 print("QUIT-SELFTEST menuItem=\(title) action=\(action)")
-                self?.terminateForReal()
+                // `=confirm` 走**普通** terminate（等价于用户按 ⌘Q）：预期被退出确认框拦住，
+                // 进程不退 —— 外面据此验「确认框真的挡住了」。`=1` 走 terminateForReal()，
+                // 那条不弹框（托盘/自更新同一条），验的是「该退的时候退得掉」。
+                if ProcessInfo.processInfo.environment["COAST_QUIT_SELFTEST"] == "confirm" {
+                    NSApplication.shared.terminate(nil)
+                } else {
+                    self?.terminateForReal()
+                }
             }
         }
 
@@ -186,9 +197,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// 退出入口（托盘菜单「退出程序」、程序自更新那条“必须退出”的路）。
-    /// 现在与 ⌘Q 走同一条路 —— 留着这个名字是因为调用点写着它，读起来也更清楚。
+    ///
+    /// 这两处**不弹确认**：托盘那一项写着「退出程序」，点它就是明确要退；自更新那条更不能问
+    /// —— 替换脚本在外面等本进程退出，弹个框等人点，更新就永远装不上。
     func terminateForReal() {
+        skipQuitConfirm = true
         NSApplication.shared.terminate(nil)
+    }
+
+    /// 这一次 terminate 跳过确认。见 `terminateForReal`。
+    private var skipQuitConfirm = false
+
+    /// 这次 terminate 是不是系统注销/关机/重启发起的。
+    ///
+    /// ★ 这一档**必须跳过确认**：注销路径上弹一个要人点的框，用户的 mac 会「注销被 Coast 挡住」，
+    ///   比误退出恶劣得多。判据：系统发起的 quit 是带 `why:` 属性的 Apple Event
+    ///   （logout/shutdown/restart 一族）；用户按 ⌘Q 走菜单没有 Apple Event，
+    ///   Dock 右键退出有事件但没有 `why:`。
+    private var terminationIsSystemInitiated: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == kAEQuitApplication else { return false }
+        return event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason)) != nil
+    }
+
+    /// 退出确认。
+    ///
+    /// 为什么要它：⌘Q 在 mac 上太容易顺手按到，而这是个代理客户端 —— 退出会停掉内核并还原
+    /// 系统代理，网络行为当场就变。**默认按钮是「取消」**：这个框存在的唯一目的就是拦住误按，
+    /// 把「退出」设成默认的话，一个「⌘Q 之后条件反射敲回车」就把它绕过去了；真想退的人多点
+    /// 一下没有任何代价。
+    private func confirmQuit() -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "退出 Coast？".t
+        alert.informativeText = "退出后会停掉内核并还原系统代理，走代理的连接会断开。".t
+        let cancel = alert.addButton(withTitle: "取消".t)
+        alert.addButton(withTitle: "退出".t)
+        // **回车落在「取消」上**，显式绑死不靠默认顺序（macOS 26 的 alert 摆放顺序与
+        // 老规矩不一样了 —— 实测先加的那颗在左边，而不是右边那颗默认）。
+        cancel.keyEquivalent = "\r"
+        return alert.runModal() == .alertSecondButtonReturn
     }
 
     /// 清理的兜底时限：到点还没跑完就**硬退**。
@@ -223,6 +271,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // 清理在跑，用户又点了一次/托盘又发了一次：别叠第二遍清理，等它自己走完。
             return .terminateCancel
         case .idle:
+            // 托盘/自更新/系统注销都直接放行，其余（⌘Q、Dock 退出、AppleScript quit）先问一句。
+            if !skipQuitConfirm, !terminationIsSystemInitiated, !confirmQuit() {
+                return .terminateCancel
+            }
             guard let state else { return .terminateNow }
             shutdown = .running
             // 退出前停核心 + 还原系统代理 —— 否则用户退出应用后整机仍指着一个已经没人监听的

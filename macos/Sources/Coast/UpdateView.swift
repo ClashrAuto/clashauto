@@ -2,21 +2,26 @@ import AppKit
 import CoastKit
 import SwiftUI
 
-/// 更新窗。**逐元素对齐** `qml/UpdateWindow.qml`：左侧三颗竖排 tab（程序 / 内核 / GeoIP）+
-/// 右侧内容卡（版本 + 更新说明）+ 下载进度条（带 ✕ 取消）+ 底部动作行
-/// （国内代理下载勾选 / 关闭 / 更新）。
+/// 更新窗。
 ///
-/// Qt 那边是独立顶层窗（600×560）；这里沿用本项目既有做法以 sheet 呈现（`ConnectionsView`
-/// 与 `RulesEditor` 同样如此），尺寸取 Qt 的 600×560。
+/// 版式（macOS 26 的液态玻璃）：
+///   · 系统标题栏抬到 50（空 toolbar + `unifiesTitleBar`，红绿灯由系统在带子里垂直居中）；
+///   · **导航栏也是 50**，钉在标题栏那条带子里（`safeAreaBar(edge: .top)`）：
+///     左内距 20 是「当前版本 → 最新版本」，右侧是**一颗胶囊里的三段玻璃按钮组**
+///     （程序 / 内核 / GeoIP）；
+///   · 中间只放更新内容（滚动，从导航栏底下穿过，由系统 scroll edge effect 渐隐）；
+///   · 底栏是一条状态机：默认「获取更新」→ 查出有新版就换成「更新」→ 点了之后换成
+///     「进度条 + 关闭」，速度与「下载量/总量」在下面**居中**。
 ///
-/// 三页都是**真的**在下载安装。「程序」页走 `AppUpdater`：下载 dmg/zip → 校验 sha256 →
-/// 放出替换脚本 → 退出进程，脚本等本进程死透后覆盖 .app 并重启（Qt 的
-/// `launchSilentUpdateAndRestartMac` 同一套）。开发期直跑（不是 .app）没有可替换的目标，
-/// 那条路回退成打开发布页。
+/// ★ 这个窗必须 `isMovableByWindowBackground`：导航栏左右都被内容占满了，而带子是
+///   macOS 上唯一的拖动区 —— 附属窗又没有主窗那个自动拖动（见 `WindowRestore`），
+///   不开这一位窗口就**拖不动**（连接窗当初正是踩了这个，才把它的顶栏整条靠右排）。
+///
+/// 「国内加速」不在这一页了 —— 它是**设置页里的同一个 config 键**（`mirror`），
+/// 两处各放一份只会让人以为是两个开关。
 struct UpdateView: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
-    @Environment(\.dismiss) private var dismiss
 
     enum Tab: Int, CaseIterable, Identifiable {
         case app, core, geoip
@@ -29,228 +34,268 @@ struct UpdateView: View {
             case .geoip: return "GeoIP"   // 专有名词，不翻译（Qt 那边同样是字面量）
             }
         }
-
-        /// Qt 用 Remix Icon 的私用区码点，这里换成同尺寸的 SF Symbols。
-        var symbol: String {
-            switch self {
-            case .app: return "app.badge"
-            case .core: return "cpu"
-            case .geoip: return "globe.asia.australia"
-            }
-        }
     }
+
+    /// 带子/导航栏的高度。红绿灯由系统在这条带子里垂直居中，导航栏给同样的定高、
+    /// 内容也居中，两边就在一条水平线上（与连接窗同值）。
+    static let bandHeight: CGFloat = 50
 
     @State private var tab: Tab = .app
     @State private var coreLocalVersion: String?
     @State private var coreLatest: (tag: String, notes: String)?
-    /// 下载进度 0…100。nil = 没在下载（对应 QML 的 `updater.downloading == false`）。
+
+    /// 已经查过一轮的页签。GeoIP 没有版本号可比，查过就当「可以更新」——
+    /// 上游那份库天天在重建，本地也没有任何可比对的版本信息，说「已是最新」才是撒谎。
+    @State private var checked: Set<Tab> = []
+    @State private var checking = false
+
+    /// 下载进度 0…100。nil = 没在下载。
     @State private var progress: Int?
+    @State private var received: Int64 = 0
+    @State private var total: Int64 = 0
+    /// 实时速度（字节/秒），由相邻两次进度回调的字节差/时间差算出。
+    @State private var speed: Int64 = 0
+    @State private var lastSample: (bytes: Int64, at: Date)?
     @State private var status = ""
     @State private var busy = false
-    /// 正在跑的下载任务 —— ✕ 取消就是取消它。
+    /// 正在跑的下载任务 —— 「关闭」就是取消它。
     @State private var work: Task<Void, Never>?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Coast 更新".t)
-                .lineLimit(1)
-                .font(.system(size: 16))
+        notes
+            .safeAreaBar(edge: .top, spacing: 0) { navBar }
+            .safeAreaBar(edge: .bottom, spacing: 0) { bottomBar }
+            // 顶栏就钉在标题栏那条带子里 —— 整列越过顶部安全区才盖得上去。
+            .ignoresSafeArea(.container, edges: .top)
+            .scrollEdgeEffectStyle(.soft, for: .all)
+            .frame(minWidth: 460, minHeight: 420)
+            .windowGlass(.sidebar, movableByBackground: true)
+            .task { await load() }
+            .task { await fakeProgressIfRequested() }
+    }
+
+    // MARK: 导航栏 = 标题栏那条带子（50）
+
+    /// 红绿灯占掉的宽度。版本号从它右边**再让 20** 起排 —— 直接从 20 起排的话
+    /// 会压在三颗灯上（第一版截图就是这样）。
+    private static let trafficLightsWidth: CGFloat = 78
+
+    private var navBar: some View {
+        HStack(spacing: 12) {
+            versionLine
+            Spacer(minLength: 12)
+            tabPicker
+        }
+        .padding(.leading, Self.trafficLightsWidth + 20)
+        .padding(.trailing, 20)
+        .frame(height: Self.bandHeight)
+    }
+
+    /// 左侧：当前版本 → 最新版本。查不到的那一头显示「—」，不编。
+    private var versionLine: some View {
+        HStack(spacing: 8) {
+            Text(localVersion)
+                .font(.system(size: 13))
                 .foregroundStyle(theme.textPrimary)
-
-            HStack(alignment: .top, spacing: 8) {
-                VStack(spacing: 6) {
-                    ForEach(Tab.allCases) { item in
-                        tabButton(item)
-                    }
-                    Spacer(minLength: 0)
-                }
-
-                contentCard
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            if let progress {
-                HStack(spacing: 8) {
-                    progressBar(progress)
-                    cancelButton
-                }
-            }
-
-            if !status.isEmpty {
-                Text(status)
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            actionRow
-        }
-        .padding(10)
-        // 默认 600×560 由 scene 的 `.defaultSize` 给；这里只写**下限**（Qt 是 460×420）。
-        // 写死 `width/height` 的话窗口就成了不可缩放的死尺寸 —— 而 Qt 那边它是能拖小的。
-        .frame(minWidth: 460, minHeight: 420)
-        .background(theme.card)
-        .task { await load() }
-    }
-
-    // MARK: 左侧 tab
-
-    /// 78×46、半径 5，选中态品牌色底 + 白字，未选中是一块比卡更深/更浅的底。
-    private func tabButton(_ item: Tab) -> some View {
-        let selected = tab == item
-        return Button { tab = item } label: {
-            HStack(spacing: 6) {
-                Image(systemName: item.symbol)
-                    .font(.system(size: 16))
-                Text(item.title)
-                    .font(.system(size: 13))
-            }
-            .foregroundStyle(selected ? .white : theme.textSecondary)
-            .frame(width: 78, height: 46)
-            .background {
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(selected ? theme.accent : (theme.dark ? Color(hex: 0x25_25_25) : Color(hex: 0xEE_EE_EE)))
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .pointingHandCursor()
-    }
-
-    // MARK: 右侧内容卡
-
-    private var contentCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            switch tab {
-            case .app:
-                Text("当前版本: ".t + AppInfo.version)
-                    .lineLimit(1)
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.textSecondary)
-                Text(state.appRelease?.tag ?? "")
-                    .font(.system(size: 15))
-                    .foregroundStyle(theme.textPrimary)
-                notesLabel("更新说明".t)
-                notesCard(state.appRelease?.notes ?? "")
-
-            case .core:
-                Text(coreLocalVersion.map { "mihomo " + $0 } ?? "内核版本: 检测中...".t)
-                    .font(.system(size: 15))
-                    .foregroundStyle(theme.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                notesLabel("更新说明".t)
-                notesCard(coreLatest?.notes ?? "")
-
-            case .geoip:
-                Text("GeoIP 数据库".t)
-                    .lineLimit(1)
-                    .font(.system(size: 15))
-                    .foregroundStyle(theme.textPrimary)
-                notesLabel("说明".t)
-                notesCard("Country.mmdb 是「按 IP 归属地区分流」所用的地理数据库（来源 MetaCubeX/meta-rules-dat）。\n\n点击「更新」下载最新数据库到用户目录与资源目录，重启核心后生效。".t)
-            }
-        }
-        .padding(10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background {
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .fill(theme.dark ? Color(hex: 0x16_16_16) : Color(hex: 0xF6_F6_F6))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .stroke(theme.divider, lineWidth: 1)
-        }
-    }
-
-    private func notesLabel(_ text: String) -> some View {
-        Text(text).font(.system(size: 12)).foregroundStyle(theme.textMuted)
-    }
-
-    /// 「更新说明」正文卡：只读、可滚动。半径 4、内距 8、12px 正文、行距 1.3。
-    private func notesCard(_ text: String) -> some View {
-        ScrollView {
-            Text(text)
+            Text("→")
                 .font(.system(size: 12))
-                .lineSpacing(12 * 0.3)
+                .foregroundStyle(theme.textMuted)
+            Text(remoteVersion)
+                .font(.system(size: 13))
+                .foregroundStyle(hasUpdate ? theme.accent : theme.textSecondary)
+        }
+        .lineLimit(1)
+    }
+
+    /// 右侧的三段。**画法照主窗页脚那颗「规则」（`MainView.modePicker`）**：
+    /// 整组只有**一层**玻璃胶囊（`glassCapsule()`），选中段的底压在这层玻璃**里面** ——
+    /// 压在里面才不会给整组带来额外的圆角，看着就是一颗胶囊被分成了三段，
+    /// 而不是三颗挨着的独立按钮。
+    private var tabPicker: some View {
+        HStack(spacing: 0) {
+            ForEach(Tab.allCases) { item in
+                Button { tab = item } label: {
+                    Text(item.title)
+                        .font(.system(size: 12))
+                        .foregroundStyle(tab == item ? theme.textPrimary : theme.textMuted)
+                        .lineLimit(1).truncationMode(.tail)
+                        .padding(.horizontal, 8)
+                        .frame(width: 66, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background {
+                    if tab == item { Capsule().fill(theme.accent.opacity(0.45)) }
+                }
+            }
+        }
+        .glassCapsule()
+    }
+
+    // MARK: 内容：更新说明
+
+    private var notes: some View {
+        ScrollView {
+            Text(notesText.isEmpty ? "暂无更新说明".t : notesText)
+                .font(.system(size: 12))
+                .lineSpacing(12 * 0.35)
                 .foregroundStyle(theme.textSecondary)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
         }
-        .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background {
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .fill(theme.dark ? Color(hex: 0x0D_0D_0D) : Color(hex: 0xFF_FF_FF))
+    }
+
+    // MARK: 底栏
+
+    /// 底栏：**左边是状态/错误信息，右边是动作**，两边**底对齐**。
+    ///
+    /// 状态那行放左边是因为它常常很长（GitHub 限流那条一句话能占两行），塞在按钮上下会把
+    /// 底栏顶得忽高忽低；而底对齐是因为右边在下载态是「进度条 + 一行文字」两行高，
+    /// 顶对齐的话左边那句会飘在半空。
+    private var bottomBar: some View {
+        HStack(alignment: .bottom, spacing: 16) {
+            Text(status)
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(status.isEmpty ? 0 : 1)   // 占位不跳：有没有状态，底栏高度一样
+
+            actions
         }
-        .overlay {
-            RoundedRectangle(cornerRadius: 4, style: .continuous)
-                .stroke(theme.divider, lineWidth: 1)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        if let progress {
+            HStack(spacing: 10) {
+                // 进度条与它下面那行「速度（下载量/总量）」是一组：文字在**进度条下方
+                // 水平居中**，所以两者同宽、一起靠右，不跟 ✕ 一起算居中。
+                VStack(spacing: 5) {
+                    progressBar(progress)
+                    Text(transferLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.textMuted)
+                        .lineLimit(1)
+                        .frame(width: Self.progressWidth)
+                }
+                // ✕ = **结束这次下载**，不是关窗。窗留着：取消完底栏自己回到
+                // 「更新 / 获取更新」那一态，用户可以直接再来一次。
+                Button {
+                    cancelDownload()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 22, height: 22)
+                }
+                .glassButton(circle: true)
+                .help("结束下载".t)
+            }
+        } else if hasUpdate {
+            Button(busy ? "更新中…".t : "更新".t) { startUpdate() }
+                .glassButton()
+                .disabled(busy)
+        } else {
+            Button(checking ? "检查中…".t : "获取更新".t) { Task { await check() } }
+                .glassButton()
+                .disabled(checking || busy)
         }
     }
 
-    // MARK: 进度
+    /// 进度条宽度。底栏内容是靠右排的，条不能撑满整行；下面那行文字与它同宽好居中。
+    static let progressWidth: CGFloat = 220
 
-    /// 高 22、半径 4、1px 描边，进度条本体内缩 1，百分比压在正中。
+    /// 细进度条：高 5、**全圆角**、不写百分比（百分比在下面那行「下载量/总量」里已经有了，
+    /// 5 高的条也塞不下字）。
     private func progressBar(_ percent: Int) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .fill(theme.dark ? Color(hex: 0x0D_0D_0D) : Color(hex: 0xEE_EE_EE))
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
+        ZStack(alignment: .leading) {
+            Capsule().fill(theme.dark ? Color(hex: 0x0D_0D_0D) : Color(hex: 0xE4_E4_E4))
+            GeometryReader { geo in
+                Capsule()
                     .fill(theme.accent)
-                    .frame(width: max(0, (geo.size.width - 2) * Double(percent) / 100))
-                    .padding(1)
-                Text("\(percent)%")
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textPrimary)
-                    .frame(maxWidth: .infinity)
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 4, style: .continuous)
-                    .stroke(theme.divider, lineWidth: 1)
+                    .frame(width: max(0, geo.size.width * Double(percent) / 100))
             }
         }
-        .frame(height: 22)
+        .frame(width: Self.progressWidth, height: 5)
     }
 
-    /// ✕ 取消：24×24 的圆，悬停转红底白字。
-    private var cancelButton: some View {
-        CancelDot { work?.cancel() }
+    /// 「12.3 MB/s (5.2 MB / 40.1 MB)」。一个字节都还没来时是「0 B/s (0 B / 0 B)」——
+    /// 留空的话用户分不清「还没开始」和「界面坏了」。
+    private var transferLine: String {
+        "\(Formatting.rate(speed)) (\(Formatting.bytes(received)) / \(Formatting.bytes(total)))"
     }
 
-    // MARK: 底部动作行
+    // MARK: 版本 / 更新说明 的取值
 
-    private var actionRow: some View {
-        HStack(spacing: 10) {
-            // 国内加速：与设置页那一项**同一个 config 键**，两处必须同步。
-            HStack(spacing: 5) {
-                MirrorCheckbox(isOn: state.config.mirror) { toggleMirror() }
-                Text("国内代理下载".t)
-                    .lineLimit(1)
-                    .font(.system(size: 12))
-                    .foregroundStyle(theme.textSecondary)
-                    .onTapGesture { toggleMirror() }
-            }
+    private var localVersion: String {
+        switch tab {
+        case .app: return String(format: "当前 %@".t, AppInfo.version)
+        case .core: return String(format: "当前 %@".t, coreLocalVersion ?? "—")
+        case .geoip: return String(format: "当前 %@".t, localMmdbDate ?? "—")
+        }
+    }
 
-            Spacer(minLength: 0)
+    /// 本地 Country.mmdb 的日期。GeoIP 没有版本号，「你手上这份是哪天的」就是全部信息。
+    private var localMmdbDate: String? {
+        let url = AppPaths.userDir.appendingPathComponent("Country.mmdb")
+        guard let date = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
 
-            SecondaryButton(title: "关闭".t, width: 80) { dismiss() }
+    private var remoteVersion: String {
+        switch tab {
+        case .app: return String(format: "最新 %@".t, state.appRelease?.tag ?? "—")
+        case .core: return String(format: "最新 %@".t, coreLatest?.tag ?? "—")
+        // GeoIP 上游没有版本号（同一个 tag 天天重建），只能说「最新」。
+        case .geoip: return String(format: "最新 %@".t, checked.contains(.geoip) ? "latest" : "—")
+        }
+    }
 
-            PrimaryButton(title: busy ? "更新中…".t : "更新".t, width: 100, disabled: busy) {
-                startUpdate()
-            }
+    /// 这个页签有没有可装的更新。
+    private var hasUpdate: Bool {
+        switch tab {
+        case .app: return state.appUpdateAvailable
+        case .core:
+            guard let local = coreLocalVersion, let remote = coreLatest?.tag else { return false }
+            return UpdateChecker.coreHasUpdate(remote: remote, local: local)
+        case .geoip: return checked.contains(.geoip)
+        }
+    }
+
+    private var notesText: String {
+        switch tab {
+        case .app: return state.appRelease?.notes ?? ""
+        case .core: return coreLatest?.notes ?? ""
+        case .geoip:
+            return "Country.mmdb 是「按 IP 归属地区分流」所用的地理数据库（来源 MetaCubeX/meta-rules-dat）。\n\n点击「更新」下载最新数据库到用户目录与资源目录，重启核心后生效。".t
         }
     }
 
     // MARK: 动作
 
-    private func toggleMirror() {
-        var next = state.config
-        next.mirror.toggle()
-        AppConfigLoader.persist(key: "mirror", bool: next.mirror)
-        state.applyConfig(next)
+    /// `COAST_UPDATE_FAKEPROGRESS=1`：走一遍假的下载进度。
+    ///
+    /// 与 `COAST_OPEN_UPDATE` / `COAST_MODE_EXPANDED` 同类的 UI 调试钩子 —— 下载态
+    /// （进度条 + 关闭 + 速度行）**只能靠真的下点什么才看得到**，而这个窗的「程序」页
+    /// 真下完是要退出进程去装的，没法拿来截图核对版式。默认不触发，正式使用零影响。
+    private func fakeProgressIfRequested() async {
+        guard ProcessInfo.processInfo.environment["COAST_UPDATE_FAKEPROGRESS"] == "1" else { return }
+        try? await Task.sleep(for: .seconds(2))
+        busy = true
+        for step in stride(from: 0, through: 100, by: 5) {
+            note(percent: step, received: Int64(step) * 431_000, total: 43_100_000)
+            try? await Task.sleep(for: .milliseconds(400))
+        }
     }
 
     private func load() async {
@@ -258,18 +303,81 @@ struct UpdateView: View {
         let checker = UpdateChecker(includePrerelease: state.config.receiveBeta,
                                     proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
         coreLatest = try? await checker.latestCoreRelease()
-        if state.appRelease == nil { await state.checkUpdates() }
+    }
+
+    /// 「获取更新」：只查这一个页签，查完由 `hasUpdate` 决定底栏换不换成「更新」。
+    private func check() async {
+        guard !checking else { return }
+        checking = true
+        status = ""
+        defer { checking = false }
+        switch tab {
+        case .app:
+            await state.checkUpdates()
+            if !state.appUpdateAvailable {
+                status = state.updateHint.isEmpty ? "已是最新版本".t : state.updateHint
+            }
+        case .core:
+            let checker = UpdateChecker(includePrerelease: state.config.receiveBeta,
+                                        proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
+            coreLocalVersion = CoreVersion.local()
+            coreLatest = try? await checker.latestCoreRelease()
+            if coreLatest == nil {
+                status = "检查失败：".t + "GitHub"
+            } else if !hasUpdate {
+                status = "已是最新版本".t
+            }
+        case .geoip:
+            // 没有可比的版本，查一下能不能连上就算「可以更新」。
+            checked.insert(.geoip)
+        }
+    }
+
+    /// 下载进度回调的落点：百分比、字节数、以及由相邻两拍算出的速度。
+    @MainActor
+    private func note(percent: Int, received newReceived: Int64, total newTotal: Int64) {
+        let now = Date()
+        if let last = lastSample {
+            let seconds = now.timeIntervalSince(last.at)
+            // 太密的两拍算出来的速度会剧烈跳动，隔 0.3 秒以上才更新一次。
+            if seconds >= 0.3 {
+                speed = Int64(max(0, Double(newReceived - last.bytes) / seconds))
+                lastSample = (newReceived, now)
+            }
+        } else {
+            lastSample = (newReceived, now)
+        }
+        progress = percent
+        received = newReceived
+        total = newTotal
+    }
+
+    private func resetTransfer() {
+        progress = nil
+        received = 0
+        total = 0
+        speed = 0
+        lastSample = nil
+    }
+
+    /// 结束这次下载。**不关窗** —— 关掉的话用户想重来一次还得再开一遍。
+    private func cancelDownload() {
+        work?.cancel()
+        work = nil
+        busy = false
+        resetTransfer()
+        status = "已取消下载".t
     }
 
     private func startUpdate() {
         guard !busy else { return }
+        status = ""
+        resetTransfer()
+        progress = 0            // 立刻进入「进度条 + 关闭」那一态，别让按钮停在原地
         switch tab {
-        case .app:
-            work = Task { await runAppUpdate() }
-        case .core:
-            work = Task { await runCoreUpdate() }
-        case .geoip:
-            work = Task { await runGeoIPUpdate() }
+        case .app: work = Task { await runAppUpdate() }
+        case .core: work = Task { await runCoreUpdate() }
+        case .geoip: work = Task { await runGeoIPUpdate() }
         }
     }
 
@@ -281,16 +389,17 @@ struct UpdateView: View {
             return
         }
         busy = true
-        defer { busy = false; progress = nil }
+        defer { busy = false; resetTransfer() }
         let updater = AppUpdater(useMirror: state.config.mirror,
                                  proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
         do {
             let staged = try await updater.stage(release: release) { step in
                 Task { @MainActor in
                     switch step {
-                    case .downloading(let percent): progress = percent
-                    case .verifying: progress = nil; status = "校验中…".t
-                    case .installing: progress = nil; status = "准备安装…".t
+                    case let .downloading(percent, received, total):
+                        note(percent: percent, received: received, total: total)
+                    case .verifying: resetTransfer(); status = "校验中…".t
+                    case .installing: resetTransfer(); status = "准备安装…".t
                     }
                 }
             }
@@ -313,7 +422,7 @@ struct UpdateView: View {
 
     private func runCoreUpdate() async {
         busy = true
-        defer { busy = false; progress = nil }
+        defer { busy = false; resetTransfer() }
         // ★ 查询/下载阶段**不停核心**（用户的网还靠它跑着；下载本身不走代理，
         //   只有「国内加速」镜像开关）。拿到产物后才停核 → 替换 → 重启。
         let wasRunning = state.controller.isCoreRunning
@@ -338,15 +447,16 @@ struct UpdateView: View {
 
     private func runGeoIPUpdate() async {
         busy = true
-        defer { busy = false; progress = nil }
+        defer { busy = false; resetTransfer() }
         let updater = GeoIPUpdater(useMirror: state.config.mirror,
                                    proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
         do {
             status = try await updater.update { step in
                 Task { @MainActor in
                     switch step {
-                    case .downloading(let percent): progress = percent
-                    case .validating: progress = nil; status = "校验中…".t
+                    case let .downloading(percent, received, total):
+                        note(percent: percent, received: received, total: total)
+                    case .validating: resetTransfer(); status = "校验中…".t
                     }
                 }
             }
@@ -358,123 +468,11 @@ struct UpdateView: View {
     @MainActor
     private func apply(_ step: CoreDownloader.Progress) {
         switch step {
-        case .checking: progress = nil; status = "检查中…".t
-        case .downloading(let percent): progress = percent
-        case .installing: progress = nil; status = "安装中…".t
-        case .done, .failed: progress = nil
+        case .checking: resetTransfer(); status = "检查中…".t
+        case let .downloading(percent, received, total):
+            note(percent: percent, received: received, total: total)
+        case .installing: resetTransfer(); status = "安装中…".t
+        case .done, .failed: resetTransfer()
         }
-    }
-}
-
-/// ✕ 取消按钮。24×24 的圆，悬停转红底白字 —— 对齐 QML 的 `cancelHover` 三处联动。
-private struct CancelDot: View {
-    @Environment(Theme.self) private var theme
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text("✕")
-                .font(.system(size: 12))
-                .foregroundStyle(hovering ? .white : theme.textSecondary)
-                .frame(width: 24, height: 24)
-                .background {
-                    Circle().fill(hovering ? Color(hex: 0xF5_6C_6C)
-                                  : (theme.dark ? Color(hex: 0x25_25_25) : Color(hex: 0xEE_EE_EE)))
-                }
-                .overlay {
-                    Circle().stroke(hovering ? Color(hex: 0xF5_6C_6C) : theme.divider, lineWidth: 1)
-                }
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .pointingHandCursor()
-    }
-}
-
-/// 16×16、半径 3 的方形勾选框。QML 手画的那个，不是系统 checkbox ——
-/// 系统 checkbox 在这一排里比周围元素高一截，且底色跟不上主题。
-private struct MirrorCheckbox: View {
-    @Environment(Theme.self) private var theme
-    let isOn: Bool
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(isOn ? theme.accent : .clear)
-                .frame(width: 16, height: 16)
-                .overlay {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .stroke(isOn ? theme.accent : theme.divider, lineWidth: 1)
-                }
-                .overlay {
-                    if isOn {
-                        Text("✓").font(.system(size: 11)).foregroundStyle(.white)
-                    }
-                }
-        }
-        .buttonStyle(.plain)
-        .pointingHandCursor()
-    }
-}
-
-/// 底部次要按钮（关闭）：80×30、半径 5、1px 描边。
-private struct SecondaryButton: View {
-    @Environment(Theme.self) private var theme
-    let title: String
-    let width: CGFloat
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 13))
-                .foregroundStyle(theme.textSecondary)
-                .frame(width: width, height: 30)
-                .background {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(hovering ? theme.hover
-                              : (theme.dark ? Color(hex: 0x25_25_25) : Color(hex: 0xEE_EE_EE)))
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .stroke(theme.divider, lineWidth: 1)
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .pointingHandCursor()
-    }
-}
-
-/// 底部主要按钮（更新）：100×30、半径 5、品牌色底白字，悬停加深；忙时半透明且不可点。
-private struct PrimaryButton: View {
-    @Environment(Theme.self) private var theme
-    let title: String
-    let width: CGFloat
-    let disabled: Bool
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 13))
-                .foregroundStyle(.white)
-                .frame(width: width, height: 30)
-                .background {
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(hovering && !disabled ? theme.accentStrong : theme.accent)
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(disabled)
-        .opacity(disabled ? 0.5 : 1)
-        .onHover { hovering = $0 }
     }
 }

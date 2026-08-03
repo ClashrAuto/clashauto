@@ -454,5 +454,14 @@
   "当前不是从 .app 运行，已打开发布页请手动安装": "Não está sendo executado de um .app — página da versão aberta, instale manualmente",
   "程序更新失败：%@": "Falha na atualização do aplicativo: %@",
   "查看详情": "Ver detalhes",
-  "忘记此设备": "Esquecer este dispositivo"
+  "忘记此设备": "Esquecer este dispositivo",
+  "当前 %@": "Atual %@",
+  "最新 %@": "Mais recente %@",
+  "获取更新": "Verificar atualizações",
+  "暂无更新说明": "Sem notas de versão",
+  "已取消下载": "Download cancelado",
+  "结束下载": "Parar download",
+  "退出 Coast？": "Sair do Coast?",
+  "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Ao sair, o núcleo é encerrado e o proxy do sistema é restaurado; as conexões via proxy serão perdidas.",
+  "退出": "Sair"
 }
