@@ -48,6 +48,31 @@
 //     TPROXY     940 Mb/s    0.06 核      0.18 核   0.24 核   0.25 核/Gbps
 //   → **TPROXY 省 3.7 倍 CPU。**
 //
+//   ── 2026-08-04：**核心自带 TUN 的两个栈 system vs gvisor，实测等价** ─────────────
+//     背景：目标是「去掉 lwIP」，一条备选路是让核心的 TUN inbound 接手。直觉上
+//     `stack: system`（内核栈）该比 `stack: gvisor`（Go 用户态栈）快，值得换。**实测否决。**
+//     先澄清两个我一度搞错、写进过结论的事实：
+//       · `system` 栈**不需要任何 build tag**。sing-tun 的 NewStack() 按字符串分发，
+//         `with_gvisor` 只保护 gvisor/mixed（我们仓库里它另外只管 tailscale 出站）。
+//         所以**现有发布核心直接就能跑 system 栈**，不必重编 —— 三端(Win/Linux/macOS)已各自验证起得来。
+//       · 但"能跑"不等于"更快"。
+//     Windows 真机 A/B（同机、同订阅、同节点 JP-2、两份配置只差 stack/网卡/网段/端口，
+//     且**每次都先读 /configs 确认 tun.enable=true 才开量**，串行跑避开 Wintun 残留冲突）：
+//         栈        TTFB 中位   吞吐(3 轮, Mb/s)          中位      CPU
+//         system    0.185s      2251 / 2743 / 2793       2743      0.45 核/Gbps
+//         gvisor    0.176s      2455 / 2666 / 2732       2666      0.45 核/Gbps
+//     → **区间完全重叠、CPU 折算相同 = 在噪声范围内等价。** 换栈拿不到任何收益。
+//     ★ 教训：第一次单轮采样得到"gvisor 快 27%"，复测 3 轮就抹平了 —— 吞吐**单次不可信**，
+//       这条与 [[throughput-test-pitfalls]] 里记的是同一件事，又踩了一次。
+//     ★ 另一个真机坑（不是我们的 bug，但会挡住任何双实例对照）：Windows 上第二个 TUN 实例
+//       恒报 `set ipv4 address: The object already exists`，即使给了不同的 device 名与
+//       inet4-address 网段。这是 Wintun 适配器残留对象的已知问题，clash-verge-rev /
+//       nekoray / hiddify / v2rayN 都有同样的 issue。**双实例 TUN 对照在 Windows 上做不了，
+//       必须串行。**
+//     ★ 结论：TUN 换栈不是出路。真要在 Windows 上超过这个量级（~2.7 Gbps / 0.45 核·Gbps），
+//       得走内核重定向（WFP ALE_CONNECT_REDIRECT，让 Windows 自己的 TCP 栈搬数据），
+//       而那需要内核 callout 驱动 + EV 证书附件签名 —— 见 net/WfpRedirect.h。
+//
 //   ── 2026-08-04：**撤回**上一版写在这里的「lwIP 每条 TCP 连接白送一个上游 RTT」──────
 //     那条结论（Windows lwIP 建连 142~178ms、"建连时间 = f(上游 RTT)"）是**错的**，已删。
 //     错因是取样没验成立：量的时候靶机的 ARP 表其实还指向**真路由器**（Coast 报了
