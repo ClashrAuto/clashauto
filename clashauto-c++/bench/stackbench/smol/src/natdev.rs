@@ -5,9 +5,15 @@
 //
 // NatTap 是个 Device：receive() 里先把 UDP 帧截下来自己 NAT（转内核 socket、回包造帧直接
 // 写 TAP），只把 TCP 帧交给 smoltcp。TX 侧沿用端口改写 shim（只对 TCP 生效）。
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::net::UdpSocket;
 use std::os::unix::io::{AsRawFd, RawFd};
+
+// ★ R15 教训：NAT 表必须有上限 + 淘汰，否则一台设备猛开 UDP 流（QUIC）就把 fd 耗尽。
+//   R14 初版没有，20000 条流直接 `bind().unwrap()` panic 崩掉整个网关——这是 R10 那个
+//   TCP fd 泄漏的 UDP 翻版，而且更致命（R10 只是连不上，这里是崩）。CAP 满就 FIFO 淘汰
+//   最老的流（关它的 socket），且**永不 unwrap**：建 socket 失败就丢这条流，不拖垮进程。
+const NAT_CAP: usize = 4096;
 
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
@@ -47,6 +53,7 @@ pub struct NatTap {
     tx: Vec<u8>,
     smac: [u8; 6],    // 本栈 MAC（回包 eth 源）
     flows: HashMap<(u32, u16), Flow>,
+    order: VecDeque<(u32, u16)>,  // FIFO 淘汰顺序
     inj: Vec<u8>,     // 造回包的缓冲
 }
 
@@ -66,7 +73,7 @@ impl NatTap {
         let fl = unsafe { libc::fcntl(fd, libc::F_GETFL, 0) };
         unsafe { libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK); }
         Ok(Self { fd, map, rx: vec![0u8; FRAME], tx: vec![0u8; FRAME], smac,
-                  flows: HashMap::new(), inj: vec![0u8; FRAME] })
+                  flows: HashMap::new(), order: VecDeque::new(), inj: vec![0u8; FRAME] })
     }
 
     // 帧是不是 IPv4/UDP 到 UDP_PORT？是则做 NAT 转发并返回 true（消费掉，不给 smoltcp）。
@@ -86,13 +93,23 @@ impl NatTap {
         let ulen = be16(&f[l4 + 4..]) as usize;
         let plen = ulen.saturating_sub(8).min(f.len() - (l4 + 8));
         let key = (u32::from_be_bytes(cip), sport);
-        let flow = self.flows.entry(key).or_insert_with(|| {
-            let s = UdpSocket::bind("127.0.0.1:0").unwrap();
-            s.connect(("127.0.0.1", UDP_PORT)).unwrap();
+        if !self.flows.contains_key(&key) {
+            // 上限保护：满了先 FIFO 淘汰最老的一条（关它的内核 socket = 还 fd）
+            while self.flows.len() >= NAT_CAP {
+                if let Some(old) = self.order.pop_front() { self.flows.remove(&old); } else { break; }
+            }
+            // ★ 永不 unwrap：EMFILE/资源不足就丢这条流，绝不 panic 拖垮整个网关
+            let s = match UdpSocket::bind("127.0.0.1:0") {
+                Ok(s) => s, Err(_) => return true, // 消费掉该帧（不回栈），但不建流
+            };
+            if s.connect(("127.0.0.1", UDP_PORT)).is_err() { return true; }
             s.set_nonblocking(true).ok();
-            Flow { sock: s, cmac, cip, cport: sport, dip, dport }
-        });
-        let _ = flow.sock.send(&f[l4 + 8..l4 + 8 + plen]);
+            self.flows.insert(key, Flow { sock: s, cmac, cip, cport: sport, dip, dport });
+            self.order.push_back(key);
+        }
+        if let Some(flow) = self.flows.get(&key) {
+            let _ = flow.sock.send(&f[l4 + 8..l4 + 8 + plen]);
+        }
         true
     }
 

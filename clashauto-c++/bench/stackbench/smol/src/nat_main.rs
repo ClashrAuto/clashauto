@@ -47,6 +47,14 @@ fn main() {
     if args.len() != 4 { eprintln!("usage: smoltcp2socks_nat <tap> <ip> <mask>"); std::process::exit(2); }
     let (tap_name, ip_str, mask_str) = (&args[1], &args[2], &args[3]);
 
+    // ★ R15：像真实网关守护进程那样，启动就把自己的 fd 上限抬高。否则默认 ulimit=1024
+    //   低于 NAT_CAP(4096)，flow 表的 FIFO 淘汰在撞 fd 墙前根本触发不了，进程会卡死在
+    //   1020 条死流上、新流全被 EMFILE 丢弃（100% 丢包）。抬到 65536 让 NAT_CAP 成为真正的界。
+    unsafe {
+        let lim = libc::rlimit { rlim_cur: 65536, rlim_max: 65536 };
+        libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+    }
+
     let map: PortMap = Arc::new(Mutex::new(HashMap::new()));
     let smac = [0x02u8, 0x00, 0x5b, 0x00, 0x00, 0x02];
     let mut device = NatTap::new(tap_name, map.clone(), smac)
