@@ -71,14 +71,25 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled, bool ipv6Enabled)
     //      结论很清楚：代价在 ②。（我一度据 fork 那条注释把它改口成"netlink dump"，错了，
     //      按 strace 计数改回来。）
     //
-    //    ★★ 而在**透明网关这条路上它还注定失败**：被代理设备的 socket 在设备自己机器上，
-    //      网关本机的 /proc 里根本不存在 —— 扫完整棵 /proc 只为得到"没找到"。
-    //      另外 TProxy 入站的 metadata.InIP 是**监听器的通配地址**（实测 /connections 里
-    //      inboundIP='::'、inboundPort=7898；listener/tproxy/tproxy.go 里显式
-    //      `WithInAddr(l.listener.Addr())`，因为 TProxy 下 conn.LocalAddr() 是原始目的地），
-    //      于是第 ① 步的精确查询判据 `InIP.Is4()==SrcIP.Is4()` 也不成立，连 netlink 都退回 dump。
-    //      核心侧的正解是**对 TPROXY/redir 入站直接跳过查进程**（客户端 socket 可证不在本机）；
-    //      那属于 clash fork 的改动、要重新发核心，与本文件这条按角色分档的开关不冲突。
+    //    ★★ **但这 5.6ms 只落在「本机发起」的连接上，被代理设备走 TPROXY 那条路量不到。**
+    //      设备的 socket 在设备自己机器上，网关本机 netlink 查不到就直接返回错误，
+    //      **根本走不到第 ② 步的 /proc 扫描** —— 代价最大的那一步被短路了。
+    //      真机实测（239 经网关取外网目标，40 次取分位，always/strict 交替两轮）：
+    //          always  p50 29.0 / 28.6 ms      strict  p50 28.9 / 29.3 ms   —— 无可测差异
+    //      （量设备侧必须用 time_starttransfer：TPROXY 下 TCP 握手由核心在本地先完成，
+    //        time_connect 恒为 ~0.3ms，量的是假连通，看不出任何后端代价。）
+    //      所以这条开关的真实收益是**网关本机自身发起的连接**（App 自己的请求、机器上跑的其它
+    //      程序经混合口出网），不是设备流量。前面那句「每条新连接白花 5.6ms」对设备路径不成立，
+    //      是我先在网关本机上量、又照着推到设备路径的过度外推，按实测改回。
+    //      取舍因此变成：在当网关的机器上，用「连接窗口对本机连接显示进程名」换本机连接
+    //      每条 5.6ms —— 这台机器的角色是路由器，换得值。
+    //
+    //    ★ 顺带记下另一处（与延迟无关，但排查时会撞上）：TProxy 入站的 metadata.InIP 是
+    //      **监听器的通配地址**（实测 /connections 里 inboundIP='::'、inboundPort=7898；
+    //      listener/tproxy/tproxy.go 显式 `WithInAddr(l.listener.Addr())`，因为 TProxy 下
+    //      conn.LocalAddr() 是原始目的地）。于是第 ① 步的精确查询判据
+    //      `InIP.Is4()==SrcIP.Is4()` 对 IPv4 客户端不成立，netlink 会退回全表 dump。
+    //      本机实测这条 dump 并不贵（设备路径没有可测差异），但换台 ehash 更大的机器可能就贵了。
     //    偏偏这只对**本机发起**的连接有意义：局域网设备的进程跑在别人机器上，本机表里查不到，
     //    网关代理的连接查到的会是 Coast 自己 —— QmlBridge 那边按 inboundUser=dev-* 主动丢弃。
     //    **也就是说当网关时，我们花 5.6ms 算出一个随后被扔掉的值。**
