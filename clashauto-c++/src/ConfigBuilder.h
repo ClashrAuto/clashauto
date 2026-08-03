@@ -57,6 +57,9 @@ private:
     QString setScalar(QString yaml, const QString &key, const QString &value) const;
     QString setNestedScalar(QString yaml, const QString &section, const QString &key, const QString &value) const;
     QString ensureProxyServerNameserver(QString yaml) const;
+    /// 剔除订阅下发的 DNS 里**在墙内不可达**的那些（见 .cpp 里的实测数据）。
+    /// 订阅方一条失效 DNS 就能让每条连接白等 5 秒，且用户完全无从得知。
+    QString pruneUnreachableDns(QString yaml) const;
     QString applyIpv6(QString yaml, bool enabled) const; // ipv6 / dns.ipv6 / dns.fake-ip-range6 三件套
     QString normalizeEmptyProxies(QString yaml) const;
     QString yamlQuote(const QString &value) const;

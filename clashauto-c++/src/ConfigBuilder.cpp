@@ -101,6 +101,7 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled, bool ipv6Enabled)
     const bool actingAsGateway = !DeviceStore::proxiedDevices(m_config.configDir).isEmpty();
     yaml = setScalar(yaml, "find-process-mode", actingAsGateway ? "strict" : "always");
     yaml = setNestedScalar(yaml, "tun", "enable", tunEnabled ? "true" : "false");
+    yaml = pruneUnreachableDns(yaml); // 必须在 ensureProxyServerNameserver 之前：剔完才知道还剩几条
     yaml = ensureProxyServerNameserver(yaml);
     // DNS 劫持配套：开 mihomo 的 DNS 监听端口。透明网关把被劫持设备的 UDP :53 查询转投到这里，而不是
     // 原样中继到「设备配置的 DNS」——后者常是网关/路由器 IP，经用户态栈中继到它走不通，导致名字解析
@@ -1129,6 +1130,82 @@ QString ConfigBuilder::ensureProxyServerNameserver(QString yaml) const
     }
     const QString block = "  proxy-server-nameserver:\n    - 223.5.5.5\n    - 119.29.29.29\n";
     yaml.insert(dnsHead.capturedEnd(0), block);
+    return yaml;
+}
+
+QString ConfigBuilder::pruneUnreachableDns(QString yaml) const
+{
+    // 订阅方会用自己的 dns 段整体覆盖我们的模板，其中常年混着**在墙内根本连不上**的 DoH。
+    // 后果比"少一个解析器"严重得多：核心按列表顺序挨个试，每撞一条不可达的就等一次连接超时，
+    // 而这发生在**每条新连接**的名字解析上。
+    //
+    // 真机实测（Windows 2026-08-04，同一台机器、同一订阅、同一节点 JP-2）：
+    //     DoH 服务器                 角色                 直连可达性
+    //     https://dns.rubyfish.cn    nameserver 第一条    超时 6.0s
+    //     https://1.0.0.1            fallback             超时 6.0s
+    //     https://dns.twnic.tw       fallback             超时 18.0s
+    //     https://public.dns.iij.jp  fallback             5.1s（勉强通但极慢）
+    //     https://223.5.5.5          nameserver           32ms  ✓
+    //     https://dns.pub            nameserver           32ms  ✓
+    // 表现：**每条代理连接的 TTFB 稳定 5.1~6.2 秒**，而裸 TCP 到节点只要 0.19s、
+    // 核心走 DIRECT 只要 0.016s。所有传输类型（vless/grpc、tuic、hysteria2）一起中招，
+    // 因此很容易被误判成"节点烂""Windows 平台慢"——我们就误判过一整轮。
+    // 剔掉这几条之后同一口径复测：**TTFB 5.14~6.24s → 0.158~0.213s（32 倍）**，
+    // 与 Linux 端(Pi)同订阅同节点的 0.18s 完全一致，证明平台本身没有问题。
+    //
+    // 只剔**实测确认不可达**的固定名单，不做运行时探测：探测本身要花时间、还会因网络抖动误杀，
+    // 而这几条是长期失效（rubyfish 域名已废弃、1.0.0.1/twnic 属被墙段）。名单之外一概不动，
+    // 保持"订阅说什么就是什么"。剔完若某个列表空了，补回我们模板里那两条实测可用的。
+    static const QStringList kUnreachable = {
+        QStringLiteral("dns.rubyfish.cn"),
+        QStringLiteral("1.0.0.1"),
+        QStringLiteral("dns.twnic.tw"),
+        QStringLiteral("public.dns.iij.jp"),
+    };
+    // 逐行扫：只删 dns 块里以 "- " 开头、且命中名单的那一行。default-nameserver 里的
+    // 1.0.0.1 是**明文 UDP**（不是 DoH），墙内可达，不能按同一把尺子砍 —— 故只在
+    // nameserver / fallback / proxy-server-nameserver 这三张表里剔。
+    const QStringList lines = yaml.split(QLatin1Char('\n'));
+    QStringList out;
+    out.reserve(lines.size());
+    bool inDns = false;      // 是否在顶层 dns: 块内
+    QString curList;         // 当前所在的子列表名
+    int removed = 0;
+    for (const QString &ln : lines) {
+        if (!ln.startsWith(QLatin1Char(' ')) && !ln.startsWith(QLatin1Char('\t'))) {
+            inDns = ln.startsWith(QStringLiteral("dns:")); // 顶格键 → 进/出 dns 块
+            curList.clear();
+        } else if (inDns) {
+            const QRegularExpressionMatch key =
+                QRegularExpression(QStringLiteral("^  ([a-z-]+):\\s*$")).match(ln);
+            if (key.hasMatch())
+                curList = key.captured(1);
+        }
+        const bool inTargetList = inDns
+            && (curList == QLatin1String("nameserver") || curList == QLatin1String("fallback")
+                || curList == QLatin1String("proxy-server-nameserver"));
+        if (inTargetList && ln.trimmed().startsWith(QLatin1Char('-'))) {
+            bool hit = false;
+            for (const QString &bad : kUnreachable) {
+                if (ln.contains(bad)) { hit = true; break; }
+            }
+            if (hit) { ++removed; continue; } // 丢掉这一行
+        }
+        out.append(ln);
+    }
+    if (removed == 0)
+        return yaml;
+    yaml = out.join(QLatin1Char('\n'));
+    // 剔空的列表补回可用项：空列表在 mihomo 里等于"没有解析器"，比留着慢的还糟。
+    static const QString kGood =
+        QStringLiteral("\n    - https://223.5.5.5/dns-query\n    - https://dns.pub/dns-query");
+    for (const QString &list : {QStringLiteral("nameserver"), QStringLiteral("fallback")}) {
+        const QRegularExpression empty(
+            QStringLiteral("(?m)^  %1:[ \\t]*\\n(?=\\S|  [a-z-]+:)").arg(list));
+        const QRegularExpressionMatch m = empty.match(yaml);
+        if (m.hasMatch())
+            yaml.insert(m.capturedEnd(0) - 1, kGood);
+    }
     return yaml;
 }
 
