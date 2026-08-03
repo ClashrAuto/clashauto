@@ -81,7 +81,17 @@ public:
     /// 启动时必须调一次：上次若被 kill -9，anchor 与 forwarding 还留在系统里。
     static void removeStale();
 
-private:
-    // 固定 anchor 名。**别用带 pid/随机串的名字**：崩溃后要靠这个名字把陈旧规则删掉。
+    /// 查一条已被 rdr 重定向的连接的**原始目的地**（open /dev/pf + ioctl DIOCNATLOOK）。
+    /// clientIp/clientPort = 连接的源（被代理设备）；proxyIp/proxyPort = 它被重定向到的本机监听。
+    /// 成功时写出 origIp/origPort（重定向前的真实目的地）。需要 root。
+    ///
+    /// ★ 方向用 PF_OUT 而不是 PF_IN：pf 记的是**重定向之后**那条状态的方向，包在 rdr 之后
+    ///   是从本机出去到 127.0.0.1 的。填 PF_IN 不会报错，只会恒 ENOENT —— 极易被误判成
+    ///   "rdr 规则没生效"，排查时先核对这里。
+    static bool lookupOriginalDest(const QString &clientIp, quint16 clientPort,
+                                   const QString &proxyIp, quint16 proxyPort, QString *origIp,
+                                   quint16 *origPort, QString *err = nullptr);
+
+    /// 固定 anchor 名。**别用带 pid/随机串的名字**：崩溃后要靠这个名字把陈旧规则删掉。
     static const char *anchorName();
 };
