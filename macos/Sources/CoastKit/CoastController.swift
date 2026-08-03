@@ -73,7 +73,14 @@ public final class CoastController {
                 Task { await self?.handleRedirectLost() }
             }
         }
-        // ★ 先擦上一世的残留系统代理，必须在任何启动动作之前（详见该函数）。
+        // ★ 启动期自愈的**顺序不能反**：先收孤儿核心，再擦残留系统代理。
+        //
+        //   `clearStaleSystemProxy()` 的判据之一是「我们的 mixedPort **无人监听**」，
+        //   而上一世遗留的孤儿核心**正占着那个端口**。若先清代理、后收孤儿，
+        //   清代理那步会因为"有人在听"直接跳过 —— **两项自愈单独都对，
+        //   凑在一起却互相抵消**。真机实测过这个组合场景：2 个孤儿占着 7890/9191，
+        //   此时残留的系统代理擦不掉。
+        core.reapOrphansAtStartup()
         clearStaleSystemProxy()
     }
 

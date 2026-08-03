@@ -181,6 +181,21 @@ public final class CoreProcess {
     ///   ② **ppid == 1**（已被 init 收养 = 父进程确实没了 = 是孤儿）
     /// 的进程。还有活父进程的实例（用户手动跑的、另一个正常实例）ppid 不是 1，不会被碰。
     /// 与 Qt 线的 `CoreController::reapOrphanCore()` 同一设计。
+    /// 供**启动早期**调用的入口：自己解析核心路径，不需要调用方先算好。
+    ///
+    /// ★ 为什么要在 `CoreProcess.start()` 之外再暴露一个入口：
+    ///   `CoastController.clearStaleSystemProxy()` 的判据之一是「我们的 mixedPort
+    ///   **无人监听**」，而上一世遗留的孤儿核心**正占着那个端口**。
+    ///   若先清代理、后收孤儿，清代理那步会因为"有人在听"直接跳过 ——
+    ///   两项自愈单独都对，**凑在一起就互相抵消**。真机实测过这个组合场景：
+    ///   2 个孤儿占着 7890/9191，此时残留的系统代理擦不掉。
+    ///   所以启动序列必须是 **先收孤儿、再清代理**。
+    public func reapOrphansAtStartup() {
+        let exe = AppPaths.coreExecutable
+        guard FileManager.default.fileExists(atPath: exe.path) else { return }
+        reapOrphanCores(executable: exe)
+    }
+
     private func reapOrphanCores(executable: URL) {
         let exePath = executable.resolvingSymlinksInPath().path
         guard !exePath.isEmpty else { return }
