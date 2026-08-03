@@ -56,6 +56,8 @@ set(BACKEND_SOURCES
     # GeoIP 库(Country.mmdb)的校验 + 原子落盘：下载侧只暂存，CoreController 起核心前才换上去
     src/MmdbFile.cpp         src/MmdbFile.h
     src/TrayController.cpp   src/TrayController.h
+    # 单实例守卫：两个实例并存时，后者的 removeStale/remove 会清掉前者装的 nft/pf 规则
+    src/SingleInstance.cpp   src/SingleInstance.h
     # 设备页后端（局域网发现 + 台账；框架无关）
     src/LanScanner.cpp       src/LanScanner.h
     src/DeviceStore.cpp      src/DeviceStore.h

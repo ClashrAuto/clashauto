@@ -13,6 +13,7 @@
 #include "LanScanner.h"   // COAST_SCAN_SELFTEST 的扫描耗时自检
 #include "net/TproxyRules.h" // COAST_TPROXY_SELFTEST 的规则层自测
 #include "LatencyProbe.h" // 状态页延迟卡：直连/路由/DNS/代理四个数
+#include "SingleInstance.h" // 单实例守卫：两个实例并存会互相清掉网关的 nft/pf 规则
 #include "SubscriptionStore.h"
 #include "TrayController.h"
 #if defined(Q_OS_MACOS)
@@ -154,6 +155,17 @@ int main(int argc, char *argv[])
     // 路由器」这条路在没有 IPv6 的网络上永远跑不到（本项目的测试台就是如此），没有它等于零覆盖。
     // ★ 这个钩子**不再限于 POSIX**：NdpSpoofer 在 Windows 上同样编进产物，以前却连这一个
     //   纯解析自测都跑不了（钩子被上面那个守卫罩住了）。见 GatewaySelfTest.cpp 里的说明。
+    // ★★ 单实例守卫**必须在 removeStale() 之前**：下一行会按固定表名清理内核里的陈旧规则，
+    //    而它分不清那是"上次崩溃的残留"还是"另一个活着的实例正在用的"。真机复现过：第二个
+    //    实例起来又退出，把生产实例的 nft 表/劫持/策略路由全清空，生产实例却毫不知情地继续
+    //    显示"网关已开启"，被代理设备静默退回直连。详见 SingleInstance.h。
+    //    豁免 --tun-elevated：Windows 开增强时以管理员重启自身，旧的非提权实例尚未退干净，
+    //    走探测会连上它并把自己当成二次启动退出 —— 增强就永远开不起来。
+    if (!app.arguments().contains(QStringLiteral("--tun-elevated"))
+        && SingleInstance::notifyExistingAndQuit())
+        return 0;
+    SingleInstance singleInstance;
+
     // 透明网关**规则层**自测（COAST_TPROXY_SELFTEST=1）：装 nft/策略路由 → 核对 → 增删设备
     // → 拆 → 核对拆干净。不需要真设备、不改路由决策（设备集合为空时规则一条都不命中）。
     // 需要 root。与下面几个 env 自检钩子同一惯例。
@@ -660,13 +672,19 @@ int main(int argc, char *argv[])
     // 关闭主窗只是 hide（见 Main.qml onClosing），这里负责再把它显示出来。mac 上窗口再显示时
     // Main.qml 的 onVisibleChanged 会经 bridge.setMacDockVisible(true) 让 Dock 图标回来。
     auto *rootWindow = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
-    QObject::connect(tray, &TrayController::openWindowRequested, rootWindow, [rootWindow] {
+    auto showMainWindow = [rootWindow] {
         if (rootWindow) {
             rootWindow->show();
             rootWindow->raise();
             rootWindow->requestActivate();
         }
-    });
+    };
+    QObject::connect(tray, &TrayController::openWindowRequested, rootWindow, showMainWindow);
+
+    // 第二次启动（用户又双击了一次图标）：那个进程已在 main 开头探测到本实例并退出，只把
+    // 「请显示窗口」这一个请求转了过来。若不响应，用户看到的是"点了没反应"，多半会去杀进程
+    // 重开——而杀进程正是留下陈旧内核规则、让被覆盖设备断网的那条路。
+    singleInstance.listen(showMainWindow);
 
     clash->start(); // 只读轮询 REST API
 
