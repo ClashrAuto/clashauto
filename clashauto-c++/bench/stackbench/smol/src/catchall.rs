@@ -53,6 +53,10 @@ fn tcp_offsets(frame: &[u8]) -> Option<usize> {
     Some(l4)
 }
 
+// rawtap.rs 复用这两个改写函数（原地版），故对外可见。
+pub fn rewrite_rx_pub(buf: &mut [u8], map: &PortMap) { rewrite_rx(buf, map) }
+pub fn rewrite_tx_pub(buf: &mut [u8], map: &PortMap) { rewrite_tx(buf, map) }
+
 // RX 改写：dst_port(真实) → FIXED，并记录映射。就地改 buf。
 fn rewrite_rx(buf: &mut [u8], map: &PortMap) {
     let l4 = match tcp_offsets(buf) { Some(x) => x, None => return };

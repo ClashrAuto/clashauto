@@ -11,6 +11,10 @@ path = "src/main.rs"
 name = "smoltcp2socks_ca"
 path = "src/ca_main.rs"
 
+[[bin]]
+name = "smoltcp2socks_rt"
+path = "src/rt_main.rs"
+
 [dependencies]
 libc = "0.2"
 
