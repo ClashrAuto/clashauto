@@ -107,22 +107,29 @@ struct UpdateView: View {
         .lineLimit(1)
     }
 
-    /// 右侧的三段，**并成一颗胶囊**。
-    ///
-    /// 做法是系统的 `GlassEffectContainer`：容器里相邻的玻璃元素靠得够近时会**自己融成
-    /// 一块连续的玻璃**（间距给 0，留 2 还看得见缝）——这是 macOS 26 上「连体按钮组」的原生写法。
-    /// 选中态用系统的 `.glassProminent`，**不自己铺任何底色**：手铺的色块压在玻璃上会糊成
-    /// 一片，而且和系统在别处的选中态长得不一样。
+    /// 右侧的三段。**画法照主窗页脚那颗「规则」（`MainView.modePicker`）**：
+    /// 整组只有**一层**玻璃胶囊（`glassCapsule()`），选中段的底压在这层玻璃**里面** ——
+    /// 压在里面才不会给整组带来额外的圆角，看着就是一颗胶囊被分成了三段，
+    /// 而不是三颗挨着的独立按钮。
     private var tabPicker: some View {
-        GlassEffectContainer(spacing: 0) {
-            HStack(spacing: 0) {
-                ForEach(Tab.allCases) { item in
-                    Button(item.title) { tab = item }
-                        .glassButton(prominent: tab == item)
+        HStack(spacing: 0) {
+            ForEach(Tab.allCases) { item in
+                Button { tab = item } label: {
+                    Text(item.title)
+                        .font(.system(size: 12))
+                        .foregroundStyle(tab == item ? theme.textPrimary : theme.textMuted)
+                        .lineLimit(1).truncationMode(.tail)
+                        .padding(.horizontal, 8)
+                        .frame(width: 66, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background {
+                    if tab == item { Capsule().fill(theme.accent.opacity(0.45)) }
                 }
             }
         }
-        .font(.system(size: 12))
+        .glassCapsule()
     }
 
     // MARK: 内容：更新说明
@@ -143,60 +150,62 @@ struct UpdateView: View {
 
     // MARK: 底栏
 
-    /// 底栏。内容**一律靠右**。
+    /// 底栏：**左边是状态/错误信息，右边是动作**，两边**底对齐**。
+    ///
+    /// 状态那行放左边是因为它常常很长（GitHub 限流那条一句话能占两行），塞在按钮上下会把
+    /// 底栏顶得忽高忽低；而底对齐是因为右边在下载态是「进度条 + 一行文字」两行高，
+    /// 顶对齐的话左边那句会飘在半空。
     private var bottomBar: some View {
-        VStack(alignment: .trailing, spacing: 6) {
-            if let progress {
-                HStack(spacing: 10) {
-                    // 进度条与它下面那行「速度（下载量/总量）」是一组：文字在**进度条下方
-                    // 水平居中**，所以两者同宽、一起靠右，不跟着 ✕ 一起算居中。
-                    VStack(spacing: 5) {
-                        progressBar(progress)
-                        Text(transferLine)
-                            .font(.system(size: 11))
-                            .foregroundStyle(theme.textMuted)
-                            .lineLimit(1)
-                            .frame(width: Self.progressWidth)
-                    }
-                    // ✕ = **结束这次下载**，不是关窗。窗留着：取消完底栏自己回到
-                    // 「更新 / 获取更新」那一态，用户可以直接再来一次。
-                    Button {
-                        cancelDownload()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 11, weight: .medium))
-                            .frame(width: 22, height: 22)
-                    }
-                    .glassButton(circle: true)
-                    .help("结束下载".t)
-                }
-            } else if hasUpdate {
-                Button(busy ? "更新中…".t : "更新".t) { startUpdate() }
-                    .glassButton()
-                    .disabled(busy)
-            } else {
-                Button(checking ? "检查中…".t : "获取更新".t) { Task { await check() } }
-                    .glassButton()
-                    .disabled(checking || busy)
-            }
+        HStack(alignment: .bottom, spacing: 16) {
+            Text(status)
+                .font(.system(size: 11))
+                .foregroundStyle(theme.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(status.isEmpty ? 0 : 1)   // 占位不跳：有没有状态，底栏高度一样
 
-            if !status.isEmpty {
-                Text(status)
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textMuted)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.trailing)
-            }
+            actions
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.horizontal, 20)
         .padding(.vertical, 10)
     }
 
-    /// ★ 底栏这几颗按钮走**系统的玻璃按钮样式**，不用本文件原来那两个手绘按钮。
-    ///   不是为了统一观感（虽然也更贴这个窗的语言）—— 手绘按钮放进 `safeAreaBar` 里，
-    ///   标签文字会被**旋转 180°** 画出来（截图里「Close」是倒着的，稳定复现；换成
-    ///   `.glassButton()` 立刻正常）。系统按钮样式不受影响，`safeAreaBar` 本来也是给它们用的。
+    @ViewBuilder
+    private var actions: some View {
+        if let progress {
+            HStack(spacing: 10) {
+                // 进度条与它下面那行「速度（下载量/总量）」是一组：文字在**进度条下方
+                // 水平居中**，所以两者同宽、一起靠右，不跟 ✕ 一起算居中。
+                VStack(spacing: 5) {
+                    progressBar(progress)
+                    Text(transferLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(theme.textMuted)
+                        .lineLimit(1)
+                        .frame(width: Self.progressWidth)
+                }
+                // ✕ = **结束这次下载**，不是关窗。窗留着：取消完底栏自己回到
+                // 「更新 / 获取更新」那一态，用户可以直接再来一次。
+                Button {
+                    cancelDownload()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .medium))
+                        .frame(width: 22, height: 22)
+                }
+                .glassButton(circle: true)
+                .help("结束下载".t)
+            }
+        } else if hasUpdate {
+            Button(busy ? "更新中…".t : "更新".t) { startUpdate() }
+                .glassButton()
+                .disabled(busy)
+        } else {
+            Button(checking ? "检查中…".t : "获取更新".t) { Task { await check() } }
+                .glassButton()
+                .disabled(checking || busy)
+        }
+    }
 
     /// 进度条宽度。底栏内容是靠右排的，条不能撑满整行；下面那行文字与它同宽好居中。
     static let progressWidth: CGFloat = 220
