@@ -10,6 +10,9 @@ for p in lwip2socks gvnet2socks smoltcp2socks relay iperf3 pingpong; do
     pkill -x "$p" >/dev/null 2>&1
 done
 pkill -f "$BENCH_DIR/bin/" >/dev/null 2>&1
+# 回显靶机是 python3 起的，进程名不叫 pingpong —— 必须按命令行杀，否则它会一直挂着
+# 占住 5202 端口，还会把 ssh 会话的 stdout 攥在手里让远程命令永不返回。
+pkill -f "pingpong.py" >/dev/null 2>&1
 sleep 0.3
 for p in lwip2socks gvnet2socks smoltcp2socks relay iperf3 pingpong; do
     pkill -9 -x "$p" >/dev/null 2>&1
@@ -32,7 +35,8 @@ sleep 1
 # 5) 自证清理干净——把断言打出来，别只说"清了"
 # 注意：pgrep -c 在计数为 0 时既打印 0 又返回退出码 1，`|| echo 0` 会再补一个 0
 # 变成 "0\n0" 把断言打飞——所以这里用 wc -l 计数。
-leftover_proc=$(pgrep -x 'iperf3|relay|lwip2socks|gvnet2socks|smoltcp2socks' 2>/dev/null | wc -l)
+leftover_proc=$(( $(pgrep -x 'iperf3|relay|lwip2socks|gvnet2socks|smoltcp2socks' 2>/dev/null | wc -l) \
+                 + $(pgrep -f 'pingpong.py' 2>/dev/null | wc -l) ))
 leftover_tun=$(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep -cE '^sb[0-9]+$')
 busy=$(ss -Hltn 2>/dev/null | awk '{print $4}' | grep -cE ':(5201|5202|7777)$')
 idle=$(awk '/^cpu /{t=0;for(i=2;i<=NF;i++)t+=$i;print 100*$5/t}' /proc/stat)

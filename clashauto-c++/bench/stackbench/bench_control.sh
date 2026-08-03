@@ -29,7 +29,7 @@ pkill -x iperf3; sleep 0.5
 "$BENCH_DIR/clean.sh" || exit 1
 iperf3 -s -B 127.0.0.1 -p 5201 -D --logfile /tmp/iperf_s.log
 sleep 0.5
-"$BENCH_DIR/bin/relay" 7777 127.0.0.1 5201 &
+setsid "$BENCH_DIR/bin/relay" 7777 127.0.0.1 5201 </dev/null >/tmp/relay.log 2>&1 &
 RPID=$!
 sleep 0.5
 T0=$(cpu_ticks "$RPID")

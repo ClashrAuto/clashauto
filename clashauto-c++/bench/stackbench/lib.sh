@@ -1,7 +1,9 @@
 #!/bin/bash
 # 公共测量函数：CPU 采样（核·秒）+ 结果落盘（每次测试一行 JSON，永不覆盖）
 BENCH_DIR=${BENCH_DIR:-/root/stackbench}
-RESULTS=${RESULTS:-$BENCH_DIR/results.jsonl}
+# ★ 结果文件**故意放在 harness 目录之外**：重新部署 harness 时会 rm -rf 掉 $BENCH_DIR，
+#   放里面的话每次改脚本都会把历史测量一起删掉（已经被删过一次）。
+RESULTS=${RESULTS:-/root/stackbench-results/results.jsonl}
 HZ=$(getconf CLK_TCK)
 
 # cpu_ticks <pid> -> utime+stime（含所有线程）
