@@ -698,6 +698,22 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         //   （另一半是 TproxyRules 里那套 ip6 规则 + v6 策略路由）。
         block += "    listen: '::'\n";
         block += QString("    port: %1\n").arg(DeviceStore::kTproxyPort);
+    } else if (m_config.gatewayPf) {
+        // macOS 的数据面：pf rdr 把转发流量重定向到这个口，核心用 redir 入站接收，
+        // 原始目的地由 PfRules::lookupOriginalDest（/dev/pf 的 DIOCNATLOOK）还原。
+        //
+        // ★ **redir 只代理 TCP，不支持 UDP**（mihomo 官方文档明确写明；tproxy 才两者都收）。
+        //   所以 macOS 上：
+        //     · TCP        → 走这条 redir，正常接管；
+        //     · DNS(UDP53) → 由 PfRules 单独下一条 `rdr ... proto udp to port 53 -> DNS口` 打到
+        //                    核心的 dns.listen 上，**不经过本 listener**，所以不受此限制；
+        //     · 其余 UDP（QUIC/HTTP3、游戏、WireGuard…）→ **无法接管**，会按内核转发直连出去。
+        //   这是 BSD 平台的固有限制（没有 TPROXY），不是实现没写完。双栈站点大多有 TCP 回退，
+        //   但 QUIC-only 的流量在 macOS 网关下确实绕过代理 —— 记在这里，别当 bug 反复查。
+        block += "  - name: coast-redir\n";
+        block += "    type: redir\n";
+        block += "    listen: 0.0.0.0\n";
+        block += QString("    port: %1\n").arg(DeviceStore::kRedirPort);
     }
 
     // 若已存在我们上轮生成的顶层 listeners: 块，整块替换（从 listeners: 到下一个顶层键为止，

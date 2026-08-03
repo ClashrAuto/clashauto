@@ -113,6 +113,12 @@ AppConfig AppConfigLoader::load()
         config.gatewayTproxy = false;
     // 无节点兜底行为（默认回落直连，见 AppConfig.h 的说明）。环境变量优先，供测试/应急。
     config.noNodeReject = boolFromYaml(yaml, "noNodeReject", config.noNodeReject);
+    config.gatewayPf = boolFromYaml(yaml, "gatewayPf", config.gatewayPf);
+    // 与 tproxy 共用同一个环境变量开关：lwip 时两条内核态数据面都关掉。
+    if (dpEnv == "lwip")
+        config.gatewayPf = false;
+    else if (dpEnv == "pf")
+        config.gatewayPf = true;
     const QByteArray nnrEnv = qgetenv("COAST_NO_NODE_REJECT").trimmed();
     if (nnrEnv == "1")
         config.noNodeReject = true;

@@ -70,6 +70,21 @@ struct AppConfig {
 #else
     bool gatewayTproxy = false;
 #endif
+    // macOS 的内核态数据面：pf 的 rdr + DIOCNATLOOK（见 net/PfRules.h）。与 gatewayTproxy
+    // 互斥 —— TPROXY 是 Linux netfilter 独有的，BSD 上没有等价物。两者都 false 时走 lwIP。
+    //
+    // ★ **macOS 默认 true**：目标是「去掉 lwip 架构」，而 lwIP 在 macOS 上同样是单线程用户态栈，
+    //   有着与 Linux 侧实测一致的天花板（跑满千兆约 0.9 核、单核封顶 ~1 Gbps）。pf rdr 走的是
+    //   内核转发，CPU 代价与 Linux 的 TPROXY 同量级。
+    // ★ 已知限制（BSD 固有，不是没写完）：**redir 只代理 TCP**。DNS(UDP53) 由 PfRules 单独
+    //   rdr 到核心的 dns.listen 上，不受影响；但其余 UDP（QUIC/HTTP3 等）无法接管，会直连出去。
+    //   Linux 的 TPROXY 两者都收，所以这是 macOS 独有的取舍。
+    // 回退：配置键 gatewayPf: false，或环境变量 COAST_GATEWAY_DATAPATH=lwip。
+#if defined(Q_OS_MACOS)
+    bool gatewayPf = true;
+#else
+    bool gatewayPf = false;
+#endif
     // 无可用代理节点时的兜底行为。默认 false = 回落直连（clash 既定语义：普通代理设备跟随
     // 规则、规则最终回落 DIRECT）。true = fail-closed：无订阅节点时把"该走代理"的流量导向
     // REJECT,避免被劫持设备在机场跑路/订阅过期时**静默裸奔**(真实 IP 泄露、翻墙失效)。

@@ -189,6 +189,12 @@ public:
     // 所以这个 listener 不带 users:。
     static constexpr quint16 kTproxyPort = 7898;
 
+    // macOS 的 redir 入站端口（pf rdr 的目的地）。与 kTproxyPort 分开：两条数据面
+
+    // 互斥、不会同时监听，但用不同端口能让「当前跑的是哪条路」一眼可辨，排查省事。
+
+    static constexpr quint16 kRedirPort = 7897;
+
 signals:
     void changed();          // 任一展示字段变化（控制器据此刷新模型）
     void deviceAdded(QString mac); // 新设备首次出现（供托盘「蹭网」通知）

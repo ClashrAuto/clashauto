@@ -37,6 +37,7 @@
 #include "IL2Endpoint.h"
 #include "NdpSpoofer.h"
 #include "NetStack.h"
+#include "PfRules.h"
 #include "TproxyRules.h" // TPROXY 数据面的内核规则（装/拆/设备集合）
 
 #include <QDateTime>
@@ -301,8 +302,11 @@ private:
     // 此时二层端点只用来收发 ARP/NDP（劫持与安全监视），内核过滤器也只放行这两类帧。
     LanGateway::DatapathSpec m_datapath;
     TproxyRules m_tproxy;
+    PfRules m_pf;  // macOS 的 pf 数据面（非 macOS 上是空实现）
     // 把当前受害设备的 IP 集合推给 nft（谁被接管由这个集合决定）。lwIP 模式下是空操作。
     void syncTproxyDevices();
+    bool datapathReadyLocal() const;
+    void syncPfDevices(); // 把被接管设备的 IPv4 推进 pf table（macOS）
     QHash<QString, GwNic *> m_nics;          // ifname → 套件
     quint16 m_socksPort = 0;
     QHash<quint64, QString> m_victimByMac;   // src MAC 打包键 → ip（帧过滤 + 记账）
@@ -351,6 +355,22 @@ private:
 // 把当前受害设备的 IP 推给 nft 的 proxied 集合。**谁被接管完全由这个集合决定**：
 // 不在集合里的设备照常由内核转发（等价于「没开代理」），所以集合为空时装着规则也是安全的。
 // lwIP 模式下是空操作。
+// 把当前被接管设备的 IPv4 全集推进 pf 的 <coast_proxied> table（macOS 数据面）。
+// 与 syncTproxyDevices 同构，只是目标是 pf 而非 nft；pf 侧没有 v6 规则（redir 只代理 TCP，
+// 且 BSD 无 TPROXY），所以这里只推 v4。
+void GatewayWorker::syncPfDevices()
+{
+    if (!m_datapath.pf || !m_pf.isInstalled())
+        return;
+    QStringList ips;
+    ips.reserve(m_victimMacStr.size());
+    for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it)
+        ips.append(it.key()); // 这张表是 ip -> mac
+    QString err;
+    if (!m_pf.syncDevices(ips, &err))
+        emit deviceError(QString(), QStringLiteral("pf 设备集合更新失败: ") + err);
+}
+
 void GatewayWorker::syncTproxyDevices()
 {
     if (!m_datapath.tproxy || !m_tproxy.isInstalled())
@@ -758,13 +778,25 @@ void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &fr
             std::fflush(stderr);
 }
 
+// 数据面是否就绪。**三条路各有各的判据**，抽出来统一用：availableLocal 与 enableDeviceLocal
+// 都要问这一句，历史上就因为两处各写各的、漏掉新数据面而出现过「规则装好了却报网关不可用」。
+bool GatewayWorker::datapathReadyLocal() const
+{
+    if (m_datapath.tproxy)
+        return m_tproxy.isInstalled();
+    if (m_datapath.pf)
+        return m_pf.isInstalled();
+    return m_net != nullptr;
+}
+
 bool GatewayWorker::availableLocal() const
 {
     // 「网关可用」= 数据面就绪 + 至少一张卡的二层端点开着。
-    // 数据面就绪按模式分别判：lwIP 看用户态栈，tproxy 看内核规则装没装。
-    // ★ 这里原本也只写 `!m_net`——与 enableDeviceLocal 里那处是同一个坑的两半：
-    //   光修那一处没用,这条总闸照样会把 tproxy 模式判成"不可用"（UI 上也会显示网关不可用）。
-    if (m_datapath.tproxy ? !m_tproxy.isInstalled() : !m_net)
+    // 数据面就绪按模式分别判：lwIP 看用户态栈，tproxy 看 nft 规则，pf 看 pf anchor。
+    // ★ 这里原本只写 `!m_net`——与 enableDeviceLocal 里那处是同一个坑的两半：
+    //   光修那一处没用,这条总闸照样会把内核态数据面判成"不可用"（UI 上也会显示网关不可用）。
+    //   **每加一条数据面都必须同步这两处**，漏一处就是"装好了却说不可用"。
+    if (!datapathReadyLocal())
         return false;
     for (GwNic *n : m_nics) {
         if (n->ready && n->ep && n->ep->isOpen())
@@ -885,6 +917,23 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             }
         }
         syncTproxyDevices();
+    } else if (m_datapath.pf) {
+        // macOS 的 pf 数据面：与 tproxy 同构 —— **不建 NetStack**，规则装不上就原地失败并
+        // 保持未接管状态（半开着等于把设备整台断网，比"这条路暂时用不了"糟得多）。
+        if (!m_pf.isInstalled()) {
+            PfRules::Spec ps;
+            ps.redirPort = m_datapath.redirPort;
+            ps.dnsPort = m_datapath.dnsPort;
+            for (const LanGateway::NicSpec &ns : specs)
+                if (!ns.ifname.isEmpty())
+                    ps.ifnames.append(ns.ifname);
+            if (!m_pf.install(ps, &err)) {
+                emit deviceError(QString(),
+                                 QStringLiteral("pf 规则装载失败（已保持未接管状态）: ") + err);
+                return;
+            }
+        }
+        syncPfDevices();
     } else if (!m_net) {
         // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。都在工作线程上创建。
         m_net = new NetStack(socksPort, this);
@@ -1262,7 +1311,7 @@ bool GatewayWorker::enableDeviceLocal(const QString &mac, const QString &ip,
     //   更值得记的是：当时我写脚本审计"所有 m_net-> 是否都加了空指针守卫"，那个脚本把含
     //   `!m_net` 的行当成"已守卫"跳过了 —— 而这行的极性恰恰相反。**审计的启发式亲手把 bug
     //   藏了起来。** 加新的数据面时,要找的不只是"解引用点",还有这类**前置条件判据**。
-    const bool datapathReady = m_datapath.tproxy ? m_tproxy.isInstalled() : (m_net != nullptr);
+    const bool datapathReady = datapathReadyLocal();
     if (!datapathReady || !availableLocal()) {
         if (err)
             *err = m_datapath.tproxy

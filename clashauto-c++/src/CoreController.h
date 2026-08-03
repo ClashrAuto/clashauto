@@ -33,6 +33,8 @@ public:
     int uiPort() const { return m_config.uiPort; }
     /// 网关数据面是否走 TPROXY（见 AppConfig::gatewayTproxy）。DevicesController 据此配置 LanGateway。
     bool gatewayTproxy() const { return m_config.gatewayTproxy; }
+    /// macOS 的 pf 数据面是否启用（见 AppConfig::gatewayPf）。
+    bool gatewayPf() const { return m_config.gatewayPf; }
 
     // 设置 IPv6 开关。只改内存里的运行态，不自己触发重建 —— 调用方（SettingsController）
     // 落完 config.yaml 后统一调 rebuildConfig()，避免一次开关引发两次热重载。

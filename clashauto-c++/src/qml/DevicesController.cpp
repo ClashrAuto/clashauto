@@ -312,6 +312,8 @@ void DevicesController::ensureGatewayConfigured()
     // 数据面模式必须在 configure() **之前**设好：configureLocal 是按当前模式决定建不建 lwIP 的。
     LanGateway::DatapathSpec dp;
     dp.tproxy = m_core && m_core->gatewayTproxy();
+    dp.pf = m_core && m_core->gatewayPf();       // macOS 的 pf 数据面（与 tproxy 互斥）
+    dp.redirPort = DeviceStore::kRedirPort;
     dp.tproxyPort = DeviceStore::kTproxyPort;
     // DNS 劫持端口 = 核心的 DNS 监听（ConfigBuilder 写死 127.0.0.1:1053，与 lwIP 那条路共用同
     // 一个口，见 NetStack.cpp 的 kDnsHijackPort）。TproxyRules 用 dnat 到回环 + route_localnet

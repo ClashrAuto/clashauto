@@ -63,6 +63,10 @@ public:
         bool tproxy = false;
         quint16 tproxyPort = 0; // 核心的 tproxy 入站端口（ConfigBuilder 发的 coast-tproxy）
         quint16 dnsPort = 0;    // 核心的 DNS 监听端口；0 = 不劫持 DNS
+        // macOS 的内核态数据面：pf 的 rdr + DIOCNATLOOK（见 PfRules）。与 tproxy 互斥 ——
+        // TPROXY 是 Linux netfilter 独有的，BSD 上没有等价物。两者都为 false 时走 lwIP。
+        bool pf = false;
+        quint16 redirPort = 0;  // 核心的 redir 入站端口（ConfigBuilder 发的 coast-redir）
     };
     void setDatapath(const DatapathSpec &spec);
 

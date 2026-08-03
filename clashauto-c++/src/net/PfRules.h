@@ -116,6 +116,15 @@ public:
     /// 固定 anchor 名。**别用带 pid/随机串的名字**：崩溃后要靠这个名字把陈旧规则删掉。
     static const char *anchorName();
 
+    // ── ★ 人工核对 pf 状态时的三个坑（真机上连续踩过，都会让你误判成"代码没生效"）──
+    //  ① **pfctl 把规则列表写到 stderr**。`pfctl -a coast -s nat 2>/dev/null | grep rdr`
+    //     恒为空 —— 必须 `2>&1`。本类内部用 QProcess::MergedChannels，不受影响。
+    //  ② **`grep -c "^rdr"` 匹配不上**：输出里 rdr 行带前导空白/分节标题。用 `grep -c rdr`。
+    //  ③ **`-T replace` 打印 `no changes.` 不是失败**，而是"内容已与目标一致"。判成败要看
+    //     `-T show` 的实际内容，别看这句话。
+    //  另：sudo 凭据过期时 pfctl 的输出会混进 "a password is required"，同样表现为"读到空"。
+    //  这三条曾让我一度以为 install/syncDevices 没生效、差点去改本来正确的代码。
+
 private:
     Spec m_spec;
     bool m_installed = false;
