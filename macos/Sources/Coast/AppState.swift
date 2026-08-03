@@ -797,15 +797,39 @@ public final class AppState {
                     try? await Task.sleep(for: .seconds(1))
                     continue
                 }
+                // ★ **完全静止时这一拍必须整拍跳过。**
+                //   pollTick / bandwidthSamples / displayedUp / displayedDown 都是 @Observable
+                //   的公开属性，**写一次就让 SwiftUI 把整棵视图树重排一遍**。原先它们是
+                //   1Hz **无条件**写的，于是核心没跑、速率恒 0、连接恒空的空载状态下，
+                //   界面明明一个像素都不会变，却仍在每秒重排一次整树。
+                //   真机实测（macOS 26.5.2 / arm64，COAST_NO_AUTOSTART=1 只跑 UI）：
+                //     空载 CPU 稳态 1.3~2.2%，`sample` 的热点 100% 落在 SwiftUI 布局引擎上
+                //     （LayoutEngineBox.sizeThatFits / StackLayout.placeChildren /
+                //       ViewLayoutEngine.sizeThatFits），即"纯重排、没有别的活"。
+                //   判据与 Qt 端页脚那颗呼吸圆点那次完全相同：**可见运动要值得它的代价**，
+                //   而"放着不管"才是这个窗口的常态。速率没变、也没有新连接快照要落，
+                //   这一拍就没有任何东西可显示，写它纯属自费。
+                //   注意 pollTick 也要一起跳过 —— 它本身就是给视图当"该刷新了"的信号用的，
+                //   照写等于把刚省下的重排又请回来。
+                let up = self.clash.up
+                let down = self.clash.down
+                let idle = up == 0 && down == 0
+                    && self.displayedUp == 0 && self.displayedDown == 0
+                    && self.pendingSnapshot == nil
+                    && self.bandwidthSamples.last.map { $0.up == 0 && $0.down == 0 } == true
+                if idle {
+                    try? await Task.sleep(for: .seconds(1))
+                    continue
+                }
                 self.pollTick &+= 1
-                self.bandwidthSamples.append((Double(self.clash.up), Double(self.clash.down)))
+                self.bandwidthSamples.append((Double(up), Double(down)))
                 if self.bandwidthSamples.count > Self.bandwidthWindow {
                     self.bandwidthSamples.removeFirst(self.bandwidthSamples.count - Self.bandwidthWindow)
                 }
                 // 界面显示的速率与连接快照都在**这一拍、这一个 turn** 里落 ——
                 // 一秒只让 SwiftUI 重排一次（理由见 `upText` 上的注释）。
-                self.displayedUp = self.clash.up
-                self.displayedDown = self.clash.down
+                self.displayedUp = up
+                self.displayedDown = down
                 self.applyPendingSnapshot()
                 try? await Task.sleep(for: .seconds(1))
             }
