@@ -40,12 +40,8 @@ ApplicationWindow {
 
     /// 顶栏高度。mac 上就是标题栏那条带子的高度（红绿灯由系统在里面垂直居中）。
     readonly property int bandHeight: 50
-    // ★ mac 上这一行**贴在红绿灯下面**，不是与它们同排。
-    //   Swift 端能把版本号与三段组画进标题栏那条带子里（NSHostingView 铺满整窗），
-    //   **Qt 不行**：即便 `configureMacTitleBar` 已经开了 `fullSizeContentView`，
-    //   QQuickWindow 的场景仍旧从标题栏下面起排 —— 给这条带子上过色量过，它的顶边落在 28，
-    //   红绿灯整个在它上面。所以左内距按普通的 20 给（不用给三颗灯让位，它们不在同一行），
-    //   观感上就是「透明标题条 + 紧贴其下的一条导航」。
+    /// mac 红绿灯占掉的宽度。版本号从它右边**再让 20** 起排 —— 不让的话直接压在三颗灯上。
+    readonly property int macTrafficLights: 78
 
     property int currentTab: 0   // 0 程序 / 1 内核 / 2 GeoIP
 
@@ -64,9 +60,15 @@ ApplicationWindow {
         if (!visible)
             return
         updater.refresh()
-        if (win.isMac)
+        if (win.isMac) {
             bridge.applyMacGlass(win, Theme.dark)
+            win.macInset = bridge.macTitleBarInset(win)
+        }
     }
+
+    /// mac 标题栏占掉的高度，由 AppKit 实取（见 `MacWindow::macTitleBarInset`）。
+    /// 内容用**负的这个数**当上边距，才能真的摆进标题栏那条带子里。
+    property int macInset: 0
 
     // 主题切换后毛玻璃深浅要重设（与 Main.qml 同）。
     Connections {
@@ -141,10 +143,11 @@ ApplicationWindow {
         implicitHeight: win.bandHeight
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 20
+            // 让开红绿灯：三颗灯占掉约 78，再让 20。不让的话版本号直接压在灯上。
+            anchors.leftMargin: win.macTrafficLights + 20
             anchors.rightMargin: 20
             spacing: 12
-            VersionLine {}
+            VersionLine { Layout.fillWidth: true }
             Item { Layout.fillWidth: true }
             SegmentedTabs {}
         }
@@ -183,8 +186,8 @@ ApplicationWindow {
                     TapHandler { onTapped: win.currentTab = parent.index }
                 }
             }
-            Item { Layout.fillWidth: true }
-            VersionLine {}
+            Item { Layout.preferredWidth: 12 }
+            VersionLine { Layout.fillWidth: true }
         }
     }
 
@@ -197,15 +200,19 @@ ApplicationWindow {
             anchors.rightMargin: 20
             spacing: 12
             SegmentedTabs {}
-            Item { Layout.fillWidth: true }
-            VersionLine {}
+            Item { Layout.preferredWidth: 12 }
+            VersionLine { Layout.fillWidth: true }
         }
     }
 
     // 当前版本 → 最新版本。查不到的那一头显示「—」，不编。
+    /// ★ 两段都要 `Layout.fillWidth` + 省略号：内核页那条「当前」本身就是一句话
+    ///   （「内核版本: 未安装 → 正式版 v1.10.4392（可切换）」），不给它上限就会把右边的
+    ///   三段组一路顶出窗外（实测 GeoIP 那段整个跑到屏幕外面去了）。
     component VersionLine: RowLayout {
         spacing: 8
         Text {
+            Layout.fillWidth: true
             text: qsTr("当前 ") + win.localVersion
             font.pixelSize: 13
             color: Theme.textPrimary
@@ -213,6 +220,7 @@ ApplicationWindow {
         }
         Text { text: "→"; font.pixelSize: 12; color: Theme.textMuted }
         Text {
+            Layout.fillWidth: true
             text: qsTr("最新 ") + win.remoteVersion
             font.pixelSize: 13
             color: win.hasUpdate ? Theme.accent : Theme.textSecondary
@@ -223,13 +231,16 @@ ApplicationWindow {
     // 三段：**一层**胶囊底，选中段的底压在里面 —— 与主窗页脚那颗「规则」同一画法，
     // 压在里面才不会给整组带来额外圆角（看着是一颗胶囊被分成三段，而不是三颗独立按钮）。
     component SegmentedTabs: Rectangle {
-        implicitWidth: segRow.implicitWidth
+        // ★ 宽度**只能由内容决定**：`implicitWidth ← Row.implicitWidth` 的同时又让 Row
+        //   `anchors.fill: parent`，就是一条循环绑定 —— 宽度每轮都往上长，实测能撑出屏幕。
+        //   Row 不再 fill，自己按内容定宽，外面这层只跟着它。
+        implicitWidth: segRow.width
         implicitHeight: 28
         radius: height / 2
         color: Theme.dark ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(0, 0, 0, 0.06)
         Row {
             id: segRow
-            anchors.fill: parent
+            height: parent.height
             Repeater {
                 model: [qsTr("程序"), qsTr("内核"), "GeoIP"]
                 delegate: Rectangle {
@@ -284,6 +295,12 @@ ApplicationWindow {
 
     ColumnLayout {
         anchors.fill: parent
+        // ★ mac：**负的上边距**把内容顶进标题栏那条带子里。
+        //   探针量过：`configureMacTitleBar` 已经开了 fullSizeContentView，NSView 确实铺满整窗
+        //   （contentView 600×560），但 AppKit 的 `contentLayoutRect` 只有 600×528 ——
+        //   Qt 按后者起排，于是场景整体下移 32，顶栏就掉到红绿灯下面去了。
+        //   顶回去之后版本号与三段组才和三颗灯在同一行（与 Swift 端一致）。
+        anchors.topMargin: win.isMac ? -win.macInset : 0
         spacing: 0
 
         // 顶部：三端各一种（见文件头的说明）
@@ -301,7 +318,9 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.leftMargin: 20
-            Layout.rightMargin: 20
+            // ★ 右边**不留内距**：滚动条要贴在窗口右缘上（系统列表都是这么排的）。
+            //   正文自己让出 20（见下面 Text 的 width），所以文字与左边一样是 20 内距，
+            //   只有滚动条压在最右边。
             Layout.topMargin: 12
             clip: true
             contentWidth: width
@@ -309,7 +328,7 @@ ApplicationWindow {
             ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
             Text {
                 id: notesInner
-                width: notesFlick.width
+                width: notesFlick.width - 20   // 让出右侧 20：滚动条贴边，正文不贴
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
                 lineHeight: 1.35

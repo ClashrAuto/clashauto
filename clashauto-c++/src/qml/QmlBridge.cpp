@@ -760,6 +760,16 @@ void QmlBridge::setTrafficDimension(int dim)
     refreshTodayTraffic();
 }
 
+int QmlBridge::macTitleBarInset(QWindow *window) const
+{
+#if defined(Q_OS_MACOS)
+    return window ? ::macTitleBarInset(window->winId()) : 0;
+#else
+    Q_UNUSED(window);
+    return 0;
+#endif
+}
+
 bool QmlBridge::envFlag(const QString &name) const
 {
     return qEnvironmentVariable(name.toLatin1().constData()) == QStringLiteral("1");

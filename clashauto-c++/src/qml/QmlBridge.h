@@ -168,6 +168,10 @@ public:
     /// 版式的唯一入口。正式运行不设就是零影响。
     Q_INVOKABLE bool envFlag(const QString &name) const;
 
+    /// mac：窗口顶部被系统标题栏占掉的高度。QML 用**负的上边距**把内容顶进那条带子里
+    /// （理由见 `MacWindow.h` 的 `macTitleBarInset`）。非 mac 恒 0。
+    Q_INVOKABLE int macTitleBarInset(QWindow *window) const;
+
     // 界面此刻有没有一个窗口真的被人看着（主窗或连接/详情/更新那几个附属窗）。
     //
     // ★ 点 ✕ 走的是「只隐藏不销毁」（Main.qml 的 onClosing + hide()），QML 场景整棵都还在，

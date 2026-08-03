@@ -110,3 +110,13 @@ QString macQuitMenuItemDescription()
     }
     return QStringLiteral("<none>");
 }
+
+int macTitleBarInset(WId winId)
+{
+    NSWindow *window = windowForWId(winId);
+    if (!window) {
+        return 0;
+    }
+    const CGFloat inset = NSHeight(window.frame) - NSHeight(window.contentLayoutRect);
+    return inset > 0 ? static_cast<int>(inset) : 0;
+}
