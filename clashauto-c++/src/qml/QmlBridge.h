@@ -76,9 +76,10 @@ class QmlBridge final : public QObject
     Q_PROPERTY(QString lastLog READ lastLog NOTIFY logAppended)
     Q_PROPERTY(QString version READ version CONSTANT)
     Q_PROPERTY(bool initialDark READ initialDark CONSTANT)
-    // 关闭到托盘（config.mini）：两处用途——(1) 启动时开→静默启动仅托盘、不显示窗口，关→正常显示
-    // 窗口（见 Main.qml Component.onCompleted）；(2) ✕ 时开→隐藏窗口而非退出（Win/Linux 用；mac 恒隐藏
-    // 不看此值，见 Main.qml onClosing）。随设置页「应用」更新，故非 CONSTANT（(2) 即时生效；(1) 下次启动生效）。
+    // 「启动到托盘」（config.mini）：开 → 启动时静默、只留托盘不显示窗口；关 → 正常显示窗口
+    // （见 Main.qml Component.onCompleted）。设置页里那颗开关的文案就是「启动到托盘」。
+    // ★ 它**不管 ✕**：✕ 在所有平台上恒隐藏窗口（见 Main.qml onClosing）。这里原来的注释还写着
+    //   「✕ 时开→隐藏窗口而非退出（Win/Linux 用）」，那是早就改掉的旧语义。
     Q_PROPERTY(bool closeToTray READ closeToTray NOTIFY closeToTrayChanged)
 
 public:
@@ -151,6 +152,16 @@ public:
     Q_INVOKABLE void closeConnectionById(const QString &id); // 断开单个连接，随后刷新列表
     // 状态页显隐：只有它可见时才每 10s 重算今日流量（那是几条 GROUP BY，没人看时白烧 CPU）。
     Q_INVOKABLE void setStatusActive(bool active);
+
+    /// 系统托盘此刻可不可用。
+    ///
+    /// ★ ✕ 恒隐藏窗口、界面里又没有任何退出入口 —— 于是**退出只有托盘菜单一条路**。
+    ///   而托盘并不是到处都有：GNOME 40+ 默认就没有系统托盘（要装 AppIndicator 扩展），
+    ///   那里托盘图标根本不出现。两件事凑一起的后果是：用户点了 ✕，窗口藏了、再也叫不回来，
+    ///   程序还在后台占着系统代理，**只能去杀进程**。所以托盘不可用时 ✕ 必须真退（见 Main.qml）。
+    ///
+    ///   **每次现查而不是启动时存一份**：X11 上面板可能比应用起得晚，启动那一刻的答案会过期。
+    Q_INVOKABLE bool trayAvailable() const;
 
     // 界面此刻有没有一个窗口真的被人看着（主窗或连接/详情/更新那几个附属窗）。
     //

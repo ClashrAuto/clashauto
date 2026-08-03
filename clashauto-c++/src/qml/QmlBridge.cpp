@@ -17,6 +17,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStyleHints>
+#include <QSystemTrayIcon>
 #include <QTimer>
 #include <QVariantMap>
 #include <QWindow>
@@ -757,6 +758,11 @@ void QmlBridge::setTrafficDimension(int dim)
         return;
     m_trafficDimension = dim;
     refreshTodayTraffic();
+}
+
+bool QmlBridge::trayAvailable() const
+{
+    return QSystemTrayIcon::isSystemTrayAvailable();
 }
 
 void QmlBridge::setStatusActive(bool active)

@@ -70,7 +70,23 @@ ApplicationWindow {
     // 「关闭到托盘」设置项现只影响「启动时是否静默到托盘」（见 Component.onCompleted）。
     onClosing: (close) => {
         close.accepted = false; // 不销毁窗口，仅隐藏，供后续重开
+        // ★ 托盘不可用时**必须真退**（GNOME 40+ 默认没有系统托盘，图标根本不出现）：
+        //   否则窗口一藏就再也叫不回来 —— 退出入口只有托盘菜单一条，界面里没有第二个 ——
+        //   而程序还在后台占着系统代理，用户只剩「去杀进程」这一条路。
+        if (!bridge.trayAvailable()) {
+            Qt.quit();
+            return;
+        }
         window.hide();
+    }
+
+    // 键盘退出：mac 上是系统菜单里的 ⌘Q，Win/Linux 上原来**一个都没有**（Alt+F4 走的是 ✕ =
+    // 收窗口），退出只能去点托盘。补上平台标准键（Linux/Windows: Ctrl+Q）。
+    Shortcut {
+        // mac 上系统菜单已经有「Quit Coast ⌘Q」（Qt 自带），再绑一次是重复绑定。
+        enabled: !isMac
+        sequences: [StandardKey.Quit]
+        onActivated: Qt.quit()
     }
 
     // 所有平台都用系统原生窗（带标题栏）。mac 由 applyMacGlass 把标题栏变透明+整窗毛玻璃；
