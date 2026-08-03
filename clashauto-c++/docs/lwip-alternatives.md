@@ -43,7 +43,55 @@ Coast 的网关是 L2 ARP 投毒式的，Windows / macOS 上没有 TPROXY 这种
 | F | lwIP 分片（N 实例 / N 线程） | C | 手工分片 | 低 | 不是替换，是把 A 的结构性上限拆开 |
 | — | F-Stack / mTCP / DPDK / VPP | — | — | 不可行 | 要独占网卡 + 大页，桌面客户端上直接出局 |
 
-## 3. 测试方法
+## 3. 结论（18 轮实测汇总 · TL;DR）
+
+> 下面是给决策者的**一页纸结论**。想看某条数字怎么来的、以及中途被推翻又修正的过程，
+> 去后面「测试记录」对应的 R 轮。所有数字均在同一台 x86（8 核）用同一套 harness、每轮
+> 前置清理并验证机器空闲测得。
+
+**建议：用 smoltcp（TCP）+ phy 层裸 NAT（UDP）替换 lwIP，单进程双数据面。**
+
+同机同 harness，smoltcp 方案 vs lwIP 现状（已加固配置）逐维对比：
+
+| 维度 | lwIP（现状） | smoltcp(+NAT) | 差距 | 出处 |
+|---|---|---|---|---|
+| TCP 单条长流 | 1.13 Gbps | **4.76 Gbps** | **4.2×** | R2/R5/R9 |
+| 核/Gbps（越低越好） | 0.88 | **0.21** | 省 4.2× | R5/R9 |
+| TCP 短连接（4 KiB 对象） | 6907 obj/s | 6796 obj/s | 持平 | R10/R11 |
+| 空载往返延迟 p99 | 0.12 ms | **0.10 ms** | 略优 | R2/R9 |
+| bulk 下交互延迟 | 中位好但甩 **12 s** 尖峰 | **有界 1.3 ms** | smoltcp 稳 | R12 |
+| UDP 逐数据报 | 136905 pps | **145635 pps** | **+6%** | R13/R14 |
+| 内存（空载） | 6.6 MB | **4.1 MB** | 省 38% | R6 |
+| 崩溃韧性（加固后） | 不崩 | 不崩 | 平 | R7/R15 |
+| catch-all 任意 (IP,端口) | ✅ accept-all 补丁 | ✅ phy 端口改写 shim | 平 | R8/R9 |
+| IPv6 TCP 转发 | ✅ ip6 accept-all | ✅ 与 v4 等同 4.5 Gbps | 平 | R17 |
+| 双数据面混合满载 | — | 不崩不饿死 | — | R18 |
+
+**一句话：没有一种常见负载 lwIP 赢；smoltcp 在吞吐/效率/负载延迟/UDP/内存上领先，其余持平。**
+
+**为什么 smoltcp 赢**：lwIP 是 `NO_SYS` 单线程，单核封顶 ~1.1 Gbps 且每包处理成本高；smoltcp
+的每包路径更省（Rust、无 alloc、批量化 I/O），同样单核跑出 4× 吞吐。UDP 则不该走任何栈——
+无连接，用 phy 层裸 NAT 表最省，反超 lwIP 的栈内 UDP。
+
+**架构（要 ship 的形态）**：一个进程、一个 TAP fd、一个 poll 循环。`receive()` 里先把 UDP 帧
+用裸 NAT 表转走（内核 socket + 手工造回包帧），只把 TCP 帧交给 smoltcp；smoltcp 的 catch-all
+靠 phy 层端口改写 shim（把任意目的端口改写成一个固定监听端口，回包改回）。NAT 表 idle-timeout
+老化、上限有界、永不 unwrap。
+
+**已加固的两个资源坑（都是本探索中途踩到又修的）**：TCP 侧连接拆完立刻关上游 fd（不等
+TIME_WAIT，否则短连接 churn 撞 fd 墙，R10/R11）；UDP NAT 表 idle-timeout + 上限 + setrlimit
+（否则海量 QUIC 流耗尽 fd 崩溃 / FIFO 误杀正在播的视频，R15/R16）。
+
+**已排除**：gVisor（多核才快，单核每 Gbps 反贵 24%、延迟差、并发劣化重，R3/R6）；lwIP 加窗
+（窗口不是瓶颈，加 8× 吞吐纹丝不动，R4）；libslirp/内核栈（单核效率无翻盘空间，未细测）。
+
+**未验证（都不是选型风险）**：① **ARM 真机**——全部数据在 x86 测得，树莓派网关是真实部署目标，
+但 Pi 测试期间一直关机、两台 mac 均为 x86，此项**悬空待补**（唯一架构盲点）。② 生产落地工程：
+v6 版 shim/NAT（换 ethertype 0x86dd，同套代码）、三端二层端点（Linux AF_PACKET / mac BPF /
+Win Npcap）、接进 `NetStack` 的 `IL2Endpoint` 抽象、接真实 mihomo 出站（本探索转发到本地直连
+以隔离栈的开销）。
+
+## 3b. 测试方法
 
 ### 3.1 台子
 
