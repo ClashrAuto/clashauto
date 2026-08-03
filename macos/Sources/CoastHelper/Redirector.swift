@@ -179,8 +179,8 @@ final class Redirector: @unchecked Sendable {
             // `active == false`，`stop()` 会直接提前返回，于是这两样**永远回滚不了**。
             // 后果不是「功能失效」而是「rdr 规则继续把流量重定向到一个没人监听的端口」——
             // 正是这套设计极力避免的那种设备断网。
-            Self.writeCrashRecord(forwardingWasOn: forwardingWasOn,
-                                  forwarding6WasOn: v6Active ? forwarding6WasOn : nil)
+            writeCrashRecordFull(forwardingWasOn: forwardingWasOn,
+                                 forwarding6WasOn: v6Active ? forwarding6WasOn : nil)
             let source = DispatchSource.makeTimerSource(queue: queue)
             source.schedule(deadline: .now(), repeating: 1.0)  // 每秒重发，压过设备的正常 ARP/NDP 学习
             source.setEventHandler { [weak self] in
@@ -220,6 +220,56 @@ final class Redirector: @unchecked Sendable {
         try? text.write(toFile: crashRecordPath, atomically: true, encoding: .utf8)
     }
 
+    /// 崩溃记录的**完整版**：除两个转发开关外，再落下**重发还原 ARP 所需的一切**。
+    ///
+    /// ★ 为什么必须存这些：原来只存 `v4=`/`v6=` 两个布尔，
+    ///   `recoverFromCrashIfNeeded` 因此**只能回滚内核状态**（清 pf anchor、还原
+    ///   ip.forwarding），**没法给被投毒的设备发还原 ARP** —— 它不知道该发给谁。
+    ///   后果是 helper 崩溃/被强杀后，设备的 ARP 缓存仍指着本机 MAC 而本机已停止转发，
+    ///   **设备直接断网十几分钟**直到缓存老化 —— 正是本文件开头极力避免的那种事，
+    ///   只是崩溃路径此前漏了。Qt 线的 `healPending()` 存完整拓扑正是为此，这里对齐。
+    ///
+    /// 格式沿用逐行 `key=value`，**向后兼容**：旧记录没有 `devs=` 等字段，
+    /// 恢复时那一段自然跳过、只回滚内核状态，与今日行为一致。
+    private func writeCrashRecordFull(forwardingWasOn: Bool, forwarding6WasOn: Bool?) {
+        var text = "v4=\(forwardingWasOn ? 1 : 0)"
+        if let v6 = forwarding6WasOn { text += "\nv6=\(v6 ? 1 : 0)" }
+        text += "\nif=\(interface)"
+        text += "\ngwip=\(Self.ipv4Text(gatewayIP))"
+        text += "\ngwmac=\(gatewayMAC.text)"
+        // 设备清单：`ip|mac` 逐台、逗号分隔。deviceIPs 与 deviceMACs 下标对齐（start 里保证）。
+        let devs = zip(deviceIPs, deviceMACs)
+            .map { "\(Self.ipv4Text($0.0))|\($0.1.text)" }
+            .joined(separator: ",")
+        text += "\ndevs=\(devs)"
+        try? text.write(toFile: Self.crashRecordPath, atomically: true, encoding: .utf8)
+    }
+
+    /// `[UInt8]` → 点分十进制。`ARPPacket` 只提供了反向的 `ipv4Bytes`。
+    private static func ipv4Text(_ bytes: [UInt8]) -> String {
+        bytes.count == 4 ? bytes.map(String.init).joined(separator: ".") : ""
+    }
+
+    /// 静态版 BPF 打开 —— 崩溃恢复发生在**任何 `Redirector` 实例产生之前**，
+    /// 用不了实例方法 `openBPF`（`runPfctlStatic` 已是同样理由的先例）。
+    /// 只需要"能往这张网卡写帧"，不装收包过滤器。失败返回 nil。
+    private static func openBPFStatic(interface: String) -> Int32? {
+        for index in 0..<256 {
+            let fd = open("/dev/bpf\(index)", O_RDWR)
+            if fd < 0 { continue }
+            var ifr = ifreq()
+            let ok = withUnsafeMutableBytes(of: &ifr.ifr_name) { raw -> Bool in
+                let name = Array(interface.utf8)
+                guard name.count < raw.count else { return false }
+                raw.copyBytes(from: name)
+                return true
+            }
+            if !ok || ioctl(fd, COAST_BIOCSETIF, &ifr) < 0 { close(fd); continue }
+            return fd
+        }
+        return nil
+    }
+
     private static func clearCrashRecord() {
         try? FileManager.default.removeItem(atPath: crashRecordPath)
     }
@@ -247,6 +297,37 @@ final class Redirector: @unchecked Sendable {
         let forwarding6WasOn: Bool? = fields["v6"].map { $0 == "1" }
 
         log("检测到上次接管未正常收尾(helper 疑似崩溃/被强杀)，正在回滚内核状态")
+
+        // ★ **先把设备放回真网关，再回滚内核状态** —— 顺序要紧：
+        //   反过来的话，转发一停、接管还在，被投毒设备就卡在「网关指着一台不转发的机器」
+        //   的断网里，要等 ARP 缓存老化十几分钟才自己恢复。
+        //   记录里没有 `devs=`（旧格式记录）时整段自然跳过、只回滚内核状态，与旧行为一致。
+        if let devs = fields["devs"], !devs.isEmpty,
+           let ifname = fields["if"], !ifname.isEmpty,
+           let gwIP = fields["gwip"].flatMap(ARPPacket.ipv4Bytes),
+           let gwMAC = fields["gwmac"].flatMap(ARPPacket.MAC.init) {
+            var pairs: [([UInt8], ARPPacket.MAC)] = []
+            for item in devs.split(separator: ",") {
+                let f = item.split(separator: "|")
+                guard f.count == 2,
+                      let ip = ARPPacket.ipv4Bytes(String(f[0])),
+                      let mac = ARPPacket.MAC(String(f[1])) else { continue }
+                pairs.append((ip, mac))
+            }
+            if !pairs.isEmpty, let fd = openBPFStatic(interface: ifname) {
+                // 与 stopLocked() 里同样重发 3 轮：丢一个包就是一台设备断网十几分钟。
+                for _ in 0..<3 {
+                    for (ip, mac) in pairs {
+                        let frame = ARPPacket.reply(senderMAC: gwMAC, senderIP: gwIP,
+                                                    targetMAC: mac, targetIP: ip)
+                        _ = frame.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+                    }
+                    usleep(50_000)
+                }
+                close(fd)
+                log("已向 \(pairs.count) 台设备重发还原 ARP")
+            }
+        }
         _ = runPfctlStatic(["-a", anchorName, "-F", "all"])   // 一并清掉 v4+v6 rdr 规则
         if !forwardingWasOn { _ = setIPForwarding(false) }
         if let v6WasOn = forwarding6WasOn, !v6WasOn { _ = setIP6Forwarding(false) }

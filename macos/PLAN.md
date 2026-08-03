@@ -4116,7 +4116,7 @@ Qt 用 `GatewayPanic`（信号处理器，覆盖 SIGSEGV/BUS/ILL/FPE/ABRT，**�
 靠 XPC 的 `invalidationHandler` —— **app 被 SIGKILL 时连接照样断，立刻就能复原**，
 不必等下次启动。这一处 Swift 更好，不需要对齐。
 
-## 第九处镜像差异（**已确证，本轮未修**）：Swift 崩溃恢复不发还原 ARP
+## 第九处镜像差异（**已修复并实测**）：Swift 崩溃恢复不发还原 ARP
 
 两条线都有"helper/app 崩溃后下次启动自愈"的设施：
 Qt 是 `GatewayWorker::healPending()`，Swift 是 `Redirector.recoverFromCrashIfNeeded()`
@@ -4155,3 +4155,33 @@ Qt 是 `GatewayWorker::healPending()`，Swift 是 `Redirector.recoverFromCrashIf
 中途发现原 `writeCrashRecord` 的文本与我的替换目标不完全一致、`openBPFStatic` 也需新写，
 时间不够做完整验证。**宁可留一个证据确凿的待办，也不提交半成品。**
 工作区已还原干净（`git status` 无改动，重新编译通过）。
+
+### 修复已落地并实测（接上节）
+
+三处改动：
+1. `writeCrashRecordFull` —— 在 `v4=`/`v6=` 之外追加 `if=` / `gwip=` / `gwmac=` /
+   `devs=<ip|mac,…>`，仍是逐行 `key=value`；
+2. `openBPFStatic(interface:)` —— 恢复发生在任何 `Redirector` 实例之前，
+   实例方法 `openBPF` 用不了（`runPfctlStatic` 已是同理由的先例）。
+   常量用项目已有的 `COAST_BIOCSETIF`（`Sources/CBPF/include/cbpf.h` 桥接），
+   不要写裸 `BIOCSETIF` —— Swift 里取不到；
+3. `recoverFromCrashIfNeeded` —— **先重发还原 ARP（3 轮）再回滚内核状态**。
+   顺序要紧：反过来的话转发一停、接管还在，设备卡在断网里等 ARP 老化。
+
+**实测（最硬的判据：抓网卡上的帧）**：
+造一份含两台假设备的崩溃记录 → 跑 helper → `tcpdump` 抓发往那两个 MAC 的 ARP：
+
+```
+抓到 6 帧 = 2 台 x 3 轮   ✔ 与代码里的重发轮数一致
+7e:ea:21:4c:b7:51 > 02:00:00:00:00:30 ... Reply 192.168.20.1 is-at ...
+7e:ea:21:4c:b7:51 > 02:00:00:00:00:31 ... Reply 192.168.20.1 is-at ...
+```
+
+内容也对：把网关 IP 指回**真网关 MAC**，单播发给每台设备。
+向后兼容也验了：旧格式记录（只有 `1`）解析后 `devs` 缺失 → 整段跳过、
+只回滚内核状态，与改动前行为一致。
+
+★ **一次差点误判"修复无效"**：第一次抓包写的是 `en0`，抓到 **0 帧**。
+查下来本机活动网卡是 **`en1`**（192.168.20.14），`en0` 有链路但没 IP ——
+帧发到一张不通的网卡上，抓到 0 是合理的，**不是代码问题**。
+换 `en1` 重测立刻 6 帧。**验证网络代码前先确认自己用对了网卡。**
