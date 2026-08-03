@@ -43,6 +43,8 @@ struct WindowConfigurator: NSViewRepresentable {
     /// 是否把标题栏抬到与页面顶栏同高（挂空 toolbar）。主窗和连接窗都要 ——
     /// 它们的顶栏就钉在那条带子里。不需要的窗传 false，保持标准 28。
     var unifiesTitleBar = true
+    /// 见 `windowGlass(_:unifiesTitleBar:movableByBackground:)`。
+    var movableByBackground = false
 
     final class Coordinator {
         var tokens: [NSObjectProtocol] = []
@@ -65,6 +67,9 @@ struct WindowConfigurator: NSViewRepresentable {
         guard let window else { return }
         window.isOpaque = false
         window.backgroundColor = .clear
+        if movableByBackground {
+            window.isMovableByWindowBackground = true
+        }
         // 阴影要保留：非不透明窗口若不显式开启，macOS 会连投影一起去掉，
         // 窗口边缘会糊在桌面上，看不出这是一个独立的窗。
         window.hasShadow = true
@@ -178,10 +183,15 @@ extension View {
 
 extension View {
     /// 给整窗铺一层毛玻璃底（并把窗口本身设为透明，否则材质无效）。
+    /// `movableByBackground`：按住窗口的**非交互空白**就能拖动整窗。
+    /// 附属窗默认没有这一位（主窗是在 `WindowRestore.adopt` 里单独开的）——
+    /// 而标题栏那条带子一旦被顶栏内容占满，它就成了唯一的拖动区，不开这一位窗口拖不动。
     func windowGlass(_ material: NSVisualEffectView.Material = .sidebar,
-                     unifiesTitleBar: Bool = true) -> some View {
+                     unifiesTitleBar: Bool = true,
+                     movableByBackground: Bool = false) -> some View {
         background(VisualEffectBackground(material: material).ignoresSafeArea())
-            .background(WindowConfigurator(unifiesTitleBar: unifiesTitleBar)
+            .background(WindowConfigurator(unifiesTitleBar: unifiesTitleBar,
+                                           movableByBackground: movableByBackground)
                 .frame(width: 0, height: 0))
     }
 }

@@ -32,7 +32,7 @@ public struct AppUpdater: Sendable {
     }
 
     public enum Progress: Sendable {
-        case downloading(percent: Int)
+        case downloading(percent: Int, received: Int64, total: Int64)
         case verifying
         case installing
     }
@@ -82,14 +82,14 @@ public struct AppUpdater: Sendable {
         try? FileManager.default.removeItem(at: workDir)
         try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
 
-        let payload = try await download(urlString: asset.url) { percent in
-            onProgress(.downloading(percent: percent))
+        let payload = try await download(urlString: asset.url) { percent, received, total in
+            onProgress(.downloading(percent: percent, received: received, total: total))
         }
 
         // 校验：产物旁边的 <name>.sha256（内容是「hex 文件名」或裸 hex，取第一个词）。
         if let checksumAsset = release.assets.first(where: { $0.name == asset.name + ".sha256" }) {
             onProgress(.verifying)
-            let expectedRaw = try await download(urlString: checksumAsset.url, onProgress: { _ in })
+            let expectedRaw = try await download(urlString: checksumAsset.url, onProgress: { _, _, _ in })
             let expected = String(data: expectedRaw, encoding: .utf8)?
                 .split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
             let actual = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
@@ -177,7 +177,7 @@ public struct AppUpdater: Sendable {
     }
 
     private func download(urlString: String,
-                          onProgress: @Sendable @escaping (Int) -> Void) async throws -> Data {
+                          onProgress: @Sendable @escaping (Int, Int64, Int64) -> Void) async throws -> Data {
         let finalURL = useMirror ? "https://ghfast.top/" + urlString : urlString
         guard let url = URL(string: finalURL) else { throw UpdateError.downloadFailed("URL 非法") }
         var request = URLRequest(url: url)

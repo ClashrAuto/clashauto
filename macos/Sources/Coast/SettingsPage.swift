@@ -600,7 +600,7 @@ struct SettingsPage: View {
             message = try await updater.update { step in
                 Task { @MainActor in
                     switch step {
-                    case .downloading(let percent): geoipStatus = String(format: "下载中 %d%%".t, percent)
+                    case let .downloading(percent, _, _): geoipStatus = String(format: "下载中 %d%%".t, percent)
                     case .validating: geoipStatus = "校验中…".t
                     }
                 }
@@ -623,7 +623,7 @@ struct SettingsPage: View {
                 Task { @MainActor in
                     switch step {
                     case .checking: coreStatus = "检查中…".t
-                    case .downloading(let percent): coreStatus = String(format: "下载中 %d%%".t, percent)
+                    case let .downloading(percent, _, _): coreStatus = String(format: "下载中 %d%%".t, percent)
                     case .installing: coreStatus = "安装中…".t
                     case .done, .failed: coreStatus = "更新内核".t
                     }

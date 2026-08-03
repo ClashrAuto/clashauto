@@ -7,12 +7,14 @@ import Foundation
 /// `URLSessionDownloadTask` —— 系统直接写盘，进度由 `didWriteData` 回调给出。
 final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
 
-    private let onProgress: @Sendable (Int) -> Void
+    /// (百分比, 已下载字节, 总字节)。后两个是给界面显示「下载量/总量」与实时速度用的 ——
+    /// 只有百分比的话，那两样都算不出来。
+    private let onProgress: @Sendable (Int, Int64, Int64) -> Void
     private var continuation: CheckedContinuation<Result<Data, Error>, Never>?
     private var session: URLSession?
     private var lastPercent = -1
 
-    init(onProgress: @escaping @Sendable (Int) -> Void) {
+    init(onProgress: @escaping @Sendable (Int, Int64, Int64) -> Void) {
         self.onProgress = onProgress
         super.init()
     }
@@ -39,7 +41,7 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sen
         let percent = Int(totalBytesWritten * 100 / totalBytesExpectedToWrite)
         guard percent != lastPercent else { return }   // 只在百分比变化时回调，别每个包都刷 UI
         lastPercent = percent
-        onProgress(percent)
+        onProgress(percent, totalBytesWritten, totalBytesExpectedToWrite)
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,

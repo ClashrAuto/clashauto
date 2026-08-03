@@ -50,6 +50,10 @@ struct CoastApp: App {
         }
         .defaultSize(width: 600, height: 560)
         .keyboardShortcut(nil)
+        // 顶栏（版本号 + 三段玻璃组）钉在标题栏那条带子里，所以系统标题栏必须让位 ——
+        // 与连接窗同一处理：透明 + 内容铺满整窗（fullSizeContentView）+ 不画标题文字。
+        // 带子的**高度**由 `windowGlass(unifiesTitleBar:)` 的空 toolbar 抬到 50。
+        .windowStyle(.hiddenTitleBar)
 
         // 设备详情同理：Qt 是 600×720 的独立窗（最小 420×420），比主窗默认的 510 高得多，
         // 做成 sheet 一样会被裁。显示的永远是 `AppState.selectedDevice`（与 Qt 的

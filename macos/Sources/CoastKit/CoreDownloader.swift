@@ -15,7 +15,7 @@ public struct CoreDownloader: Sendable {
 
     public enum Progress: Sendable {
         case checking
-        case downloading(percent: Int)
+        case downloading(percent: Int, received: Int64, total: Int64)
         case installing
         case done(version: String)
         case failed(String)
@@ -197,7 +197,9 @@ public struct CoreDownloader: Sendable {
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30
 
-        let downloader = FileDownloader { percent in onProgress(.downloading(percent: percent)) }
+        let downloader = FileDownloader { percent, received, total in
+            onProgress(.downloading(percent: percent, received: received, total: total))
+        }
         switch await downloader.download(request: request,
                                          configuration: sessionConfiguration()) {
         case .success(let data):

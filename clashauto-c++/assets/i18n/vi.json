@@ -454,5 +454,9 @@
   "当前不是从 .app 运行，已打开发布页请手动安装": "Không chạy từ .app — đã mở trang phát hành, vui lòng cài đặt thủ công",
   "程序更新失败：%@": "Cập nhật ứng dụng thất bại: %@",
   "查看详情": "Xem chi tiết",
-  "忘记此设备": "Quên thiết bị này"
+  "忘记此设备": "Quên thiết bị này",
+  "当前 %@": "Hiện tại %@",
+  "最新 %@": "Mới nhất %@",
+  "获取更新": "Kiểm tra cập nhật",
+  "暂无更新说明": "Không có ghi chú phát hành"
 }

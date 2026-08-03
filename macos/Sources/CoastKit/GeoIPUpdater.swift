@@ -11,7 +11,7 @@ import Foundation
 public struct GeoIPUpdater: Sendable {
 
     public enum Progress: Sendable {
-        case downloading(percent: Int)
+        case downloading(percent: Int, received: Int64, total: Int64)
         case validating
     }
 
@@ -60,7 +60,7 @@ public struct GeoIPUpdater: Sendable {
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
 
-        onProgress(.downloading(percent: 0))
+        onProgress(.downloading(percent: 0, received: 0, total: 0))
         let data: Data
         let response: URLResponse
         do {
@@ -71,7 +71,7 @@ public struct GeoIPUpdater: Sendable {
         if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
             throw UpdateError.network("HTTP \(http.statusCode)")
         }
-        onProgress(.downloading(percent: 100))
+        onProgress(.downloading(percent: 100, received: Int64(data.count), total: Int64(data.count)))
         onProgress(.validating)
 
         let result = MmdbFile.stage(data, target: target)
