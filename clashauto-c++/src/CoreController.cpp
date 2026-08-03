@@ -510,6 +510,10 @@ void CoreController::startCore()
     }
 #endif
 
+    // ★ 收孤儿必须在**两条启动路径之前**。原先这行在下面 m_core.start() 边上，而 macOS 走
+    //   helper(root) 那条分支会提前 return —— 于是 macOS 上它从来没跑过，孤儿只增不减。
+    reapOrphanCore();
+
 #if defined(Q_OS_MACOS)
     // helper 已注册启用：以 root 起核心（这样 TUN/增强模式才能建 utun、改路由）。
     // 判定用 status()==Enabled——与 MainWindow 开启增强、状态栏显示的判定一致；不要再靠 isReady()
@@ -565,8 +569,7 @@ void CoreController::startCore()
     // but not defined: -token」→ 打印用法并以退出码 2 结束，导致核心起不来。
     m_core.setArguments({"-d", m_config.userDir, "-f", cfg});
     m_core.setWorkingDirectory(QFileInfo(exe).absolutePath());
-    reapOrphanCore(); // ★ 先收掉上一次崩溃遗留的核心，否则新核心绑不上端口（见该函数说明）
-    m_core.start();
+    m_core.start(); // 收孤儿已在本函数开头做过（两条路径共用），这里不再重复
     if (!m_core.waitForStarted(3000)) {
         emit logUpdated(tr("启动 Clash 核心失败: %1").arg(m_core.errorString()));
     } else {
@@ -603,6 +606,51 @@ void CoreController::writeCorePid(qint64 pid) const
 // pid 会被系统复用，光按 pid 杀可能误伤无辜进程。Linux/macOS 用 /proc 或 ps 核对可执行路径。
 void CoreController::reapOrphanCore()
 {
+    // ——— 第二道：按**可执行路径**扫掉所有残留，不依赖 core.pid ———
+    // core.pid 只记得住"最后一个"，而真机上孤儿是**成批**的：本机实测一次清出 9 个
+    // （ppid 全是 1、分两批相隔 18 小时、共占 326 MB、0 个网络 fd），core.pid 甚至根本
+    // 不存在 —— macOS 走 helper(root) 路径时没人写它。只靠 pid 文件这条路等于没有兜底。
+    //
+    // 判据同样要严，宁可漏杀不可误杀：只收「命令行里出现我们这份核心可执行文件的**绝对路径**」
+    // 且 **ppid == 1**（已被 init 收养 = 父进程没了 = 确实是孤儿）的进程。还活着的父进程
+    // 拉起的核心（比如用户手动跑的、或另一个正常实例）ppid 不是 1，不会被碰。
+#if defined(Q_OS_UNIX)
+    const QString exePath = QFileInfo(m_config.clashExecutable()).canonicalFilePath();
+    if (!exePath.isEmpty()) {
+        QProcess ps;
+        ps.start(QStringLiteral("ps"), {QStringLiteral("-axo"), QStringLiteral("pid=,ppid=,command=")});
+        if (ps.waitForFinished(3000)) {
+            const QStringList lines = QString::fromUtf8(ps.readAllStandardOutput()).split('\n');
+            int reaped = 0;
+            for (const QString &raw : lines) {
+                const QString ln = raw.trimmed();
+                if (ln.isEmpty() || !ln.contains(exePath))
+                    continue;
+                const QStringList f = ln.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+                if (f.size() < 3)
+                    continue;
+                bool okPid = false, okPpid = false;
+                const qint64 cpid = f.at(0).toLongLong(&okPid);
+                const qint64 cppid = f.at(1).toLongLong(&okPpid);
+                if (!okPid || !okPpid || cpid <= 0)
+                    continue;
+                if (cppid != 1)
+                    continue; // 还有活着的父进程 → 不是孤儿，别碰
+                if (cpid == QCoreApplication::applicationPid())
+                    continue; // 自保
+                ::kill(pid_t(cpid), SIGKILL);
+                ++reaped;
+            }
+            if (reaped > 0) {
+                emit logUpdated(tr("已收掉 %1 个上次异常退出遗留的内核进程").arg(reaped));
+                // 等它们真的消失，否则新核心照样绑不上端口。
+                for (int i = 0; i < 20; ++i)
+                    QThread::msleep(50);
+            }
+        }
+    }
+#endif
+
     QFile f(QDir(m_config.userDir).filePath("core.pid"));
     if (!f.open(QIODevice::ReadOnly))
         return;
