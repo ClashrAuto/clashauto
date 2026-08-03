@@ -8,6 +8,14 @@ struct CoastApp: App {
 
     init() {
         SelfTests.runIfRequested()
+        // ★ 单实例守卫要在**任何**会碰全局状态的动作之前（详见 SingleInstance）。
+        //   第二个实例不是"体验不好"，而是会让第一个实例的数据面被静默撤销、
+        //   自己的核心绑不上端口也不报错。
+        if !SingleInstance.acquire() {
+            FileHandle.standardError.write(
+                "Coast 已经在运行（单实例守卫），本次启动退出\n".data(using: .utf8)!)
+            exit(0)
+        }
         IconFont.registerAll()
     }
 
