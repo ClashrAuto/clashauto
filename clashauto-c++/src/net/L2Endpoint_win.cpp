@@ -721,6 +721,27 @@ public:
                 // 批量提交走 Packet.dll 的 PacketSendPackets（有线/WiFi 都用它，实测两种介质
                 // 都是 10~15 µs/帧且不丢帧；替代了会在 WiFi 上丢帧的 pcap_sendqueue）。
                 // COAST_GW_TXBATCH=0 → 不开 adapter，TxWorker 退回逐帧 pcap_sendpacket。
+                //
+                // ★★★ **已知真机故障：这条批量路径可能"报告成功但一帧都不上线"。**
+                //   2026-08-03 在一台 Windows（VM，模拟 Intel PRO/1000 MT，Npcap 已装）上实测：
+                //     默认（批量）  在设备侧抓包 → Windows 发出的投毒帧 **0 个**；诊断 tx=46/10s、
+                //                   txdrop=0（即 PacketSendPackets 返回成功），被接管设备**直接断网**
+                //     COAST_GW_TXBATCH=0（逐帧）→ 同一台机器、同一次抓包口径 → 投毒帧 **82 个**，
+                //                   `Reply 192.168.20.1 is-at bc:24:11:8f:4d:f1` 清清楚楚上线
+                //   已排除的干扰：① 不是 hypervisor 过滤 —— 同一抓包里 Windows **内核**发的
+                //   ICMP/ARP 都到了，而且投毒帧用的本来就是自己的源 MAC，不涉及 MAC 伪造；
+                //   ② 不是结构体不匹配 —— 本机 MinGW 下 sizeof(pcap_pkthdr)=16、caplen@8、len@12，
+                //   与 MSVC 版 Npcap 的布局一致。
+                //   → 故障就落在「独立 PacketOpenAdapter 句柄 + PacketSendPackets」这条路上。
+                //     怀疑点：这个 adapter 句柄是我们自己开的，没走 WinPcap 打开 pcap_t 时那套
+                //     初始化（PacketSetBuff/PacketSetNumWrites 等），根因**尚未坐实**。
+                //   ★ 失败形态是最坏的一种：**静默** —— 返回成功、诊断不报错、UI 仍显示"已代理"，
+                //     而被接管设备彻底断网。碰到"Windows 上开了网关设备就断网"，
+                //     **第一件事就是设 COAST_GW_TXBATCH=0 试一次**。
+                //   ★ 该怎么根治（下一步）：开 adapter 后先用批量路径发一帧**广播探针**，
+                //     在自己的收帧句柄上确认收得到，收不到就自动关掉 m_txAdapter 降级逐帧。
+                //     方向是安全的（探针漏判只损失吞吐、不损失功能），但要在一台**批量正常**的
+                //     Windows 上做正对照才敢默认开启 —— 本机只能验失败侧。
                 const PacketApi *pkt = packetApi();
                 if (pkt && !txBatchForcedOff()) {
                     m_txAdapter = pkt->openAdapter(adapter.npfName.constData());
