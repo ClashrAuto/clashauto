@@ -53,13 +53,13 @@ struct StatusPage: View {
                                 value: state.upText,
                                 accent: theme.uploadAccent,
                                 lineColor: theme.uploadLine,
-                                samples: state.bandwidthSamples.map(\.up),
+                                samples: state.bandwidthUp,
                                 tick: state.pollTick)
                     TrafficCard(glyph: "\u{EC54}", title: "下载".t, // download-2-line
                                 value: state.downText,
                                 accent: theme.downloadAccent,
                                 lineColor: theme.downloadLine,
-                                samples: state.bandwidthSamples.map(\.down),
+                                samples: state.bandwidthDown,
                                 tick: state.pollTick)
                 }
                 HStack(alignment: .top, spacing: 10) {

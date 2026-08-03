@@ -293,7 +293,15 @@ public final class AppState {
     /// 带宽图的采样序列。长度与图上的点数一致（`BandwidthChart.pointCount` = 42，
     /// 即 40 个可见 + 2 个富余）—— **横轴就是「最近 40 秒」，与 Qt 相同**。
     /// 原来留 60 拍，同样的宽度里塞 60 秒，一次尖峰看起来比 Qt 窄一截。
-    public private(set) var bandwidthSamples: [(up: Double, down: Double)] = []
+    /// 上/下行采样窗口，**拆成两个数组分别存**，不是一个元组数组。
+    ///
+    /// 原来是 `[(up:,down:)]`，状态页两张 `TrafficCard` 各自在 body 里
+    /// `bandwidthSamples.map(\.up)` / `map(\.down)` —— 每一次重排都要把整个采样窗口
+    /// 全量映射两遍。拆开存之后视图直接取数组，零映射。
+    /// （注：单独做这一项**并没有**降低开窗 CPU，见 PLAN.md 的排除表；保留是因为
+    ///   它逻辑上就该这样，且是"缩小重排波及面"这条路的必要一步。）
+    public private(set) var bandwidthUp: [Double] = []
+    public private(set) var bandwidthDown: [Double] = []
     private static let bandwidthWindow = BandwidthChart.pointCount
 
     public init() {
@@ -809,16 +817,18 @@ public final class AppState {
                 // ★ **降开窗 CPU 的正确姿势：不降频率，只是别写"没变的值"。**
                 //   这几个都是 @Observable 属性，**赋一次值就通知一次**，SwiftUI 不比较新旧 ——
                 //   把同样的 0 再写一遍，读它的视图连同父链照样整体重排一次。
-                //   `bandwidthSamples` 更贵：它被状态页两张图 `map(\.up)/map(\.down)` 读，
-                //   数组一动就是两次全量映射 + 两张图重算。`pollTick` 被状态页、设备页、
+                //   采样窗口已拆成 bandwidthUp/bandwidthDown（见其声明），视图直接取、
+                //   不再每次重排都 map。`pollTick` 被状态页、设备页、
                 //   设备详情同时读，+1 一次波及面最大。
                 //   曲线本身要求"没数据也得往前走"，所以 samples/pollTick 仍每拍推进；
                 //   但**速率文字**没变就不写 —— 空载时它恒为 0，写它纯属自费。
                 //   与本文件 `coreReachable` 那处"变了才写"是同一手法，理由也相同。
                 self.pollTick &+= 1
-                self.bandwidthSamples.append((Double(up), Double(down)))
-                if self.bandwidthSamples.count > Self.bandwidthWindow {
-                    self.bandwidthSamples.removeFirst(self.bandwidthSamples.count - Self.bandwidthWindow)
+                self.bandwidthUp.append(Double(up))
+                self.bandwidthDown.append(Double(down))
+                if self.bandwidthUp.count > Self.bandwidthWindow {
+                    self.bandwidthUp.removeFirst(self.bandwidthUp.count - Self.bandwidthWindow)
+                    self.bandwidthDown.removeFirst(self.bandwidthDown.count - Self.bandwidthWindow)
                 }
                 // 界面显示的速率与连接快照都在**这一拍、这一个 turn** 里落 ——
                 // 一秒只让 SwiftUI 重排一次（理由见 `upText` 上的注释）。
