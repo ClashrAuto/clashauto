@@ -433,6 +433,7 @@ public final class AppState {
     public func start() {
         clash.start()
         startBandwidthSampling()
+        startHistoryFlush()
         startTodayTrafficRefresh()
         applySystemAppearanceIfNeeded()   // 启动时若跟随系统,先对齐一次
         startSystemAppearanceObserver()   // 之后系统外观变了也跟上
@@ -791,6 +792,31 @@ public final class AppState {
 
     /// 今日流量卡的刷新。**不跟着每秒轮询走** —— 那是几条 GROUP BY 聚合查询，
     /// 每秒跑一次纯属浪费；这张卡的数字慢几秒没有任何影响。
+    /// 历史库的**周期性落盘**（5s，与 Qt 线的 `HistoryStore::m_flushTimer` 同周期）。
+    ///
+    /// ★ 没有这条，历史记录会**整批丢失**：`HistoryStore` 原本只有两个落盘时机 ——
+    ///   ① 待写缓冲攒够 `flushThreshold`（64 条）；② `AppState.shutdown()` 里那次
+    ///   `flush(includingLive: true)`。而 ② 只在**优雅退出**时走到：崩溃、被 SIGKILL、
+    ///   强制退出都不会执行。于是"这一轮攒了不到 64 条就异常退出"= 那批浏览史**永久丢失**。
+    ///   而历史库正是「昨天访问过什么」的**唯一**来源（界面上那些会话累计在窗口隐藏时
+    ///   就停了，只有它是完整的账），丢了补不回来。
+    ///
+    ///   真机实测暴露的过程：造真实流量后历史库**新增 0 条**，一度怀疑是刚加的
+    ///   「0 字节不入库」过滤误伤；做了对照实验（临时回退过滤、同样流程）——
+    ///   **同样是 0 条**，才排除过滤、定位到"根本没 flush 过"。
+    ///   Qt 线一直有 5s 定时 flush，这是第十一处镜像差异。
+    private func startHistoryFlush() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self else { return }
+                // 只落已断开的那批（includingLive: false）—— 在途连接留到退出时再落，
+                // 否则一条长连接会被反复写成多条残缺记录。
+                self.history.flush()
+            }
+        }
+    }
+
     private func startTodayTrafficRefresh() {
         Task { [weak self] in
             while !Task.isCancelled {
