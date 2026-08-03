@@ -78,7 +78,8 @@ public:
     /// 运行时增删即时生效，不需要重装规则、更不需要重启核心——实测过。
     /// macs 是同一批设备的 MAC（形如 aa:bb:cc:dd:ee:ff）。**必须一起给**：v6 兜底丢弃链按 MAC
     /// 匹配（tproxy 下不学设备的 v6 地址，MAC 才是稳定的抓手），漏了它 = IPv6 绕过策略。
-    bool syncDevices(const QStringList &ipv4, const QStringList &macs, QString *err = nullptr);
+    bool syncDevices(const QStringList &ipv4, const QStringList &macs, QString *err = nullptr,
+                     const QStringList &ipv6 = {});
 
     /// 更新「局域网隔离」集合：policy=reject 的设备 IP，以及本机各网卡的网段。
     ///
@@ -114,6 +115,7 @@ private:
     //   route_localnet 那条尤其危险（裸露本机回环服务）。存档是崩溃安全的唯一真相。
     //   这两个成员只作 remove() 的「装过没」哨兵短暂留用，真正的还原走 sysctlStateRestoreAll()。
     QString m_savedIpForward;
+    QString m_savedIpForward6; // v6 转发原值（v6 规则补齐后才开，见 install）
     QString m_savedRouteLocalnet;
     void saveAndDisableRedirects(); // 逐网卡关 send_redirects，原值进 /run 存档
     // 往 iptables 侧插/删「放行本网关转发」的 ACCEPT。**不能只靠 nft 的 forward_accept 链**：

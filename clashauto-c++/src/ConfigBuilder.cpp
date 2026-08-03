@@ -692,7 +692,11 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
     if (m_config.gatewayTproxy) {
         block += "  - name: coast-tproxy\n";
         block += "    type: tproxy\n";
-        block += "    listen: 0.0.0.0\n";
+        // ★ `::` 而不是 `0.0.0.0`：Linux 的双栈套接字（net.ipv6.bindv6only=0，发行版默认）
+        //   一个 `::` 监听同时收 v4 与 v6，v4 连接以 ::ffff:a.b.c.d 形式到达。写 0.0.0.0 则
+        //   **只收 v4**，v6 的 TPROXY 投递会因无监听而失败——这是 v6 走 TPROXY 的第一个必要条件
+        //   （另一半是 TproxyRules 里那套 ip6 规则 + v6 策略路由）。
+        block += "    listen: '::'\n";
         block += QString("    port: %1\n").arg(DeviceStore::kTproxyPort);
     }
 

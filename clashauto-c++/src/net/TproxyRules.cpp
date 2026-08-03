@@ -147,6 +147,17 @@ void TproxyRules::removeStale()
     }
     run(QStringLiteral("ip"), {QStringLiteral("route"), QStringLiteral("flush"),
                                QStringLiteral("table"), QStringLiteral("99")});
+    // v6 侧同样可能有残留（kill -9 之后），独立删一遍
+    for (int i = 0; i < 4; ++i) {
+        if (run(QStringLiteral("ip"), {QStringLiteral("-6"), QStringLiteral("rule"),
+                                       QStringLiteral("del"), QStringLiteral("fwmark"),
+                                       QStringLiteral("0x1"), QStringLiteral("lookup"),
+                                       QStringLiteral("99")}) != 0)
+            break;
+    }
+    run(QStringLiteral("ip"), {QStringLiteral("-6"), QStringLiteral("route"),
+                               QStringLiteral("flush"), QStringLiteral("table"),
+                               QStringLiteral("99")});
     // iptables 侧那条放行也要清 —— 它按 comment 找，静态调用也删得掉（kill -9 之后就靠这个）。
     TproxyRules().removeIptablesForward();
     // sysctl 的崩溃恢复：把上次改动过的 ip_forward / route_localnet / 逐网卡 send_redirects
@@ -195,6 +206,8 @@ table inet %1 {
     type filter hook forward priority filter - 10; policy accept;
     ip saddr @proxied counter accept
     ip daddr @proxied counter accept
+    ip6 saddr @proxied6 counter accept
+    ip6 daddr @proxied6 counter accept
   }
 }
 )")
@@ -360,6 +373,16 @@ bool TproxyRules::install(const Spec &spec, QString *err)
     // 在 v6 规则补齐之前，正确的取向是 fail-closed：宁可让被代理设备的 v6 不通，也不能让它
     // 绕过策略出去。双栈客户端有 Happy Eyeballs，v6 不通会自动回落 v4，影响可控；
     // 而"策略被静默绕过"是不可接受的。
+    //
+    // ★ 2026-08-03：v6 规则已补齐（proxied6 集合 + prerouting6 链 + ip -6 策略路由 +
+    //   forward_accept 的 v6 两条 + listener 改听 `::`），所以现在**可以**打开 v6 转发了。
+    //   顺序很要紧：必须先有 prerouting6 把被接管设备的 v6 截给核心，再开转发；反过来就是
+    //   上面描述的那个安全洞。v6guard 仍然留着 —— 它兜住「劫持已生效、但该设备的 v6 地址还没
+    //   被学到（尚未进 proxied6）」那个窗口，此时依旧 fail-closed 丢弃，不放行。
+    //   原值同样落盘存档，崩溃后能还原（与 ip_forward / route_localnet 同一套机制）。
+    m_savedIpForward6 = sysctlRead(QStringLiteral("net.ipv6.conf.all.forwarding"));
+    sysctlStateSave(QStringLiteral("net.ipv6.conf.all.forwarding"), m_savedIpForward6);
+    sysctlWrite(QStringLiteral("net.ipv6.conf.all.forwarding"), QStringLiteral("1"));
     if (m_spec.dnsPort != 0) {
         // route_localnet：允许把包路由到 127.0.0.0/8。DNS 劫持那条 dnat 到回环，没有它内核会把
         // 改写后的包当 martian 丢掉。
@@ -390,6 +413,19 @@ bool TproxyRules::install(const Spec &spec, QString *err)
         remove(); // 不留半成品
         return false;
     }
+    // IPv6 的策略路由：v4/v6 在内核里是**两套独立的规则表**，`ip rule` 加的只对 v4 生效，
+    // v6 必须再来一遍 `ip -6 rule`。少了它，prerouting6 打了 mark 的包照样会被转发出去、
+    // 到不了核心监听，表现为「v6 规则命中了但连接不通」。
+    // 失败**不致命**：这台机器可能压根没有 v6（无 v6 地址/内核关了 v6），那时 v6 本来就无从谈起，
+    // 而 v4 已经配好了，不该因此把整条数据面拆掉。失败时 v6 仍由 v6guard 兜底丢弃（fail-closed）。
+    if (!runIp({QStringLiteral("-6"), QStringLiteral("rule"), QStringLiteral("add"),
+                QStringLiteral("fwmark"), mark, QStringLiteral("lookup"), table})
+        || !runIp({QStringLiteral("-6"), QStringLiteral("route"), QStringLiteral("add"),
+                   QStringLiteral("local"), QStringLiteral("default"), QStringLiteral("dev"),
+                   QStringLiteral("lo"), QStringLiteral("table"), table})) {
+        std::fprintf(stderr, "[TPROXY] IPv6 策略路由未配上，v6 将继续被 fail-closed 丢弃\n");
+        std::fflush(stderr);
+    }
 
     // —— 主表 ——
     //  set proxied：被代理设备的 IPv4。**空集合时下面的规则一条都不会命中**，等价于「没开代理」，
@@ -403,6 +439,10 @@ table inet %1 {
     type ipv4_addr
     flags interval
   }
+  set proxied6 {
+    type ipv6_addr
+    flags interval
+  }
   set victimmacs {
     type ether_addr
   }
@@ -414,7 +454,18 @@ table inet %1 {
     flags interval
   }
   chain v6guard {
+    # 被劫持设备的 IPv6 **兜底**：走到这里说明 prerouting6 没把它 tproxy 走（即该设备的 v6
+    # 地址还没进 proxied6 集合 —— NdpSpoofer 刚把它的默认路由指过来、但我们还没学到它的
+    # 全局地址）。这种「劫持已生效、接管尚未生效」的窗口必须 fail-closed 丢弃：放行就等于
+    # 让它绕过代理与每设备策略直连出网，连「禁网」都形同虚设（真机验证过这个洞）。
+    # 注意：真正被接管的 v6 在 prerouting6 里已 accept，根本到不了这条。
+    # ★ 先放行**已接管设备**的 v6（源地址已在 proxied6 里）。它们的 TCP/UDP 早在 prerouting6
+    #   被 tproxy 截走、根本到不了这里；能走到这条的是 **ICMPv6 等非 TCP/UDP 流量**，那些本就
+    #   该像 v4 的 ICMP 一样交给内核转发。少了这条放行，被接管设备的 ping6 会被下面的兜底全丢
+    #   （真机实测：ping6 5 个包、v6guard 计数正好 +5，而 lwIP 模式下 ping6 是通的 —— 属回归）。
     type filter hook forward priority filter - 30; policy accept;
+    ip6 saddr @proxied6 counter accept
+    ip6 daddr @proxied6 counter accept
     ether saddr @victimmacs meta nfproto ipv6 counter drop
   }
   chain isolate {
@@ -438,6 +489,20 @@ table inet %1 {
     script += QStringLiteral(
                   "    ip saddr @proxied meta l4proto { tcp, udp } counter meta mark set %1 "
                   "tproxy ip to :%2 accept\n  }\n")
+                  .arg(mark)
+                  .arg(m_spec.tproxyPort);
+    // ── IPv6 的 TPROXY：与上面 v4 那条完全对称，只是 `tproxy ip6 to` + 走 proxied6 集合 ──
+    //   没有这一段时 v6 会被 v6guard 无条件丢弃 —— 而 lwIP 那条路**是支持 v6 的**（NdpSpoofer
+    //   + NetStack::addDeviceV6），真机实测被劫持设备 v6 正常（ipv6.baidu.com 200、ping6 公网
+    //   0% 丢包）。所以少了它，TPROXY 相对 lwIP 就是**功能回归**，也就没法把 TPROXY 设成默认。
+    //   DNS 同样要先 return，避免被 tproxy 再截一次（与 v4 同理）。
+    script += QStringLiteral("  chain prerouting6 {\n"
+                             "    type filter hook prerouting priority mangle; policy accept;\n");
+    if (m_spec.dnsPort != 0)
+        script += QStringLiteral("    ip6 saddr @proxied6 udp dport 53 return\n");
+    script += QStringLiteral(
+                  "    ip6 saddr @proxied6 meta l4proto { tcp, udp } counter meta mark set %1 "
+                  "tproxy ip6 to :%2 accept\n  }\n")
                   .arg(mark)
                   .arg(m_spec.tproxyPort);
     if (m_spec.dnsPort != 0) {
@@ -475,7 +540,8 @@ table inet %1 {
     return true;
 }
 
-bool TproxyRules::syncDevices(const QStringList &ipv4, const QStringList &macs, QString *err)
+bool TproxyRules::syncDevices(const QStringList &ipv4, const QStringList &macs, QString *err,
+                              const QStringList &ipv6)
 {
     if (!m_installed) {
         if (err)
@@ -484,11 +550,18 @@ bool TproxyRules::syncDevices(const QStringList &ipv4, const QStringList &macs, 
     }
     // 整体替换而不是逐个增删：调用方给的是「当前应当被代理的全集」，逐个 diff 既容易漏、
     // 也会在中间态出现「刚删掉又加回来」的抖动（那一瞬间设备会断一下）。
-    QString script = QStringLiteral("flush set inet %1 proxied\nflush set inet %1 victimmacs\n")
+    QString script = QStringLiteral("flush set inet %1 proxied\nflush set inet %1 proxied6\n"
+                                    "flush set inet %1 victimmacs\n")
                          .arg(QString::fromLatin1(kTable));
     if (!ipv4.isEmpty()) {
         script += QStringLiteral("add element inet %1 proxied { %2 }\n")
                       .arg(QString::fromLatin1(kTable), ipv4.join(QStringLiteral(", ")));
+    }
+    // v6 地址集合：空也没关系 —— 那时 prerouting6 一条都不命中，v6 由 v6guard 兜底丢弃，
+    // 与补 v6 之前的行为完全一致（fail-closed），不会因为「还没学到 v6 地址」而放行。
+    if (!ipv6.isEmpty()) {
+        script += QStringLiteral("add element inet %1 proxied6 { %2 }\n")
+                      .arg(QString::fromLatin1(kTable), ipv6.join(QStringLiteral(", ")));
     }
     if (!macs.isEmpty()) {
         script += QStringLiteral("add element inet %1 victimmacs { %2 }\n")
@@ -533,6 +606,11 @@ void TproxyRules::remove()
                                QStringLiteral("fwmark"), mark, QStringLiteral("lookup"), table});
     run(QStringLiteral("ip"), {QStringLiteral("route"), QStringLiteral("flush"),
                                QStringLiteral("table"), table});
+    // v6 那套是独立的规则表，必须单独删（v4 的 `ip rule del` 删不掉它）
+    run(QStringLiteral("ip"), {QStringLiteral("-6"), QStringLiteral("rule"), QStringLiteral("del"),
+                               QStringLiteral("fwmark"), mark, QStringLiteral("lookup"), table});
+    run(QStringLiteral("ip"), {QStringLiteral("-6"), QStringLiteral("route"),
+                               QStringLiteral("flush"), QStringLiteral("table"), table});
     // 三个 sysctl（ip_forward / route_localnet / 逐网卡 send_redirects）统一从 /run 存档还原。
     // 不再各自留成员变量：存档是唯一真相，且能跨 SIGKILL（那时本对象根本不会被析构）。
     sysctlStateRestoreAll();
@@ -645,7 +723,8 @@ bool TproxyRules::install(const Spec &, QString *err)
         *err = QStringLiteral("TPROXY 仅 Linux 可用");
     return false;
 }
-bool TproxyRules::syncDevices(const QStringList &, const QStringList &, QString *err)
+bool TproxyRules::syncDevices(const QStringList &, const QStringList &, QString *err,
+                              const QStringList &)
 {
     if (err)
         *err = QStringLiteral("TPROXY 仅 Linux 可用");

@@ -49,6 +49,7 @@
 #include <QJsonObject>
 #include <QMutex>
 #include <QNetworkInterface>
+#include <QProcess>
 #include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
@@ -359,10 +360,49 @@ void GatewayWorker::syncTproxyDevices()
     macs.reserve(m_victimMacStr.size());
     for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it) {
         ips.append(it.key());       // 这张表是 ip → mac
-        macs.append(it.value());    // v6 兜底丢弃按 MAC 匹配（tproxy 下不学设备 v6 地址）
+        macs.append(it.value());    // v6guard 兜底丢弃按 MAC 匹配（见 TproxyRules 那条链）
     }
+    // 被接管设备的 IPv6 全局地址 → proxied6 集合，让 prerouting6 把它们 tproxy 给核心。
+    // 地址来源与 lwIP 那条路完全相同（m_victimV6ByMac，由 learnDeviceV6 从设备自己的帧里学），
+    // 所以两条数据面对「哪些 v6 属于被接管设备」的认知是一致的。
+    // ★ 还没学到 v6 地址的设备不会进这个集合 —— 那一瞬间它的 v6 由 v6guard 兜底丢弃
+    //   （fail-closed），不会在「劫持已生效、接管未生效」的窗口里绕过代理直连出网。
+    QStringList ip6s;
+    for (auto it = m_victimV6ByMac.constBegin(); it != m_victimV6ByMac.constEnd(); ++it)
+        for (const QString &a : it.value())
+            if (!a.isEmpty())
+                ip6s.append(a);
+    // ★ 从**内核邻居表**补种。learnDeviceV6 只在设备主动发 v6 帧时才学得到，所以进程重启后
+    //   m_victimV6ByMac 是空的 —— 在设备下次发 v6 之前，它的 v6 会一直被 v6guard 丢弃
+    //   （真机实测：重启后 proxied6 为空、普通设备 curl -6 = 000，而 lwIP 模式下是通的）。
+    //   而内核的 `ip -6 neigh` 里本来就存着「v6 地址 ↔ MAC」，且是我们已接管设备的 MAC，
+    //   拿来播种既准确又即时，把这个启动窗口关掉。学习路径照旧保留（覆盖邻居表还没有的地址）。
+    {
+        QSet<QString> victimMacs;
+        for (auto it = m_victimMacStr.constBegin(); it != m_victimMacStr.constEnd(); ++it)
+            victimMacs.insert(it.value().toLower());
+        QProcess p;
+        p.start(QStringLiteral("ip"), {QStringLiteral("-6"), QStringLiteral("neigh"),
+                                       QStringLiteral("show")});
+        if (p.waitForFinished(3000)) {
+            const QStringList lines =
+                    QString::fromUtf8(p.readAllStandardOutput()).split(QLatin1Char('\n'),
+                                                                      Qt::SkipEmptyParts);
+            for (const QString &l : lines) {
+                const QStringList f = l.simplified().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+                if (f.size() < 5 || f.at(0).startsWith(QStringLiteral("fe80")))
+                    continue; // 链路本地不进集合：它出不了本网段，进去只会白占
+                const int li = f.indexOf(QStringLiteral("lladdr"));
+                if (li < 0 || li + 1 >= f.size())
+                    continue;
+                if (victimMacs.contains(f.at(li + 1).toLower()))
+                    ip6s.append(f.at(0));
+            }
+        }
+    }
+    ip6s.removeDuplicates();
     QString err;
-    if (!m_tproxy.syncDevices(ips, macs, &err))
+    if (!m_tproxy.syncDevices(ips, macs, &err, ip6s))
         emit deviceError(QString(), QStringLiteral("TPROXY 设备集合更新失败: ") + err);
 
     // 局域网隔离（policy=reject）：被隔离设备的 IP + 本机各网卡的网段。
@@ -668,10 +708,14 @@ void GatewayWorker::learnDeviceV4(GwNic *n, const uchar *f, const QByteArray &fr
 
 void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &frame)
 {
-    // tproxy 模式下**故意**不学 v6：现在的 nft 规则只覆盖 IPv4（见 TproxyRules），学了也没处用。
-    // 等 v6 规则补上之后，这里要改成「学到就同步进 nft 的 v6 集合」，而不是继续沿用 m_net 判据。
-    if (m_datapath.tproxy || !m_net || frame.size() < 14 + 40)
+    // 两条数据面都要学 v6：lwIP 用它注册 NetStack 设备；tproxy 用它填 nft 的 proxied6 集合
+    // （下面结尾处 syncTproxyDevices()）。此前 tproxy 这条是直接 return 的——那时 nft 只有 v4
+    // 规则、学了没处用；现在 prerouting6 已经补上，再不学就等于 v6 永远进不了 proxied6、
+    // 一直被 v6guard 兜底丢弃，TPROXY 相对 lwIP 就成了功能回归。
+    if (frame.size() < 14 + 40)
         return;
+    if (!m_datapath.tproxy && !m_net)
+        return; // lwIP 模式下栈还没起来，学了也无处注册
     const uchar *src = f + 14 + 8; // IPv6 源地址
     if (!ip6SrcIsRoutable(src))
         return;
@@ -690,9 +734,10 @@ void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &fr
     //   一台设为「禁网」的设备，它的 v6 地址是这里学到的，注册时丢了 reject，
     //   NetStack 的 handleUdpFrame6 就查不到 dev.reject → **该设备的 IPv6 UDP 不被拦截**，
     //   「禁网」在 v6 上静默失效。而这条路径只在设备真发 v6 流量时才走，真机极难覆盖到。
-    if (!m_net) // tproxy 模式没有用户态栈：设备身份由原始源 IP 承载,不需要在这里登记
-        return;
-    if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
+    // ★ 这里**不能** `if (!m_net) return;`：tproxy 模式下 m_net 恒为空，早退会让下面的
+    //   set.insert(ip6) 永远不执行 → m_victimV6ByMac 一直是空 → proxied6 集合永远为空 →
+    //   设备的 v6 全被 v6guard 丢掉。lwIP 专属的注册跳过即可，登记与同步必须照常走完。
+    if (m_net) { // lwIP：把这条 v6 注册进用户态栈（设备身份 + reject 一并带上）
         m_net->addDeviceV6(n->ep, ip6, mb, m_victimUserByMac.value(vkey),
                            m_isolatedMacs.contains(vkey));
     }
@@ -704,6 +749,10 @@ void GatewayWorker::learnDeviceV6(GwNic *n, const uchar *f, const QByteArray &fr
         n->watch->addVictimV6(macStr, ip6); // 也让监视器能检测「这台设备的 v6 被别人投毒」
     }
     set.insert(ip6);
+    // tproxy：新学到的 v6 立刻推进 nft 的 proxied6，否则要等下一次设备增删才生效，
+    // 中间这段时间该地址一直被 v6guard 丢弃（表现为「设备 v6 时通时不通」）。
+    if (m_datapath.tproxy)
+        syncTproxyDevices();
     if (gwDbgOn())
         std::fprintf(stderr, "[GW] learned device v6 %s\n", ip6.toLatin1().constData()),
             std::fflush(stderr);
