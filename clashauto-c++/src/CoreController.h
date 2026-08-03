@@ -57,6 +57,10 @@ signals:
 private:
     void startProxy();
     void stopProxy();
+    /// 启动自愈：上一次会话被强杀/崩溃时来不及还原系统代理，会把整机流量指向一个
+    /// **已经没人监听**的本机端口 —— 用户表现为"什么都打不开"，且完全无从得知原因。
+    /// 与 TproxyRules::removeStale() 同一模式：进程起来后先把上一世的残留擦干净。
+    void clearStaleSystemProxy();
     void reloadConfig();
     void putConfigs(); // reloadConfig 的第二段：校验通过后真正 PUT /configs（异步回调里调）
 

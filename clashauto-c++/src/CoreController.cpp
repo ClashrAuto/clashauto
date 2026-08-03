@@ -1,4 +1,7 @@
 #include "CoreController.h"
+#include <QTcpSocket>
+#include <QHostAddress>
+#include <cstring>
 
 #include "MmdbFile.h"
 
@@ -228,6 +231,9 @@ CoreController::CoreController(AppConfig config, QObject *parent)
         a->flags |= kCreateNoWindow;
     });
 #endif
+    // ★ 先擦上一世的残留系统代理（详见 clearStaleSystemProxy）。必须在**任何**启动动作之前：
+    //   我们自己接下来若要开代理，会把它重新设成正确值；若不开，用户至少能正常上网。
+    clearStaleSystemProxy();
     // mihomo 的 stdout/stderr 是 UTF-8：必须用 fromUtf8，否则中文 Windows 会按 GBK 解码成乱码
     connect(&m_core, &QProcess::readyReadStandardOutput, this, [this] {
         const QString output = QString::fromUtf8(m_core.readAllStandardOutput()).trimmed();
@@ -870,6 +876,137 @@ void CoreController::startProxy()
     m_sysproxyActive = true;
     emit logUpdated("Start sysproxy ok!");
 #endif
+}
+
+void CoreController::clearStaleSystemProxy()
+{
+    // 上一次会话若是被强杀（任务管理器、OOM、崩溃、断电后残留的注册表/偏好设置），
+    // aboutToQuit → stopCore → stopProxy 这条还原链根本没机会跑，系统代理就留在了
+    // "指向 127.0.0.1:<mixedPort>" 的状态。而这一世的 m_sysproxyActive 是 false，
+    // stopProxy() 开头那个 early-return 会直接跳过还原 —— 于是残留**永远**擦不掉。
+    //
+    // 用户看到的现象是「整机什么都打不开」：所有走系统代理的程序（浏览器、商店、更新）
+    // 都往一个没人监听的端口发，秒拒或超时，而且完全无从得知原因。真机两端都撞到过：
+    //   Windows 2026-08-04：ProxyEnable=1 → 127.0.0.1:7890，端口无人监听，
+    //                       curl 全部超时；把它关掉后直连基线立刻恢复正常(80~101ms)。
+    //   macOS   2026-08-04：networksetup 显示 Wi-Fi 的 web/secure 代理都 Enabled: Yes
+    //                       → 127.0.0.1:7890，而 Coast 与核心都没在跑（code=000，0.3ms 即拒）。
+    //
+    // 判据必须**两个条件同时成立**才动手，否则会误删用户自己配的公司代理：
+    //   ① 系统代理指向本机回环地址，且端口 == 我们自己的 mixedPort；
+    //   ② 该端口当前**没有任何进程在监听**（我们的核心确实不在）。
+    // 满足则说明这是我们上一世漏下的，安全清除。任何一条不满足就原样不动。
+    const quint16 port = static_cast<quint16>(m_config.mixedPort);
+    if (port == 0)
+        return;
+    // 条件②：能连上就说明有人在听（可能是用户手动起的核心），一律不动。
+    {
+        QTcpSocket probe;
+        probe.connectToHost(QHostAddress::LocalHost, port);
+        if (probe.waitForConnected(150)) {
+            probe.abort();
+            return;
+        }
+    }
+    bool cleared = false;
+#if defined(Q_OS_WIN)
+    // 读当前 WinINET 设置，只在「已启用且代理串正是我们那个 host:port」时才关。
+    INTERNET_PER_CONN_OPTION_LISTW list{};
+    INTERNET_PER_CONN_OPTIONW opts[2]{};
+    opts[0].dwOption = INTERNET_PER_CONN_FLAGS;
+    opts[1].dwOption = INTERNET_PER_CONN_PROXY_SERVER;
+    list.dwSize = sizeof(list);
+    list.pszConnection = nullptr;
+    list.dwOptionCount = 2;
+    list.pOptions = opts;
+    DWORD sz = sizeof(list);
+    if (InternetQueryOptionW(nullptr, INTERNET_OPTION_PER_CONNECTION_OPTION, &list, &sz)) {
+        const bool proxyOn = (opts[0].Value.dwValue & PROXY_TYPE_PROXY) != 0;
+        const QString cur = opts[1].Value.pszValue
+                                ? QString::fromWCharArray(opts[1].Value.pszValue)
+                                : QString();
+        const QString mine = QStringLiteral("127.0.0.1:%1").arg(port);
+        if (proxyOn && cur.contains(mine)) {
+            INTERNET_PER_CONN_OPTIONW off[1]{};
+            off[0].dwOption = INTERNET_PER_CONN_FLAGS;
+            off[0].Value.dwValue = PROXY_TYPE_DIRECT;
+            INTERNET_PER_CONN_OPTION_LISTW offList{};
+            offList.dwSize = sizeof(offList);
+            offList.pszConnection = nullptr;
+            offList.dwOptionCount = 1;
+            offList.pOptions = off;
+            if (InternetSetOptionW(nullptr, INTERNET_OPTION_PER_CONNECTION_OPTION, &offList,
+                                   sizeof(offList))) {
+                InternetSetOptionW(nullptr, INTERNET_OPTION_SETTINGS_CHANGED, nullptr, 0);
+                InternetSetOptionW(nullptr, INTERNET_OPTION_REFRESH, nullptr, 0);
+                cleared = true;
+            }
+        }
+        if (opts[1].Value.pszValue)
+            GlobalFree(opts[1].Value.pszValue);
+    }
+#elif defined(Q_OS_MACOS)
+    // networksetup 读当前服务的代理；命中我们的 host:port 才关。用 -listallnetworkservices
+    // 逐个服务处理（Wi-Fi / Ethernet / Thunderbolt Bridge 名字因机器而异，不能写死 "Wi-Fi"）。
+    QProcess ls;
+    ls.start(QStringLiteral("networksetup"), {QStringLiteral("-listallnetworkservices")});
+    if (ls.waitForFinished(5000)) {
+        const QStringList svcs = QString::fromUtf8(ls.readAllStandardOutput()).split('\n');
+        for (const QString &raw : svcs) {
+            const QString svc = raw.trimmed();
+            // 首行是说明文字；带 * 前缀的是被禁用的服务，都跳过。
+            if (svc.isEmpty() || svc.startsWith('*') || svc.contains(QLatin1String("denotes that")))
+                continue;
+            for (const char *getter : {"-getwebproxy", "-getsecurewebproxy"}) {
+                QProcess q;
+                q.start(QStringLiteral("networksetup"),
+                        {QString::fromLatin1(getter), svc});
+                if (!q.waitForFinished(5000))
+                    continue;
+                const QString out = QString::fromUtf8(q.readAllStandardOutput());
+                if (!out.contains(QLatin1String("Enabled: Yes")))
+                    continue;
+                if (!out.contains(QStringLiteral("Port: %1").arg(port)))
+                    continue; // 端口不是我们的 → 用户自己配的，不动
+                const char *setter = (std::strcmp(getter, "-getwebproxy") == 0)
+                                         ? "-setwebproxystate"
+                                         : "-setsecurewebproxystate";
+                QProcess off;
+                off.start(QStringLiteral("networksetup"),
+                          {QString::fromLatin1(setter), svc, QStringLiteral("off")});
+                if (off.waitForFinished(5000) && off.exitCode() == 0)
+                    cleared = true;
+            }
+        }
+    }
+#else
+    // Linux：gsettings。同样只在 mode=manual 且端口是我们的时候才回到 none。
+    QProcess mode;
+    mode.start(QStringLiteral("gsettings"),
+               {QStringLiteral("get"), QStringLiteral("org.gnome.system.proxy"),
+                QStringLiteral("mode")});
+    if (mode.waitForFinished(5000)
+        && QString::fromUtf8(mode.readAllStandardOutput()).contains(QLatin1String("manual"))) {
+        QProcess p;
+        p.start(QStringLiteral("gsettings"),
+                {QStringLiteral("get"), QStringLiteral("org.gnome.system.proxy.http"),
+                 QStringLiteral("port")});
+        if (p.waitForFinished(5000)
+            && QString::fromUtf8(p.readAllStandardOutput()).trimmed()
+                   == QString::number(port)) {
+            QProcess off;
+            off.start(QStringLiteral("gsettings"),
+                      {QStringLiteral("set"), QStringLiteral("org.gnome.system.proxy"),
+                       QStringLiteral("mode"), QStringLiteral("none")});
+            if (off.waitForFinished(5000) && off.exitCode() == 0)
+                cleared = true;
+        }
+    }
+#endif
+    if (cleared) {
+        emit logUpdated(
+            tr("已清除上次异常退出残留的系统代理（127.0.0.1:%1 无人监听）").arg(port));
+    }
 }
 
 void CoreController::stopProxy()
