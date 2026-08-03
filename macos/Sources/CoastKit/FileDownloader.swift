@@ -21,17 +21,32 @@ final class FileDownloader: NSObject, URLSessionDownloadDelegate, @unchecked Sen
 
     /// 下载完成后把内容读进内存返回。内核包只有十几 MB，读进来比在多处传临时文件路径省事；
     /// 真要下几百 MB 的东西时应该改成返回 URL。
+    /// ★ **必须响应任务取消**：界面上那颗「结束下载」按下时取消的是外层的 `Task`，而
+    ///   `withCheckedContinuation` 本身不会因此恢复 —— 不接这一条的话，URLSession 会**照旧
+    ///   把整个包下完**（几十 MB 白流），期间那条 async 函数一直挂着，用户点了「结束」却什么
+    ///   都没停下。`withTaskCancellationHandler` 里把 session 作废，delegate 随即以
+    ///   `NSURLErrorCancelled` 收尾，继续走正常的 `finish` 路径。
     func download(request: URLRequest, configuration: URLSessionConfiguration) async -> Result<Data, Error> {
-        await withCheckedContinuation { continuation in
-            let queue = OperationQueue()
-            queue.maxConcurrentOperationCount = 1
-            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
-            queue.addOperation {
-                self.continuation = continuation
-                self.session = session
-                session.downloadTask(with: request).resume()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let queue = OperationQueue()
+                queue.maxConcurrentOperationCount = 1
+                let session = URLSession(configuration: configuration, delegate: self, delegateQueue: queue)
+                queue.addOperation {
+                    self.continuation = continuation
+                    self.session = session
+                    session.downloadTask(with: request).resume()
+                }
             }
+        } onCancel: {
+            cancel()
         }
+    }
+
+    /// 立刻中断在途下载。作废 session 会让 delegate 收到取消错误，`finish` 那条路照走，
+    /// continuation 不会悬着。
+    func cancel() {
+        session?.invalidateAndCancel()
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,

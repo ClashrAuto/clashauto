@@ -459,5 +459,7 @@
   "当前 %@": "Current %@",
   "最新 %@": "Latest %@",
   "获取更新": "Check for updates",
-  "暂无更新说明": "No release notes"
+  "暂无更新说明": "No release notes",
+  "已取消下载": "Download canceled",
+  "结束下载": "Stop download"
 }

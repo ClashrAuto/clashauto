@@ -203,6 +203,8 @@ extension View {
 /// 而用 `#available` 分支又要在每个调用点重复一遍。
 struct GlassButtonModifier: ViewModifier {
     var prominent = false
+    /// 圆形（给只有一个图标的按钮用，比如「结束下载」那颗 ✕）。默认是胶囊。
+    var circle = false
 
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
@@ -216,18 +218,18 @@ struct GlassButtonModifier: ViewModifier {
                     content.buttonStyle(.glass)
                 }
             }
-            .buttonBorderShape(.capsule)
+            .buttonBorderShape(circle ? .circle : .capsule)
         } else {
             // 旧系统回落到 bordered —— 观感最接近，也不会显得突兀。
-            content.buttonStyle(.bordered).buttonBorderShape(.capsule)
+            content.buttonStyle(.bordered).buttonBorderShape(circle ? .circle : .capsule)
         }
     }
 }
 
 extension View {
     /// 液态玻璃按钮；macOS 26 以下回落 `.bordered`。
-    func glassButton(prominent: Bool = false) -> some View {
-        modifier(GlassButtonModifier(prominent: prominent))
+    func glassButton(prominent: Bool = false, circle: Bool = false) -> some View {
+        modifier(GlassButtonModifier(prominent: prominent, circle: circle))
     }
 }
 

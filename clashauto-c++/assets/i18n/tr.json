@@ -458,5 +458,7 @@
   "当前 %@": "Geçerli %@",
   "最新 %@": "En son %@",
   "获取更新": "Güncellemeleri denetle",
-  "暂无更新说明": "Sürüm notu yok"
+  "暂无更新说明": "Sürüm notu yok",
+  "已取消下载": "İndirme iptal edildi",
+  "结束下载": "İndirmeyi durdur"
 }

@@ -22,7 +22,6 @@ import SwiftUI
 struct UpdateView: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
-    @Environment(\.dismiss) private var dismiss
 
     enum Tab: Int, CaseIterable, Identifiable {
         case app, core, geoip
@@ -149,16 +148,28 @@ struct UpdateView: View {
         VStack(alignment: .trailing, spacing: 6) {
             if let progress {
                 HStack(spacing: 10) {
-                    progressBar(progress)
-                    // 「关闭」= 取消这次下载并关窗。不取消的话下载会在没有界面的情况下
-                    // 继续跑完，程序更新那条更糟 —— 它跑完是要**退出进程去装**的。
-                    Button("关闭".t) { cancelAndClose() }
-                        .glassButton()
+                    // 进度条与它下面那行「速度（下载量/总量）」是一组：文字在**进度条下方
+                    // 水平居中**，所以两者同宽、一起靠右，不跟着 ✕ 一起算居中。
+                    VStack(spacing: 5) {
+                        progressBar(progress)
+                        Text(transferLine)
+                            .font(.system(size: 11))
+                            .foregroundStyle(theme.textMuted)
+                            .lineLimit(1)
+                            .frame(width: Self.progressWidth)
+                    }
+                    // ✕ = **结束这次下载**，不是关窗。窗留着：取消完底栏自己回到
+                    // 「更新 / 获取更新」那一态，用户可以直接再来一次。
+                    Button {
+                        cancelDownload()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .medium))
+                            .frame(width: 22, height: 22)
+                    }
+                    .glassButton(circle: true)
+                    .help("结束下载".t)
                 }
-                Text(transferLine)
-                    .font(.system(size: 11))
-                    .foregroundStyle(theme.textMuted)
-                    .lineLimit(1)
             } else if hasUpdate {
                 Button(busy ? "更新中…".t : "更新".t) { startUpdate() }
                     .glassButton()
@@ -187,8 +198,11 @@ struct UpdateView: View {
     ///   标签文字会被**旋转 180°** 画出来（截图里「Close」是倒着的，稳定复现；换成
     ///   `.glassButton()` 立刻正常）。系统按钮样式不受影响，`safeAreaBar` 本来也是给它们用的。
 
+    /// 进度条宽度。底栏内容是靠右排的，条不能撑满整行；下面那行文字与它同宽好居中。
+    static let progressWidth: CGFloat = 220
+
     /// 细进度条：高 5、**全圆角**、不写百分比（百分比在下面那行「下载量/总量」里已经有了，
-    /// 5 高的条也塞不下字）。定宽 220 —— 底栏内容是靠右排的，条本身不能撑满整行。
+    /// 5 高的条也塞不下字）。
     private func progressBar(_ percent: Int) -> some View {
         ZStack(alignment: .leading) {
             Capsule().fill(theme.dark ? Color(hex: 0x0D_0D_0D) : Color(hex: 0xE4_E4_E4))
@@ -198,7 +212,7 @@ struct UpdateView: View {
                     .frame(width: max(0, geo.size.width * Double(percent) / 100))
             }
         }
-        .frame(width: 220, height: 5)
+        .frame(width: Self.progressWidth, height: 5)
     }
 
     /// 「12.3 MB/s (5.2 MB / 40.1 MB)」。一个字节都还没来时是「0 B/s (0 B / 0 B)」——
@@ -337,11 +351,13 @@ struct UpdateView: View {
         lastSample = nil
     }
 
-    private func cancelAndClose() {
+    /// 结束这次下载。**不关窗** —— 关掉的话用户想重来一次还得再开一遍。
+    private func cancelDownload() {
         work?.cancel()
         work = nil
+        busy = false
         resetTransfer()
-        dismiss()
+        status = "已取消下载".t
     }
 
     private func startUpdate() {

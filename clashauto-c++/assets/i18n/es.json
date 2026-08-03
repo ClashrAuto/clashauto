@@ -458,5 +458,7 @@
   "当前 %@": "Actual %@",
   "最新 %@": "Última %@",
   "获取更新": "Buscar actualizaciones",
-  "暂无更新说明": "Sin notas de la versión"
+  "暂无更新说明": "Sin notas de la versión",
+  "已取消下载": "Descarga cancelada",
+  "结束下载": "Detener descarga"
 }
