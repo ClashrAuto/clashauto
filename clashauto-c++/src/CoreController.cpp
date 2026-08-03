@@ -43,6 +43,21 @@
 #endif
 
 namespace {
+
+// 取一批输出里的**最后一行**。原先写的是 `output.split(QRegularExpression("[\\r\\n]+")).last()`：
+// 每次读都现场编译一个正则、再把整批切成 QStringList，只为取最后一个元素后全部丢掉。
+// 核心在 log-level=info 且网关满负载时每秒有几百行，这条路径是热的。改成从尾部找换行，
+// 不分配列表、不碰正则。行为不变（同样跳过尾部空行 —— 调用方已 trimmed）。
+QString lastLineOf(const QString &output)
+{
+    for (int i = output.size() - 1; i >= 0; --i) {
+        const QChar c = output.at(i);
+        if (c == QLatin1Char('\n') || c == QLatin1Char('\r'))
+            return output.mid(i + 1);
+    }
+    return output;
+}
+
 #if defined(Q_OS_WIN)
 constexpr unsigned kCreateNoWindow = 0x08000000; // CREATE_NO_WINDOW
 #endif
@@ -216,15 +231,13 @@ CoreController::CoreController(AppConfig config, QObject *parent)
     // mihomo 的 stdout/stderr 是 UTF-8：必须用 fromUtf8，否则中文 Windows 会按 GBK 解码成乱码
     connect(&m_core, &QProcess::readyReadStandardOutput, this, [this] {
         const QString output = QString::fromUtf8(m_core.readAllStandardOutput()).trimmed();
-        if (!output.isEmpty()) {
-            emit logUpdated(output.split(QRegularExpression("[\\r\\n]+")).last());
-        }
+        if (!output.isEmpty())
+            emit logUpdated(lastLineOf(output));
     });
     connect(&m_core, &QProcess::readyReadStandardError, this, [this] {
         const QString output = QString::fromUtf8(m_core.readAllStandardError()).trimmed();
-        if (!output.isEmpty()) {
-            emit logUpdated(output.split(QRegularExpression("[\\r\\n]+")).last());
-        }
+        if (!output.isEmpty())
+            emit logUpdated(lastLineOf(output));
     });
     connect(&m_core, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this](int code) {
         stopProxy();

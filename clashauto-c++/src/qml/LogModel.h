@@ -12,6 +12,7 @@
 // 那些是 MainWindow 的内部调用，不经信号；QML 版没有 MainWindow，故它们不会到达本 model。
 // 到达本 model 的日志源就是后端两个信号——这与 QmlBridge 的 pushLog 合流口径一致。
 #include <QAbstractListModel>
+#include <QDateTime>
 #include <QString>
 #include <QVector>
 
@@ -40,7 +41,21 @@ public:
     int rowCountProp() const { return rowCount(); }
 
     // 追加一条日志：派生时间戳 + 严重级别，最新插到第 0 行，超过 100 条丢弃最旧。
+    //
+    // ★ **不再逐条动模型。** 每来一行就 beginInsertRows + beginRemoveRows，会让 ListView
+    //   反复重排版；日志速率一高就变成纯浪费。真机实测（树莓派网关，239 上 20 并发短连接
+    //   持续加压，核心 log-level 分别取 info / warning，交替两轮）：
+    //       log-level=info     核心 21.5%/21.1%   **App 27.5%/28.2%**
+    //       log-level=warning  核心 18.2%/20.2%   **App  3.3%/ 3.8%**
+    //   —— App 比核心还费，而它在 TPROXY 下根本不在数据面上；perf 采样的热点是
+    //   QTextLine::layout_helper / harfbuzz（文字排版）与 QML 绑定机械，全是在"显示"日志。
+    //   网关上更荒唐：headless 跑着，一个人都没在看。
+    //   所以：日志一律先进环形缓冲；**只有可见时**才按 kFlushMs 合并成一次批量插入。
     void append(const QString &message);
+
+    /// 这个时间线当前可不可见（LogsPage 显示时才为 true）。不可见时只缓冲、不碰模型。
+    void setActive(bool active);
+    bool isActive() const { return m_active; }
 
     // 由 message 派生严重级别（复刻 appendTimeline 的判定与顺序）。
     static QString severityFor(const QString &message);
@@ -54,8 +69,14 @@ private:
         QString time;
         QString severity;
     };
+    void flush(); // 把缓冲里的行一次性插进模型（单次 beginInsertRows）
+
     static constexpr int kMaxRows = 100;
-    QVector<Row> m_rows; // 索引 0 = 最新
+    static constexpr int kFlushMs = 100; // 可见时最多每 100ms 更新一次视图
+    QVector<Row> m_rows;    // 索引 0 = 最新（已进模型的）
+    QVector<Row> m_pending; // 索引 0 = 最新（尚未进模型的）
+    bool m_active = false;
+    bool m_flushScheduled = false;
 };
 
 // 门面：持有两个 LogEntryModel（主日志 + 核心日志），把后端两个信号路由进去。
@@ -71,6 +92,9 @@ public:
 
     LogEntryModel *mainModel() { return &m_main; }
     LogEntryModel *coreModel() { return &m_core; }
+
+    /// LogsPage 可见性：QML 在页面显示/隐藏时调一次。两个时间线一起开关。
+    Q_INVOKABLE void setActive(bool active);
 
 private:
     LogEntryModel m_main; // 全部日志

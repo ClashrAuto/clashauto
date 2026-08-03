@@ -9,6 +9,12 @@ import ClashAuto
 Item {
     id: page
 
+    // 页面显隐驱动日志入模型：不可见时后端只往环形缓冲里塞，一次模型信号都不发。
+    // 理由是实测的——核心 log-level=info、网关满负载时，光"显示日志"就要 27% 的一个核，
+    // 比核心自己转发还贵，而 TPROXY 下 App 根本不在数据面上（见 LogModel.h 的数据）。
+    onVisibleChanged: logModel.setActive(page.visible)
+    Component.onCompleted: logModel.setActive(page.visible)
+
     // 复用的标签按钮（Theme 上色 + 选中态卡底 + 底部强调条）。
     component LogTab: TabButton {
         id: tabBtn

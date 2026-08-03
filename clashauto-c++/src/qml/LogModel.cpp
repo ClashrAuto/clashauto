@@ -4,6 +4,7 @@
 #include "../CoreController.h"
 
 #include <QDateTime>
+#include <QTimer>
 
 LogEntryModel::LogEntryModel(QObject *parent) : QAbstractListModel(parent) {}
 
@@ -61,20 +62,56 @@ void LogEntryModel::append(const QString &message)
     row.time = QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
     row.severity = severityFor(message);
 
-    // 最新置顶：插到第 0 行（对齐 el-timeline :reverse=true / insertWidget(0)）。
-    beginInsertRows(QModelIndex(), 0, 0);
-    m_rows.prepend(row);
-    endInsertRows();
+    // 先进缓冲（最新置顶）。缓冲本身也只留 kMaxRows 条 —— 不可见期间日志再多，
+    // 内存占用也是常数，切回日志页时看到的就是"最近 100 条"，与一直可见时一致。
+    m_pending.prepend(row);
+    while (m_pending.size() > kMaxRows)
+        m_pending.removeLast();
 
-    // 只保留最近 100 条：超出则从末尾（最旧）逐条移除。
-    while (m_rows.size() > kMaxRows) {
+    if (!m_active)
+        return; // 不可见：一次模型信号都不发，ListView 不会被唤醒去排版
+
+    // 可见：合并 kFlushMs 内的所有行，一次性插入。日志速率再高，视图也最多每 100ms 动一次。
+    if (m_flushScheduled)
+        return;
+    m_flushScheduled = true;
+    QTimer::singleShot(kFlushMs, this, [this] {
+        m_flushScheduled = false;
+        flush();
+    });
+}
+
+void LogEntryModel::flush()
+{
+    if (m_pending.isEmpty())
+        return;
+    const int n = m_pending.size();
+    // 最新置顶：整批插到第 0..n-1 行（m_pending 本身已是"最新在前"）。
+    beginInsertRows(QModelIndex(), 0, n - 1);
+    for (int i = n - 1; i >= 0; --i)
+        m_rows.prepend(m_pending.at(i));
+    endInsertRows();
+    m_pending.clear();
+
+    // 只保留最近 100 条：超出的一次性从末尾移除（不再逐条发信号）。
+    if (m_rows.size() > kMaxRows) {
+        const int first = kMaxRows;
         const int last = m_rows.size() - 1;
-        beginRemoveRows(QModelIndex(), last, last);
-        m_rows.removeLast();
+        beginRemoveRows(QModelIndex(), first, last);
+        m_rows.remove(first, last - first + 1);
         endRemoveRows();
     }
 
     emit countChanged();
+}
+
+void LogEntryModel::setActive(bool active)
+{
+    if (m_active == active)
+        return;
+    m_active = active;
+    if (m_active)
+        flush(); // 刚切回来：把不可见期间攒下的立刻补上，用户不会看到空白
 }
 
 LogModel::LogModel(CoreController *core, ClashService *clash, QObject *parent)
@@ -92,4 +129,10 @@ LogModel::LogModel(CoreController *core, ClashService *clash, QObject *parent)
             m_core.append(message);
         });
     }
+}
+
+void LogModel::setActive(bool active)
+{
+    m_main.setActive(active);
+    m_core.setActive(active);
 }

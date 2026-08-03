@@ -172,7 +172,21 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
 void QmlBridge::pushLog(const QString &message)
 {
     m_lastLog = message;
-    emit logAppended(message);
+    // 前沿触发：距上次广播够久就立刻发，保证第一条/低频日志零延迟。
+    if (!m_lastLogEmitAt.isValid() || m_lastLogEmitAt.elapsed() >= kLogEmitMs) {
+        m_lastLogEmitAt.restart();
+        emit logAppended(m_lastLog);
+        return;
+    }
+    // 窗口内：合并。只安排一次尾部广播，届时发的是那一刻最新的一条。
+    if (m_logEmitScheduled)
+        return;
+    m_logEmitScheduled = true;
+    QTimer::singleShot(kLogEmitMs - m_lastLogEmitAt.elapsed(), this, [this] {
+        m_logEmitScheduled = false;
+        m_lastLogEmitAt.restart();
+        emit logAppended(m_lastLog);
+    });
 }
 
 QString QmlBridge::version() const { return QString::fromUtf8(APP_VERSION); }

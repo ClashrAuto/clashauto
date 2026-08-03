@@ -11,6 +11,7 @@
 #include "NodeListModel.h"
 
 #include <QColor>
+#include <QElapsedTimer>
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -337,6 +338,19 @@ private:
     QTimer *m_spinnerTimer = nullptr;  // 120ms 推进转圈帧
     QTimer *m_failsafeTimer = nullptr; // 6s 兜底：未确认则强制结束，避免永久卡加载态
     QString m_mode = QString::fromUtf8("规则");
+    // 页脚那行「最新日志」。**广播要节流**：Main.qml 里有个 Text 绑在 lastLog 上，每变一次
+    // 就是一次文字重排 + 整窗重绘（Qt Quick 没有局部重绘）。核心 log-level=info、网关满负载时
+    // 每秒几百行日志 —— 而每秒变几百次的文字根本没人读得了，纯粹是把整窗按在地上重画。
+    // 真机实测（树莓派网关，239 上 20 并发短连接持续加压，各采样 25s）：
+    //     日志入模型不设门 + 页脚不节流   App 27.5% / 28.2%   （核心自己才 21%，App 比它还贵）
+    //     只给日志模型设可见性门          App 10.4% / 10.4%   ← 剩下的就是这行页脚文字
+    //     再加页脚节流（本节流）          App  4.4% /  5.0%
+    //     参照：把核心 log-level 调成 warning（几乎没有日志）时是 3.3% —— 已经贴到地板
+    // 节流用**前沿**触发：距上次广播超过 kLogEmitMs 就立刻发（第一条日志不会迟到），
+    // 否则安排一次尾部广播，把窗口内的若干条合并成一次。
     QString m_lastLog = QStringLiteral("Ready");
+    static constexpr int kLogEmitMs = 200; // 页脚最多每 200ms 更新一次
+    QElapsedTimer m_lastLogEmitAt;
+    bool m_logEmitScheduled = false;
     bool m_initialDark = true;
 };
