@@ -12,6 +12,7 @@
 #include "HistoryStore.h" // 上网历史库（SQLite）
 #include "LanScanner.h"   // COAST_SCAN_SELFTEST 的扫描耗时自检
 #include "net/TproxyRules.h" // COAST_TPROXY_SELFTEST 的规则层自测
+#include "net/PfRules.h"      // COAST_PF_SELFTEST 的 pf 规则层自测（macOS）
 #include "LatencyProbe.h" // 状态页延迟卡：直连/路由/DNS/代理四个数
 #include "SingleInstance.h" // 单实例守卫：两个实例并存会互相清掉网关的 nft/pf 规则
 #include "SubscriptionStore.h"
@@ -179,6 +180,12 @@ int main(int argc, char *argv[])
 
     if (qEnvironmentVariableIsSet("COAST_NDP_RA_SELFTEST"))
         return runNdpRaSelfTest();
+
+    // pf 规则层自测（COAST_PF_SELFTEST=1，macOS）：与上面的 TPROXY 自测同一套约定 ——
+    // 装载 → 核对规则与挂载点 → 增删设备 → 拆除 → 核对拆干净。需要 root。
+    // 不产生真实流量、不接管任何设备（表里只放 192.0.2.0/24，rdr 绑 lo0），跑在正用的机器上也安全。
+    if (qEnvironmentVariableIsSet("COAST_PF_SELFTEST"))
+        return runPfRulesSelfTest();
 
     // 用可定制的 Basic 样式：macOS 原生 Quick 样式不允许自定义控件 background（会报
     // "current style does not support customization"），本 app 全是自绘控件，必须 Basic。

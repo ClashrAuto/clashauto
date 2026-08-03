@@ -134,6 +134,9 @@ public:
                                    const QString &proxyIp, quint16 proxyPort, QString *origIp,
                                    quint16 *origPort, QString *err = nullptr);
 
+    /// 把 anchor 里的规则原样读回（含 table 内容）。自测与排查用；非 macOS 返回空串。
+    static QString dumpAnchor();
+
     /// 固定 anchor 名，当前是 **"com.apple/coast"**。**别用带 pid/随机串的名字**：崩溃后要靠
     /// 这个名字把陈旧规则删掉。**也别改成顶层名字**——顶层 anchor 不被 macOS 默认 /etc/pf.conf
     /// 引用，规则装得进去却永远不会被求值（真机对照实验见 PfRules.cpp 里 kAnchor 处）。
@@ -152,3 +155,9 @@ private:
     Spec m_spec;
     bool m_installed = false;
 };
+
+/// pf 规则层 headless 自测（COAST_PF_SELFTEST=1）：装载 → 核对规则与挂载点 → 增删设备 → 拆除
+/// → 核对拆干净。需要 root（或已就绪的免密 helper）。
+/// ★ **不产生真实流量、不接管任何设备**：表里只放 192.0.2.0/24（RFC 5737 文档用网段），
+///   rdr 绑 lo0，所以在一台正在使用的机器上跑也是安全的。与 Linux 侧 TPROXY 自测同一套约定。
+int runPfRulesSelfTest();

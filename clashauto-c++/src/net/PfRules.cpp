@@ -458,7 +458,110 @@ bool PfRules::lookupOriginalDest(const QString &clientIp, quint16 clientPort,
     return true;
 }
 
+QString PfRules::dumpAnchor()
+{
+    // ★ 必须合并 stderr：pfctl 把规则列表写到 **stderr**，只读 stdout 恒为空
+    //   （run() 用 MergedChannels，所以这里天然是对的；手工敲命令时记得 2>&1）。
+    QString rules;
+    run(QStringLiteral("/sbin/pfctl"),
+        {QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-s"),
+         QStringLiteral("nat")},
+        &rules);
+    // ★★ 表内容要**单独读**：`pfctl -s all` / `-s Tables` 只列出表**名**，不含成员地址。
+    //    真机上踩过——自测据此判定"设备没进 table"，而实际上 -T replace 早就写进去了，
+    //    错的是核对方法不是产品代码。要看成员必须 `-t <表> -T show`。
+    QString table;
+    run(QStringLiteral("/sbin/pfctl"),
+        {QStringLiteral("-a"), QString::fromLatin1(kAnchor), QStringLiteral("-t"),
+         QStringLiteral("coast_proxied"), QStringLiteral("-T"), QStringLiteral("show")},
+        &table);
+    return rules + QStringLiteral("\n--- table coast_proxied ---\n") + table;
+}
+
+int runPfRulesSelfTest()
+{
+    auto say = [](const char *fmt, const QString &a = {}) {
+        std::fprintf(stderr, fmt, a.toLocal8Bit().constData());
+        std::fflush(stderr);
+    };
+    QString why;
+    if (!PfRules::available(&why)) {
+        say("PF-SELFTEST: SKIP —— %s\n", why);
+        return 0;
+    }
+    // ★ 本自测**不产生任何真实流量、也不接管任何设备**：rdr 只对 <coast_proxied> 表里的源地址
+    //   生效，而这里只往表里放 TEST-NET-1（192.0.2.0/24，RFC 5737 保留给文档/测试，网上不可路由）。
+    //   所以在一台正在用的机器上跑它是安全的 —— 与 Linux 侧 TPROXY 自测同一套约定。
+    PfRules::removeStale();
+
+    PfRules r;
+    PfRules::Spec spec;
+    spec.redirPort = 17897;
+    spec.dnsPort = 17853;
+    spec.ifnames = QStringList{QStringLiteral("lo0")}; // 环回：规则装得上，又绝不影响真实网卡
+    QString err;
+    if (!r.install(spec, &err)) {
+        say("PF-SELFTEST: FAIL 装载失败 —— %s\n", err);
+        return 1;
+    }
+    QString dump = PfRules::dumpAnchor();
+    const bool hasRedir = dump.contains(QStringLiteral("port 17897"));
+    const bool hasDns = dump.contains(QStringLiteral("port 17853"));
+    const bool hasTable = dump.contains(QStringLiteral("coast_proxied"));
+    if (!hasRedir || !hasDns || !hasTable) {
+        say("PF-SELFTEST: FAIL 规则不完整 —— %s",
+            QStringLiteral("redir=") + QString::number(hasRedir) + " dns="
+                + QString::number(hasDns) + " table=" + QString::number(hasTable));
+        say("\n%s\n", dump);
+        r.remove();
+        return 1;
+    }
+
+    if (!r.syncDevices({QStringLiteral("192.0.2.10"), QStringLiteral("192.0.2.11")}, &err)) {
+        say("PF-SELFTEST: FAIL 设备集合写入失败 —— %s\n", err);
+        r.remove();
+        return 1;
+    }
+    dump = PfRules::dumpAnchor();
+    if (!dump.contains(QStringLiteral("192.0.2.10"))
+        || !dump.contains(QStringLiteral("192.0.2.11"))) {
+        say("PF-SELFTEST: FAIL 设备没进 table\n%s\n", dump);
+        r.remove();
+        return 1;
+    }
+    // 换成只剩一台：验证「整体替换」而不是只增不减。
+    if (!r.syncDevices({QStringLiteral("192.0.2.11")}, &err)
+        || PfRules::dumpAnchor().contains(QStringLiteral("192.0.2.10"))) {
+        say("PF-SELFTEST: FAIL 设备移除没生效\n");
+        r.remove();
+        return 1;
+    }
+
+    r.remove();
+    dump = PfRules::dumpAnchor();
+    if (dump.contains(QStringLiteral("rdr")) || dump.contains(QStringLiteral("192.0.2."))) {
+        say("PF-SELFTEST: FAIL 拆除后仍有残留\n%s\n", dump);
+        return 1;
+    }
+    // 再跑一次 removeStale：崩溃后启动就是"什么都没有"这个场景，必须能安全调用。
+    PfRules::removeStale();
+    say("PF-SELFTEST: PASS（装载 + 挂载点核实 + 设备增删 + 幂等拆除）\n");
+    return 0;
+}
+
 #else // 非 macOS：空实现，让跨平台调用方不必写平台分支（与 TproxyRules 同一套做法）
+
+QString PfRules::dumpAnchor()
+{
+    return {};
+}
+
+int runPfRulesSelfTest()
+{
+    std::fprintf(stderr, "PF-SELFTEST: SKIP —— pf 数据面仅 macOS 可用\n");
+    return 0;
+}
+
 
 bool PfRules::available(QString *why)
 {
