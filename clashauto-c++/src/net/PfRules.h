@@ -122,6 +122,24 @@
 //        零重传**，`ethtool` 也确认 Pi 的 eth0 就是 1000Mb/s —— 局域网是**千兆**，不是 2.5G。
 //        要量并发总吞吐，用 iperf3 -P，或在**父进程**里量总墙钟，别信子任务自己的秒表。
 //
+// ── ★★ macOS 的 IPv6：**卡在核心侧，不是配置问题**（2026-08-03 实测定论）───────────
+//   「能不能在 macOS 上把 v6 也代理起来」这一条，逐项验到底了：
+//     ① pf 接受 inet6 的 rdr 语法 —— 可以（`rdr pass on en0 inet6 proto tcp ... -> ...`
+//        装载成功 1 条）；
+//     ② net.inet6.ip6.forwarding 可开 —— 可以；
+//     ③ 核心的 redir 能对 v6 还原原始目的地 —— **不行**。
+//   ③ 的两次真机对照（Windows 做设备，用手工 v6 路由指到 Mac，不投毒）：
+//     · rdr 目标写 `::1`：pf 命中 4 包、状态 `::1[17897] <- 目标[80] <- 设备` 停在
+//       **CLOSED:SYN_SENT** —— 握手压根没完成（外来包进 ::1 被内核挡住的可能性大）；
+//     · rdr 目标改成 Mac 自己的**全局 v6**、核心监听 `::`：pf 命中 16 包、2 条状态，
+//       状态是 **TIME_WAIT:TIME_WAIT** —— 说明**握手完成了、连接被 accept 之后立刻关掉**，
+//       而**核心日志一行都没有**，设备侧请求 FAIL。
+//   后一种正是本文件前面记的那个「拿不到原始目的地就不报错、不打日志、直接丢连接」的特征
+//   —— 即 mihomo 的 darwin redir 在 v6 上取不到 DIOCNATLOOK 的结果。
+//   **所以 macOS 的 v6 代理需要先改核心**（darwin redir 的 v6 原始目的地还原），
+//   在那之前 LanGateway 侧刻意不投毒 v6（见 LanGateway_linux.cpp 里 NdpSpoofer 那段），
+//   宁可让 v6 直连绕过，也不制造"间歇断网 + 间歇泄漏"的更差状态。
+//
 // ★ 真正待做的下一步：实现 install/remove（写 anchor + 开关 forwarding + sysctl 存档还原）、
 //   ConfigBuilder 按平台产出 redir listener、以及 LanGateway 的 macOS 实现接上
 //   （目前 LanGateway 只有 _linux 与 _stub 两份，macOS 走 stub）。
