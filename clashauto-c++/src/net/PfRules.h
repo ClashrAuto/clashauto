@@ -85,6 +85,28 @@
 //   （上面 root 那次就是 -> 127.0.0.1 port 17897 成功的）。网上常见「macOS 不允许外部流量
 //   rdr 到 loopback」的说法在本机 13.7.8 上不成立 —— 那类报告多半也是踩了 root 这个坑。
 //
+// ── ★ 端到端实测（2026-08-03，macOS 13.7.8 + Windows 真机做被接管设备）───────────
+//   终于用一台**不被别的网关代理**的真机（Windows .51，Pi 的劫持名单里没有它）跑通了整条路：
+//   COAST_GATEWAY_TESTDEV=192.168.20.51 让 App 自己发现并接管它（App 维护 pf 表，手工
+//   `-T add` 是徒劳的 —— syncDevices 每轮 `-T replace` 会刷成"已挂载设备集合"）。
+//
+//   **功能正确**：核心侧看到
+//       inbound=Redir  192.168.20.51:54143 → :443  host=mp.weixin.qq.com  chain=DIRECT
+//     —— Redir 入站、源是被接管设备、**原始目的地被正确还原成域名**（DIOCNATLOOK 通路正常）。
+//     退出后 ARP 还原（Windows 的网关 MAC 回到真路由 70-A7-41-A4-19-7B）、rdr 与 forwarding 清零。
+//
+//   ★★ **但吞吐有问题，而且不是算力问题。** 同一台设备、同一个 HTTP 源（局域网 Pi）：
+//       无网关（直连）          109.6 MB/s（0.919 Gbps，千兆线速）
+//       经 Mac 的 pf 网关         6.2 MB/s（0.052 Gbps）        ← 约 1/18
+//     加压 30s 期间在 Mac 上采样：
+//       **核心 CPU 0.00 核（0%）**、App 0.00 核（0%）
+//       en0 实际流量 370 MB/30s = 12.3 MB/s（≈2× 载荷，符合"过两次网卡"）
+//       而这台 Mac 自己做端点到同一个源能跑 48 MB/s
+//     既不是 CPU 打满（0%），也不是链路打满（12.3 « 48）—— 是**窗口/停顿型**瓶颈：
+//     形态像是中继缓冲太小或每次读写都在等对端，而不是我们在算什么。
+//     所以在查清这一条之前，**不能说 macOS 的 pf 路已经可以替掉 lwIP**：功能上通了，吞吐没通。
+//     下一步该量的是核心 redir 中继的读写粒度/缓冲，以及 pf 状态表在转发路径上的开销。
+//
 // ★ 真正待做的下一步：实现 install/remove（写 anchor + 开关 forwarding + sysctl 存档还原）、
 //   ConfigBuilder 按平台产出 redir listener、以及 LanGateway 的 macOS 实现接上
 //   （目前 LanGateway 只有 _linux 与 _stub 两份，macOS 走 stub）。
