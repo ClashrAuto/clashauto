@@ -4562,3 +4562,28 @@ DeviceStore: 读设备表失败: no such column: total_up  Unable to execute sta
 
 ★ 本轮的自我修正：一开始把"读不到"推断成"会被清空"，差点写成一个数据丢失级告警。
 **查一眼 `DELETE` 语句数就能证伪的事，不该靠推断下结论。**
+
+## 共享磁盘状态的兼容性排查：**只有 `device` 表一处不兼容**
+
+上一节发现 `device` 表 schema 冲突后，把两条线共享的磁盘状态全查了一遍：
+
+| 共享状态 | 兼容性 | 依据 |
+|---|---|---|
+| `coast.db` 的 **`conn` 表** | **兼容** | 两边列完全相同（`id,mac,host,dest_ip,chain,network,process,started_at,ended_at,up,down`）；实测 Qt 在 Swift 建的库里成功新增 1 条历史 |
+| `full.yaml` | **兼容** | 两条线各自从同一订阅重建，**代理条目 70 个、差异 0 行** |
+| `config.yaml` / `subscribe.yaml` / `rules.json` | 兼容 | 两边都读写，重建后未见解析错误 |
+| **`coast.db` 的 `device` 表** | **不兼容** | Qt 读 Swift 建的表报 `no such column: total_up` |
+
+**问题范围因此比上一节写的小得多** —— 不是"两条线的数据层不兼容"，
+而是**单张表的列集合不同**。上一节列的三个选项里，第 3 个（超集表）代价其实最低：
+只要给表补上对方独有的那几列（Qt 需 `password/last_ip/hostname/interface`，
+Swift 需 `ip/total_up/total_down/today_*/is_self/is_gateway/auto_name/auto_type`），
+两边各读各的，历史数据不用迁移、`conn` 表和配置层完全不用动。
+
+仍然**不动手** —— 决定"两条线要不要共享台账"依旧是产品决策；
+但现在这个决策的成本清楚了：**一张表加几列，不是数据层重构**。
+
+★ 排查方法值得记：发现一处不兼容后，**不要停在那一处**，
+把同一类共享状态（同库其他表、同目录其他文件）全过一遍。
+这次过完才知道问题只有一处 —— 否则会一直按"数据层可能整体不兼容"的假设估代价，
+估出来的方案（统一 schema、分库）都比实际需要的重。
