@@ -289,6 +289,9 @@ public final class AppState {
     /// 用计数器而不是让视图自己比对数组：数组到了上限之后长度不再变，`onChange(of:count)`
     /// 从此再也不触发；而末位的值经常连着好几拍都是 0，比值也认不出「来了新的一拍」。
     public private(set) var pollTick: UInt64 = 0
+    /// 上一拍是否停在状态页。用于「切回状态页立刻补一次今日流量」，
+    /// 非 @Observable 语义的内部状态，写它不该触发重排。
+    private var lastOnStatus = false
 
     /// 带宽图的采样序列。长度与图上的点数一致（`BandwidthChart.pointCount` = 42，
     /// 即 40 个可见 + 2 个富余）—— **横轴就是「最近 40 秒」，与 Qt 相同**。
@@ -393,6 +396,10 @@ public final class AppState {
         let visibleNow = WindowRestore.anyWindowVisible
         let onNodes = visibleNow && currentPage == .nodes
         if clash.nodesVisible != onNodes { clash.nodesVisible = onNodes }
+        // 切回状态页立刻补一拍今日流量，别让用户对着 10 秒前的旧数字。
+        let onStatus = visibleNow && currentPage == .status
+        if onStatus && !lastOnStatus { refreshTodayTraffic() }
+        lastOnStatus = onStatus
         let visible = visibleNow
         guard visible != uiVisible else { return }
         uiVisible = visible
@@ -776,9 +783,12 @@ public final class AppState {
         Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                // 几条 GROUP BY 聚合，只给状态页那张卡看。窗口收起来时不跑，
-                // 重新可见的那一刻 `syncUIVisibility` 会立刻补一次。
-                if self.uiVisible { self.refreshTodayTraffic() }
+                // 几条 GROUP BY 聚合，**只给状态页那张卡看**。所以两个条件都要满足：
+                // 窗口看得见、且用户正停在状态页。少判后一个的话，人在节点页/日志页时
+                // 这几条聚合照跑不误，纯属白烧 —— Qt 线的 `setStatusActive` 判的就是
+                // `m_statusActive && m_uiVisible` 两条，这里对齐。
+                // 重新可见/切回状态页的那一刻 `syncUIVisibility` 会立刻补一次。
+                if self.uiVisible && self.currentPage == .status { self.refreshTodayTraffic() }
                 try? await Task.sleep(for: .seconds(10))
             }
         }
