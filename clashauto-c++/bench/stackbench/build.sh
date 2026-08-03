@@ -9,6 +9,9 @@ mkdir -p bin
 gcc -O2 -o bin/relay relay.c
 echo "[build] relay ok"
 
+gcc -O2 -o bin/udpflood udpflood.c
+echo "[build] udpflood ok"
+
 LW=$BENCH_DIR/lwip
 LWSRC="
 $LW/core/init.c $LW/core/def.c $LW/core/dns.c $LW/core/inet_chksum.c
