@@ -44,6 +44,16 @@ public:
     // （历史记录的唯一数据源，停了会在历史上留一段空白）照旧跑。
     // 恢复可见时立刻补一次，不让用户对着上一次的旧列表发呆。
     void setUiActive(bool active);
+    /// 用户是不是正停在**节点页**。决定 `/proxies` 的轮询频率。
+    ///
+    /// ★ `/proxies` 的响应**很大**：本机 70 个节点时实测 **51 KB**，而这条定时器原本
+    ///   **恒 1 秒**拉一次并整份 `QJsonDocument::fromJson`。而这份数据**只有节点页在看** ——
+    ///   状态页、设备页、日志页都不需要节点状态每秒刷新。
+    ///   所以按「在不在看节点页」分档：看着就 1s（那是它该有的实时手感），
+    ///   没看着就 5s（只为切回去时不至于是陈旧数据）。
+    ///   与 `setUiActive` 的分工：那个管「窗口开没开」，这个管「开着时在看哪一页」。
+    ///   Swift 线的 `ClashService.nodesVisible` 是同一设计，两条线保持对齐。
+    void setNodesVisible(bool visible);
     void setEndpoint(const QString &host, int port); // REST API 地址（对齐 config.uiPort，默认 9191）
     void setMixedPort(int port); // 混合代理端口（对齐 config.mixedPort，默认 7890）——下载测速经此端口走代理
     void setSecret(const QString &secret); // external-controller 的 secret；非空时所有发往核心的请求带 Authorization: Bearer
@@ -104,6 +114,9 @@ private:
     bool m_connectionsInFlight = false; // /connections 轮询在途：上一拍未回则跳过，防止慢响应下请求自我堆积
     bool m_nodesInFlight = false;        // /proxies 轮询在途：同上
     bool m_uiActive = true;              // 见 setUiActive
+    bool m_nodesVisible = false;         // 见 setNodesVisible
+    /// 当前该用的 /proxies 轮询间隔（毫秒）。看着节点页 1s，否则 5s。
+    int nodesPollMs() const { return m_nodesVisible ? 1000 : 5000; }
     bool m_started = false;              // start() 调过没有——没起来时别自作主张启定时器
     QString m_host = "127.0.0.1";
     int m_port = 9191; // 默认对齐 AppConfig::uiPort / default.yaml；实际由 setEndpoint 按配置设定

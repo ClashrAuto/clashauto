@@ -794,6 +794,15 @@ bool QmlBridge::trayAvailable() const
     return QSystemTrayIcon::isSystemTrayAvailable();
 }
 
+void QmlBridge::setNodesActive(bool active)
+{
+    m_nodesActive = active;
+    // 与 setStatusActive 同一条判据：页面「可见」不等于窗口看得见 ——
+    // 托盘态下 QML 的 Item.visible 仍是 true，两个条件都要满足才算「用户在看」。
+    if (m_clash)
+        m_clash->setNodesVisible(active && m_uiVisible);
+}
+
 void QmlBridge::setStatusActive(bool active)
 {
     m_statusActive = active;
@@ -831,6 +840,7 @@ void QmlBridge::syncUiVisible()
     m_uiVisible = visible;
     // 状态页那张今日流量卡跟着窗口停/起（重新可见时 setStatusActive 会立刻补一次）
     setStatusActive(m_statusActive);
+    setNodesActive(m_nodesActive); // 窗口显隐同样影响「用户在不在看节点页」
     emit uiVisibleChanged(visible);
 }
 

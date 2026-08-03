@@ -71,10 +71,23 @@ void ClashService::setUiActive(bool active)
         return;
     if (active) {
         pollNodes();               // 先补一拍，别等下一个周期
-        m_nodesTimer.start(1000);
+        m_nodesTimer.start(nodesPollMs());
     } else {
         m_nodesTimer.stop();
     }
+}
+
+void ClashService::setNodesVisible(bool visible)
+{
+    if (visible == m_nodesVisible)
+        return;
+    m_nodesVisible = visible;
+    if (!m_started || !m_uiActive)
+        return;
+    // 切到节点页：先补一拍再改周期，别让用户盯着上一次的旧状态等满 1 秒。
+    if (visible)
+        pollNodes();
+    m_nodesTimer.start(nodesPollMs());   // QTimer::start 会重设间隔并重新计时
 }
 
 void ClashService::start()
@@ -94,7 +107,7 @@ void ClashService::start()
     //   改这个数字之前请先读它，别以为是参数没调好。
     m_connectionsTimer.start(2000);
     if (m_uiActive)
-        m_nodesTimer.start(1000); // 1s 实时拉取节点列表状态（对齐旧项目 getProxies 每秒轮询）
+        m_nodesTimer.start(nodesPollMs()); // 1s 实时拉取节点列表状态（对齐旧项目 getProxies 每秒轮询）
 }
 
 void ClashService::setMode(const QString &mode)
