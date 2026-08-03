@@ -302,6 +302,7 @@ private:
     // 此时二层端点只用来收发 ARP/NDP（劫持与安全监视），内核过滤器也只放行这两类帧。
     LanGateway::DatapathSpec m_datapath;
     TproxyRules m_tproxy;
+    const char *m_dbgLastMode = nullptr; // 上次报告过的数据面模式，只在变化时打日志
     PfRules m_pf;  // macOS 的 pf 数据面（非 macOS 上是空实现）
     // 把当前受害设备的 IP 集合推给 nft（谁被接管由这个集合决定）。lwIP 模式下是空操作。
     void syncTproxyDevices();
@@ -898,6 +899,21 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
     refreshLocalAddrs(); // 网卡/地址可能刚变（DHCP 续约、插拔、VPN 起落），每轮重建
     m_socksPort = socksPort;
 
+    // 数据面模式落到日志：三条路（tproxy / pf / lwIP）外观极像——都靠 ARP/NDP 劫持把包引过来，
+    // 区别只在引到哪儿，日志里以前**没有任何一行**说走的是哪条。查一次"为什么没走 TPROXY"
+    // 要靠 nft 表空不空、有没有 `-> lwIP fed=` 反推，一整轮时间就耗在这上面。只在模式变化时
+    // 打（每轮扫描都会调到这里，无条件打会刷屏）。
+    {
+        const char *mode = m_datapath.tproxy ? "tproxy" : (m_datapath.pf ? "pf" : "lwIP");
+        if (m_dbgLastMode != mode) {
+            m_dbgLastMode = mode;
+            std::fprintf(stderr, "[GW] 数据面=%s（tproxyPort=%u pfRedirPort=%u dnsPort=%u）\n", mode,
+                         unsigned(m_datapath.tproxyPort), unsigned(m_datapath.redirPort),
+                         unsigned(m_datapath.dnsPort));
+            std::fflush(stderr);
+        }
+    }
+
     QString err;
     if (m_datapath.tproxy) {
         // TPROXY 数据面：**不建 NetStack**。规则装不上就必须原地失败并让上层退回 lwIP——
@@ -1128,8 +1144,10 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     if (ip6Len >= 40 && isLocalIp6(p6 + 24))
                         return;
                     ++GatewayDiag::c.fedLwip;
-                    if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
-                        std::fprintf(stderr, "[GW] -> lwIP fed(v6)=%lld\n", m_dbgFedLwip),
+                    if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0) // 标签按真实模式，理由见 v4 那处
+                        std::fprintf(stderr, "[GW] -> %s fed(v6)=%lld\n",
+                                     m_net ? "lwIP" : (m_datapath.tproxy ? "tproxy" : "pf"),
+                                     m_dbgFedLwip),
                             std::fflush(stderr);
                     if (m_net) // tproxy 模式没有用户态栈，这里恒为空
                         m_net->inputFrame(n->ep, frame);
@@ -1237,8 +1255,14 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             // 走到这里 = 真出网 / 发往网关的帧 → 喂进用户态栈。这个计数在涨却仍「设备流量 0」,
             // 那问题在 lwIP 之后(SOCKS/mihomo);它不涨,问题在它上面几道。
             ++GatewayDiag::c.fedLwip;
+            // ★ 标签按**当前真实模式**打。这行原来恒写死 "-> lwIP"，可它在 m_net 判空之**前**，
+            //   于是 tproxy/pf 模式下（m_net 恒空、一个包都没进用户态栈）日志照样刷 "-> lwIP fed="。
+            //   2026-08-03 就是被这行骗着查了一整轮"为什么 Linux 没走 TPROXY"——实际一直在走。
+            //   日志撒的谎比没有日志更贵：没有日志会去查，假日志会让人不查。
             if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0)
-                std::fprintf(stderr, "[GW] -> lwIP fed=%lld\n", m_dbgFedLwip), std::fflush(stderr);
+                std::fprintf(stderr, "[GW] -> %s fed=%lld\n",
+                             m_net ? "lwIP" : (m_datapath.tproxy ? "tproxy" : "pf"), m_dbgFedLwip),
+                    std::fflush(stderr);
             if (m_net) { // tproxy 模式没有用户态栈,这里恒为空
                 m_net->inputFrame(n->ep, frame);
             }
