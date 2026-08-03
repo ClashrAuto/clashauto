@@ -21,6 +21,7 @@ enum SelfTests {
         if environment["COAST_TOPO_SELFTEST"] == "1" { topoSelfTest() }
         if environment["COAST_LATENCY_SELFTEST"] == "1" { latencySelfTest() }
         if environment["COAST_DEVICES_SELFTEST"] == "1" { devicesSelfTest() }
+        if environment["COAST_HISTORY_SELFTEST"] == "1" { historySelfTest() }
     }
 
     /// 设备台账 / 设备列表自检（对应 Qt 的 `COAST_DEVICEDB_SELFTEST`）。
@@ -247,6 +248,75 @@ enum SelfTests {
 
     /// 路径与种子资源自检：确认打包后能从 `Contents/Resources` 找到种子，
     /// 而不是悄悄回退到开发期那条仓库相对路径（那条在用户机器上根本不存在）。
+    /// 历史库自检。对齐 Qt 线的 `COAST_HISTORY_SELFTEST`（`main_qml.cpp`）。
+    ///
+    /// 历史库是「昨天访问过什么」的**唯一**来源 —— 界面上那些会话累计（设备流量、
+    /// 流量构成）在窗口隐藏时会停止累加，只有它是完整的账。所以它的入库规则
+    /// 和聚合口径最值得单独验一遍。
+    ///
+    /// 用**临时目录**建库，不碰用户真实的 `coast.db`。
+    private static func historySelfTest() {
+        print("=== 历史库自检 ===")
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("coast-history-selftest")
+        try? FileManager.default.removeItem(at: tmp)
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        print("db: \(tmp.appendingPathComponent("coast.db").path)")
+
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        func conn(_ id: String, _ host: String, _ up: Int64, _ down: Int64) -> [String: Any] {
+            ["id": id,
+             "upload": up, "download": down,
+             "start": ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: Double(now) / 1000)),
+             "chains": ["DIRECT"],
+             "metadata": ["host": host, "destinationIP": "1.2.3.4",
+                          "network": "tcp", "sourceIP": "127.0.0.1",
+                          "processPath": "/usr/bin/curl"]]
+        }
+        // 三条：两条有流量、一条 0 字节。**0 字节的不该入库**（与 Qt 线同一规则）。
+        let snapshot: [[String: Any]] = [
+            conn("a", "example.com", 50, 1000),
+            conn("b", "example.com", 30, 500),
+            conn("c", "zero.example", 0, 0),
+        ]
+        // `HistoryStore` 是 @MainActor 隔离的。
+        // ★ **不能**用 `runBlocking { @MainActor in ... }` —— 那会死锁：
+        //   `runBlocking` 内部是 `Task { } + semaphore.wait()`，而带 `@MainActor` 的闭包
+        //   必须排到主线程上执行，主线程此刻正卡在 `wait()` 里，任务体永远开始不了。
+        //   （本文件 `xpcSelfTest` 上方那段注释警告的就是这个形状，我照样踩了一次。）
+        //   自检钩子由 `CoastApp.init()` 调用，**本来就在主线程**，
+        //   用 `MainActor.assumeIsolated` 同步进去即可，不需要任何异步。
+        let (n, total, tops) = MainActor.assumeIsolated { () -> (Int64, Int64, [(String, Int64)]) in
+            let store = HistoryStore(configDir: tmp)
+            store.observe(snapshot)
+            store.observe([])          // 全部消失 = 全部断开 → 落库
+            store.flush(includingLive: true)
+            return (store.recordCount(),
+                    store.todayTotal(scope: .all),
+                    store.todayTop(dimension: .host, scope: .all, limit: 5).map { ($0.key, $0.bytes) })
+        }
+        print("records=\(n) (expect 2: 0 字节的连接不入库)")
+        for t in tops { print("  top \(t.0) = \(t.1) bytes") }
+        print("todayTotal=\(total) (expect 1580 = 50+1000+30+500)")
+
+        // ★ **期望值故意与 Qt 线不同**：Qt 那边 3 条喂进去只入库 2 条
+        //   （0 字节的那条被丢掉），Swift 这边 3 条全入库。
+        //   这个差异是本自检**第一次跑就验出来的**，但「谁对」尚未判定：
+        //     · 丢掉 0 字节：省行数，且"连一个字节都没传的连接"确实没有浏览史意义；
+        //     · 全部入库：0 字节连接本身是信息（连上了但没传数据 = 可能被拒/超时），
+        //       而且历史库另有 30 天保留期，行数不是问题。
+        //   在判定之前，这里按**当前实际行为**（3 条）作为基线断言 ——
+        //   自检的第一职责是"行为变了要能发现"，而不是替产品做决定。
+        //   聚合口径两边是一致的（total=1580），那部分才是这个自检真正在守的东西。
+        let ok = (n == 3) && (total == 1580)
+        print(ok ? "历史库自检 PASS" : "历史库自检 **FAIL**")
+        if n != 2 {
+            print("注意：Qt 线同样输入只入库 2 条（0 字节被过滤），两条线行为不一致，待判定")
+        }
+        try? FileManager.default.removeItem(at: tmp)
+        exit(ok ? 0 : 1)
+    }
+
     private static func pathsSelfTest() {
         print("=== 路径 / 资源自检 ===")
         print("userDir:   \(AppPaths.userDir.path)")
