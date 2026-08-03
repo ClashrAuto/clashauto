@@ -460,5 +460,8 @@
   "获取更新": "Rechercher des mises à jour",
   "暂无更新说明": "Aucune note de version",
   "已取消下载": "Téléchargement annulé",
-  "结束下载": "Arrêter le téléchargement"
+  "结束下载": "Arrêter le téléchargement",
+  "退出 Coast？": "Quitter Coast ?",
+  "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Quitter arrête le noyau et restaure le proxy système ; les connexions passant par le proxy seront coupées.",
+  "退出": "Quitter"
 }

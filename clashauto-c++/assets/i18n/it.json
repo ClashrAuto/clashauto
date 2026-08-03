@@ -460,5 +460,8 @@
   "获取更新": "Cerca aggiornamenti",
   "暂无更新说明": "Nessuna nota di rilascio",
   "已取消下载": "Download annullato",
-  "结束下载": "Interrompi download"
+  "结束下载": "Interrompi download",
+  "退出 Coast？": "Uscire da Coast?",
+  "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Uscendo si arresta il core e si ripristina il proxy di sistema; le connessioni via proxy verranno interrotte.",
+  "退出": "Esci"
 }

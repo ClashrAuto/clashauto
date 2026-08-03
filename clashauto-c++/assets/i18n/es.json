@@ -460,5 +460,8 @@
   "获取更新": "Buscar actualizaciones",
   "暂无更新说明": "Sin notas de la versión",
   "已取消下载": "Descarga cancelada",
-  "结束下载": "Detener descarga"
+  "结束下载": "Detener descarga",
+  "退出 Coast？": "¿Salir de Coast?",
+  "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Al salir se detiene el núcleo y se restaura el proxy del sistema; las conexiones por proxy se cortarán.",
+  "退出": "Salir"
 }

@@ -460,5 +460,8 @@
   "获取更新": "Güncellemeleri denetle",
   "暂无更新说明": "Sürüm notu yok",
   "已取消下载": "İndirme iptal edildi",
-  "结束下载": "İndirmeyi durdur"
+  "结束下载": "İndirmeyi durdur",
+  "退出 Coast？": "Coast kapatılsın mı?",
+  "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Çıkışta çekirdek durdurulur ve sistem proxy'si geri alınır; proxy üzerinden giden bağlantılar kesilir.",
+  "退出": "Çık"
 }

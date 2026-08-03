@@ -460,5 +460,8 @@
   "获取更新": "Nach Updates suchen",
   "暂无更新说明": "Keine Versionshinweise",
   "已取消下载": "Download abgebrochen",
-  "结束下载": "Download stoppen"
+  "结束下载": "Download stoppen",
+  "退出 Coast？": "Coast beenden?",
+  "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Beim Beenden wird der Kern gestoppt und der System-Proxy zurückgesetzt; Proxy-Verbindungen brechen ab.",
+  "退出": "Beenden"
 }
