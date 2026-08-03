@@ -433,6 +433,34 @@ bool TproxyRules::install(const Spec &spec, QString *err)
     //  dnsnat 链（nat/dstnat）：53 端口 redirect 到核心的 DNS 监听（理由见头文件第 3 条）。
     //  prerouting 链（filter/mangle）：其余 TCP/UDP 打 fwmark + tproxy 给核心。
     //    DNS 那条先 return，避免被下面的 tproxy 再截一次。
+    //
+    // ★★ 下面这段 nft 脚本里**只许出现 ASCII**，解释一律写在这里（C++ 注释里）。
+    //    MSVC 的传统预处理器不能正确处理原始字符串字面量：脚本里以 `#` 开头的行会被它当成
+    //    预处理指令去解析，指令名里一旦出现 CJK 标点（「」、。★ 之类）就报
+    //        error C3872: '0x300c': this character is not allowed in an identifier
+    //        error C3873: '0x2605': ... not allowed as a first character of an identifier
+    //    ——**只有 MSVC 会**：同一份源码用 MinGW/GCC 构建是通过的，Linux/macOS 也通过，
+    //    所以本地怎么编都发现不了。真机代价：v1.1 分支从加入这些注释的那一次提交起，
+    //    Windows x64/arm64 连红 14 次，而作业日志要仓库 admin 权限才看得到，红了很久没人知道。
+    //
+    // ── v6guard 链在做什么（原先写在脚本里的那段说明搬到这里）──────────────────
+    //  被劫持设备的 IPv6 **兜底**：走到这条说明 prerouting6 没把它 tproxy 走（即该设备的 v6
+    //  地址还没进 proxied6 集合 —— NdpSpoofer 刚把它的默认路由指过来、但我们还没学到它的
+    //  全局地址）。这种「劫持已生效、接管尚未生效」的窗口必须 fail-closed 丢弃：放行就等于
+    //  让它绕过代理与每设备策略直连出网，连「禁网」都形同虚设（真机验证过这个洞）。
+    //  真正被接管的 v6 在 prerouting6 里已 accept，根本到不了这条。
+    //  ★ 前两条 accept 先放行**已接管设备**的 v6（地址已在 proxied6 里）。它们的 TCP/UDP 早在
+    //    prerouting6 被 tproxy 截走、到不了这里；能走到的是 **ICMPv6 等非 TCP/UDP 流量**，
+    //    那些本就该像 v4 的 ICMP 一样交给内核转发。少了这两条，被接管设备的 ping6 会被兜底
+    //    全丢（真机实测：ping6 5 个包、v6guard 计数正好 +5，而 lwIP 模式下 ping6 是通的）。
+    //
+    // ── isolate 链在做什么 ────────────────────────────────────────────────────
+    //  局域网隔离的**兜底**层。真正拦下绝大多数包的是 prerouting 链里同样一条规则 —— 实测这条
+    //  forward 规则只命中 1 包：TPROXY 在 prerouting(mangle) 就把被接管设备的包截给本地 socket
+    //  了，路由判决都不做，forward 钩子根本轮不到。放着不删是因为它覆盖 prerouting 放行之后仍
+    //  走转发的残余路径（跨网段本机地址旁路那几条 return）。
+    //  顺带：只有 prerouting 那条能避免「TPROXY 本地 socket 先把 TCP 握手做完、再由核心 REJECT」
+    //  的假连通 —— 那正是 `nc -z` 会误报「通」的原因，别再拿 -z 验隔离。
     QString script = QStringLiteral(R"(
 table inet %1 {
   set proxied {
@@ -454,28 +482,12 @@ table inet %1 {
     flags interval
   }
   chain v6guard {
-    # 被劫持设备的 IPv6 **兜底**：走到这里说明 prerouting6 没把它 tproxy 走（即该设备的 v6
-    # 地址还没进 proxied6 集合 —— NdpSpoofer 刚把它的默认路由指过来、但我们还没学到它的
-    # 全局地址）。这种「劫持已生效、接管尚未生效」的窗口必须 fail-closed 丢弃：放行就等于
-    # 让它绕过代理与每设备策略直连出网，连「禁网」都形同虚设（真机验证过这个洞）。
-    # 注意：真正被接管的 v6 在 prerouting6 里已 accept，根本到不了这条。
-    # ★ 先放行**已接管设备**的 v6（源地址已在 proxied6 里）。它们的 TCP/UDP 早在 prerouting6
-    #   被 tproxy 截走、根本到不了这里；能走到这条的是 **ICMPv6 等非 TCP/UDP 流量**，那些本就
-    #   该像 v4 的 ICMP 一样交给内核转发。少了这条放行，被接管设备的 ping6 会被下面的兜底全丢
-    #   （真机实测：ping6 5 个包、v6guard 计数正好 +5，而 lwIP 模式下 ping6 是通的 —— 属回归）。
     type filter hook forward priority filter - 30; policy accept;
     ip6 saddr @proxied6 counter accept
     ip6 daddr @proxied6 counter accept
     ether saddr @victimmacs meta nfproto ipv6 counter drop
   }
   chain isolate {
-    # 局域网隔离的**兜底**层（注意：这段在 nft 脚本里，注释必须用 # 不能用 //）。真正拦下
-    # 绝大多数包的是 prerouting 链里同样一条规则 —— 实测这条 forward 规则只命中 1 包：
-    # TPROXY 在 prerouting(mangle) 就把被接管设备的包截给本地 socket 了，路由判决都不做，
-    # forward 钩子根本轮不到。放着不删是因为它覆盖 prerouting 放行之后仍走转发的残余路径
-    # （跨网段本机地址旁路那几条 return）。顺带：只有 prerouting 那条能避免「TPROXY 本地
-    # socket 先把 TCP 握手做完、再由核心 REJECT」的假连通 —— 那正是 `nc -z` 会误报「通」
-    # 的原因，别再拿 -z 验隔离。
     type filter hook forward priority filter - 20; policy accept;
     ip saddr @isolated ip daddr @lansubnets ct state new counter drop
   }
