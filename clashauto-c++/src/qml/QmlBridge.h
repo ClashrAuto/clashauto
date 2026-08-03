@@ -163,6 +163,11 @@ public:
     ///   **每次现查而不是启动时存一份**：X11 上面板可能比应用起得晚，启动那一刻的答案会过期。
     Q_INVOKABLE bool trayAvailable() const;
 
+    /// 读一个「置位即生效」的环境变量。给 UI 调试钩子用（如 `COAST_OPEN_UPDATE`）——
+    /// QML 里读不到环境变量，而这类钩子（启动即打开某个只能点出来的窗）是无头截图核对
+    /// 版式的唯一入口。正式运行不设就是零影响。
+    Q_INVOKABLE bool envFlag(const QString &name) const;
+
     // 界面此刻有没有一个窗口真的被人看着（主窗或连接/详情/更新那几个附属窗）。
     //
     // ★ 点 ✕ 走的是「只隐藏不销毁」（Main.qml 的 onClosing + hide()），QML 场景整棵都还在，

@@ -111,6 +111,10 @@ ApplicationWindow {
         // 或 mac Dock 重开）；关 → 正常显示窗口。设 visible=true 会触发 onVisibleChanged → applyChrome，
         // 故显示分支无需再手动 applyChrome；隐藏分支等首次显示（重开）时再上标题栏/毛玻璃。
         window.visible = !bridge.closeToTray;
+        // 启动即打开更新窗（`COAST_OPEN_UPDATE=1`）：与 Swift 端同名同语义的 UI 调试钩子 ——
+        // 那个窗只能点出来，而无头截图核对它的版式时需要一个不经交互的入口。默认不触发。
+        if (bridge.envFlag("COAST_OPEN_UPDATE"))
+            updateWindow.show();
     }
     onVisibleChanged: {
         if (visible)

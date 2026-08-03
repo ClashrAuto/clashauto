@@ -760,6 +760,11 @@ void QmlBridge::setTrafficDimension(int dim)
     refreshTodayTraffic();
 }
 
+bool QmlBridge::envFlag(const QString &name) const
+{
+    return qEnvironmentVariable(name.toLatin1().constData()) == QStringLiteral("1");
+}
+
 bool QmlBridge::trayAvailable() const
 {
     return QSystemTrayIcon::isSystemTrayAvailable();

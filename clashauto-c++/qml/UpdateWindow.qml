@@ -3,12 +3,24 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ClashAuto
 
-// 更新窗 —— 独立窗口。改造后只「展示更新内容 + 一键更新」，不再让用户挑资源：
-//   [程序] 当前版→最新版 + 更新说明 → 更新
-//          （Windows：下 portable zip → 解压覆盖到项目目录 → 重启；mac/linux 走各自安装器）
-//   [内核] 本地版→最新 mihomo + 说明 → 更新（settings.updateCore：下 zip/gz → 替换内核 → 重启核心）
-//   [GeoIP] 说明 → 更新（settings.updateGeoip：下 country.mmdb 到用户目录 + 资源目录）
-// 程序下载走 updater 的进度条（含 ✕ 取消 + 速度/已下载）；内核 / GeoIP 体积小，只显示状态文字。
+// 更新窗 —— 独立窗口。与 Swift 端**同一套版式**（那边是 `UpdateView.swift`）：
+//
+//   顶部：当前版本 → 最新版本 + 三段切换（程序 / 内核 / GeoIP）
+//   中间：只放更新内容（滚动）
+//   底部：一条状态机 —— 默认「获取更新」→ 查出有新版换成「更新」→ 点了之后换成
+//         「进度条 + ✕」，速度与「下载量/总量」在**进度条正下方居中**；
+//         状态/错误信息在**左侧**，与右侧那组**底对齐**。
+//
+// ★ 顶部按平台分三种，这是刻意的 —— 三端的「标题栏」根本不是一回事：
+//   · **macOS**：标题栏被做成透明 + 内容铺满整窗（`configureMacTitleBar`），所以版本号与
+//     三段组**就摆在标题栏那条带子里**；左边留出红绿灯的位置（`kMacTrafficLights + 20`），
+//     不留的话文字直接压在三颗灯上。
+//   · **Windows**：三段以**系统原生标题栏菜单**的样子出现 —— 平铺文字、悬停高亮、贴着
+//     客户区左上角，就是 Windows 应用菜单栏的长相；窗口标题仍旧由系统标题栏显示。
+//   · **Linux**：窗口标题交给系统标题栏（各家 WM 自己画），三段组**悬浮在标题栏下面、居左**。
+//
+// 「国内加速」不在这一页 —— 它是设置页里的**同一个** `settings.mirror`，
+// 两处各放一份只会让人以为是两个开关。
 ApplicationWindow {
     id: win
     // 独立顶层窗（去掉隐式 transientParent）：Win/Linux 任务栏显示独立图标，方便切换窗口。
@@ -19,12 +31,25 @@ ApplicationWindow {
     minimumWidth: 460
     minimumHeight: 420
     title: qsTr("Coast 更新")
-    color: Theme.card
+    // mac 透明底露玻璃（applyMacGlass 会在窗后插一层 NSVisualEffectView），
+    // 其余平台用壳色 —— 与 Main.qml 同一处置。
+    color: isMac ? "transparent" : Theme.shell
+
+    readonly property bool isMac: Qt.platform.os === "osx"
+    readonly property bool isWin: Qt.platform.os === "windows"
+
+    /// 顶栏高度。mac 上就是标题栏那条带子的高度（红绿灯由系统在里面垂直居中）。
+    readonly property int bandHeight: 50
+    // ★ mac 上这一行**贴在红绿灯下面**，不是与它们同排。
+    //   Swift 端能把版本号与三段组画进标题栏那条带子里（NSHostingView 铺满整窗），
+    //   **Qt 不行**：即便 `configureMacTitleBar` 已经开了 `fullSizeContentView`，
+    //   QQuickWindow 的场景仍旧从标题栏下面起排 —— 给这条带子上过色量过，它的顶边落在 28，
+    //   红绿灯整个在它上面。所以左内距按普通的 20 给（不用给三颗灯让位，它们不在同一行），
+    //   观感上就是「透明标题条 + 紧贴其下的一条导航」。
 
     property int currentTab: 0   // 0 程序 / 1 内核 / 2 GeoIP
 
     // 程序更新的**频道**：0=正式版 / 1=测试版(prerelease)。与 currentTab 无关，别混。
-    // updater 后端一直同时备着两条频道（releaseXxx / betaXxx），这里只是把「用哪条」接到设置上。
     readonly property int channel: settings.receiveBeta ? 1 : 0
 
     // 当前 tab 的「更新」是否进行中（下载 / 安装）。
@@ -33,12 +58,60 @@ ApplicationWindow {
                                                     : settings.geoipUpdating
 
     // 打开即拉 release 列表 + 内核版本。
-    onVisibleChanged: if (visible) updater.refresh()
-
-    Connections {
-        target: updater
-        function onFailed(reason) { /* status 已在窗内展示，此处不额外弹窗 */ }
+    // mac 上还要把标题栏做成透明 + 内容铺满整窗 —— 版本号与三段组就摆在那条带子里
+    // （与主窗、连接窗同一处理；不调的话系统标题栏还在，顶栏会掉到它下面）。
+    onVisibleChanged: {
+        if (!visible)
+            return
+        updater.refresh()
+        if (win.isMac)
+            bridge.applyMacGlass(win, Theme.dark)
     }
+
+    // 主题切换后毛玻璃深浅要重设（与 Main.qml 同）。
+    Connections {
+        target: Theme
+        function onDarkChanged() { if (win.isMac && win.visible) bridge.applyMacGlass(win, Theme.dark) }
+    }
+
+    // —— 每个页签的三样：当前版本 / 最新版本 / 更新内容 ——
+    readonly property string localVersion:
+        currentTab === 0 ? updater.currentVersion
+        : currentTab === 1 ? (updater.coreVersion.length > 0 ? updater.coreVersion : "—")
+                           : "—"
+    /// `updater.releaseVersion` 是「VERSION: 1.2.3」这种老展示串，这一版的版式里
+    /// 前缀由「最新 」承担了，去掉免得读成「最新 VERSION: 1.2.3」。
+    function stripVersionPrefix(v) {
+        return (v || "").replace(/^VERSION:\s*/, "")
+    }
+    readonly property string remoteVersion:
+        currentTab === 0 ? (stripVersionPrefix(channel === 1 ? updater.betaVersion
+                                                             : updater.releaseVersion) || "—")
+        // 内核那条 updater 只给「更新说明」，最新版本号本身在 about 那边（角标也用它）。
+        : currentTab === 1 ? (about.coreUpdateAvailable ? qsTr("有新版") : qsTr("已是最新"))
+                           : (updater.checking ? "…" : "latest")
+    readonly property string notesText:
+        currentTab === 0 ? (channel === 1 ? updater.betaNotes : updater.releaseNotes)
+        : currentTab === 1 ? updater.coreNotes
+                           : qsTr("Country.mmdb 是「按 IP 归属地区分流」所用的地理数据库（来源 MetaCubeX/meta-rules-dat）。\n\n点击「更新」下载最新数据库到用户目录与资源目录，重启核心后生效。")
+
+    /// 这个页签有没有可装的更新。程序页拿版本号比；内核页交给后端的判断；
+    /// GeoIP 没有版本可比（上游天天重建同一个 tag），查过一轮就当「可以更新」——
+    /// 说「已是最新」才是撒谎。
+    /// 「有没有可装的更新」用的是 `about` 那份判断 —— 侧栏那两颗角标（new / core）同一来源，
+    /// 两处结论必须一致（各判各的迟早会出现「角标说有、这页说没有」）。
+    readonly property bool hasUpdate:
+        currentTab === 0 ? about.updateAvailable
+        : currentTab === 1 ? about.coreUpdateAvailable
+                           : checkedGeoip
+
+    property bool checkedGeoip: false
+
+    /// 底部左侧那行状态/错误。
+    readonly property string statusText:
+        currentTab === 1 ? (settings.coreUpdating ? settings.coreUpdateStatus : "")
+        : currentTab === 2 ? (settings.geoipUpdating ? settings.geoipStatus : "")
+                           : updater.status
 
     function doUpdate() {
         if (win.busy)
@@ -54,47 +127,182 @@ ApplicationWindow {
         }
     }
 
-    // 竖排 tab 按钮（图标 + 文字）
-    component TabButton_: Rectangle {
-        property int idx: 0
-        property string label: ""
-        property string icon: ""
-        Layout.preferredWidth: 78
-        Layout.preferredHeight: 46
-        radius: 5
-        color: win.currentTab === idx ? Theme.accent : (Theme.dark ? "#252525" : "#eeeeee")
-        RowLayout {
-            anchors.centerIn: parent
-            spacing: 6
-            Text {
-                text: icon
-                font.family: Theme.riFont
-                font.pixelSize: 16
-                color: win.currentTab === idx ? "#ffffff" : Theme.textSecondary
-            }
-            Text {
-                text: label
-                font.pixelSize: 13
-                color: win.currentTab === idx ? "#ffffff" : Theme.textSecondary
-            }
-        }
-        HoverHandler { cursorShape: Qt.PointingHandCursor }
-        TapHandler { onTapped: win.currentTab = idx }
+    function doCheck() {
+        updater.refresh()   // 拉 release 列表 + 内核说明（这一页的「更新内容」要用）
+        about.check()       // 版本比对（角标与本页的「有没有新版」同一来源）
+        if (currentTab === 2)
+            win.checkedGeoip = true   // GeoIP 没有版本可比，查过一轮就当可以更新
     }
 
-    // 「更新说明」正文卡（只读、可滚动）
-    component NotesCard: Rectangle {
-        property alias text: notesInner.text
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-        radius: 4
-        color: Theme.dark ? "#0d0d0d" : "#ffffff"
-        border.width: 1
-        border.color: Theme.divider
+    // ———————————————————————— 顶部 ————————————————————————
+
+    // mac：版本号 + 三段组**摆进标题栏那条带子**。
+    component MacBand: Item {
+        implicitHeight: win.bandHeight
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 20
+            anchors.rightMargin: 20
+            spacing: 12
+            VersionLine {}
+            Item { Layout.fillWidth: true }
+            SegmentedTabs {}
+        }
+    }
+
+    // Windows：三段做成**系统原生标题栏菜单**的样子（平铺文字 + 悬停高亮，贴左上角）；
+    // 窗口标题仍旧由系统标题栏显示。版本号排在同一条的右端。
+    component WinMenuBar: Rectangle {
+        implicitHeight: 28
+        color: Theme.dark ? Qt.rgba(1, 1, 1, 0.04) : Qt.rgba(0, 0, 0, 0.04)
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 4
+            anchors.rightMargin: 12
+            spacing: 0
+            Repeater {
+                model: [qsTr("程序"), qsTr("内核"), "GeoIP"]
+                delegate: Rectangle {
+                    required property int index
+                    required property string modelData
+                    Layout.preferredWidth: menuText.implicitWidth + 24
+                    Layout.preferredHeight: 28
+                    // 菜单栏那种「悬停/选中才有底」的平铺样式，不画圆角、不画边框。
+                    color: win.currentTab === index ? Theme.accent
+                           : (menuHover.hovered ? (Theme.dark ? Qt.rgba(1, 1, 1, 0.10)
+                                                              : Qt.rgba(0, 0, 0, 0.08))
+                                                : "transparent")
+                    Text {
+                        id: menuText
+                        anchors.centerIn: parent
+                        text: parent.modelData
+                        font.pixelSize: 12
+                        color: win.currentTab === parent.index ? "#ffffff" : Theme.textPrimary
+                    }
+                    HoverHandler { id: menuHover }
+                    TapHandler { onTapped: win.currentTab = parent.index }
+                }
+            }
+            Item { Layout.fillWidth: true }
+            VersionLine {}
+        }
+    }
+
+    // Linux：标题归系统标题栏，三段组**悬浮在标题栏下面、居左**。
+    component LinuxBar: Item {
+        implicitHeight: 44
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 20
+            anchors.rightMargin: 20
+            spacing: 12
+            SegmentedTabs {}
+            Item { Layout.fillWidth: true }
+            VersionLine {}
+        }
+    }
+
+    // 当前版本 → 最新版本。查不到的那一头显示「—」，不编。
+    component VersionLine: RowLayout {
+        spacing: 8
+        Text {
+            text: qsTr("当前 ") + win.localVersion
+            font.pixelSize: 13
+            color: Theme.textPrimary
+            elide: Text.ElideRight
+        }
+        Text { text: "→"; font.pixelSize: 12; color: Theme.textMuted }
+        Text {
+            text: qsTr("最新 ") + win.remoteVersion
+            font.pixelSize: 13
+            color: win.hasUpdate ? Theme.accent : Theme.textSecondary
+            elide: Text.ElideRight
+        }
+    }
+
+    // 三段：**一层**胶囊底，选中段的底压在里面 —— 与主窗页脚那颗「规则」同一画法，
+    // 压在里面才不会给整组带来额外圆角（看着是一颗胶囊被分成三段，而不是三颗独立按钮）。
+    component SegmentedTabs: Rectangle {
+        implicitWidth: segRow.implicitWidth
+        implicitHeight: 28
+        radius: height / 2
+        color: Theme.dark ? Qt.rgba(1, 1, 1, 0.08) : Qt.rgba(0, 0, 0, 0.06)
+        Row {
+            id: segRow
+            anchors.fill: parent
+            Repeater {
+                model: [qsTr("程序"), qsTr("内核"), "GeoIP"]
+                delegate: Rectangle {
+                    required property int index
+                    required property string modelData
+                    width: 66
+                    height: parent.height
+                    radius: height / 2
+                    color: win.currentTab === index ? Qt.rgba(Theme.accent.r, Theme.accent.g,
+                                                              Theme.accent.b, 0.45)
+                                                    : "transparent"
+                    Text {
+                        anchors.centerIn: parent
+                        text: parent.modelData
+                        font.pixelSize: 12
+                        color: win.currentTab === parent.index ? Theme.textPrimary : Theme.textMuted
+                    }
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: win.currentTab = parent.index }
+                }
+            }
+        }
+    }
+
+    // ———————————————————————— 底部动作 ————————————————————————
+
+    // 胶囊按钮（获取更新 / 更新）。mac 上系统会给玻璃感，其余平台是同形状的实心胶囊。
+    component PillButton: Rectangle {
+        property string label: ""
+        property bool disabled: false
+        signal clicked
+        implicitWidth: pillText.implicitWidth + 32
+        implicitHeight: 30
+        radius: height / 2
+        opacity: disabled ? 0.5 : 1.0
+        color: pillHover.hovered && !disabled
+               ? (Theme.dark ? Qt.rgba(1, 1, 1, 0.18) : Qt.rgba(0, 0, 0, 0.12))
+               : (Theme.dark ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.08))
+        Text {
+            id: pillText
+            anchors.centerIn: parent
+            text: parent.label
+            font.pixelSize: 13
+            color: Theme.textPrimary
+        }
+        HoverHandler { id: pillHover; cursorShape: parent.disabled ? Qt.ArrowCursor
+                                                                   : Qt.PointingHandCursor }
+        TapHandler { enabled: !parent.disabled; onTapped: parent.clicked() }
+    }
+
+    // ———————————————————————— 版面 ————————————————————————
+
+    ColumnLayout {
+        anchors.fill: parent
+        spacing: 0
+
+        // 顶部：三端各一种（见文件头的说明）
+        Loader {
+            Layout.fillWidth: true
+            sourceComponent: win.isMac ? macBand : (win.isWin ? winMenuBar : linuxBar)
+        }
+        Component { id: macBand; MacBand {} }
+        Component { id: winMenuBar; WinMenuBar {} }
+        Component { id: linuxBar; LinuxBar {} }
+
+        // 中间：只放更新内容
         Flickable {
             id: notesFlick
-            anchors.fill: parent
-            anchors.margins: 8
+            Layout.fillWidth: true
+            Layout.fillHeight: true
+            Layout.leftMargin: 20
+            Layout.rightMargin: 20
+            Layout.topMargin: 12
             clip: true
             contentWidth: width
             contentHeight: notesInner.implicitHeight
@@ -104,247 +312,103 @@ ApplicationWindow {
                 width: notesFlick.width
                 wrapMode: Text.WordWrap
                 font.pixelSize: 12
-                lineHeight: 1.3
+                lineHeight: 1.35
                 color: Theme.textSecondary
+                text: win.notesText.length > 0 ? win.notesText : qsTr("暂无更新说明")
             }
         }
-    }
 
-    ColumnLayout {
-        anchors.fill: parent
-        anchors.margins: 10
-        spacing: 8
-
-        // —— 标题 ——
-        Text {
-            text: qsTr("Coast 更新")
-            font.pixelSize: 16
-            color: Theme.textPrimary
-        }
-
-        // —— 左 tab + 右内容 ——
+        // 底栏：**左边状态/错误，右边动作，两边底对齐**。
+        // 状态那行常常很长（限流那条一句话就两行），塞在按钮上下会把底栏顶得忽高忽低；
+        // 底对齐是因为右侧在下载态是「进度条 + 一行文字」两行高，顶对齐的话左边那句会飘在半空。
         RowLayout {
             Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: 8
+            Layout.margins: 20
+            Layout.topMargin: 10
+            spacing: 16
 
+            Text {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignBottom
+                text: win.statusText
+                wrapMode: Text.WordWrap
+                font.pixelSize: 11
+                color: Theme.textMuted
+            }
+
+            // —— 下载中：进度条 + ✕（结束下载），速度在进度条正下方居中 ——
             ColumnLayout {
-                Layout.alignment: Qt.AlignTop
-                spacing: 6
-                TabButton_ { idx: 0; label: qsTr("程序"); icon: "" }
-                TabButton_ { idx: 1; label: qsTr("内核"); icon: "" }
-                TabButton_ { idx: 2; label: qsTr("GeoIP"); icon: "" }
-                Item { Layout.fillHeight: true }
-            }
-
-            // 内容卡
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                radius: 5
-                color: Theme.dark ? "#161616" : "#f6f6f6"
-                border.width: 1
-                border.color: Theme.divider
-
-                // ——— 程序 ———
-                ColumnLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 6
-                    visible: win.currentTab === 0
-
-                    Text {
-                        text: qsTr("当前版本: ") + updater.currentVersion
-                        font.pixelSize: 13
-                        color: Theme.textSecondary
-                    }
-                    Text {
-                        text: win.channel === 1 ? updater.betaVersion : updater.releaseVersion
-                        font.pixelSize: 15
-                        color: Theme.textPrimary
-                    }
-                    Text { text: qsTr("更新说明"); font.pixelSize: 12; color: Theme.textMuted }
-                    NotesCard { text: win.channel === 1 ? updater.betaNotes : updater.releaseNotes }
-                }
-
-                // ——— 内核 ———
-                ColumnLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 6
-                    visible: win.currentTab === 1
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: updater.coreVersion.length > 0 ? updater.coreVersion : qsTr("内核版本: 检测中...")
-                        font.pixelSize: 15
-                        wrapMode: Text.WordWrap
-                        color: Theme.textPrimary
-                    }
-                    Text { text: qsTr("更新说明"); font.pixelSize: 12; color: Theme.textMuted }
-                    NotesCard { text: updater.coreNotes }
-                }
-
-                // ——— GeoIP ———
-                ColumnLayout {
-                    anchors.fill: parent
-                    anchors.margins: 10
-                    spacing: 6
-                    visible: win.currentTab === 2
-
-                    Text {
-                        text: qsTr("GeoIP 数据库")
-                        font.pixelSize: 15
-                        color: Theme.textPrimary
-                    }
-                    Text { text: qsTr("说明"); font.pixelSize: 12; color: Theme.textMuted }
-                    NotesCard {
-                        text: qsTr("Country.mmdb 是「按 IP 归属地区分流」所用的地理数据库（来源 MetaCubeX/meta-rules-dat）。\n\n点击「更新」下载最新数据库到用户目录与资源目录，重启核心后生效。")
-                    }
-                }
-            }
-        }
-
-        // —— 下载中（程序）：进度条 + 右侧 ✕ 取消 ——
-        RowLayout {
-            Layout.fillWidth: true
-            visible: updater.downloading
-            spacing: 8
-
-            Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: 22
-                radius: 4
-                color: Theme.dark ? "#0d0d0d" : "#eeeeee"
-                border.width: 1
-                border.color: Theme.divider
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.top: parent.top
-                    anchors.bottom: parent.bottom
-                    anchors.margins: 1
-                    width: Math.max(0, (parent.width - 2) * updater.progress / 100)
-                    radius: 4
-                    color: Theme.accent
-                }
-                Text {
-                    anchors.centerIn: parent
-                    text: updater.progress + "%"
-                    font.pixelSize: 11
-                    color: Theme.textPrimary
-                }
-            }
-
-            // ✕ 取消下载：abort → UpdateController 走「已取消」分支（删临时文件、不弹失败）。
-            Rectangle {
-                Layout.preferredWidth: 24
-                Layout.preferredHeight: 24
-                radius: 12
-                color: cancelHover.hovered ? "#f56c6c" : (Theme.dark ? "#252525" : "#eeeeee")
-                border.width: 1
-                border.color: cancelHover.hovered ? "#f56c6c" : Theme.divider
-                Text {
-                    anchors.centerIn: parent
-                    text: "✕"
-                    font.pixelSize: 12
-                    color: cancelHover.hovered ? "#ffffff" : Theme.textSecondary
-                }
-                HoverHandler { id: cancelHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: updater.cancelDownload() }
-            }
-        }
-
-        // —— 程序下载统计：速度 · 已下载 / 总量 ——
-        Text {
-            Layout.fillWidth: true
-            visible: updater.downloading
-            text: (updater.downloadSpeed.length > 0 ? updater.downloadSpeed + "   ·   " : "")
-                  + updater.downloadedText + " / " + updater.totalText
-            font.pixelSize: 11
-            color: Theme.textSecondary
-        }
-
-        // —— 状态行：程序=updater.status；内核/GeoIP=各自进行中的状态 ——
-        Text {
-            Layout.fillWidth: true
-            readonly property string s: win.currentTab === 1 ? (settings.coreUpdating ? settings.coreUpdateStatus : "")
-                                        : win.currentTab === 2 ? (settings.geoipUpdating ? settings.geoipStatus : "")
-                                                               : updater.status
-            visible: s.length > 0
-            text: s
-            wrapMode: Text.WordWrap
-            font.pixelSize: 11
-            color: Theme.textMuted
-        }
-
-        // —— 底部动作行 ——
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 10
-
-            // 国内代理下载（与设置页「国内加速」共用 settings.mirror；程序/内核下载都用它）
-            RowLayout {
+                Layout.alignment: Qt.AlignBottom
+                visible: updater.downloading
                 spacing: 5
-                Rectangle {
-                    width: 16; height: 16; radius: 3
-                    color: settings.mirror ? Theme.accent : "transparent"
-                    border.width: 1
-                    border.color: settings.mirror ? Theme.accent : Theme.divider
-                    Text {
-                        anchors.centerIn: parent
-                        text: "✓"; font.pixelSize: 11; color: "#ffffff"
-                        visible: settings.mirror
+
+                RowLayout {
+                    spacing: 10
+                    ColumnLayout {
+                        spacing: 5
+                        // 细进度条：高 5、**全圆角**、不写百分比（下面那行已经有量了，
+                        // 5 高的条也塞不下字）。
+                        Rectangle {
+                            Layout.preferredWidth: 220
+                            Layout.preferredHeight: 5
+                            radius: height / 2
+                            color: Theme.dark ? "#0d0d0d" : "#e4e4e4"
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                anchors.bottom: parent.bottom
+                                width: Math.max(0, parent.width * updater.progress / 100)
+                                radius: height / 2
+                                color: Theme.accent
+                            }
+                        }
+                        Text {
+                            Layout.preferredWidth: 220
+                            horizontalAlignment: Text.AlignHCenter
+                            text: (updater.downloadSpeed.length > 0 ? updater.downloadSpeed : "0 B/s")
+                                  + " (" + updater.downloadedText + " / " + updater.totalText + ")"
+                            font.pixelSize: 11
+                            color: Theme.textMuted
+                        }
                     }
-                    TapHandler { onTapped: settings.setMirror(!settings.mirror) }
-                }
-                Text {
-                    text: qsTr("国内代理下载")
-                    font.pixelSize: 12
-                    color: Theme.textSecondary
-                    TapHandler { onTapped: settings.setMirror(!settings.mirror) }
+                    // ✕ = **结束这次下载**，不是关窗。窗留着：取消完底栏自己回到
+                    // 「更新 / 获取更新」，用户可以直接再来一次。
+                    Rectangle {
+                        Layout.alignment: Qt.AlignTop
+                        Layout.preferredWidth: 26
+                        Layout.preferredHeight: 26
+                        radius: 13
+                        color: cancelHover.hovered
+                               ? (Theme.dark ? Qt.rgba(1, 1, 1, 0.18) : Qt.rgba(0, 0, 0, 0.12))
+                               : (Theme.dark ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(0, 0, 0, 0.08))
+                        Text {
+                            anchors.centerIn: parent
+                            text: "✕"
+                            font.pixelSize: 11
+                            color: Theme.textPrimary
+                        }
+                        HoverHandler { id: cancelHover; cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: updater.cancelDownload() }
+                    }
                 }
             }
 
-            Item { Layout.fillWidth: true }
-
-            // 关闭
-            Rectangle {
-                Layout.preferredWidth: 80
-                Layout.preferredHeight: 30
-                radius: 5
-                color: closeHover.hovered ? Theme.hover : (Theme.dark ? "#252525" : "#eeeeee")
-                border.width: 1
-                border.color: Theme.divider
-                Text {
-                    anchors.centerIn: parent
-                    text: qsTr("关闭")
-                    font.pixelSize: 13
-                    color: Theme.textSecondary
-                }
-                HoverHandler { id: closeHover; cursorShape: Qt.PointingHandCursor }
-                TapHandler { onTapped: win.close() }
+            // —— 有更新：更新 ——
+            PillButton {
+                Layout.alignment: Qt.AlignBottom
+                visible: !updater.downloading && win.hasUpdate
+                label: win.busy ? qsTr("更新中…") : qsTr("更新")
+                disabled: win.busy
+                onClicked: win.doUpdate()
             }
 
-            // 更新（当前 tab 的动作）
-            Rectangle {
-                id: updateBtn
-                Layout.preferredWidth: 100
-                Layout.preferredHeight: 30
-                radius: 5
-                enabled: !win.busy
-                opacity: win.busy ? 0.5 : 1.0
-                color: updHover.hovered && !win.busy ? Theme.accentStrong : Theme.accent
-                Text {
-                    anchors.centerIn: parent
-                    text: win.busy ? qsTr("更新中…") : qsTr("更新")
-                    font.pixelSize: 13
-                    color: "#ffffff"
-                }
-                HoverHandler { id: updHover; cursorShape: win.busy ? Qt.ArrowCursor : Qt.PointingHandCursor }
-                TapHandler {
-                    enabled: !win.busy
-                    onTapped: win.doUpdate()
-                }
+            // —— 默认：获取更新 ——
+            PillButton {
+                Layout.alignment: Qt.AlignBottom
+                visible: !updater.downloading && !win.hasUpdate
+                label: (updater.checking || about.checking) ? qsTr("检查中…") : qsTr("获取更新")
+                disabled: updater.checking || about.checking || win.busy
+                onClicked: win.doCheck()
             }
         }
     }
