@@ -3,6 +3,14 @@ name = "smoltcp2socks"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "smoltcp2socks"
+path = "src/main.rs"
+
+[[bin]]
+name = "smoltcp2socks_ca"
+path = "src/ca_main.rs"
+
 [dependencies]
 libc = "0.2"
 
