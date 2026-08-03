@@ -264,7 +264,13 @@ void DeviceStore::load()
             "SELECT mac,alias,type_override,first_seen,proxy_enabled,policy_mode,policy_target,"
             "total_up,total_down,today_up,today_down,today_date,"
             "ip,auto_name,model,vendor,auto_type,is_self,is_gateway,last_seen FROM device"))) {
-        qWarning("DeviceStore: 读设备表失败: %s", q.lastError().text().toUtf8().constData());
+        const QString err = q.lastError().text();
+        qWarning("DeviceStore: 读设备表失败: %s", err.toUtf8().constData());
+        // 不能只写日志就走 —— 见 storeError 的说明：界面会静静显示"没有设备"。
+        // 两条路都走：信号给"已经连上的"消费者，m_loadError 给"构造时还不存在的"那些
+        //（load() 在本类构造函数里调，那时控制器还没建，只发信号等于没发）。
+        m_loadError = tr("设备台账读取失败：%1").arg(err);
+        emit storeError(m_loadError);
         return;
     }
     while (q.next()) {

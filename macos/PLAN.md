@@ -4587,3 +4587,42 @@ Swift 需 `ip/total_up/total_down/today_*/is_self/is_gateway/auto_name/auto_type
 把同一类共享状态（同库其他表、同目录其他文件）全过一遍。
 这次过完才知道问题只有一处 —— 否则会一直按"数据层可能整体不兼容"的假设估代价，
 估出来的方案（统一 schema、分库）都比实际需要的重。
+
+## 台账读不出来时要让用户看见（Qt，已修并验证）
+
+上一节确认 Qt 在本机读不了 Swift 建的 device 表。这轮查它**怎么告诉用户** ——
+答案是**不告诉**：`DeviceStore::load()` 读失败只 `qWarning` 一句就 `return`，
+界面上就是一个**空设备列表**。用户看到的是"还没扫到设备"，
+真相却是"台账在这儿但读不了" —— 两者的处置完全不同（等一等 vs 去查库），
+**把人引向错误的方向比不提示更糟**。
+
+修法：加 `DeviceStore::storeError` 信号 + `loadError()` 查询接口，
+`DevicesController` 接到后转成已有的 `gatewayError`（`DevicesPage.qml` 的 `noticeBar`）。
+
+### ★ 第一版没生效：信号发早了
+
+只加信号是不够的 —— **`load()` 是在 `DeviceStore` 自己的构造函数里调的**，
+那一刻 `DevicesController` 还没建出来、信号无人接听，**发了等于没发**。
+（第一版就是这么写的，跑起来界面依旧一声不吭。）
+
+补法两条一起走：
+· 信号 —— 给"已经连上的"消费者；
+· `loadError()` —— 给"构造时还不存在"的那些，控制器连上后**主动补问一次**，
+  并用 `Qt::QueuedConnection` 延到事件循环下一轮再发（此刻 QML 侧的 `Connections` 也还没建好）。
+
+**验证**（临时在 `noticeBar.show` 处打点，确认消息真送达界面，而不是只看代码）：
+
+```
+qml: [EXP] noticeBar: 设备台账读取失败：no such column: total_up Unable to execute statement
+```
+
+打点已移除并重新编译确认。
+
+### 一次自我修正
+
+排查中我一度断定 `gatewayError` 是**悬空信号**（C++ 侧 emit 11 次、QML 侧搜不到接收方），
+差点当成"所有这些错误用户都看不到"的大问题写进结论。
+**实际上 `DevicesPage.qml:372` 有 `onGatewayError(msg) { noticeBar.show(msg) }`** ——
+我 grep 时只搜了 `gatewayError`，而 QML 的槽名带 `on` 前缀。
+**跨语言查引用时要按目标语言的命名约定搜**（QML `onXxx`、Qt `SIGNAL(xxx())`），
+不能只用 C++ 侧的名字一搜了之。

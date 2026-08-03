@@ -198,6 +198,24 @@ public:
 signals:
     void changed();          // 任一展示字段变化（控制器据此刷新模型）
     void deviceAdded(QString mac); // 新设备首次出现（供托盘「蹭网」通知）
+    /// 台账**读不出来**（表结构不符/库损坏等）。
+    ///
+    /// ★ 这个信号存在的理由：读失败时原来只 `qWarning` 一句就 `return`，
+    ///   界面上就是一个**空设备列表** —— 用户看到的是"还没扫到设备"，
+    ///   而真相是"台账在这儿但读不了"。两者的处置完全不同（等一等 vs 去查库），
+    ///   把人引向错误的方向比不提示更糟。
+    ///   真机遇到过：两条产品线的 device 表列集合不同，Qt 读 Swift 建的表
+    ///   报 `no such column: total_up`，界面却一声不吭。
+    void storeError(QString message);
+
+public:
+    /// 台账读取失败的原因（空 = 没失败）。
+    ///
+    /// ★ 光有 `storeError` 信号**不够**：`load()` 是在 `DeviceStore` **构造函数里**调的，
+    ///   那一刻 `DevicesController` 还没建出来、信号无人接听，发了等于没发。
+    ///   （第一版就是这么写的，跑起来界面依旧一声不吭。）
+    ///   所以把原因**存下来**，让后建的消费者能主动问一次。
+    QString loadError() const { return m_loadError; }
 
 private:
     void load();
@@ -211,6 +229,7 @@ private:
     QString m_connName;
     QSqlDatabase m_db;
     bool m_ok = false;       // 库打不开（缺 QSQLITE 驱动等）时只在内存里跑，程序照常用
+    QString m_loadError; // 见 loadError()
     QVector<DeviceRecord> m_devices;
     QHash<QString, int> m_index; // mac → m_devices 下标
     bool m_dirty = false;
