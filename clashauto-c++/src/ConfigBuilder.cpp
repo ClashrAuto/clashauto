@@ -48,10 +48,27 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled, bool ipv6Enabled)
     yaml = setScalar(yaml, "allow-lan", "false");
     // 进程归属：让核心把发起连接的进程名填进 metadata.process（连接窗口要显示它）。
     // always 而不是 strict —— strict 由核心自行决定要不要查（没有 PROCESS-NAME 规则时它就不查了，
-    // 于是 UI 永远拿不到进程名）。代价是每条新连接多一次本机套接字表查询，核心内部有缓存。
-    // 注意：这只对**本机发起**的连接有意义；局域网设备的进程跑在别人机器上，本机表里查不到
-    //（网关代理的连接查到的会是 Coast 自己，所以 QmlBridge 那边按 inboundUser 把它丢掉）。
-    yaml = setScalar(yaml, "find-process-mode", "always");
+    // 于是 UI 永远拿不到进程名）。真机实测证实了这一点：strict 下本机连接的 process 同样是空的。
+    //
+    // ★★ **但它很贵，所以只在"当网关"之外才开。** 真机实测（树莓派网关，同两端、只改这一项、
+    //    交替重复两轮，每轮 60 次取分位）：
+    //
+    //        find-process-mode   min    p50    p90    p99
+    //        always             5.5ms  7.4ms  11.0ms 11.4ms
+    //        off / strict       1.3ms  1.7ms   2.3ms  2.5ms
+    //
+    //    直连（完全不经代理）的基线是 p50 0.97ms —— 也就是说代理这一跳本身只值 ~0.8ms，
+    //    而 always **每条新连接多花约 5.6ms**（本机 ARM 上扫 /proc 的代价；x86 会低些）。
+    //    偏偏这只对**本机发起**的连接有意义：局域网设备的进程跑在别人机器上，本机表里查不到，
+    //    网关代理的连接查到的会是 Coast 自己 —— QmlBridge 那边按 inboundUser=dev-* 主动丢弃。
+    //    **也就是说当网关时，我们花 5.6ms 算出一个随后被扔掉的值。**
+    //
+    //    所以按角色分：有设备开着代理（= 在当网关，连接率高、延迟敏感、值又用不上）→ strict；
+    //    纯桌面客户端（连接窗口的进程名是真能看到的功能）→ 维持 always。
+    //    用 strict 而不是 off：语义上"必要时才查"更贴切，实测延迟与 off 无差别，且将来若加
+    //    PROCESS-NAME 规则它还能自动生效。
+    const bool actingAsGateway = !DeviceStore::proxiedDevices(m_config.configDir).isEmpty();
+    yaml = setScalar(yaml, "find-process-mode", actingAsGateway ? "strict" : "always");
     yaml = setNestedScalar(yaml, "tun", "enable", tunEnabled ? "true" : "false");
     yaml = ensureProxyServerNameserver(yaml);
     // DNS 劫持配套：开 mihomo 的 DNS 监听端口。透明网关把被劫持设备的 UDP :53 查询转投到这里，而不是
