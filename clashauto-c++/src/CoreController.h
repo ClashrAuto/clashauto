@@ -56,6 +56,15 @@ private:
     void startProxy();
     void stopProxy();
     void reloadConfig();
+    void putConfigs(); // reloadConfig 的第二段：校验通过后真正 PUT /configs（异步回调里调）
+
+    // 热重载前的 `mihomo -t` 预校验进程。**必须异步**：真机实测这一步在树莓派网关上稳定
+    // 耗时 ~970ms，而整个热重载里真正的 PUT /configs 只要 52ms —— 校验占了 95%，且原先是
+    // waitForFinished 同步跑在 UI 线程上，于是每次改设备策略/规则/设置都冻结界面近 1 秒。
+    QProcess *m_configTest = nullptr;
+    // 校验期间又来了新的重载请求 → 只置位，等这次校验回来再补跑一次，避免并发起多个校验进程
+    // （rebuildConfig 有 10 处调用点，且 resumeProxies 的设备循环体内也会调，天然会连发）。
+    bool m_reloadPending = false;
     void emitStatus();
     void seedBundledCore(); // 打包集成的内核首次运行落位（缺了才补，绝不覆盖已装的）
     void writeCorePid(qint64 pid) const; // 记下自己拉起的核心 pid，供下次启动收孤儿
