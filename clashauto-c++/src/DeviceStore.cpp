@@ -291,6 +291,25 @@ const DeviceRecord *DeviceStore::find(const QString &mac) const
     return i >= 0 ? &m_devices[i] : nullptr;
 }
 
+// `first_seen` / `last_seen` 这两列**两条产品线写的格式不一样**：这条线一直写 ISO 文本
+// （建表也声明成 TEXT），Swift 线写的是 Unix 秒（它声明成 INTEGER）。SQLite 是动态类型，
+// 两种值就在同一列里共存 —— 实测一份真实台账 25 行里 17 行整数、8 行文本。
+//
+// 后果是**两条线互相读不懂对方的时间戳**：这边把整数读成无效 QDateTime，那边把 ISO 文本
+// 读成 0（1970 年）。以前这只是"最近可见"显示得不对；一旦按时间做去留判定
+//（见 DeviceStore::keepsOfflineRow），就会变成**设备凭空从列表里消失**。
+//
+// 读这一侧一律做容错：整数按 epoch，其它按 ISO。写仍按本线原样（ISO），
+// 对面同样加了容错，于是谁最后写都不影响另一边读。
+static QDateTime stampFromDb(const QVariant &value)
+{
+    bool isEpoch = false;
+    const qint64 epoch = value.toLongLong(&isEpoch);
+    if (isEpoch && epoch > 0)
+        return QDateTime::fromSecsSinceEpoch(epoch);
+    return QDateTime::fromString(value.toString(), Qt::ISODate);
+}
+
 void DeviceStore::load()
 {
     if (!m_ok)
@@ -299,7 +318,14 @@ void DeviceStore::load()
     if (!q.exec(QStringLiteral(
             "SELECT mac,alias,type_override,first_seen,proxy_enabled,policy_mode,policy_target,"
             "total_up,total_down,today_up,today_down,today_date,"
-            "ip,auto_name,model,vendor,auto_type,is_self,is_gateway,last_seen FROM device"))) {
+            // ★ `ip` 与 `last_ip` 是**两条产品线各自的同一样东西**：这条线一直写 `ip`，
+            // Swift 线写 `last_ip`（两列都在表里，因为两边的建表/补列都跑过）。
+            // 实测一份真实台账 25 行里 `ip` 只有 2 行有值、`last_ip` 有 17 行 ——
+            // 也就是**这边有 16 台设备读不到地址**。后果远不止列表少一行：
+            // 每设备代理规则是按地址生成的，读不到地址 = 用户在那条线上开过代理的设备
+            // 换到这边**静默不被代理**。故读时二选一、写时两列都写（见 save()）。
+            "COALESCE(NULLIF(ip,''), last_ip),"
+            "auto_name,model,vendor,auto_type,is_self,is_gateway,last_seen FROM device"))) {
         const QString err = q.lastError().text();
         qWarning("DeviceStore: 读设备表失败: %s", err.toUtf8().constData());
         // 不能只写日志就走 —— 见 storeError 的说明：界面会静静显示"没有设备"。
@@ -316,7 +342,7 @@ void DeviceStore::load()
             continue;
         d.alias = q.value(1).toString();
         d.typeOverride = typeFromKey(q.value(2).toString());
-        d.firstSeen = QDateTime::fromString(q.value(3).toString(), Qt::ISODate);
+        d.firstSeen = stampFromDb(q.value(3));
         d.proxyEnabled = q.value(4).toBool();
         d.policyMode = modeFromKey(q.value(5).toString());
         d.policyTarget = q.value(6).toString();
@@ -336,7 +362,7 @@ void DeviceStore::load()
         d.autoType = typeFromKey(q.value(16).toString());
         d.isSelf = q.value(17).toBool();
         d.isGateway = q.value(18).toBool();
-        d.lastSeen = QDateTime::fromString(q.value(19).toString(), Qt::ISODate);
+        d.lastSeen = stampFromDb(q.value(19));
         // online 与 inLanSubnet **故意不持久化**：前者要靠本轮探测才算数（存成 true 会让离线设备
         // 一直显示在线），后者决定「能不能开代理」——换了网络还沿用上次的判断，会让用户对着一台
         // 其实劫持不到的设备点开关。两者都留 false，等这一轮扫描说话。
@@ -355,8 +381,9 @@ void DeviceStore::save()
     q.prepare(QStringLiteral(
         "INSERT OR REPLACE INTO device (mac,alias,type_override,first_seen,proxy_enabled,"
         "policy_mode,policy_target,total_up,total_down,today_up,today_down,today_date,"
-        "ip,auto_name,model,vendor,auto_type,is_self,is_gateway,last_seen) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
+        // `last_ip` 跟着 `ip` 一起写：对面那条线只认 `last_ip`，只写一列等于把地址藏起来。
+        "ip,auto_name,model,vendor,auto_type,is_self,is_gateway,last_seen,last_ip) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"));
     m_db.transaction(); // 整表一个事务：几十行，比维护脏行标记省心，也比逐行 commit 快得多
     int failed = 0;
     for (const DeviceRecord &d : m_devices) {
@@ -388,6 +415,8 @@ void DeviceStore::save()
         q.bindValue(17, d.isSelf ? 1 : 0);
         q.bindValue(18, d.isGateway ? 1 : 0);
         q.bindValue(19, d.lastSeen.isValid() ? d.lastSeen.toString(Qt::ISODate) : QString(""));
+        // 第 21 个占位符 = `last_ip`，与 `ip` 同值。见 load() 里那段说明。
+        q.bindValue(20, sqlite::nn(d.ip));
         if (!q.exec())
             ++failed;
     }

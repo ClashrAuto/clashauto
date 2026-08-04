@@ -165,10 +165,38 @@ public final class DeviceStore: @unchecked Sendable {
     // MARK: - 读写
 
     /// 两个查询共用的列清单与行映射 —— 分开写过一次就会漏字段。
+    /// ★ `last_ip` 与 `ip` 是**两条产品线各自的同一样东西**：这条线写 `last_ip`，
+    /// Qt 线写 `ip`（两列都在表里，因为两边的建表/补列都跑过）。实测一份真实台账 25 行里
+    /// `ip` 只有 2 行有值、`last_ip` 有 17 行 —— 谁也读不全对方写的地址。
+    /// 后果远不止列表少一行：每设备代理规则按地址生成，读不到地址 = 用户在那条线上
+    /// 开过代理的设备换到这边**静默不被代理**。故读时二选一、写时两列都写。
     private static let columns = """
-        mac, alias, proxy_enabled, policy_mode, policy_target, last_ip, first_seen,
+        mac, alias, proxy_enabled, policy_mode, policy_target,
+        COALESCE(NULLIF(last_ip,''), ip), first_seen,
         type_override, hostname, vendor, model, interface, last_seen
         """
+
+    /// `first_seen` / `last_seen` 这两列**两条产品线写的格式不一样**：这条线写 Unix 秒
+    /// （建表声明 INTEGER），Qt 线写的是 ISO 文本（它声明成 TEXT）。SQLite 是动态类型，
+    /// 两种值就在同一列里共存 —— 实测一份真实台账 25 行里 17 行整数、8 行文本。
+    ///
+    /// 后果是**两条线互相读不懂对方的时间戳**：`row.int()` 碰上 ISO 文本会返回 0，
+    /// 于是那条记录变成「1970 年见过」，被 `keepsOfflineRow` 当成过期残留丢掉 ——
+    /// 用户换一条线用，设备就从列表里凭空消失。
+    ///
+    /// 读这一侧一律做容错：非 0 整数按 epoch，否则按 ISO 文本解析。写仍按本线原样，
+    /// 对面同样加了容错，于是谁最后写都不影响另一边读。
+    private static func stamp(_ row: SQLiteDatabase.Row, _ index: Int32) -> Date {
+        let seconds = row.int(index)
+        if seconds > 0 { return Date(timeIntervalSince1970: Double(seconds)) }
+        let text = row.text(index)
+        guard !text.isEmpty else { return Date(timeIntervalSince1970: 0) }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        if let parsed = iso.date(from: text) { return parsed }
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return iso.date(from: text) ?? Date(timeIntervalSince1970: 0)
+    }
 
     private static func makeDevice(_ row: SQLiteDatabase.Row) -> Device {
         var device = Device(mac: row.text(0))
@@ -177,13 +205,13 @@ public final class DeviceStore: @unchecked Sendable {
         device.policyMode = PolicyMode(rawValue: row.text(3)) ?? .follow
         device.policyTarget = row.text(4)
         device.lastIP = row.text(5)
-        device.firstSeen = Date(timeIntervalSince1970: Double(row.int(6)))
+        device.firstSeen = Self.stamp(row, 6)
         device.typeOverride = row.text(7)
         device.hostname = row.text(8)
         device.vendor = row.text(9)
         device.model = row.text(10)
         device.interface = row.text(11)
-        device.lastSeen = Date(timeIntervalSince1970: Double(row.int(12)))
+        device.lastSeen = Self.stamp(row, 12)
         return device
     }
 
@@ -224,14 +252,16 @@ public final class DeviceStore: @unchecked Sendable {
         return database.run("""
             INSERT INTO device (mac, alias, proxy_enabled, policy_mode, policy_target, last_ip,
                                 first_seen, type_override, hostname, vendor, model, interface,
-                                last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                last_seen, ip)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(mac) DO UPDATE SET
               alias = excluded.alias,
               proxy_enabled = excluded.proxy_enabled,
               policy_mode = excluded.policy_mode,
               policy_target = excluded.policy_target,
               last_ip = excluded.last_ip,
+              -- `ip` 跟着 `last_ip` 一起写：Qt 线只认 `ip`,只写一列等于把地址藏起来。
+              ip = excluded.last_ip,
               type_override = excluded.type_override
             """, [
             .text(device.mac), .text(device.alias),
@@ -245,6 +275,7 @@ public final class DeviceStore: @unchecked Sendable {
             // 新建的记录不能带着 `distantPast` 落库 —— 那等于「上古时期见过」，
             // 下一次 `purgeStale` 就把它扫掉了。
             .int(Int64(max(device.lastSeen, device.firstSeen).timeIntervalSince1970)),
+            .text(device.lastIP),   // ← 第 14 个占位符 = `ip`,与 `last_ip` 同值
         ])
     }
 

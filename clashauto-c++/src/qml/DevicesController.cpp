@@ -284,7 +284,11 @@ void DevicesController::resumeProxies()
 
 QString DevicesController::localIp() const { return m_scanner ? m_scanner->localIp() : QString(); }
 QString DevicesController::gatewayIp() const { return m_scanner ? m_scanner->gatewayIp() : QString(); }
-int DevicesController::deviceCount() const { return m_store ? m_store->devices().size() : 0; }
+// 概览条上的「N/M」里的 M。**必须和列表同源**（模型），不能读原始台账 ——
+// `refreshModel()` 现在会把「当前没扫到、且过期/不在本网段」的残留挡在列表外，
+// 读台账就会出现「表头说 25 台、列表只有 23 行」这种对不上的数。
+// 旁边的 onlineCount/proxiedCount 本来就读模型，这一项是漏掉的那个。
+int DevicesController::deviceCount() const { return m_model.rowCountProp(); }
 
 // 概览条上的「今日总量」：直接把台账里每台设备的 todayUp/Down 加起来（十几台设备，随 UI 绑定
 // 每秒求一次和的开销可以忽略；也省得再维护一份会和台账走神的缓存）。
@@ -560,7 +564,18 @@ void DevicesController::syncLanPrefixRules()
 
 void DevicesController::refreshModel()
 {
-    m_model.setDevices(m_store->devices());
+    // 在线的一律显示；**当前没扫到的**才过 `keepsOfflineRow` 那道闸 ——
+    // 否则台账里每一条残留都会变成一行灰设备（换个网络尤其明显，见该函数注释）。
+    // Swift 端在 `DevicesPage.allRows` 里做同一件事，判据同一份。
+    const QString prefix = DeviceStore::subnetPrefix(localIp());
+    const QDateTime now = QDateTime::currentDateTime();
+    QVector<DeviceRecord> visible;
+    visible.reserve(m_store->devices().size());
+    for (const DeviceRecord &d : m_store->devices()) {
+        if (d.online || DeviceStore::keepsOfflineRow(d, prefix, now))
+            visible.append(d);
+    }
+    m_model.setDevices(visible);
     emit overviewChanged();
 }
 
