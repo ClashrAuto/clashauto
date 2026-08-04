@@ -97,6 +97,31 @@ public:
     // 沿时调一次（幂等：重复调用只是刷新窗口）。治「空闲后第一次访问先失败、再直连、再代理」的过渡。
     void startBoost();
 
+    /// 「我们确实握着这台设备」的证据：收到该 victim **发给本机 MAC** 的帧时由 LanGateway 调一次。
+    ///
+    /// ★ 存在的理由（真机定位，2026-08-05）：投毒是**双向**的 —— (a)/(a2) 骗设备、(b) 骗网关。
+    ///   两者生效的难度完全不对称：网关（路由器）常醒、ARP 表刷得勤，(b) 一两秒就吃下去；而手机
+    ///   会睡、处在 802.11 省电、邻居表项还是 REACHABLE，(a)/(a2) 可能很久都不被采纳。
+    ///   在这段窗口里，设备按旧缓存把包发给**真网关**、真网关正常转发出网，可回包到了网关那里却被
+    ///   查成「这台设备在本机 MAC」→ 送给我们 → 而我们从没见过这条连接的 SYN、栈里没有对应项 →
+    ///   丢掉。**设备双向断，但 WiFi/DHCP 一切正常**，表现就是「有网上不去」，且会一直持续到
+    ///   (a)/(a2) 终于生效为止。真机实证：路由器后台显示该手机的 MAC 就是本机 MAC。
+    ///
+    ///   所以 (b) 必须以「我们真的握着它」为前提。判据只认**目的 MAC 是本机**的帧：非混杂模式下
+    ///   设备的广播帧（ARP/DHCP）我们照样收得到，拿广播当证据会把「设备其实指着真网关」误判成
+    ///   「握着」—— 那正是要避免的状态。
+    ///
+    ///   丢失（kGatewayHoldTtlMs 内没再收到）时会**主动给网关补一次还原**，让回程立刻交还给设备：
+    ///   此时设备走真网关直连（能用），而不是黑洞（不能用）。
+    ///
+    /// ★ 记录在案：NdpSpoofer 早就论证过 v6 侧**根本不投毒路由器**（终结式代理的回程落在
+    ///   本机/mihomo 的 socket 上，不经「路由器→设备」那条 LAN 路径，见 NdpSpoofer.h 顶部）。
+    ///   那套论证对 v4 一字不差地成立 —— 也就是说 (b) 很可能可以整个删掉。这里先做成「有条件发」
+    ///   而不是直接删，是因为局域网隔离（policy=reject）那条路还没逐条核过。
+    ///
+    /// mac6 = 帧的源 MAC（6 字节，不取所有权）。非 victim 的 MAC 由调用方挡在外面。
+    void noteVictimHeld(const uchar *mac6);
+
     QStringList victims() const; // 当前被劫持的 victim MAC 列表
 
     // 本机/网关信息是否齐备且合法。**未配置时 startSpoof/heal 全是静默 no-op** —— 调用方（
@@ -115,6 +140,17 @@ private:
         QByteArray ip;  // 4 字节
     };
 
+    // 「握没握住这台设备」的状态（见 noteVictimHeld 的论证）。键是打包后的 6 字节 MAC——
+    // 收帧热路径上不构造 QByteArray/QString，只做整数哈希。
+    struct HoldState {
+        qint64 lastSeenMs = 0;   // 最后一次收到它**发给本机 MAC** 的帧的时刻；0 = 从没收到过
+        bool gwPoisoned = false; // 我们当前是否正在对网关投毒（用于「刚失去 → 还原一次」的沿检测）
+    };
+    // 多久没收到它发给本机的帧就算「失去」。取 15s：足够跨过活跃会话里的正常空档（keepalive、
+    // 读页面），又短到设备一旦倒向真网关能在十几秒内退回「直连可用」而不是继续黑洞。
+    static constexpr qint64 kGatewayHoldTtlMs = 15000;
+    static quint64 macKey6(const uchar *mac6); // 6 字节 MAC → quint64（本类内部自洽，不跨文件约定）
+
     void tick();                 // 定时重发所有 victim 的欺骗 ARP
     void boostTick();            // 唤醒沿高频窗口内的重投（50ms 一发，跑满 N 拍自停）
     void sendSpoof(const Target &t); // 给一个 victim 发欺骗 ARP（(a)reply+(a2)request 给 victim +(b)给网关）
@@ -123,6 +159,11 @@ private:
     // 拼那四帧（唯一一份实现，healOne 与 healFrames 共用）。
     QVector<QByteArray> buildHealFrames(const QByteArray &victimMac,
                                         const QByteArray &victimIp) const;
+    // 其中**只给网关那一侧**的两帧（「victim IP is-at victim 真实 MAC」的无偿 ARP）。
+    // 单独拆出来是给「失去设备时立刻把回程还给它」用的——那一刻不能连设备侧一起还原，
+    // 设备侧的投毒要继续，我们还在等它接受。buildHealFrames 复用它，保持只有一份实现。
+    QVector<QByteArray> buildGatewayHealFrames(const QByteArray &victimMac,
+                                               const QByteArray &victimIp) const;
     bool hasVictimMac(const QByteArray &mac6) const; // 6 字节 MAC 是否仍在被劫持集合里（延迟连发前复核）
     // 按 6 字节 MAC 取 victim 的 4 字节 IP。m_victims 的键是**小写 MAC 字符串**，直接拿
     // QByteArray 去 contains/value 会走 QByteArray→QString 隐式转换：编译得过、永远查不中
@@ -180,4 +221,7 @@ private:
     bool m_lastConfigOk = false;
     bool m_configLogged = false;
     QHash<QString, Target> m_victims; // key = 小写 victimMac
+    // 每个 victim 的「握住」状态。只在 startSpoof 时建、stopSpoof/healAll 时清，不会无界增长
+    //（调用方只对已在册的 victim 调 noteVictimHeld）。
+    QHash<quint64, HoldState> m_hold;
 };
