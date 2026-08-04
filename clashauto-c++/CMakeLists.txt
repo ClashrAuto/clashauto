@@ -30,6 +30,42 @@ set(CMAKE_AUTOUIC ON)
 find_package(QT NAMES Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 
+#   结果 **macOS universal 与 Windows arm64 两个 job 直接构建失败**（CI 实测）：
+#     · macOS 要 `-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64` 出通用二进制，而 brew 的 libcrypto 是
+#       **单架构**的 → 即便 find 得到也链不进通用二进制；
+#     · Windows arm64 是交叉编译，环境里没有 arm64 的 OpenSSL，find_package 会找到**宿主 x64** 的
+#       → 架构不匹配、编译过而链接炸（这一条正是「只按平台猜」的写法漏掉的，故改用下面的真链测试）。
+#   降级后果**很轻**：只有「需要裸 AEAD/X25519 的三个协议」(ss / vmess / reality) 不编入、不注册，
+#   拨号侧照旧回退 mihomo（功能不缺，只是不走进程内）；direct / trojan / vless 仍是进程内（它们只用
+#   QSslSocket + Qt 哈希）。本地 MinGW 自带（opt/include、opt/lib），可用 -DOPENSSL_ROOT_DIR 提示。
+set(COAST_HAVE_OPENSSL OFF)
+find_package(OpenSSL QUIET)
+if(OPENSSL_FOUND)
+    # ★「找到」≠「能用」：交叉编译/通用构建里 find_package 很可能给出**另一个架构**的 libcrypto
+    #   —— Windows arm64 交叉编译会找到宿主的 x64 库、macOS 通用构建拿到的 brew 库是单架构。
+    #   这种情况下编译能过、**链接必炸**（实测 CI 上就是这么挂的）。所以别猜平台，直接**真链一次**：
+    #   编译+链接一个调用 EVP 的最小程序，过了才认。这一招同时覆盖架构不匹配、通用构建、装坏了的库。
+    include(CMakePushCheckState)
+    include(CheckCXXSourceCompiles)
+    cmake_push_check_state(RESET)
+    set(CMAKE_REQUIRED_LIBRARIES OpenSSL::Crypto)
+    check_cxx_source_compiles("
+        #include <openssl/evp.h>
+        int main() { return EVP_aes_128_gcm() != nullptr ? 0 : 1; }
+    " COAST_OPENSSL_LINKS)
+    cmake_pop_check_state()
+    if(COAST_OPENSSL_LINKS)
+        set(COAST_HAVE_OPENSSL ON)
+    else()
+        message(STATUS "OpenSSL 找到了但链不上（架构不匹配/装坏）→ 按缺失处理")
+    endif()
+endif()
+if(COAST_HAVE_OPENSSL)
+    message(STATUS "OpenSSL found → CoastCore ss/vmess/reality (in-process) enabled")
+else()
+    message(STATUS "OpenSSL NOT usable → ss/vmess/reality fall back to mihomo (direct/trojan/vless unaffected)")
+endif()
+
 # Linux 的睡眠/唤醒事件走 systemd-logind 的 D-Bus 信号 PrepareForSleep（外加一把 delay 抑制锁，
 # 保证我们能在挂起前把被代理设备的 ARP 还回去）。QtDBus 属 qtbase，装了 Qt 基本就有；**故意做成
 # 可选**——万一某个构建环境缺它，只是这条链路降级为不可用，不该让整个构建失败。
@@ -301,6 +337,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     endif()
 else()
     target_sources(clashauto-qml PRIVATE src/net/LanGateway_stub.cpp)
+endif()
+
+# CoastCore 需要裸 AEAD / X25519 的部分（ss / vmess / reality + 加密 KAT 自测）：仅在 OpenSSL
+# **可用**时编入 + 定义 COAST_HAVE_OPENSSL（见 OutboundRegistry.cpp 的 #ifdef）。
+# 不可用时这三个协议不注册 -> 拨号侧回退 mihomo；direct/trojan/vless 不受影响。
+if(COAST_HAVE_OPENSSL)
+    target_sources(clashauto-qml PRIVATE
+        src/net/core/crypto/Aead.cpp               src/net/core/crypto/Aead.h
+        src/net/core/crypto/CryptoSelfTest.cpp     src/net/core/crypto/CryptoSelfTest.h
+        # uTLS 指纹 + 自建最小 TLS1.3 客户端（REALITY 用；QSslSocket 无法控制 ClientHello 指纹）
+        src/net/core/transport/UtlsClient.cpp      src/net/core/transport/UtlsClient.h
+        src/net/core/proto/ShadowsocksOutbound.cpp src/net/core/proto/ShadowsocksOutbound.h
+        src/net/core/proto/VmessOutbound.cpp       src/net/core/proto/VmessOutbound.h
+        src/net/core/proto/RealityOutbound.cpp     src/net/core/proto/RealityOutbound.h)
+    # 只链 libcrypto，不链 libssl（TLS 由 Qt 的 QSslSocket 负责）。
+    target_link_libraries(clashauto-qml PRIVATE OpenSSL::Crypto)
+    target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_OPENSSL)
 endif()
 
 # Windows：把 assets/icon.ico 作为 exe 图标嵌入。

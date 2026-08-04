@@ -1,7 +1,25 @@
-物理出口：以太网 2 (ifIndex=5)
-✓ IP_UNICAST_IF 读回一致：5（写入时为网络序 83886080）
-✓ 钉住网卡后仍连得通 223.5.5.5:80（本地 192.168.20.51）
-✓ 反向对照：钉到回环口(ifIndex=1)如期连不通（Network unreachable）
-✓ prepareSocket 后连得通（本地 ::ffff:192.168.20.51）
-✓ prepareSocket 反向对照：钉到回环口如期连不通（Network unreachable）
-=== SelfRouteGuard 自检 PASS ===
+PROXYCFG: PASS  shape A: parsed 7 nodes
+PROXYCFG: PASS  shape A: no warnings
+PROXYCFG: PASS  ss: type/server/port/cipher/password
+PROXYCFG: PASS  vmess: type/uuid/cipher/tls/sni/fingerprint
+PROXYCFG: PASS  vmess: ws-opts path/host
+PROXYCFG: PASS  vless: type/tls/sni/ws-opts
+PROXYCFG: PASS  vless: alpn list joined
+PROXYCFG: PASS  reality: type normalized vless->reality
+PROXYCFG: PASS  reality: flow/fingerprint/tls/sni
+PROXYCFG: PASS  reality: public-key/short-id
+PROXYCFG: PASS  trojan: type/password/sni/skip-cert/tls/alpn
+PROXYCFG: PASS  hysteria2: type/password/sni/skip-cert/alpn
+PROXYCFG: PASS  tuic: type/uuid/password/sni/alpn
+PROXYCFG: PASS  shape B: parsed 2 nodes (headerless list)
+PROXYCFG: PASS  shape B ss: alias shadowsocks->ss + fields (use: ignored)
+PROXYCFG: PASS  shape B reality: 6-space indent + ws-opts + reality-opts
+PROXYCFG: PASS  buildProxyConfig: 7 nodes + DIRECT
+PROXYCFG: PASS  buildProxyConfig: built-in DIRECT appended
+PROXYCFG: PASS  buildProxyConfig: selected + mode carried
+PROXYCFG: PASS  bad node skipped, table survives, warn set
+PROXYCFG: PASS  groups: emoji 组名解转义 + 解析到节点
+PROXYCFG: PASS  groups: 行内数组 + DIRECT 叶子
+PROXYCFG: PASS  groups: 嵌套组走到底
+PROXYCFG: PASS  groups: 成环的组不收录（宁可回退核心也不误路由）
+PROXYCFG: ALL PASS (0 failures)

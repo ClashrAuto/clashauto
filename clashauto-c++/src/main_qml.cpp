@@ -13,7 +13,12 @@
 #include "LanScanner.h"   // COAST_SCAN_SELFTEST 的扫描耗时自检
 #include "net/TproxyRules.h" // COAST_TPROXY_SELFTEST 的规则层自测
 #include "net/PfRules.h"
-#include "net/core/SelfRouteGuard.h" // COAST_SELFROUTE_SELFTEST      // COAST_PF_SELFTEST 的 pf 规则层自测（macOS）
+#include "net/core/SelfRouteGuard.h" // COAST_SELFROUTE_SELFTEST
+#include "net/core/RuleEngine.h"          // COAST_RULE_SELFTEST
+#include "net/core/ProxyConfigBuilder.h"  // COAST_PROXYCFG_SELFTEST
+#ifdef COAST_HAVE_OPENSSL
+#  include "net/core/crypto/CryptoSelfTest.h" // COAST_CRYPTO_SELFTEST（需 OpenSSL）
+#endif      // COAST_PF_SELFTEST 的 pf 规则层自测（macOS）
 #include "LatencyProbe.h" // 状态页延迟卡：直连/路由/DNS/代理四个数
 #include "SingleInstance.h" // 单实例守卫：两个实例并存会互相清掉网关的 nft/pf 规则
 #include "SubscriptionStore.h"
@@ -166,6 +171,21 @@ int main(int argc, char *argv[])
     // 自身流量排除的自测（随 CoastCore 引擎一起移植进来）。
     // ★ 必须在这里注册：不注册的话设了这个 env 只是把 GUI 正常启动，进程不退出 ——
     //   自测"挂住"而不是"失败"，比失败更难查。
+    // ★ 移植进来的自测钩子**必须逐个注册**。不注册的后果不是"跑不了"，而是
+    //   「设了 env 只是把 GUI 正常启动、进程永不退出」—— 自测挂住而不是失败，比失败难查得多。
+    //   这个坑本轮踩了两次（SELFROUTE、CRYPTO），所以这里一次把已编入的全部接上。
+#ifdef COAST_HAVE_OPENSSL
+    // 加密层已知答案测试：AEAD(AES-GCM/ChaCha20-Poly1305) + HKDF。缺 OpenSSL 时这块根本没编入。
+    if (qEnvironmentVariableIsSet("COAST_CRYPTO_SELFTEST"))
+        return coastcore::runCryptoSelfTest();
+#endif
+    // 分流规则匹配自测（纯逻辑，不需要网络/节点）
+    if (qEnvironmentVariableIsSet("COAST_RULE_SELFTEST"))
+        return RuleEngine::selfTest() ? 0 : 1;
+    // proxies YAML → ProxyNode 解析自测
+    if (qEnvironmentVariableIsSet("COAST_PROXYCFG_SELFTEST"))
+        return coastcore::proxyConfigSelfTest() ? 0 : 1;
+
     if (qEnvironmentVariableIsSet("COAST_SELFROUTE_SELFTEST")) {
         QString report;
         const bool ok = SelfRouteGuard::selfTest(&report);
