@@ -145,6 +145,19 @@ int main(int argc, char *argv[])
     // 可跑），Linux 侧 .deb 已 Depends libgl1/libopengl0/libegl1（Mesa llvmpipe 软件 GL）。
     // 真遇到起不来的环境，仍可用环境变量退回：QT_QUICK_BACKEND=software（不再被代码覆盖）。
     //
+#ifdef COAST_HAVE_RUST_STACK
+    // Rust(smoltcp) 数据面的**链接 + ABI 自证**（COAST_RUSTSTACK_SELFTEST=1）。
+    // 纯 FFI 往返，不碰网络/不需要 root/毫秒级。存在的意义：Phase 1 的库运行时还没接进
+    // NetStack，没有这条的话「库编出来了」和「库真能被调用、ABI 对得上」在 CI 绿灯里分不清。
+    //
+    // ★ 必须放在**单实例守卫之前**。守卫在本机已有实例时会直接 return 0，
+    //   而"退出码 0"恰好和"自测通过"撞车 —— 我就是这么被骗了一次：断言故意改坏也返回 0。
+    //   下面 COAST_TPROXY_SELFTEST / COAST_NDP_RA_SELFTEST 两个钩子目前仍在守卫之后，
+    //   有实例在跑时它们会静默"通过"，同一个坑还开着。
+    if (qEnvironmentVariableIsSet("COAST_RUSTSTACK_SELFTEST"))
+        return runRustStackSelfTest();
+#endif
+
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
     // 后退出（配合 validate/gateway_selftest.sh）。用 offscreen 平台即可（无显示环境）。
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)

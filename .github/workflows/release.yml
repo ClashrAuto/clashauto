@@ -154,6 +154,24 @@ jobs:
           Expand-Archive -Path $zip -DestinationPath $dst -Force
           "NPCAP_SDK=$dst" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Install Rust (coaststack)
+        # 透明网关的 TCP 数据面（smoltcp，rust/coaststack）**只在 Windows 构建**——
+        # Linux 走 TPROXY、macOS 走 pf rdr，都不需要用户态栈。所以 macos/linux/trigger-mac
+        # 三个 job 与外部签名仓库 integemjack/schat.build 一行都不用动。
+        # target 按架构选；staticlib 形态下 cargo 不调链接器，ARM64 交叉不需要 ARM64 的 cl.exe
+        # （前提是依赖树纯 Rust、无 cc crate —— 见 rust/coaststack/README.md）。
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch == 'arm64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+
+      - name: Rust unit tests (coaststack)
+        # 本仓库此前没有任何单测框架，Rust 侧是第一份，成本近乎为零。
+        # 只在 x64 跑：arm64 是交叉编译，runner 上跑不了 arm64 测试。
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        working-directory: clashauto-c++/rust/coaststack
+        run: cargo test --release --locked
+
       - name: Configure
         shell: pwsh
         run: |
@@ -186,6 +204,25 @@ jobs:
             foreach ($e in $errs) { Write-Host "::error::$($e.Line.Trim())" }
             if (-not $errs) { Write-Host "::error::构建失败但日志里没有可识别的报错行（见完整日志）" }
             exit $rc
+          }
+
+      - name: coaststack ABI self-test
+        # 只在 x64 跑（arm64 是交叉编译，runner 上跑不了 arm64 产物）。
+        # 为什么必须有这一条：Phase 1 的 Rust 库运行时还没接进 NetStack，若只看构建绿灯，
+        # 「库编出来了」和「库真能被 C++ 调用、结构体布局与错误码语义都对得上」是分不清的。
+        # 这里跨 FFI 走一遍完整往返，任何一项对不上就非 0 退出、当场红灯。
+        # （本地已验证可证伪：故意改坏一个断言 → exit=1 并指明位置。）
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        env:
+          COAST_RUSTSTACK_SELFTEST: "1"
+        run: |
+          $exe = Join-Path $env:BUILD_DIR "Release\Coast.exe"
+          if (-not (Test-Path $exe)) { throw "找不到 $exe" }
+          & $exe
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::coaststack ABI 自证失败（exit=$LASTEXITCODE）——C ABI 与 Rust 侧不一致"
+            exit $LASTEXITCODE
           }
 
       - name: Stage portable app

@@ -21,3 +21,7 @@ int runGatewaySelfTest();
 // 以及四个必须拒绝的用例（hop limit≠255 / Router Lifetime==0 / 源地址非链路本地 / 选项长度为 0）。
 // 不需要 root、不碰网络、毫秒级完成。返回 0=全部通过，1=有断言失败。
 int runNdpRaSelfTest();
+
+// Rust(smoltcp) 数据面的链接+ABI 自证（COAST_RUSTSTACK_SELFTEST=1，仅 Windows 且开了
+// COAST_RUST 时编入）。0=通过。见 RustStackSelfTest.cpp 的文件头。
+int runRustStackSelfTest();

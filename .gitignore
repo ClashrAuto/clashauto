@@ -8,3 +8,10 @@ clashauto-c++/build-mac/
 schat.build/
 clashauto-c++/tools/
 .DS_Store
+
+# Rust（coaststack）：构建产物与可选的 vendor 目录。
+# vendor/ 默认不提交——cargo vendor 会把 heapless 的可选 defmt feature 连同
+# syn/quote/proc-macro2/thiserror 一起拉进来（实际需要 ~3 MB，vendor 出来 11 MB）。
+# 理由与何时该改主意见 clashauto-c++/rust/coaststack/README.md。
+clashauto-c++/rust/coaststack/target/
+clashauto-c++/rust/vendor/

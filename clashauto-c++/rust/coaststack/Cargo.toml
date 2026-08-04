@@ -1,0 +1,42 @@
+[package]
+name = "coaststack"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Coast 透明网关的用户态 TCP 数据面（smoltcp），以 C ABI 静态库形式供 C++ 侧调用"
+
+[lib]
+name = "coaststack"
+# staticlib：被吸进 Coast.exe，不产生要部署的动态库（windeployqt 无需改动）。
+# 关键副作用：staticlib 形态下 cargo **不调用链接器**，只做 codegen + 打包 .lib/.a，
+# 所以 Windows ARM64 交叉编译不需要 ARM64 的 cl.exe —— 前提是依赖树里没有跑 cc crate 的包。
+crate-type = ["staticlib"]
+
+[dependencies]
+# ★ 依赖树必须保持**纯 Rust、零 build.rs 编 C**（见上）。
+#   相对 bench/stackbench/smol 砍掉了两项：
+#     · libc                    —— 生产的 phy 层在 C++ 侧（Npcap），Rust 侧不碰系统调用
+#     · phy-tuntap_interface    —— 同上，且 R9 已证明自写 phy 比 smoltcp 自带的更快
+#       （绕过了它每收一包一次 vec![0; mtu] 的分配）
+[dependencies.smoltcp]
+version = "0.12"
+default-features = false
+features = [
+    "alloc",
+    "medium-ethernet",
+    "proto-ipv4",
+    "proto-ipv6",
+    "socket-tcp",
+]
+
+# 与 bench/stackbench/smol/Cargo.toml 一致 —— docs/lwip-alternatives.md 里那些实测数字
+# 就是在这个 profile 下量的，换 profile 等于换了被测对象。
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# ★ panic="abort" 是刻意的：panic 跨 FFI 边界是 UB。代价是 Rust 侧一旦 panic 会**直接杀掉
+#   整个 Qt GUI 进程**，而今天 lwIP 的降级路径是"网关不可用但 app 照常跑"。
+#   因此 FFI 边界必须零 unwrap/零 panic，所有可失败路径显式转成错误码返回给 C++。
+#   （R15 在 bench 里就栽过一次：NAT 表 bind().unwrap() 遇 EMFILE 直接 core dump。）
+panic = "abort"

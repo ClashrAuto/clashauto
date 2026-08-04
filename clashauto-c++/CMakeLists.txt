@@ -208,6 +208,61 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         set(NPCAP_SDK "$ENV{NPCAP_SDK}")
         target_include_directories(clashauto-qml PRIVATE "${NPCAP_SDK}/Include")
         target_link_libraries(clashauto-qml PRIVATE iphlpapi ws2_32)
+
+        # ———— coaststack：smoltcp 的 TCP 数据面（Rust 静态库）————
+        # **只在 Windows 编**：Linux 走 TPROXY、macOS 走 pf rdr，都不需要用户态栈，
+        # 所以 mac/Linux 的 CI 与外部签名仓库 integemjack/schat.build 一行都不用动
+        # （那个仓库推不动、忘了同步也不报红灯，绕开它是 Windows-only 方案的最大红利）。
+        # 选型与收益见 docs/lwip-alternatives.md；C ABI 见 src/net/coaststack.h。
+        #
+        # COAST_RUST=OFF 可整体关掉（应急/排查用），关掉后不定义 COAST_HAVE_RUST_STACK，
+        # C++ 侧据此走 lwIP 老路。
+        option(COAST_RUST "Build the Rust (smoltcp) TCP datapath on Windows" ON)
+        if(COAST_RUST)
+            # ★ triple 必须按 **C++ 编译器** 选，不能只看架构：
+            #   staticlib 的 ABI/CRT 要与 C++ 工具链一致（MSVC 的 .lib vs MinGW 的 .a），
+            #   混了会在链接期炸出一堆缺符号。CI 是 MSVC，本地开发常是 MinGW。
+            if(MSVC)
+                if(CMAKE_VS_PLATFORM_NAME MATCHES "ARM64|arm64")
+                    set(COAST_RUST_TARGET aarch64-pc-windows-msvc)
+                else()
+                    set(COAST_RUST_TARGET x86_64-pc-windows-msvc)
+                endif()
+                set(COAST_RUST_LIBNAME coaststack.lib)
+            else()
+                set(COAST_RUST_TARGET x86_64-pc-windows-gnu)
+                set(COAST_RUST_LIBNAME libcoaststack.a)
+            endif()
+
+            set(COAST_RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/rust/coaststack")
+            set(COAST_RUST_OUT "${COAST_RUST_DIR}/target/${COAST_RUST_TARGET}/release/${COAST_RUST_LIBNAME}")
+
+            # --locked：Cargo.lock 已提交，解析结果逐字节可复现（没有 vendor 依赖源码，
+            # 理由见 rust/coaststack/README.md）。
+            add_custom_command(
+                OUTPUT "${COAST_RUST_OUT}"
+                COMMAND ${CMAKE_COMMAND} -E env cargo build --release --locked
+                        --target ${COAST_RUST_TARGET}
+                WORKING_DIRECTORY "${COAST_RUST_DIR}"
+                DEPENDS "${COAST_RUST_DIR}/Cargo.toml" "${COAST_RUST_DIR}/Cargo.lock"
+                        "${COAST_RUST_DIR}/src/lib.rs" "${COAST_RUST_DIR}/src/ffi.rs"
+                COMMENT "cargo build coaststack (${COAST_RUST_TARGET})"
+                VERBATIM)
+            add_custom_target(coaststack_build DEPENDS "${COAST_RUST_OUT}")
+            add_library(coaststack STATIC IMPORTED)
+            set_target_properties(coaststack PROPERTIES IMPORTED_LOCATION "${COAST_RUST_OUT}")
+            add_dependencies(clashauto-qml coaststack_build)
+
+            # Rust std 引入的系统符号。缺了就是一串 LNK2019 —— 这几个是 MSVC 上的常见集合。
+            # （CRT 保持 /MD：rust 的 *-pc-windows-msvc 默认就链动态 CRT，与本工程一致；
+            #   谁要是给 CMake 加了 /MT，必须同步给 rustc 加 -Ctarget-feature=+crt-static。）
+            target_link_libraries(clashauto-qml PRIVATE coaststack
+                userenv bcrypt ntdll synchronization)
+            target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_RUST_STACK=1)
+            # 链接+ABI 自证（COAST_RUSTSTACK_SELFTEST=1）。没有它，"库编出来了"和
+            # "库真能被调用、ABI 对得上"在 CI 绿灯里分不清。
+            target_sources(clashauto-qml PRIVATE src/net/RustStackSelfTest.cpp)
+        endif()
     endif()
 else()
     target_sources(clashauto-qml PRIVATE src/net/LanGateway_stub.cpp)
