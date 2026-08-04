@@ -225,6 +225,28 @@ jobs:
             exit $LASTEXITCODE
           }
 
+      - name: coaststack A/B gateway self-test
+        # 同一套断言跑两条 TCP 栈（smoltcp 与 lwip），两条都必须 PASS。
+        # 只测一条只能说明"这条能跑"；两条都测才说明**换栈后行为一致**。
+        # 这个 A/B 已经抓到过一个真缺陷：smoltcp 侧一度在 SynReceived 就拨上游
+        # （lwIP 是握手完成才 accept），等于 SYN 洪水每个 SYN 都建一条上游连接。
+        # 不碰真网卡、不需要 root：假二层端点 + 假 SOCKS + 合成帧。
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:BUILD_DIR "Release\Coast.exe"
+          foreach ($st in @("smoltcp", "lwip")) {
+            $env:COAST_STACK = $st
+            $env:COAST_SMOLGW_SELFTEST = "1"
+            & $exe
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "::error::网关自测在 $st 上失败（exit=$LASTEXITCODE）"
+              exit $LASTEXITCODE
+            }
+            Write-Host "gateway self-test OK on $st"
+          }
+          Remove-Item Env:\COAST_STACK, Env:\COAST_SMOLGW_SELFTEST
+
       - name: Stage portable app
         shell: pwsh
         run: |

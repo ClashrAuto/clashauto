@@ -36,6 +36,12 @@ extern "C" {
 #include "lwip/priv/tcp_priv.h"
 #include "lwip/timeouts.h"
 #include "netif/ethernet.h"
+
+// Rust(smoltcp) 数据面 —— 只在 Windows 且开了 COAST_RUST 时编入（见根 CMakeLists.txt）。
+// 与 lwIP **并存**，由运行时开关 COAST_STACK 选一条走；默认仍是 lwIP。
+#ifdef COAST_HAVE_RUST_STACK
+#include "coaststack.h"
+#endif
 }
 
 // lwIP(NO_SYS) 需要单调毫秒时钟。
@@ -77,6 +83,25 @@ struct TcpConn {
     bool established = false;
     bool lwipClosed = false;
 };
+
+#ifdef COAST_HAVE_RUST_STACK
+// 一条经 smoltcp 终结的 TCP 连接 ↔ 到 mihomo 的 Socks5Tcp。
+// 与上面的 TcpConn 是同一件事的两个栈版本；**故意不合并**：
+// 合并会让每个字段都要带一个"哪个栈"的分支，而两边的生命周期规则差别很大
+// （lwIP 是回调里可能同步销毁 + 必须回 ERR_ABRT；smoltcp 是 poll 模型，没有这一类问题）。
+struct SmolConn {
+    NetStack::Impl *impl = nullptr;
+    quint64 id = 0;              // coaststack 的连接 id（0 恒无效）
+    Socks5Tcp *socks = nullptr;
+    QByteArray toStack;          // socks→设备 方向待写进栈的字节（受 coast_conn_sndbuf 限流）
+    quint32 pendingRecved = 0;   // 已交给我们、但还没 coast_conn_recved 归还的窗口字节
+    bool upThrottled = false;
+    bool downPaused = false;
+    bool socksClosed = false;
+    bool established = false;
+    bool stackClosed = false;
+};
+#endif
 
 } // namespace
 
@@ -281,6 +306,18 @@ struct NetStack::Impl {
         qint64 sentMs = 0;
     };
     QHash<quint16, DnsPending> dnsPending;
+#ifdef COAST_HAVE_RUST_STACK
+    // ———— smoltcp 数据面（COAST_STACK=smoltcp 时启用；默认关，走 lwIP）————
+    // 只接管 **TCP**：UDP/DNS 那 700 行（UdpFlow/UdpLru/hijackDns/onUdpResponse）原样共享，
+    // 它们本来就不经 lwIP，与选哪个 TCP 栈无关。
+    bool useSmol = false;
+    CoastStack *smol = nullptr;
+    QHash<quint64, SmolConn *> smolConns;      // coast conn id → 桥接上下文
+    QHash<IL2Endpoint *, quint32> nicIds;      // 二层端点 → coaststack 的 nic id
+    QHash<quint32, Nic *> nicById;             // 反查（出帧回调要据 nic id 找端点）
+    quint32 nextNicId = 1;
+    QElapsedTimer smolClock;                   // 给 coast_stack_poll 的单调毫秒
+#endif
     QTimer *timer = nullptr;
     int pumpTick = 0;        // 泵的拍数计数器，给「老化 + 池诊断」分频用（见 init() 里的说明）
     QElapsedTimer pumpClock; // 量每一拍的真实间隔 → 迟到量 = 工作线程饱和度
@@ -1248,6 +1285,245 @@ NetStack::~NetStack()
     delete d;
 }
 
+// ═══════════════════════ smoltcp 数据面桥接 ═══════════════════════
+//
+// 与 lwIP 那一侧同构，但**没有** ConnWatch/g_destroyedConn/needsAbortReturn 那一整套 ——
+// coaststack 是 poll 模型：回调在 coast_stack_poll 内部同步发出，且引擎保证发回调时不持有
+// 自身借用，所以回调里可以安全地反过来调 coast_*（含当场 abort）。lwIP 那边 ~60 行的重入
+// 防护（NetStack.cpp 的 ConnWatch 一段）在这里结构性地不需要。
+#ifdef COAST_HAVE_RUST_STACK
+namespace {
+
+void smolDestroyConn(SmolConn *c, bool abortIt);
+
+// 上行背压：与 lwIP 侧同一套高低水位迟滞（kUpQueueHighWater/kUpQueueLowWater），
+// 保证换栈前后设备侧观感一致。
+void smolFlushRecvWindow(SmolConn *c)
+{
+    if (!c || !c->impl || !c->impl->smol || c->pendingRecved == 0)
+        return;
+    // socks 没了 → 无条件归还，否则窗口永远关着 = 设备卡死（lwIP 侧同款兜底）
+    const qint64 queued = c->socks ? c->socks->bytesToWrite() : 0;
+    const qint64 limit = c->upThrottled ? kUpQueueLowWater : kUpQueueHighWater;
+    if (c->socks && queued > limit) {
+        if (!c->upThrottled) {
+            c->upThrottled = true;
+            ++GatewayDiag::c.upThrottleHits;
+        }
+        return; // 扣住窗口 —— 这正是闸门
+    }
+    c->upThrottled = false;
+    const quint32 give = c->pendingRecved;
+    c->pendingRecved = 0;
+    coast_conn_recved(c->impl->smol, c->id, give);
+}
+
+// 下行：把 socks 来的字节写进栈（受发送缓冲余量限流），并按水位暂停/恢复读取。
+// 返回 true = 连接已被销毁（调用方必须立刻停手）。
+bool smolPumpToStack(SmolConn *c)
+{
+    if (!c || !c->impl || !c->impl->smol)
+        return false;
+    while (!c->toStack.isEmpty()) {
+        const int room = coast_conn_sndbuf(c->impl->smol, c->id);
+        if (room < 0) {
+            smolDestroyConn(c, true);
+            return true;
+        }
+        if (room == 0)
+            break; // 等 conn_sent 回调再续
+        const int n = qMin<int>(room, c->toStack.size());
+        const int wrote =
+            coast_conn_send(c->impl->smol, c->id,
+                            reinterpret_cast<const uint8_t *>(c->toStack.constData()),
+                            static_cast<size_t>(n));
+        if (wrote < 0) {
+            smolDestroyConn(c, true);
+            return true;
+        }
+        if (wrote == 0)
+            break;
+        c->toStack.remove(0, wrote);
+    }
+
+    // 下行水位：顶到高水位让 socks 停读，回落到低水位再放开（与 lwIP 侧同参数）
+    if (c->socks) {
+        const int q = c->toStack.size();
+        if (!c->downPaused && q >= kToLwipHighWater) {
+            c->downPaused = true;
+            ++GatewayDiag::c.downPauseHits;
+            c->socks->setReadPaused(true);
+        } else if (c->downPaused && q <= kToLwipLowWater) {
+            c->downPaused = false;
+            c->socks->setReadPaused(false);
+        }
+    }
+
+    // socks 已关且下行排空 → 优雅关。
+    // ★ 必须**先把窗口还满**：coast_conn_close 在窗口未还满时返回 COAST_ERR_STATE。
+    //   lwIP 那边同样的情形是静默退化成 RST（设备"下载到一半被断"），这里是显式失败，
+    //   所以这两步的顺序不能反。
+    if (c->socksClosed && c->toStack.isEmpty() && !c->stackClosed) {
+        smolFlushRecvWindow(c);
+        if (coast_conn_close(c->impl->smol, c->id) == COAST_OK) {
+            c->stackClosed = true;
+            ++GatewayDiag::c.tcpClosed;
+        }
+    }
+    return false;
+}
+
+void smolDestroyConn(SmolConn *c, bool abortIt)
+{
+    if (!c || !c->impl)
+        return;
+    NetStack::Impl *d = c->impl;
+    d->smolConns.remove(c->id);
+    if (c->socks) {
+        // 先断信号：closeTunnel 会同步 emit closed()，带着已死的 c 回来（lwIP 侧同款教训）
+        QObject::disconnect(c->socks, nullptr, nullptr, nullptr);
+        c->socks->closeTunnel();
+        c->socks->deleteLater();
+        c->socks = nullptr;
+    }
+    if (d->smol && !c->stackClosed) {
+        if (abortIt) {
+            coast_conn_abort(d->smol, c->id);
+            ++GatewayDiag::c.tcpAborted;
+        } else {
+            coast_conn_close(d->smol, c->id);
+            ++GatewayDiag::c.tcpClosed;
+        }
+    }
+    delete c;
+}
+
+QString addrToString(const CoastAddr *a)
+{
+    if (!a)
+        return QString();
+    if (a->is_v6) {
+        Q_IPV6ADDR raw;
+        memcpy(raw.c, a->bytes, 16);
+        return QHostAddress(raw).toString();
+    }
+    quint32 v4 = (quint32(a->bytes[0]) << 24) | (quint32(a->bytes[1]) << 16)
+        | (quint32(a->bytes[2]) << 8) | quint32(a->bytes[3]);
+    return QHostAddress(v4).toString();
+}
+
+// ———————————————————————— coaststack 的五个回调 ————————————————————————
+
+void smolOutFrame(void *user, CoastNicId nic, const uint8_t *frame, size_t len)
+{
+    auto *d = static_cast<NetStack::Impl *>(user);
+    if (!d || !frame || len < 14)
+        return;
+    NetStack::Nic *n = d->nicById.value(nic, nullptr);
+    if (!n || !n->ep)
+        return;
+    // 必须是自有内存的 QByteArray：端点可能把它排进积压队列（IL2Endpoint.h 的硬契约）
+    n->ep->send(QByteArray(reinterpret_cast<const char *>(frame), static_cast<int>(len)));
+}
+
+bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *src, uint16_t sport,
+                 const CoastAddr *dst, uint16_t dport)
+{
+    Q_UNUSED(nic);
+    Q_UNUSED(sport);
+    auto *d = static_cast<NetStack::Impl *>(user);
+    if (!d || !src || !dst)
+        return false;
+
+    const QString victimIp = addrToString(src); // 连接对端 = 被劫持设备
+    const QString serverIp = addrToString(dst); // 设备原本想访问的公网地址
+    const QString socksUser = d->userForIp(victimIp);
+    if (socksUser.isEmpty()) {
+        // 不认识的设备：与 lwIP 侧一致，拒绝而不是拿空用户名去拨（那会认证失败）
+        return false;
+    }
+
+    auto *c = new SmolConn;
+    c->impl = d;
+    c->id = id;
+    c->socks = new Socks5Tcp(d->owner);
+    d->smolConns.insert(id, c);
+    ++GatewayDiag::c.tcpAccepted;
+
+    QObject::connect(c->socks, &Socks5Tcp::established, d->owner, [c]() {
+        c->established = true;
+        smolFlushRecvWindow(c);
+    });
+    QObject::connect(c->socks, &Socks5Tcp::upstreamBytesWritten, d->owner,
+                     [c]() { smolFlushRecvWindow(c); });
+    QObject::connect(c->socks, &Socks5Tcp::dataReceived, d->owner, [c](const QByteArray &b) {
+        c->toStack.append(b);
+        smolPumpToStack(c);
+    });
+    QObject::connect(c->socks, &Socks5Tcp::failed, d->owner, [c](const QString &) {
+        ++GatewayDiag::c.socksFailed;
+        smolDestroyConn(c, true);
+    });
+    QObject::connect(c->socks, &Socks5Tcp::closed, d->owner, [c]() {
+        c->socksClosed = true;
+        smolPumpToStack(c);
+    });
+
+    c->socks->connectTo(d->socksPort, serverIp, dport, socksUser);
+    return true;
+}
+
+void smolConnData(void *user, CoastConnId id, const uint8_t *data, size_t len)
+{
+    auto *d = static_cast<NetStack::Impl *>(user);
+    if (!d || !data || len == 0)
+        return;
+    SmolConn *c = d->smolConns.value(id, nullptr);
+    if (!c)
+        return;
+    // ★ 先记账、后落地、最后才可能归还 —— 与 lwIP 侧同一顺序。
+    //   记账必须在前：write() 可能同步走到 upstreamBytesWritten → flushRecvWindow。
+    c->pendingRecved += static_cast<quint32>(len);
+    if (c->socks)
+        c->socks->write(QByteArray(reinterpret_cast<const char *>(data), static_cast<int>(len)));
+    smolFlushRecvWindow(c);
+}
+
+void smolConnSent(void *user, CoastConnId id, uint32_t n)
+{
+    Q_UNUSED(n);
+    auto *d = static_cast<NetStack::Impl *>(user);
+    if (!d)
+        return;
+    if (SmolConn *c = d->smolConns.value(id, nullptr))
+        smolPumpToStack(c);
+}
+
+void smolConnClosed(void *user, CoastConnId id, bool isAbort)
+{
+    auto *d = static_cast<NetStack::Impl *>(user);
+    if (!d)
+        return;
+    if (SmolConn *c = d->smolConns.value(id, nullptr)) {
+        c->stackClosed = true; // 栈侧已经没了，别再回头调 coast_conn_*
+        smolDestroyConn(c, false);
+    }
+    if (isAbort)
+        ++GatewayDiag::c.tcpAborted;
+}
+
+} // namespace
+#endif // COAST_HAVE_RUST_STACK
+
+const char *NetStack::activeTcpStack() const
+{
+#ifdef COAST_HAVE_RUST_STACK
+    if (d->useSmol && d->smol)
+        return "smoltcp";
+#endif
+    return "lwip";
+}
+
 bool NetStack::init(QString *err)
 {
     if (d->inited)
@@ -1259,6 +1535,32 @@ bool NetStack::init(QString *err)
     }
     g_impl = d;
     g_debug = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
+
+#ifdef COAST_HAVE_RUST_STACK
+    // ———— TCP 栈选择：COAST_STACK=smoltcp|lwip，默认 lwip ————
+    // 与 COAST_GATEWAY_DATAPATH（AppConfig.cpp）同一套"env 覆盖、供线上不改配置就能退回去"
+    // 的范式。**只影响 TCP**：UDP/DNS 那 700 行两条路径共用，不受此开关影响。
+    // 收益与边界见 docs/lwip-alternatives.md（R19–R21：Windows 上真正的绑定约束是 Npcap
+    // 发送路径，换栈是省 CPU 约 1/3，不是提高吞吐天花板）。
+    d->useSmol = qgetenv("COAST_STACK").trimmed().toLower() == "smoltcp";
+    if (d->useSmol) {
+        CoastCallbacks cb {};
+        cb.out_frame = smolOutFrame;
+        cb.conn_new = smolConnNew;
+        cb.conn_data = smolConnData;
+        cb.conn_sent = smolConnSent;
+        cb.conn_closed = smolConnClosed;
+        d->smol = coast_stack_new(&cb, d);
+        if (!d->smol) {
+            g_impl = nullptr;
+            if (err)
+                *err = QStringLiteral("coaststack 初始化失败");
+            return false;
+        }
+        d->smolClock.start();
+        qInfo("[NetStack] TCP 数据面 = smoltcp (%s)", coast_stack_version());
+    }
+#endif
 
     lwip_init();
 
@@ -1339,6 +1641,12 @@ bool NetStack::init(QString *err)
         }
 
         sys_check_timeouts();
+#ifdef COAST_HAVE_RUST_STACK
+        // smoltcp 的定时器（重传/延迟 ACK/TIME_WAIT 回收）。回调在这里同步发出：
+        // 出帧 → ep->send()，随后与 lwIP 共用同一次 flushNicTx 收口。
+        if (d->useSmol && d->smol)
+            coast_stack_poll(d->smol, static_cast<quint64>(d->smolClock.elapsed()));
+#endif
         // ★ flushTx 的第三个调用点，同时是**兜底**：重传、延迟 ACK、ARP/NDP 周期投毒这些帧
         //   既不在收帧排空里、也不在 pumpToLwip 里，只有这里能收口。它也保证了「任何漏掉
         //   flush 的出帧路径最迟 25 ms 也会被发出去」——加新的出帧路径时这条兜底是安全网，
@@ -1422,6 +1730,40 @@ bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QStrin
     netif_create_ip6_linklocal_address(&nic->nif, 1);
 #endif
     d->nics.insert(ep, nic);
+#ifdef COAST_HAVE_RUST_STACK
+    if (d->useSmol && d->smol) {
+        const quint32 nid = d->nextNicId++;
+        CoastAddr a {};
+        a.is_v6 = false;
+        // lwIP 的 ip4_addr_t::addr 已是**网络序**，CoastAddr.bytes 也是网络序 → 直接铺字节
+        memcpy(a.bytes, &nip.addr, 4);
+        // 掩码 → 前缀长度：同样按网络序逐字节数前导 1（不引 QtEndian，省一个 include）
+        quint8 prefix = 0;
+        {
+            const uchar *mb = reinterpret_cast<const uchar *>(&nmask.addr);
+            for (int bi = 0; bi < 4; ++bi) {
+                if (mb[bi] == 0xFF) {
+                    prefix += 8;
+                    continue;
+                }
+                for (uchar bit = 0x80; bit && (mb[bi] & bit); bit >>= 1)
+                    ++prefix;
+                break;
+            }
+        }
+        if (coast_stack_add_nic(d->smol, nid, reinterpret_cast<const uint8_t *>(nic->localMac6.constData()),
+                                &a, prefix) != COAST_OK) {
+            if (err)
+                *err = QStringLiteral("coaststack add_nic 失败");
+            d->nics.remove(ep);
+            netif_remove(&nic->nif);
+            delete nic;
+            return false;
+        }
+        d->nicIds.insert(ep, nid);
+        d->nicById.insert(nid, nic);
+    }
+#endif
     return true;
 }
 
@@ -1597,6 +1939,17 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
             handleUdpFrame6(nic, frame);
             return;
         }
+#ifdef COAST_HAVE_RUST_STACK
+        // TCP 交给 smoltcp（开关打开时）。ICMPv6-echo 之类仍走 lwIP —— 那不是数据面。
+        if (d->useSmol && d->smol && nexthdr == 6) {
+            const quint32 nid = d->nicIds.value(from, 0);
+            if (nid)
+                coast_stack_input(d->smol, nid,
+                                  reinterpret_cast<const uint8_t *>(frame.constData()),
+                                  static_cast<size_t>(frame.size()));
+            return;
+        }
+#endif
         // TCP/ICMPv6-echo 等交给 lwIP（accept-all v6 补丁把无主单播收到 inp 上）。
         struct pbuf *p6 = pbuf_alloc(PBUF_RAW, static_cast<u16_t>(frame.size()), PBUF_POOL);
         if (!p6)
@@ -1618,6 +1971,15 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
         handleUdpFrame(nic, frame, ihl);
         return;
     }
+#ifdef COAST_HAVE_RUST_STACK
+    if (d->useSmol && d->smol && proto == 6) {
+        const quint32 nid = d->nicIds.value(from, 0);
+        if (nid)
+            coast_stack_input(d->smol, nid, reinterpret_cast<const uint8_t *>(frame.constData()),
+                              static_cast<size_t>(frame.size()));
+        return;
+    }
+#endif
     // TCP/ICMP 等交给 lwIP —— 注入**收到它的那个 netif**（accept-all 补丁会把无主单播收到 inp 上）。
     struct pbuf *p = pbuf_alloc(PBUF_RAW, static_cast<u16_t>(frame.size()), PBUF_POOL);
     if (!p)

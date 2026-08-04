@@ -112,6 +112,26 @@ fn conn_new_of(events: &[Event]) -> Option<(ConnId, u16)> {
     })
 }
 
+
+/// 完成三次握手，返回 (连接 id, SYN-ACK 的 seq)。
+/// ★ 必须走完握手才会有 ConnNew —— 引擎刻意只在 Established 才 promote，与 lwIP 的 accept
+///   时机一致；否则 SYN 洪水会给每个 SYN 各拨一条上游（这个差异是 A/B 自测抓出来的）。
+fn establish(e: &mut Engine, sport: u16, dport: u16, seq: u32) -> (ConnId, u32) {
+    let mut evs = Vec::new();
+    e.input(1, &tcp_frame(sport, dport, 0x02, seq, 0, b""));
+    e.poll_collect(10, &mut evs);
+    let synack_seq = tcp_out(&evs)
+        .into_iter()
+        .find(|(fl, _, _, _)| fl & 0x12 == 0x12)
+        .map(|(_, _, _, s)| s)
+        .expect("握手第二步应有 SYN-ACK");
+    evs.clear();
+    e.input(1, &tcp_frame(sport, dport, 0x10, seq + 1, synack_seq.wrapping_add(1), b""));
+    e.poll_collect(20, &mut evs);
+    let id = conn_new_of(&evs).expect("握手完成后应有 ConnNew").0;
+    (id, synack_seq)
+}
+
 #[test]
 fn syn_gets_synack_with_original_dport() {
     let mut e = mk_engine();
@@ -130,8 +150,15 @@ fn syn_gets_synack_with_original_dport() {
     assert_eq!(sport, 443, "SYN-ACK 源端口必须还原成 443");
     assert_eq!(dport, 51000, "SYN-ACK 目的端口应为设备源端口");
 
-    // ③ ConnNew 报的是原始目的端口，C++ 侧据此拨 SOCKS
-    let (id, real) = conn_new_of(&evs).expect("应有 ConnNew");
+    // ③ 此时**还不该**有 ConnNew —— 握手没完成就拨上游 = SYN 洪水放大
+    assert!(conn_new_of(&evs).is_none(), "SynReceived 阶段不该 promote");
+
+    // ④ 补上第三次握手，ConnNew 才出现，且报的是原始目的端口
+    let synack_seq = synack.unwrap().3;
+    evs.clear();
+    e.input(1, &tcp_frame(51000, 443, 0x10, 1001, synack_seq.wrapping_add(1), b""));
+    e.poll_collect(20, &mut evs);
+    let (id, real) = conn_new_of(&evs).expect("握手完成后应有 ConnNew");
     assert_eq!(real, 443, "ConnNew 应报原始目的端口");
     assert_ne!(id, 0, "conn id 不能为 0（0 是无效值）");
     assert_eq!(e.conns_accepted, 1);
@@ -141,19 +168,7 @@ fn syn_gets_synack_with_original_dport() {
 fn window_is_gated_until_recved() {
     let mut e = mk_engine();
     let mut evs = Vec::new();
-    e.input(1, &tcp_frame(51001, 443, 0x02, 5000, 0, b""));
-    e.poll_collect(10, &mut evs);
-    let (id, _) = conn_new_of(&evs).expect("应有 ConnNew");
-    let synack_seq = tcp_out(&evs)
-        .into_iter()
-        .find(|(fl, _, _, _)| fl & 0x12 == 0x12)
-        .map(|(_, _, _, seq)| seq)
-        .expect("应有 SYN-ACK");
-
-    // 三次握手收尾
-    evs.clear();
-    e.input(1, &tcp_frame(51001, 443, 0x10, 5001, synack_seq.wrapping_add(1), b""));
-    e.poll_collect(20, &mut evs);
+    let (id, synack_seq) = establish(&mut e, 51001, 443, 5000);
 
     // 设备发数据
     evs.clear();
@@ -182,20 +197,12 @@ fn window_is_gated_until_recved() {
 #[test]
 fn multiple_conns_and_close_by_device() {
     let mut e = mk_engine();
-    let mut evs = Vec::new();
+    let mut ids = Vec::new();
     for i in 0..3u16 {
-        assert!(e.input(1, &tcp_frame(52000 + i, 8080, 0x02, 1000, 0, b"")));
+        let (id, _) = establish(&mut e, 52000 + i, 8080, 1000);
+        ids.push(id);
     }
-    e.poll_collect(10, &mut evs);
-
-    let ids: Vec<ConnId> = evs
-        .iter()
-        .filter_map(|ev| match ev {
-            Event::ConnNew { id, .. } => Some(*id),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(ids.len(), 3, "三条 SYN 应各建一条连接，实得 {:?}", ids);
+    assert_eq!(ids.len(), 3, "三条连接应各建一条，实得 {:?}", ids);
     assert!(ids.iter().all(|&i| i != 0));
 
     // 对应 lwIP 那边遍历 tcp_active_pcbs —— 换址/DHCP 续约时必须能整批关掉，

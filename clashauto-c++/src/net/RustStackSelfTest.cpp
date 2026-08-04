@@ -84,7 +84,8 @@ const uint8_t kOurIp[4]  = {10, 99, 0, 2};
 const uint8_t kDstIp[4]  = {93, 184, 216, 34}; // 设备想访问的公网地址（非本机）
 
 // 返回 54 字节的 eth+ip+tcp 帧
-void buildSyn(uint8_t *f, uint16_t sport, uint16_t dport)
+void buildTcp(uint8_t *f, uint16_t sport, uint16_t dport, uint8_t flags, uint32_t seq,
+              uint32_t ack)
 {
     std::memset(f, 0, 54);
     std::memcpy(f, kOurMac, 6);
@@ -100,8 +101,11 @@ void buildSyn(uint8_t *f, uint16_t sport, uint16_t dport)
     uint8_t *t = f + 34;
     t[0] = static_cast<uint8_t>(sport >> 8); t[1] = static_cast<uint8_t>(sport & 0xff);
     t[2] = static_cast<uint8_t>(dport >> 8); t[3] = static_cast<uint8_t>(dport & 0xff);
-    t[4] = 0; t[5] = 0; t[6] = 0x03; t[7] = 0xE8;   // seq = 1000
-    t[12] = 0x50; t[13] = 0x02;                      // offset 5, SYN
+    t[4] = uint8_t(seq >> 24); t[5] = uint8_t(seq >> 16);
+    t[6] = uint8_t(seq >> 8);  t[7] = uint8_t(seq);
+    t[8] = uint8_t(ack >> 24); t[9] = uint8_t(ack >> 16);
+    t[10] = uint8_t(ack >> 8); t[11] = uint8_t(ack);
+    t[12] = 0x50; t[13] = flags;                     // offset 5
     t[14] = 0xFF; t[15] = 0xFF;                      // window
     uint32_t ph = 0;
     ph = onesSum(kDevIp, 4, ph);
@@ -109,6 +113,11 @@ void buildSyn(uint8_t *f, uint16_t sport, uint16_t dport)
     ph += 6; ph += 20;
     const uint16_t tc = fold16(onesSum(t, 20, ph));
     t[16] = static_cast<uint8_t>(tc >> 8); t[17] = static_cast<uint8_t>(tc & 0xff);
+}
+
+inline void buildSyn(uint8_t *f, uint16_t sport, uint16_t dport)
+{
+    buildTcp(f, sport, dport, 0x02 /*SYN*/, 1000, 0);
 }
 
 } // namespace
@@ -203,5 +212,251 @@ int runRustStackSelfTest()
                  "[ruststack] PASS —— ABI 一致 + 数据面往返正常"
                  "（SYN→SYN-ACK，源端口还原为 %u，conn_new dport=%u）\n",
                  static_cast<unsigned>(ctx.synAckSport), static_cast<unsigned>(ctx.lastDport));
+    return 0;
+}
+
+// ═══════ NetStack 级自证：整条 smoltcp 路径（COAST_SMOLGW_SELFTEST=1）═══════
+//
+// 上面那个只证明「Rust 引擎自己能用」。这个证明**接进 NetStack 之后整条路仍然通**：
+// 合成 SYN → NetStack::inputFrame → 桥接 → Socks5Tcp → 真的拨出 SOCKS CONNECT，
+// 且带着该设备的身份。
+//
+// ★ 判据必须校验 cmd==CONNECT(0x01)。GatewaySelfTest.cpp 里记着一个真实教训：
+//   UDP ASSOCIATE(0x03) 与 CONNECT(0x01) 在字节上完全同形，而 associate 的用户名取自
+//   devices 表、**不走** TCP 那条 userForIp 管线 —— 于是「每设备身份」这条断言曾在
+//   TCP 路径彻底断掉的情况下照样 PASS。这里只喂 TCP 帧、且显式判 cmd，双保险。
+#include "IL2Endpoint.h"
+#include "NetStack.h"
+
+#include <QEventLoop>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <QTimer>
+
+namespace {
+
+/// 记录出帧的假二层端点（不碰真网卡）
+class FakeEp final : public IL2Endpoint
+{
+public:
+    explicit FakeEp(const QByteArray &mac) : m_mac(mac) {}
+    bool open(const QString &, QString *) override { return true; }
+    void close() override {}
+    bool isOpen() const override { return true; }
+    bool send(const QByteArray &f) override
+    {
+        ++sent;
+        if (f.size() >= 54 && quint8(f[12]) == 0x08 && quint8(f[13]) == 0x00
+            && quint8(f[23]) == 6 && (quint8(f[47]) & 0x12) == 0x12) {
+            ++synAck;
+            synAckSport = quint16((quint8(f[34]) << 8) | quint8(f[35]));
+            synAckSeq = (quint32(quint8(f[38])) << 24) | (quint32(quint8(f[39])) << 16)
+                | (quint32(quint8(f[40])) << 8) | quint32(quint8(f[41]));
+        }
+        return true;
+    }
+    QByteArray localMac() const override { return m_mac; }
+    int ifIndex() const override { return 1; }
+    int mtu() const override { return 1500; }
+
+    int sent = 0;
+    int synAck = 0;
+    quint16 synAckSport = 0;
+    quint32 synAckSeq = 0;
+
+private:
+    QByteArray m_mac;
+};
+
+/// 最小 SOCKS5 服务端：校验 用户名 + cmd==CONNECT + 目的端口
+class MiniSocks final : public QObject
+{
+public:
+    explicit MiniSocks(quint16 port)
+    {
+        QObject::connect(&m_srv, &QTcpServer::newConnection, this, [this] {
+            while (QTcpSocket *s = m_srv.nextPendingConnection()) {
+                auto *st = new St;
+                QObject::connect(s, &QTcpSocket::readyRead, s, [this, s, st] { onData(s, st); });
+                QObject::connect(s, &QTcpSocket::disconnected, s, [s, st] {
+                    delete st;
+                    s->deleteLater();
+                });
+            }
+        });
+        ok = m_srv.listen(QHostAddress::LocalHost, port);
+    }
+    bool ok = false;
+    bool gotConnect = false;
+    QString user;
+    quint16 dport = 0;
+
+private:
+    struct St { int phase = 0; QByteArray buf; QString user; };
+    void onData(QTcpSocket *s, St *c)
+    {
+        c->buf += s->readAll();
+        if (c->phase == 0) {
+            if (c->buf.size() < 2) return;
+            const int n = quint8(c->buf[1]);
+            if (c->buf.size() < 2 + n) return;
+            const bool up = c->buf.mid(2, n).contains(char(0x02));
+            c->buf.remove(0, 2 + n);
+            const char rep[2] = {0x05, char(up ? 0x02 : 0x00)};
+            s->write(rep, 2);
+            c->phase = up ? 1 : 2;
+        }
+        if (c->phase == 1) {
+            if (c->buf.size() < 2) return;
+            const int ul = quint8(c->buf[1]);
+            if (c->buf.size() < 2 + ul + 1) return;
+            const int pl = quint8(c->buf[2 + ul]);
+            if (c->buf.size() < 3 + ul + pl) return;
+            c->user = QString::fromLatin1(c->buf.mid(2, ul));
+            c->buf.remove(0, 3 + ul + pl);
+            const char rep[2] = {0x01, 0x00};
+            s->write(rep, 2);
+            c->phase = 2;
+        }
+        if (c->phase == 2) {
+            if (c->buf.size() < 4) return;
+            const int cmd = quint8(c->buf[1]);
+            const int atyp = quint8(c->buf[3]);
+            int need = 4 + 2;
+            if (atyp == 0x01) need += 4;
+            else if (atyp == 0x04) need += 16;
+            else if (atyp == 0x03) {
+                if (c->buf.size() < 5) return;
+                need += 1 + quint8(c->buf[4]);
+            }
+            if (c->buf.size() < need) return;
+            // ★ 只认 CONNECT —— UDP ASSOCIATE 同形但走另一条身份管线（见上面的警告）
+            if (cmd == 0x01) {
+                gotConnect = true;
+                user = c->user;
+                dport = quint16((quint8(c->buf[need - 2]) << 8) | quint8(c->buf[need - 1]));
+            }
+            c->buf.clear();
+        }
+    }
+    QTcpServer m_srv;
+};
+
+} // namespace
+
+int runSmolGatewaySelfTest()
+{
+    const quint16 kSocksPort = 47899;
+    const QString kUser = QStringLiteral("dev-abc123");
+
+    MiniSocks socks(kSocksPort);
+    if (!socks.ok) {
+        std::fprintf(stderr, "[smolgw] FAIL: 假 SOCKS 监听 %u 失败\n", kSocksPort);
+        return 3;
+    }
+
+    // A/B 夹具：默认测 smoltcp；显式 COAST_STACK=lwip 则用**同一套断言**测 lwIP。
+    // 两条都 PASS 才说明"换栈后行为一致"，只测一条只能说明"这条能跑"。
+    QByteArray want = qgetenv("COAST_STACK").trimmed().toLower();
+    if (want.isEmpty()) {
+        want = "smoltcp";
+        qputenv("COAST_STACK", want);
+    }
+    NetStack net(kSocksPort);
+    QString err;
+    if (!net.init(&err)) {
+        std::fprintf(stderr, "[smolgw] FAIL: NetStack::init: %s\n", err.toLatin1().constData());
+        return 1;
+    }
+
+    // ★ 先证明测的确实是 smoltcp 那条路。lwIP 的 accept-all 对外行为与 catch-all 一致，
+    //   同一个断言在两条路上都会 PASS —— 没有这一条，这个自测证明不了任何东西。
+    if (want != QByteArray(net.activeTcpStack())) {
+        std::fprintf(stderr,
+                     "[smolgw] FAIL: 没跑在 smoltcp 上（实际=%s）——这个自测对 lwIP 也会绿，\n"
+                     "         所以必须先确认路径，否则等于没测\n",
+                     net.activeTcpStack());
+        return 3;
+    }
+
+    FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
+    if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
+                    QStringLiteral("255.255.255.0"), &err)) {
+        std::fprintf(stderr, "[smolgw] FAIL: addNic: %s\n", err.toLatin1().constData());
+        return 1;
+    }
+    net.addDevice(QStringLiteral("10.99.0.1"),
+                  QByteArray(reinterpret_cast<const char *>(kDevMac), 6), kUser);
+
+    // ★ 必须走完**三次握手**才会拨上游 —— 两条栈都是在连接建立后才 accept 的。
+    //   （smoltcp 侧一度在 SynReceived 就 promote，是这个 A/B 自测在 lwIP 上跑不过才发现的：
+    //     那等于 SYN 洪水每个 SYN 都拨一条上游。已修，见 engine.rs 的 pending 一段。）
+    uint8_t f[54];
+    buildTcp(f, 51000, 443, 0x02 /*SYN*/, 1000, 0);
+    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), sizeof(f)));
+
+    // 等 SYN-ACK（lwIP 侧要等泵跑一拍）
+    {
+        QEventLoop w;
+        QTimer t;
+        t.setSingleShot(true);
+        QObject::connect(&t, &QTimer::timeout, &w, &QEventLoop::quit);
+        QTimer poll;
+        QObject::connect(&poll, &QTimer::timeout, &w, [&] {
+            if (ep.synAck > 0)
+                w.quit();
+        });
+        poll.start(5);
+        t.start(2000);
+        w.exec();
+    }
+    if (ep.synAck < 1) {
+        std::fprintf(stderr, "[smolgw] FAIL: 没收到 SYN-ACK（出帧=%d）\n", ep.sent);
+        return 1;
+    }
+    buildTcp(f, 51000, 443, 0x10 /*ACK*/, 1001, ep.synAckSeq + 1);
+    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), sizeof(f)));
+
+    // 等 SOCKS 握手跑完（泵 25ms 一拍，SOCKS 在回环上）
+    QEventLoop loop;
+    QTimer deadline;
+    deadline.setSingleShot(true);
+    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QTimer tick;
+    QObject::connect(&tick, &QTimer::timeout, &loop, [&] {
+        if (socks.gotConnect)
+            loop.quit();
+    });
+    tick.start(20);
+    deadline.start(5000);
+    loop.exec();
+
+    if (!socks.gotConnect) {
+        std::fprintf(stderr,
+                     "[smolgw] FAIL: 5s 内没等到 SOCKS CONNECT（出帧=%d SYN-ACK=%d）"
+                     "—— TCP 路径没打通\n",
+                     ep.sent, ep.synAck);
+        return 1;
+    }
+    if (socks.user != kUser) {
+        std::fprintf(stderr, "[smolgw] FAIL: 每设备身份错：期望 %s 实得 %s\n",
+                     kUser.toLatin1().constData(), socks.user.toLatin1().constData());
+        return 2;
+    }
+    if (socks.dport != 443) {
+        std::fprintf(stderr, "[smolgw] FAIL: 目的端口错：期望 443 实得 %u\n", socks.dport);
+        return 2;
+    }
+    if (ep.synAck < 1 || ep.synAckSport != 443) {
+        std::fprintf(stderr, "[smolgw] FAIL: SYN-ACK 缺失或源端口错（%d 个，sport=%u）\n",
+                     ep.synAck, ep.synAckSport);
+        return 2;
+    }
+
+    std::fprintf(stderr,
+                 "[smolgw] PASS(%s) —— 整条路径通：SYN → SYN-ACK(sport=%u) → "
+                 "SOCKS CONNECT(user=%s, dport=%u)\n",
+                 net.activeTcpStack(), ep.synAckSport, socks.user.toLatin1().constData(),
+                 socks.dport);
     return 0;
 }

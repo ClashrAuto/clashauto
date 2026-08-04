@@ -25,3 +25,7 @@ int runNdpRaSelfTest();
 // Rust(smoltcp) 数据面的链接+ABI 自证（COAST_RUSTSTACK_SELFTEST=1，仅 Windows 且开了
 // COAST_RUST 时编入）。0=通过。见 RustStackSelfTest.cpp 的文件头。
 int runRustStackSelfTest();
+
+// NetStack 级：整条 smoltcp 路径（COAST_SMOLGW_SELFTEST=1）。合成 SYN → 桥接 → 真 SOCKS
+// CONNECT + 每设备身份。0=通过。见 RustStackSelfTest.cpp 末尾。
+int runSmolGatewaySelfTest();

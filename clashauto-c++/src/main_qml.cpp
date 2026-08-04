@@ -156,6 +156,9 @@ int main(int argc, char *argv[])
     //   有实例在跑时它们会静默"通过"，同一个坑还开着。
     if (qEnvironmentVariableIsSet("COAST_RUSTSTACK_SELFTEST"))
         return runRustStackSelfTest();
+    // NetStack 级：整条 smoltcp 路径（要建 NetStack + 假 SOCKS，仍不碰真网卡/不需要 root）
+    if (qEnvironmentVariableIsSet("COAST_SMOLGW_SELFTEST"))
+        return runSmolGatewaySelfTest();
 #endif
 
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS

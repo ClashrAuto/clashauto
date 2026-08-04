@@ -127,6 +127,11 @@ struct Nic {
     device: QueueDevice,
     sockets: SocketSet<'static>,
     listeners: Vec<SocketHandle>,
+    /// 已离开 Listen、但**还没**完成三次握手的 socket。
+    /// ★ 必须等 Established 才 promote：lwIP 的 accept 回调就是在连接建立后才触发的，
+    ///   若在 SynReceived 就拨上游，一次 SYN 洪水会给每个 SYN 各建一条 SOCKS 连接
+    ///   （放大攻击）。这个差异是 A/B 自测抓出来的 —— 同一套断言在 lwIP 上跑不过。
+    pending: Vec<SocketHandle>,
     portmap: PortMap,
     /// 本机在这张卡上的 MAC 与 IP —— 合成 ARP 应答时要用（见 learn_neighbor）。
     our_mac: [u8; 6],
@@ -262,6 +267,7 @@ impl Engine {
                 device,
                 sockets,
                 listeners,
+                pending: Vec::new(),
                 portmap: PortMap::new(),
                 our_mac: mac,
                 our_ip: ip,
@@ -375,21 +381,48 @@ impl Engine {
     /// 监听 socket 被连上 → 转成连接，并补一个新的监听顶上。
     fn promote_listeners(&mut self, nid: NicId, out: &mut Vec<Event>) {
         let Some(n) = self.nics.get_mut(&nid) else { return };
-        let promoted: Vec<SocketHandle> = n
+        // ① 离开 Listen 的挪进 pending，并补一个新监听顶上（保持突发容忍度）
+        let left: Vec<SocketHandle> = n
             .listeners
             .iter()
             .copied()
             .filter(|h| {
                 let s = n.sockets.get::<tcp::Socket>(*h);
-                !matches!(s.state(), tcp::State::Listen | tcp::State::Closed)
+                !matches!(s.state(), tcp::State::Listen)
+            })
+            .collect();
+        for h in left {
+            n.listeners.retain(|x| *x != h);
+            n.pending.push(h);
+            if let Some(nh) = new_listener(&mut n.sockets) {
+                n.listeners.push(nh);
+            }
+        }
+
+        // ② pending 里握手失败/被拆的，直接回收
+        let dead: Vec<SocketHandle> = n
+            .pending
+            .iter()
+            .copied()
+            .filter(|h| matches!(n.sockets.get::<tcp::Socket>(*h).state(), tcp::State::Closed))
+            .collect();
+        for h in dead {
+            n.pending.retain(|x| *x != h);
+            n.sockets.remove(h);
+        }
+
+        // ③ 只有真正 Established 的才 promote 成连接（与 lwIP 的 accept 时机一致）
+        let promoted: Vec<SocketHandle> = n
+            .pending
+            .iter()
+            .copied()
+            .filter(|h| {
+                matches!(n.sockets.get::<tcp::Socket>(*h).state(), tcp::State::Established)
             })
             .collect();
 
         for h in promoted {
-            n.listeners.retain(|x| *x != h);
-            if let Some(nh) = new_listener(&mut n.sockets) {
-                n.listeners.push(nh);
-            }
+            n.pending.retain(|x| *x != h);
 
             let (cip, cport, sip, is_v6) = {
                 let s = n.sockets.get::<tcp::Socket>(h);

@@ -237,6 +237,12 @@ public:
                      const QString &socksUser, bool reject = false);
     void removeDeviceV6(const QString &ip6);
 
+    // 当前**实际生效**的 TCP 数据面："lwip" 或 "smoltcp"（由 COAST_STACK 决定，init 后才确定）。
+    // ★ 存在的理由是测试可证伪性，不是好看：lwIP 的 accept-all 与 smoltcp 的 catch-all 对外
+    //   行为一致，同一个自测在两条路上都会 PASS —— 没有这个标识就无法证明测的是哪一条。
+    //   诊断日志也该记它，否则线上出问题时分不清用户跑的是哪个栈。
+    const char *activeTcpStack() const;
+
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。
     // from = 收到该帧的二层端点，用来定位注入哪个 netif（也决定 UDP 回程从哪张卡发出）。
     void inputFrame(IL2Endpoint *from, const QByteArray &frame);
