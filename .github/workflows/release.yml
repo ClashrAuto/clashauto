@@ -183,6 +183,14 @@ jobs:
             "-DCMAKE_PREFIX_PATH=$env:QT_ROOT",
             "-DAPP_VERSION=$env:APP_VERSION"
           )
+          # OpenSSL（可选）：给 CoastCore 的 ss/vmess/reality 提供裸 AEAD/X25519。
+          # runner 自带一份，指给它即可；**只对 x64 提示** —— arm64 是交叉编译，环境里没有
+          # arm64 的 OpenSSL，硬指过去会拿到宿主 x64 的库（编译过、链接炸）。
+          # CMake 那侧是**静态链 + 真链测试**：链不上就自动降级成"不编入这三个协议"，
+          # 构建不会失败，也不会给包引入任何 DLL 依赖（见 CMakeLists 里那段的说明）。
+          if ("${{ matrix.arch }}" -eq "x64" -and (Test-Path "$env:PROGRAMFILES\OpenSSL")) {
+            $args += "-DOPENSSL_ROOT_DIR=$env:PROGRAMFILES\OpenSSL"
+          }
           if ("${{ matrix.arch }}" -eq "arm64") {
             $args += "-DQT_HOST_PATH=$env:QT_HOST_ROOT"
           }

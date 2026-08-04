@@ -1,0 +1,10 @@
+CRYPTO-KAT: PASS  aes-128-gcm
+CRYPTO-KAT: PASS  aes-128-gcm open
+CRYPTO-KAT: PASS  aes-128-gcm tamper-reject
+CRYPTO-KAT: PASS  chacha20-ietf-poly1305
+CRYPTO-KAT: PASS  chacha20-ietf-poly1305 open
+CRYPTO-KAT: PASS  chacha20-ietf-poly1305 tamper-reject
+CRYPTO-KAT: PASS  hkdf-sha1 rfc5869-tc4
+CRYPTO-KAT: PASS  ssMasterKey test/16
+CRYPTO-KAT: PASS  ssMasterKey test/32
+CRYPTO-KAT: 全部通过 ✅
