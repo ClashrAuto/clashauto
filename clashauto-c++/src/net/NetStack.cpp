@@ -412,6 +412,19 @@ namespace {
 NetStack::Impl *g_impl = nullptr;
 bool g_debug = false;             // COAST_GATEWAY_DEBUG=1 时打诊断日志（自测/联调用）
 
+// ———————————— 归因用的分级短路（COAST_GW_BENCH_STAGE）————————————
+//
+// ★ 只为**测量**存在，生产恒为 0，代价是每帧一次 int 比较。
+//   动机：`COAST_GW_THROUGHPUT` 量出上行是 ~17 ns/字节、几乎全是每字节成本，
+//   但那 8 项每字节的活各占多少**没人量过**（见 docs/gateway-bottleneck-audit.md 第九节）。
+//   照直觉去改是本仓库反复栽过的错法，所以先做归因：逐级砍掉一段，看 CPU 掉多少。
+//     0 = 全路径（默认，生产）
+//     1 = conn_data 不写 SOCKS（砍掉 QByteArray + 写缓冲 + 回环 + 对端读）
+//     2 = 不 poll（再砍掉校验和验证 + 收环拷贝 + peek/to_vec + 事件派发）
+//     3 = 连 coast_stack_input 都不调（再砍掉 frame.to_vec + portmap 改写）
+//   相邻两级之差 = 被砍掉那一段的成本。
+int g_benchStage = 0;
+
 // 把所有网卡攒着的出帧一次性交给驱动（契约与理由见 IL2Endpoint::flushTx）。
 // 为什么不挑「这条连接对应的那张卡」：网卡数是个位数、空队列的 flushTx 只是一次判空 ——
 // 全刷一遍更简单也更不容易漏。
@@ -660,7 +673,7 @@ void smolDestroyConn(SmolConn *c, bool abortIt);
 // ———————————————————— 推进协议栈 + 收口出帧 ————————————————————
 void pollStack(NetStack::Impl *d)
 {
-    if (!d || !d->smol)
+    if (!d || !d->smol || g_benchStage >= 2)
         return;
     ++d->pollCount;
     coast_stack_poll(d->smol, static_cast<quint64>(d->smolClock.elapsed()));
@@ -897,7 +910,7 @@ void smolConnData(void *user, CoastConnId id, const uint8_t *data, size_t len)
     // ★ 先记账、后落地、最后才可能归还 —— 与 lwIP 侧同一顺序。
     //   记账必须在前：write() 可能同步走到 upstreamBytesWritten → flushRecvWindow。
     c->pendingRecved += static_cast<quint32>(len);
-    if (c->socks)
+    if (c->socks && g_benchStage < 1)
         c->socks->write(QByteArray(reinterpret_cast<const char *>(data), static_cast<int>(len)));
     smolFlushRecvWindow(c);
 }
@@ -970,6 +983,13 @@ NetStack::~NetStack()
     delete d;
 }
 
+void coastSetBenchStage(int stage)
+{
+    g_benchStage = stage;
+    if (stage > 0)
+        qWarning("[NetStack] ★ 归因短路已开启 STAGE=%d —— 这不是正常模式", stage);
+}
+
 const char *NetStack::activeTcpStack() const
 {
     // lwIP 移除后只剩一条路，但这个方法**不删**：自测和诊断日志都据它证明"跑的是哪条数据面"，
@@ -988,6 +1008,7 @@ bool NetStack::init(QString *err)
     }
     g_impl = d;
     g_debug = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
+
 
     // ———— 建栈 ————
     // catch-all（接住发往**任意** IP:port 的 SYN）由 Rust 侧实现：smoltcp 的 any_ip + 一层
@@ -1313,6 +1334,8 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
     }
 
     // 到这里必定是 v4 或 v6 的 TCP 帧 —— 交给栈。
+    if (g_benchStage >= 3)
+        return; // 归因用：连喂帧都不做，量的是夹具自身的底噪
     const quint32 nid = d->nicIds.value(from, 0);
     if (nid) {
         coast_stack_input(d->smol, nid, reinterpret_cast<const uint8_t *>(frame.constData()),

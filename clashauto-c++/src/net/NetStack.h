@@ -214,6 +214,12 @@
 class IL2Endpoint;
 class QHostAddress;
 
+/// 归因用的分级短路开关（详见 NetStack.cpp 里 g_benchStage 的说明）。
+/// ★ 只为测量存在，生产恒为 0。之所以要个 setter 而不是只读 env：
+///   短路必须在**握手完成之后**才打开 —— STAGE>=2 会关掉 poll，
+///   而三次握手本身就要 poll，开在前面等于连连接都建不起来（第一版就是这么废掉的）。
+void coastSetBenchStage(int stage);
+
 class NetStack final : public QObject
 {
     Q_OBJECT

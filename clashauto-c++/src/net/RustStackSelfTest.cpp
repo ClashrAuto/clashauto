@@ -341,6 +341,13 @@ private:
     struct St { int phase = 0; QByteArray buf; QString user; };
     void onData(QTcpSocket *s, St *c)
     {
+        // ★ 隧道建立后直接丢弃、**不拷贝**：夹具自己的 readAll()+append 是每字节两次拷贝，
+        //   会被算进"0→1 段"的归因里，把 SOCKS 回环那一段的成本虚高。
+        //   skip() 在 QIODevice 层丢弃，不构造 QByteArray。
+        if (c->phase == 3) {
+            rxBytes += s->skip(s->bytesAvailable());
+            return;
+        }
         c->buf += s->readAll();
         if (c->phase == 0) {
             if (c->buf.size() < 2) return;
@@ -391,9 +398,11 @@ private:
             c->buf.clear();
             return;
         }
-        // phase 3：隧道已建立，之后收到的全是被代理设备的上行数据
-        rxBytes += c->buf.size();
-        c->buf.clear();
+        // 切到 phase 3 那一刻缓冲里可能已经跟着数据，别丢
+        if (c->phase == 3) {
+            rxBytes += c->buf.size();
+            c->buf.clear();
+        }
     }
     QTcpServer m_srv;
 };
@@ -825,6 +834,10 @@ int runGatewayThroughputBench()
     for (int i = 0; i < 100; ++i)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
 
+    // ★ 短路必须在握手**之后**才打开：STAGE>=2 关掉 poll，而握手本身要 poll。
+    if (qEnvironmentVariableIsSet("COAST_GW_BENCH_STAGE"))
+        coastSetBenchStage(qEnvironmentVariableIntValue("COAST_GW_BENCH_STAGE"));
+
     // ——— 灌数据 ———
     // 设备严格遵守我方通告窗口（FakeEp 从出方向 ACK 里解析 ack/window）。
     // ★ 载荷尺寸可调（COAST_GW_BENCH_PAYLOAD）。这不是调参，是**判别器**：
@@ -843,7 +856,10 @@ int runGatewayThroughputBench()
     // ★ 先标定「造帧」本身的开销，之后从总量里扣掉。
     //   基准每帧都要算 1420 字节的 TCP 校验和 —— 那是**夹具**的成本，生产路径不付。
     //   不扣掉就会把它算进"我们的代码有多贵"，得出偏高的结论。
-    constexpr int kCalib = 20000;
+    // ★ GetProcessTimes 的粒度是 15.6 ms。标定只跑 2 万帧时总耗时约 1 个 tick，
+    //   误差 ±0.78 us/帧 —— 足以把 STAGE=2/3 的净值算成负数（第一版就是这么废的）。
+    //   20 万帧 ≈ 10+ 个 tick，误差降到 10% 以内。
+    constexpr int kCalib = 200000;
     const double calib0 = cpuSeconds();
     for (int i = 0; i < kCalib; ++i)
         buildTcpData(f, 51000, 443, 1001 + quint32(i) * 1400, ackToPeer, payload, kPayload);
@@ -856,33 +872,57 @@ int runGatewayThroughputBench()
     const double cpu0 = cpuSeconds();
     int stalls = 0;
 
-    while (socks.rxBytes < target && wall.elapsed() < 20000) {
-        bool fed = false;
-        for (;;) {
-            const quint32 inflight = seq - ep.lastAck;
-            if (inflight + kPayload > ep.lastWnd)
-                break;
+    // ★ STAGE>=2 时没有任何东西在消费，窗口反馈不存在 —— 改成灌固定帧数，
+    //   判据从"送达多少"换成"喂了多少"。两种模式量的都是 CPU，可直接相减做归因。
+    const int stage = qEnvironmentVariableIsSet("COAST_GW_BENCH_STAGE")
+                          ? qEnvironmentVariableIntValue("COAST_GW_BENCH_STAGE")
+                          : 0;
+    qint64 fedBytes = 0;
+    if (stage >= 2) {
+        // 同理：STAGE>=2 每帧只有 1~2 us，按 target 只够跑 0.02 s = 一两个 tick。
+        // 放大 20 倍，让总 CPU 落在几百毫秒量级才量得准。
+        const qint64 nFrames = target * 20 / kPayload;
+        for (qint64 i = 0; i < nFrames; ++i) {
             const int len = buildTcpData(f, 51000, 443, seq, ackToPeer, payload, kPayload);
             net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), len));
-            seq += kPayload;
-            fed = true;
+            seq += quint32(kPayload);
+            fedBytes += kPayload;
+            if ((i & 0x3FF) == 0)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 0);
         }
-        const qint64 before = socks.rxBytes;
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
-        if (!fed && socks.rxBytes == before) {
-            if (++stalls > 400)
-                break;
-        } else {
-            stalls = 0;
+    } else {
+        // ★ STAGE=1 时 SOCKS 侧收不到任何东西，socks.rxBytes 恒 0 —— 用它当条件会空跑到超时。
+        while ((stage >= 1 ? fedBytes : socks.rxBytes) < target && wall.elapsed() < 20000) {
+            bool fed = false;
+            for (;;) {
+                const quint32 inflight = seq - ep.lastAck;
+                if (inflight + quint32(kPayload) > ep.lastWnd)
+                    break;
+                const int len = buildTcpData(f, 51000, 443, seq, ackToPeer, payload, kPayload);
+                net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), len));
+                seq += quint32(kPayload);
+                fedBytes += kPayload;
+                fed = true;
+            }
+            const qint64 before = socks.rxBytes;
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
+            if (!fed && socks.rxBytes == before) {
+                if (++stalls > 400)
+                    break;
+            } else {
+                stalls = 0;
+            }
         }
     }
+    // 归因时以"喂进去的字节"为准（STAGE>=1 时 SOCKS 侧本来就收不到）
+    const qint64 accounted = (stage >= 1) ? fedBytes : socks.rxBytes;
 
     const double secs = double(wall.elapsed()) / 1000.0;
     const double cpu = cpuSeconds() - cpu0;
-    const double mbps = double(socks.rxBytes) * 8.0 / secs / 1e6;
+    const double mbps = double(accounted) * 8.0 / secs / 1e6;
     const double corePerGbps = (mbps > 1.0) ? (cpu / secs) / (mbps / 1000.0) : 0.0;
-    const double frames = double(socks.rxBytes) / kPayload;
-    const double usPerFrame = (socks.rxBytes > 0) ? cpu * 1e6 / frames : 0.0;
+    const double frames = double(accounted) / kPayload;
+    const double usPerFrame = (accounted > 0) ? cpu * 1e6 / frames : 0.0;
     // 扣掉夹具造帧的那部分，才是「我们的代码」的净成本
     const double netUsPerFrame = usPerFrame - calibUsPerFrame;
     const double netCorePerGbps =
@@ -891,15 +931,17 @@ int runGatewayThroughputBench()
     std::fprintf(stderr,
                  "[gwbench] 载荷=%d 送达 %lld B / %.2fs → %.0f Mb/s；CPU %.2fs "
                  "(%.3f 核/Gbps, %.2f us/帧)\n", kPayload,
-                 static_cast<long long>(socks.rxBytes), secs, mbps, cpu, corePerGbps, usPerFrame);
+                 static_cast<long long>(accounted), secs, mbps, cpu, corePerGbps, usPerFrame);
     std::fprintf(stderr,
-                 "[gwbench]   扣掉夹具造帧 %.2f us/帧 → **净 %.2f us/帧, %.3f 核/Gbps**\n",
-                 calibUsPerFrame, netUsPerFrame, netCorePerGbps);
+                 "[gwbench]   STAGE=%d 扣掉夹具造帧 %.2f us/帧 → **净 %.2f us/帧 "
+                 "(%.2f ns/字节), %.3f 核/Gbps**\n",
+                 stage, calibUsPerFrame, netUsPerFrame, netUsPerFrame * 1000.0 / kPayload,
+                 netCorePerGbps);
     std::fprintf(stderr,
                  "[gwbench]   ★ 这是**去掉网卡之后**的纯软件成本（FakeEp 不碰驱动）；"
                  "不含 Npcap 收发/真实链路/真实核心，别当端到端吞吐用。\n");
 
-    if (socks.rxBytes < target / 4) {
+    if (stage == 0 && socks.rxBytes < target / 4) {
         std::fprintf(stderr, "[gwbench] FAIL: 20s 内只搬了 %lld B，远低于目标 —— 路径有阻塞\n",
                      static_cast<long long>(socks.rxBytes));
         return 2;
