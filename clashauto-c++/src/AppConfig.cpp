@@ -143,6 +143,9 @@ AppConfig AppConfigLoader::load()
     config.mirror = boolFromYaml(yaml, "mirror", config.mirror);
     config.receiveBeta = boolFromYaml(yaml, "beta", config.receiveBeta);
     config.ipv6 = boolFromYaml(yaml, "ipv6", config.ipv6);
+    config.coastcore = boolFromYaml(yaml, "coastcore", config.coastcore); // 进程内出站（默认关）
+    // 严格模式：判不了就断，不回退核心（默认关）。只有 coastcore 开着时才有意义。
+    config.coastcoreStrict = boolFromYaml(yaml, "coastcore_strict", config.coastcoreStrict);
     config.language = valueFromYaml(yaml, "language", config.language);
     config.secret = valueFromYaml(yaml, "secret", QString());
 

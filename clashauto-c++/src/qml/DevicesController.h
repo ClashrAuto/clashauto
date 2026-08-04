@@ -1,5 +1,7 @@
 #pragma once
 
+#include <memory>
+
 // 「设备」页的门面控制器（薄胶水，风格对齐 SubscriptionsController/AboutController）。
 // 组装：LanScanner（发现）+ DeviceStore（台账）+ DeviceListModel（左列表）+
 // DeviceConnectionsModel（右详情连接）。自持一个 1s 连接轮询（仅页面活动时开），把 /connections
@@ -24,6 +26,8 @@ class LanScanner;
 class ClashService;
 class CoreController;
 class LanGateway;
+class ProxyConfigStore;
+class RuleEngine;
 class HistoryStore;
 class QTimer;
 
@@ -58,6 +62,10 @@ class DevicesController final : public QObject
 public:
     DevicesController(DeviceStore *store, ClashService *clash, CoreController *core,
                       LanGateway *gateway, HistoryStore *history, QObject *parent = nullptr);
+
+    /// 打开/关闭 CoastCore 进程内出站（网关这条路）。由 main_qml 按 AppConfig.coastcore 调一次。
+    /// configDir 用来读 full.yaml（节点表来源）。关着时是彻底的 no-op —— 连快照都不建。
+    void setCoastCore(bool enabled, bool strict, const QString &configDir);
 
     DeviceListModel *model() { return &m_model; }
     DeviceConnectionsModel *connModel() { return &m_connModel; }
@@ -130,6 +138,15 @@ private:
 
     DeviceStore *m_store = nullptr;
     ClashService *m_clash = nullptr;
+    // ———— CoastCore 进程内出站（默认关 = 这几个成员恒为空，零行为变化）————
+    bool m_coastCore = false;
+    bool m_coastStrict = false;
+    QString m_ccConfigDir;
+    std::shared_ptr<ProxyConfigStore> m_pcfgStore;
+    std::shared_ptr<RuleEngine> m_ruleEngine;
+    // 从 full.yaml + 当前模式/选中节点重建出站快照，并推给网关。
+    // 换节点/换模式/改订阅之后都要调 —— 快照是不可变的，换掉它即刻对**新连接**生效。
+    void rebuildCoastCoreConfig();
     CoreController *m_core = nullptr;
     LanGateway *m_gateway = nullptr;
     HistoryStore *m_history = nullptr; // 常用域名从它查（跨重启保留）

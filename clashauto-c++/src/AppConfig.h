@@ -36,6 +36,18 @@ struct AppConfig {
     // dns.fake-ip-range6 三件套。注意三者缺一不可：只开 dns.ipv6 而没有 v6 fake-ip 池时，
     // fake-ip 模式下核心对 AAAA 照样回空答案（见 mihomo dns/middleware.go 的 withFakeIP）。
     bool ipv6 = false;
+    // ———— CoastCore：把网关的**出站**搬进本进程（config.yaml 键 `coastcore`）————
+    // 默认 **false = 零行为变化**，网关照旧经回环 SOCKS 拨 mihomo。
+    // 打开后网关终结出的连接在进程内直接出站，那一跳整个消失 —— 实测它占网关软件成本的 **65%**
+    //（docs/gateway-bottleneck-audit.md 第十节）。判不了的情形（协议没编进来、规则要先解析 IP）
+    // 仍**回退** mihomo，按原因记账，见 GatewayDiag 的 cc=… 那几栏。
+    // ★ 这里默认 false 而不是跟着上游分支取 true：v1.1 上这条路刚接完线、还没做过真机验证，
+    //   默认打开等于拿所有用户当小白鼠。等真机 A/B 有数了再谈改默认值。
+    bool coastcore = false;
+    // 严格模式：上面那些「判不了」的情形**拒绝回退**，直接让该连接失败（config.yaml 键
+    // `coastcore_strict`）。用途是把「离完全替换 mihomo 还差多少」暴露出来 —— 静默回退会把
+    // 差距藏起来。代价是这些连接会断，所以单独一个开关。默认关。
+    bool coastcoreStrict = false;
     // 透明网关的**数据面**走哪条路。
     //   true  = 「内核转发 + nftables TPROXY」：ARP 劫持照旧（那是「设备什么都不用改」的来源），
     //           但劫持来的帧不再喂进 lwIP，而是由内核转发、TPROXY 投给核心。

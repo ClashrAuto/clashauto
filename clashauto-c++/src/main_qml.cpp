@@ -590,6 +590,10 @@ int main(int argc, char *argv[])
     // 启动即先还原上次异常退出遗留的 ARP 投毒（panic-restore），避免被劫持设备一直断网。
     lanGateway->recoverFromCrash();
     auto *devicesCtrl = new DevicesController(deviceStore, clash, core, lanGateway, history, &app);
+    // CoastCore 进程内出站（config.yaml 的 `coastcore`，默认关 = 零行为变化）。
+    // 打开后网关终结出的连接不再经回环 SOCKS 拨 mihomo，而在进程内直接出站 ——
+    // 那一跳实测占网关软件成本的 65%（docs/gateway-bottleneck-audit.md 第十节）。
+    devicesCtrl->setCoastCore(config.coastcore, config.coastcoreStrict, config.configDir);
     // 窗口显隐 → 停/起那些**只喂界面**的活儿。点 ✕ 是「只隐藏不销毁」，QML 场景整棵还在，
     // 不接这一条的话托盘态与开着窗口一样贵（实测两边都是 6.5%）。
     // 各家自己决定停什么：ClashService 停 1s 的 /proxies；DevicesController 把 1s 的连接聚合停掉、

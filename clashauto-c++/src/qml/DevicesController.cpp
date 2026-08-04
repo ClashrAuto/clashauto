@@ -1,4 +1,8 @@
 #include "DevicesController.h"
+#include <QDir>
+#include "../net/core/RuleEngine.h"
+#include "../net/core/ProxyConfigBuilder.h"
+#include "../net/core/ProxyConfig.h"
 #include "../ClashService.h"
 #include "../ConfigBuilder.h" // localGlobal6Prefixes()：与生成配置同一份实现
 #include "../CoreController.h"
@@ -988,4 +992,70 @@ void DevicesController::aggregate(const QVariantList &conns)
     refreshModel();
     rebuildSelected();
     emit overviewChanged();
+}
+
+// ———————————————— CoastCore 进程内出站：配置快照与接线 ————————————————
+//
+// 网关终结出的连接默认经回环 SOCKS 拨 mihomo，而那一跳实测占网关软件成本的 **65%**
+//（docs/gateway-bottleneck-audit.md 第十节）。打开这个开关之后连接在进程内直接出站，
+// 那一跳整个消失。默认关 = 零行为变化。
+void DevicesController::setCoastCore(bool enabled, bool strict, const QString &configDir)
+{
+    m_coastCore = enabled;
+    m_coastStrict = strict;
+    m_ccConfigDir = configDir;
+    if (!enabled) {
+        // 撤回：网关装回默认 SOCKS 工厂（与从未启用完全一致）。快照留着不释放也无害，
+        // 但显式清掉更干净 —— 免得下次打开时先用到一份过期的节点表。
+        m_pcfgStore.reset();
+        m_ruleEngine.reset();
+        if (m_gateway)
+            m_gateway->setCoastCore(false, false, nullptr, nullptr);
+        return;
+    }
+    if (!m_pcfgStore)
+        m_pcfgStore = std::make_shared<ProxyConfigStore>();
+    if (!m_ruleEngine)
+        m_ruleEngine = std::make_shared<RuleEngine>();
+    rebuildCoastCoreConfig();
+    if (m_gateway)
+        m_gateway->setCoastCore(true, m_coastStrict, m_pcfgStore, m_ruleEngine);
+}
+
+void DevicesController::rebuildCoastCoreConfig()
+{
+    if (!m_pcfgStore)
+        return;
+    // 节点表取自 **full.yaml**：它的 proxies 节点名与核心/选中节点一致。
+    // subscribe.yaml 的裸名少了「 - 订阅名」后缀，与 selected 对不上 —— 只当 full.yaml
+    // 缺失时的兜底（那时 Global 找不到节点即回退 mihomo，安全）。
+    QString proxiesYaml;
+    {
+        QFile f(QDir(m_ccConfigDir).filePath(QStringLiteral("full.yaml")));
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+            proxiesYaml = QString::fromUtf8(f.readAll());
+    }
+    if (proxiesYaml.trimmed().isEmpty()) {
+        QFile f(QDir(m_ccConfigDir).filePath(QStringLiteral("subscribe.yaml")));
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+            proxiesYaml = QString::fromUtf8(f.readAll());
+    }
+
+    // 模式与选中节点取 ClashService 轮询到的缓存（无网络往返）。拿不到就按 Rule/空处理
+    // → 选不出节点即回退 mihomo，安全。
+    const QString modeStr = m_clash ? m_clash->mode() : QString();
+    const QString selected = m_clash ? m_clash->selectedNode() : QString();
+    ProxyConfig::Mode mode = ProxyConfig::Mode::Rule;
+    if (modeStr.compare(QStringLiteral("Global"), Qt::CaseInsensitive) == 0)
+        mode = ProxyConfig::Mode::Global;
+    else if (modeStr.compare(QStringLiteral("Direct"), Qt::CaseInsensitive) == 0)
+        mode = ProxyConfig::Mode::Direct;
+
+    std::shared_ptr<const ProxyConfig> cfg =
+        coastcore::buildProxyConfig(proxiesYaml, selected, mode);
+    if (!cfg)
+        return;
+    // 快照是**不可变**的：换掉它即刻对新连接生效，在途连接不受影响（router 每建一条新连接
+    // 才现读 current()）。所以这里不需要任何锁，也不需要停网关。
+    m_pcfgStore->reload(cfg);
 }

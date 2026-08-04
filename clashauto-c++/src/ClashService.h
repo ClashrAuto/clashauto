@@ -48,6 +48,10 @@ public:
     void setMixedPort(int port); // 混合代理端口（对齐 config.mixedPort，默认 7890）——下载测速经此端口走代理
     void setSecret(const QString &secret); // external-controller 的 secret；非空时所有发往核心的请求带 Authorization: Bearer
     void setMode(const QString &mode);
+    // 当前模式 / 选中节点的只读快照。CoastCore 建出站配置快照要用它们，
+    // 而那发生在**没有网络往返**的路径上，所以取轮询到的缓存值而不是再发一次 REST。
+    QString mode() const { return m_mode; }
+    QString selectedNode() const { return m_selectedNode; }
     void setSelectedGroup(const QString &group);
     void setClearConnectionsOnSwitch(bool enabled);
     void selectNode(const QString &name);
