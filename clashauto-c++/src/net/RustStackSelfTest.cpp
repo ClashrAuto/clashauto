@@ -249,6 +249,7 @@ int runRustStackSelfTest()
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QEventLoop>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -294,6 +295,9 @@ public:
         lastAck = (quint32(quint8(f[42])) << 24) | (quint32(quint8(f[43])) << 16)
                 | (quint32(quint8(f[44])) << 8) | quint32(quint8(f[45]));
         lastWnd = quint32((quint8(f[48]) << 8) | quint8(f[49]));
+        // 多连接聚合基准：按**设备源端口**（= 出方向帧的目的端口）分开记
+        const quint16 devPort = quint16((quint8(f[36]) << 8) | quint8(f[37]));
+        ackByPort[devPort] = qMakePair(lastAck, lastWnd);
     }
     // 出方向数据帧：累计载荷长度（下行基准据此回 ACK 并计吞吐）
     void noteData(const QByteArray &f)
@@ -327,6 +331,7 @@ public:
     //（Rust 侧那三次返工全栽在这上面，别在 C++ 侧再栽一次）。
     quint32 lastAck = 0;
     quint32 lastWnd = 65535;
+    QHash<quint16, QPair<quint32, quint32>> ackByPort; // 设备源端口 → (ack, 窗口)
     // 下行基准用：出方向 TCP 帧里的载荷字节总数，以及第一段数据的起始序号。
     qint64 dataBytes = 0;
     quint32 firstDataSeq = 0;
@@ -949,6 +954,101 @@ int runGatewayThroughputBench()
     }
     static uint8_t payload[1400];
     std::memset(payload, 0x5A, sizeof payload);
+
+    // ═══════════ 多连接聚合基准（COAST_GW_BENCH_CONNS=N）═══════════
+    //
+    // ★ 回答一个此前一直没问的问题：**420 Mb/s 是"一条连接"的数，还是"整台机器"的数？**
+    //   两者含义天差地别：
+    //     · 若是每连接的 → 多设备并发时总量还能往上叠，420 只是单流上限
+    //     · 若是聚合的   → 那就是**整个网关的总容量**，加设备只会互相分摊
+    //   数据面是**单线程**的（NetStack.h 的线程模型、coaststack.h 的单线程契约），
+    //   所以后者的可能性很大 —— 但"很可能"不是测量。
+    //
+    // 判据：N 条连接同时灌，看总吞吐是否随 N 上升。
+    //   总吞吐基本不变 ⇒ 单线程已饱和，420 Mb/s 就是整机上限。
+    if (qEnvironmentVariableIsSet("COAST_GW_BENCH_CONNS")) {
+        const int nConn = qBound(1, qEnvironmentVariableIntValue("COAST_GW_BENCH_CONNS"), 64);
+
+        struct Conn {
+            quint16 sport;
+            quint32 seq;
+            quint32 ackToPeer;
+        };
+        QVector<Conn> conns;
+        uint8_t mf[2048];
+
+        // 逐条握手（第一条已经在上面建好了，这里从第二条开始）
+        conns.append(Conn{51000, 1001, ackToPeer});
+        for (int i = 1; i < nConn; ++i) {
+            const quint16 sp = quint16(51000 + i);
+            ep.synAck = 0;
+            buildSyn(mf, sp, 443);
+            net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(mf), 54));
+            for (int k = 0; k < 200 && ep.synAck < 1; ++k)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+            if (ep.synAck < 1) {
+                std::fprintf(stderr, "[gwbench] FAIL: 第 %d 条连接没等到 SYN-ACK\n", i + 1);
+                return 1;
+            }
+            const quint32 a = ep.synAckSeq + 1;
+            buildTcp(mf, sp, 443, 0x10, 1001, a);
+            net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(mf), 54));
+            for (int k = 0; k < 100; ++k)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+            conns.append(Conn{sp, 1001, a});
+        }
+        // 等所有 SOCKS 隧道就绪
+        for (int k = 0; k < 300; ++k)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+
+        const qint64 mtarget = 32 * 1024 * 1024;
+        const qint64 rx0 = socks.rxBytes;
+        QElapsedTimer mwall;
+        mwall.start();
+        const double mcpu0 = cpuSeconds();
+        int midle = 0;
+
+        while (socks.rxBytes - rx0 < mtarget && mwall.elapsed() < 20000) {
+            bool fed = false;
+            for (Conn &c : conns) {
+                const auto st = ep.ackByPort.value(c.sport, qMakePair(c.seq, quint32(65535)));
+                for (;;) {
+                    const quint32 inflight = c.seq - st.first;
+                    if (inflight + quint32(kPayload) > st.second)
+                        break;
+                    const int len =
+                        buildTcpData(mf, c.sport, 443, c.seq, c.ackToPeer, payload, kPayload);
+                    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(mf), len));
+                    c.seq += quint32(kPayload);
+                    fed = true;
+                }
+            }
+            const qint64 before = socks.rxBytes;
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
+            if (!fed && socks.rxBytes == before) {
+                if (++midle > 400)
+                    break;
+            } else {
+                midle = 0;
+            }
+        }
+
+        const qint64 moved = socks.rxBytes - rx0;
+        const double msecs = double(mwall.elapsed()) / 1000.0;
+        const double mcpu = cpuSeconds() - mcpu0;
+        const double mmbps = double(moved) * 8.0 / msecs / 1e6;
+        std::fprintf(stderr,
+                     "[gwbench][聚合] 连接数=%d 送达 %lld B / %.2fs → **总 %.0f Mb/s**"
+                     "（每连接 %.0f Mb/s）；CPU %.2fs = %.0f%% 单核\n",
+                     nConn, static_cast<long long>(moved), msecs, mmbps, mmbps / nConn, mcpu,
+                     mcpu / msecs * 100.0);
+        if (moved < mtarget / 8) {
+            std::fprintf(stderr, "[gwbench][聚合] FAIL: 只搬了 %lld B\n",
+                         static_cast<long long>(moved));
+            return 2;
+        }
+        return 0;
+    }
 
     // ★ 先标定「造帧」本身的开销，之后从总量里扣掉。
     //   基准每帧都要算 1420 字节的 TCP 校验和 —— 那是**夹具**的成本，生产路径不付。
