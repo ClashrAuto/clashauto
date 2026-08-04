@@ -22,6 +22,35 @@ enum SelfTests {
         if environment["COAST_LATENCY_SELFTEST"] == "1" { latencySelfTest() }
         if environment["COAST_DEVICES_SELFTEST"] == "1" { devicesSelfTest() }
         if environment["COAST_HISTORY_SELFTEST"] == "1" { historySelfTest() }
+        if environment["COAST_LOOKUP_SELFTEST"] == "1" { lookupSelfTest() }
+    }
+
+    /// 单台设备查询的耗时自检。
+    ///
+    /// 存在的理由：`DeviceDetailView` 里 `record` 是 computed property，body 每求值一次
+    /// 就查一次台账，而 body 上引用它（含 `proxyEnabled`/`canToggle` 这些派生量）有十几处。
+    /// 于是「打开一台设备的详情」这个动作的开销，直接由单台查询的耗时 × 十几倍决定。
+    /// 这里把它单独拎出来计时，好让「改成主键查找」这类优化有个可复现的前后对照。
+    private static func lookupSelfTest() {
+        print("=== 单台查询耗时自检 ===")
+        let store = DeviceStore()
+        guard store.isOpen else { print("台账打不开"); exit(1) }
+        let macs = store.all().map(\.mac)
+        guard let target = macs.last else { print("台账是空的，测不了"); exit(1) }
+        print("台账 \(macs.count) 台，取末尾一台作目标（线性扫描的最坏情况）：\(target)")
+
+        let rounds = 500
+        // 先热身，把 SQLite 的页缓存与首次语句准备的开销排掉，免得算进结果。
+        for _ in 0..<50 { _ = store.device(mac: target) }
+        let began = Date()
+        for _ in 0..<rounds { _ = store.device(mac: target) }
+        let elapsed = Date().timeIntervalSince(began)
+        let per = elapsed / Double(rounds) * 1000
+        print(String(format: "%d 次查询共 %.3f s，单次 %.3f ms", rounds, elapsed, per))
+        // 详情页一次 body 大约十几次查询，按 14 次估一帧的台账开销。
+        print(String(format: "按详情页每帧约 14 次算：%.2f ms/帧（16.7 ms 预算的 %.0f%%）",
+                     per * 14, per * 14 / 16.7 * 100))
+        exit(0)
     }
 
     /// 设备台账 / 设备列表自检（对应 Qt 的 `COAST_DEVICEDB_SELFTEST`）。

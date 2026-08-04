@@ -164,33 +164,49 @@ public final class DeviceStore: @unchecked Sendable {
 
     // MARK: - 读写
 
+    /// 两个查询共用的列清单与行映射 —— 分开写过一次就会漏字段。
+    private static let columns = """
+        mac, alias, proxy_enabled, policy_mode, policy_target, last_ip, first_seen,
+        type_override, hostname, vendor, model, interface, last_seen
+        """
+
+    private static func makeDevice(_ row: SQLiteDatabase.Row) -> Device {
+        var device = Device(mac: row.text(0))
+        device.alias = row.text(1)
+        device.proxyEnabled = row.int(2) != 0
+        device.policyMode = PolicyMode(rawValue: row.text(3)) ?? .follow
+        device.policyTarget = row.text(4)
+        device.lastIP = row.text(5)
+        device.firstSeen = Date(timeIntervalSince1970: Double(row.int(6)))
+        device.typeOverride = row.text(7)
+        device.hostname = row.text(8)
+        device.vendor = row.text(9)
+        device.model = row.text(10)
+        device.interface = row.text(11)
+        device.lastSeen = Date(timeIntervalSince1970: Double(row.int(12)))
+        return device
+    }
+
     public func all() -> [Device] {
         var result: [Device] = []
-        database?.query("""
-            SELECT mac, alias, proxy_enabled, policy_mode, policy_target, last_ip, first_seen,
-                   type_override, hostname, vendor, model, interface, last_seen
-            FROM device ORDER BY mac
-            """) { row in
-            var device = Device(mac: row.text(0))
-            device.alias = row.text(1)
-            device.proxyEnabled = row.int(2) != 0
-            device.policyMode = PolicyMode(rawValue: row.text(3)) ?? .follow
-            device.policyTarget = row.text(4)
-            device.lastIP = row.text(5)
-            device.firstSeen = Date(timeIntervalSince1970: Double(row.int(6)))
-            device.typeOverride = row.text(7)
-            device.hostname = row.text(8)
-            device.vendor = row.text(9)
-            device.model = row.text(10)
-            device.interface = row.text(11)
-            device.lastSeen = Date(timeIntervalSince1970: Double(row.int(12)))
-            result.append(device)
+        database?.query("SELECT \(Self.columns) FROM device ORDER BY mac") { row in
+            result.append(Self.makeDevice(row))
         }
         return result
     }
 
+    /// 查一台。**必须走主键**，不能写成 `all().first { … }` ——
+    /// 详情页里 `record` 是 computed property，body 上引用它（含派生的
+    /// `proxyEnabled`/`canToggle`）有十几处，每处求值都会重来一次。全表读时
+    /// 这份开销随台账线性放大：实测 24 台单次 0.024 ms、100 台 0.311 ms（13 倍），
+    /// 换算成详情页一帧约 4.35 ms，占满 16.7 ms 预算的四分之一。
+    /// 主键查找后与台账规模无关。回归可跑 `COAST_LOOKUP_SELFTEST=1`。
     public func device(mac: String) -> Device? {
-        all().first { $0.mac == mac }
+        var result: Device?
+        database?.query("SELECT \(Self.columns) FROM device WHERE mac = ?", [.text(mac)]) { row in
+            result = Self.makeDevice(row)
+        }
+        return result
     }
 
     /// 写用户那半边（备注名 / 开关 / 策略 / 类型 / 地址）。**整条覆盖**，
