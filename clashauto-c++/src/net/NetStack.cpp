@@ -132,7 +132,9 @@ struct UdpSess; // 每设备的壳（MAC / 网卡 / 该设备的所有流）
 // 一条 UDP 流 = 设备的一个源端口。
 struct UdpFlow {
     UdpSess *sess = nullptr;
-    Socks5Udp *socks = nullptr;
+    // 出站是**接口**：Socks5Udp（经 mihomo 的 UDP associate）与进程内 UDP 出站都实现它。
+    // 由 Impl::outFactory 创建 —— 与 TCP 侧同一个工厂，所以「换出站」两条腿一起换。
+    IOutboundUdp *socks = nullptr;
     quint16 vport = 0;                 // 设备源端口：回程包的目的端口就是它
     bool ready = false;                // associate 完成
     struct Pending {
@@ -1522,18 +1524,27 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         flow->sess = s;
         flow->vport = sport;
         flow->idleMs = isShortLivedUdpPort(dport) ? kUdpDnsIdleMs : kUdpIdleMs;
-        flow->socks = new Socks5Udp(d->socksPort, this);
+        // 经工厂创建：默认返回 Socks5Udp（拨 mihomo），装了 CoreDialerFactory 就是进程内 UDP 出站。
+        flow->socks = d->outFactory ? d->outFactory->createUdp(this) : nullptr;
+        if (!flow->socks) {
+            // 工厂拒绝（协议没有 UDP 出站实现且严格模式）→ 这条流建不起来，丢包即可（UDP 语义）
+            ++GatewayDiag::c.udpFlowsRefused;
+            s->flows.remove(sport);
+            d->udpFlowCount--;
+            delete flow;
+            return;
+        }
         s->flows.insert(sport, flow);
         d->udpFlowCount++;
 
         UdpFlow *nf = flow;
-        connect(nf->socks, &Socks5Udp::ready, this, [nf]() {
+        connect(nf->socks, &IOutboundUdp::ready, this, [nf]() {
             nf->ready = true;
             for (const UdpFlow::Pending &pk : std::as_const(nf->pending))
                 nf->socks->sendTo(QHostAddress(pk.dstIp), pk.dport, pk.payload);
             nf->pending.clear();
         });
-        connect(nf->socks, &Socks5Udp::datagramReceived, this,
+        connect(nf->socks, &IOutboundUdp::datagramReceived, this,
                 [this, srcIp, sport](const QHostAddress &fromIp, quint16 fromPort,
                                      const QByteArray &data) {
                     // 捕值不捕流指针：即便这条流已经被老化/淘汰掉，槽里也只是查表落空，
@@ -1543,10 +1554,10 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         // 关联建不起来（mihomo 没起来）或控制连接掉线（mihomo 重启）→ 立刻收掉这条流，别让这个
         // 源端口一直黑洞到老化为止；设备下次发包会重建。destroyUdpFlow 走的是 disconnect +
         // deleteLater，在被删对象自己的信号里调用是安全的。
-        connect(nf->socks, &Socks5Udp::failed, this, [this, nf](const QString &) {
+        connect(nf->socks, &IOutboundUdp::failed, this, [this, nf](const QString &) {
             destroyUdpFlow(d, nf);
         });
-        connect(nf->socks, &Socks5Udp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
+        connect(nf->socks, &IOutboundUdp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
 
         nf->socks->associate(dev.socksUser);
     }
@@ -1650,12 +1661,21 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
         // v6 的来源校验：peers 用的是 QSet<quint32>（v4 地址），装不下 v6。直接退化成全锥
         //（不校验来源），记录在案的取舍——v6 UDP（QUIC/DNS64 等）以此为代价换实现简单。
         flow->coneOpen = true;
-        flow->socks = new Socks5Udp(d->socksPort, this);
+        // 经工厂创建：默认返回 Socks5Udp（拨 mihomo），装了 CoreDialerFactory 就是进程内 UDP 出站。
+        flow->socks = d->outFactory ? d->outFactory->createUdp(this) : nullptr;
+        if (!flow->socks) {
+            // 工厂拒绝（协议没有 UDP 出站实现且严格模式）→ 这条流建不起来，丢包即可（UDP 语义）
+            ++GatewayDiag::c.udpFlowsRefused;
+            s->flows.remove(sport);
+            d->udpFlowCount--;
+            delete flow;
+            return;
+        }
         s->flows.insert(sport, flow);
         d->udpFlowCount++;
 
         UdpFlow *nf = flow;
-        connect(nf->socks, &Socks5Udp::ready, this, [nf]() {
+        connect(nf->socks, &IOutboundUdp::ready, this, [nf]() {
             nf->ready = true;
             for (const UdpFlow::Pending &pk : std::as_const(nf->pending)) {
                 Q_IPV6ADDR d6;
@@ -1664,15 +1684,15 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
             }
             nf->pending.clear();
         });
-        connect(nf->socks, &Socks5Udp::datagramReceived, this,
+        connect(nf->socks, &IOutboundUdp::datagramReceived, this,
                 [this, srcIp, sport](const QHostAddress &fromIp, quint16 fromPort,
                                      const QByteArray &data) {
                     onUdpResponse(srcIp, sport, fromIp, fromPort, data);
                 });
-        connect(nf->socks, &Socks5Udp::failed, this, [this, nf](const QString &) {
+        connect(nf->socks, &IOutboundUdp::failed, this, [this, nf](const QString &) {
             destroyUdpFlow(d, nf);
         });
-        connect(nf->socks, &Socks5Udp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
+        connect(nf->socks, &IOutboundUdp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
 
         nf->socks->associate(dev.socksUser);
     }
