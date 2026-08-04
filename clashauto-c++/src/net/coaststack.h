@@ -163,6 +163,8 @@ typedef struct {
     uint64_t conns_closed;
     uint64_t conns_aborted;
     uint64_t conns_refused;   // catch-all 接住但被拒（socket 表满 / conn_new 返回 false）
+    uint64_t rx_overflow;     // ★ 收队列满而丢的帧数。非 0 = **工作线程跟不上**，
+                              //   与 rxdrop（链路/内核缓冲丢）分属不同环节，别混。
     uint64_t rx_frames;
     uint64_t tx_frames;
     uint64_t rx_dropped;      // 解析失败/无对应 nic

@@ -493,7 +493,7 @@ QString smolStatsLine()
     const quint64 polls = g_impl->pollCount;
     g_impl->pollCount = 0;
     QString out = QStringLiteral("polls=%8 stackRx=%1 stackTx=%2 stackDrop=%3 rexmit=%4 refuse=%5"
-                                 " conns=%6 pollGapMax=%7ms")
+                                 " conns=%6 pollGapMax=%7ms rxOvf=%9")
                       .arg(s.rx_frames - prev.rx_frames)
                       .arg(s.tx_frames - prev.tx_frames)
                       .arg(s.rx_dropped - prev.rx_dropped)
@@ -501,7 +501,8 @@ QString smolStatsLine()
                       .arg(s.conns_refused - prev.conns_refused)
                       .arg(s.conns_active)
                       .arg(s.poll_max_gap_ms)
-                      .arg(polls);
+                      .arg(polls)
+                      .arg(s.rx_overflow - prev.rx_overflow);
     prev = s;
     return out;
 }

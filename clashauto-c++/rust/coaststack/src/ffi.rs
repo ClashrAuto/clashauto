@@ -60,6 +60,8 @@ pub struct CoastStats {
     pub conns_closed: u64,
     pub conns_aborted: u64,
     pub conns_refused: u64,
+    /// 收队列满而丢的帧数（工作线程跟不上；与链路丢包不是一回事）
+    pub rx_overflow: u64,
     pub rx_frames: u64,
     pub tx_frames: u64,
     pub rx_dropped: u64,
@@ -373,6 +375,8 @@ pub unsafe extern "C" fn coast_stack_stats(s: *mut CoastStack, out: *mut CoastSt
     st.stats.conns_aborted = st.engine.conns_aborted;
     st.stats.conns_refused += st.engine.conns_refused;
     st.engine.conns_refused = 0;
+    st.stats.rx_overflow += st.engine.rx_overflow;
+    st.engine.rx_overflow = 0;
     *out = st.stats;
     st.stats.poll_max_gap_ms = 0; // 瞬时量，读完清零
 }

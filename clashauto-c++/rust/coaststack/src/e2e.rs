@@ -541,32 +541,21 @@ fn payload_bytes(evs: &[Event]) -> usize {
     n
 }
 
-#[test]
-fn measure_ceilings_with_window_scaling() {
-    // ───────────────── 上行：设备 → 我们 ─────────────────
+/// 上行天花板：设备严格遵守通告窗口，每 `poll_ms` 毫秒推进一次协议栈。
+/// 返回 (Mb/s, 实际送达字节, 拍数)。
+fn measure_up(poll_ms: u64) -> (f64, usize, u32) {
     let mut e = mk_engine();
     let (id, synack_seq, shift, syn_wnd) = establish_ws(&mut e, 51030, 443, 3000);
-    std::eprintln!(
-        "[WS  ] SYN-ACK window={} shift={} → 我方有效接收窗口 {} B",
-        syn_wnd,
-        shift,
-        (syn_wnd as u64) << shift
-    );
-
     let ackno = synack_seq.wrapping_add(1);
     let payload = [0x5Au8; 1460];
     let mut seq: u32 = 3001;
     let mut peer_ack: u32 = 3001;
-    // ★ RFC 7323：**SYN 段里的窗口字段不缩放**（缩放只对后续段生效）。
-    //   第一版这里错误地对 SYN-ACK 的 window 应用了 shift，把 65535 当成 262140，
-    //   于是灌了超出真实窗口一倍的数据 → 被判出窗丢弃 → 假设备不重传 → 整条流停摆，
-    //   量出来一个看着像"0.8 Mb/s"的假数。
+    // RFC 7323：SYN 段里的窗口字段不缩放，后续段才缩放。
     let mut wnd: u64 = syn_wnd as u64;
-    let mut wnd_max = wnd;
 
     const TARGET: usize = 4 * 1024 * 1024;
     let (mut delivered, mut cycles, mut now, mut idle) = (0usize, 0u32, 1000u64, 0u32);
-    while delivered < TARGET && cycles < 5000 {
+    while delivered < TARGET && cycles < 200_000 {
         let mut sent = 0usize;
         loop {
             let inflight = seq.wrapping_sub(peer_ack) as u64;
@@ -578,7 +567,7 @@ fn measure_ceilings_with_window_scaling() {
             sent += 1460;
         }
         let mut evs = Vec::new();
-        now += 25;
+        now += poll_ms;
         e.poll_collect(now, &mut evs);
         cycles += 1;
 
@@ -598,80 +587,90 @@ fn measure_ceilings_with_window_scaling() {
             if flags & 0x10 != 0 {
                 peer_ack = a;
                 wnd = (w as u64) << shift;
-                if wnd > wnd_max {
-                    wnd_max = wnd;
-                }
             }
         }
         if sent == 0 && got == 0 {
             idle += 1;
-            if idle > 50 {
+            if idle > 200 {
                 break;
             }
         } else {
             idle = 0;
         }
     }
-    let up = (delivered as f64) * 8.0 / (cycles as f64 * 0.025) / 1e6;
-    std::eprintln!(
-        "[UP  ] {} B / {} 拍 → {:.1} Mb/s/连接（最大有效窗口 {} B）",
-        delivered,
-        cycles,
-        up,
-        wnd_max
-    );
+    let secs = cycles as f64 * (poll_ms as f64 / 1000.0);
+    ((delivered as f64) * 8.0 / secs / 1e6, delivered, cycles)
+}
 
-    // ───────────────── 下行：我们 → 设备 ─────────────────
-    // 设备通告 65535<<7 ≈ 8 MiB，故意不让设备窗口成为限制。
-    let mut e2 = mk_engine();
-    let (id2, sa2, _s2, _w2) = establish_ws(&mut e2, 51031, 8080, 4000);
-    let ack_base = sa2.wrapping_add(1);
+/// 下行天花板：设备通告一个大窗口（不让设备侧成为限制），量的就是推进节奏本身。
+fn measure_down(poll_ms: u64, cycles_target: u32) -> (f64, usize) {
+    let mut e = mk_engine();
+    let (id, sa, _s, _w) = establish_ws(&mut e, 51031, 8080, 4000);
+    let ack_base = sa.wrapping_add(1);
     let chunk = vec![0xA5u8; 128 * 1024];
-
-    let (mut pushed, mut on_wire, mut cyc) = (0usize, 0usize, 0u32);
-    let mut now2 = 2000u64;
-    while cyc < 300 {
+    let (mut on_wire, mut cyc, mut now) = (0usize, 0u32, 2000u64);
+    while cyc < cycles_target {
         loop {
-            let room = e2.sndbuf(id2).unwrap_or(0);
+            let room = e.sndbuf(id).unwrap_or(0);
             if room == 0 {
                 break;
             }
             let n = room.min(chunk.len());
-            match e2.send(id2, &chunk[..n]) {
-                Ok(w) if w > 0 => pushed += w,
+            match e.send(id, &chunk[..n]) {
+                Ok(w) if w > 0 => {}
                 _ => break,
             }
         }
         let mut evs = Vec::new();
-        now2 += 25;
-        e2.poll_collect(now2, &mut evs);
+        now += poll_ms;
+        e.poll_collect(now, &mut evs);
         cyc += 1;
         on_wire += payload_bytes(&evs);
-        // 设备把收到的全部 ACK 掉（累计确认）
-        e2.input(
+        e.input(
             1,
-            &tcp_frame_opt(
-                51031,
-                8080,
-                0x10,
-                4001,
-                ack_base.wrapping_add(on_wire as u32),
-                b"",
-                &[],
-            ),
+            &tcp_frame_opt(51031, 8080, 0x10, 4001, ack_base.wrapping_add(on_wire as u32), b"", &[]),
         );
     }
-    let down = (on_wire as f64) * 8.0 / (cyc as f64 * 0.025) / 1e6;
-    std::eprintln!(
-        "[DOWN] 上线 {} B / {} 拍 → {:.1} Mb/s/连接（已灌进栈 {} B）",
-        on_wire,
-        cyc,
-        down,
-        pushed
-    );
+    let secs = cyc as f64 * (poll_ms as f64 / 1000.0);
+    ((on_wire as f64) * 8.0 / secs / 1e6, on_wire)
+}
 
-    assert!(delivered > 0, "上行一个字节都没走通");
-    assert!(on_wire > 0, "下行一个字节都没上线");
+/// ★ 推进节奏 → 吞吐 的扫描。
+///
+/// 这条替代了原来那个硬编码 25ms 的版本 —— 生产已经改成**每轮事件循环 poll 一次**
+/// （NetStack.cpp 的 schedulePoll），25ms 只剩定时器兜底，所以"25ms 一拍"不再是生产模型。
+/// 把周期变成参数之后，这条测试测的是那个真正不变的规律：
+///
+///     每连接吞吐 ≈ 有效窗口 ÷ 推进周期
+///
+/// 它同时是回归护栏：谁要是把 schedulePoll 拆了、退回纯定时器，25ms 那一行就是当时的数。
+/// ⚠️ 下限是 1ms：smoltcp 的时间戳是毫秒粒度，再密的 poll 在**模型里**推不动时间
+///    （真实生产里仍有意义 —— 收队列的排空不依赖时间推进）。
+#[test]
+fn throughput_scales_with_poll_rate() {
+    std::eprintln!("  周期     上行 Mb/s    下行 Mb/s");
+    let mut rows = Vec::new();
+    for &ms in &[25u64, 5, 1] {
+        let (up, _b, _c) = measure_up(ms);
+        let (down, _) = measure_down(ms, 300);
+        std::eprintln!("  {:>3} ms   {:>9.1}    {:>9.1}", ms, up, down);
+        rows.push((ms, up, down));
+    }
+
+    let (_, up25, down25) = rows[0];
+    let (_, up1, down1) = rows[2];
+    // 1ms 相对 25ms 应当有数量级的提升；取 8× 做判据，留足实现细节的余量。
+    assert!(
+        up1 > up25 * 8.0,
+        "上行没有随推进变密而提升：25ms={:.1} 1ms={:.1} —— \
+         说明瓶颈已经不是推进周期（或者模型写错了）",
+        up25, up1
+    );
+    assert!(
+        down1 > down25 * 8.0,
+        "下行没有随推进变密而提升：25ms={:.1} 1ms={:.1}",
+        down25, down1
+    );
 }
 
 /// backlog 不该限制**一拍之内**能接受多少条新连接。
@@ -702,3 +701,28 @@ fn backlog_does_not_cap_accepts_per_poll() {
         N, synacks
     );
 }
+
+/// 收队列必须有界 —— 被劫持设备是**不可信输入源**。
+///
+/// 这条守的不是性能而是安全：改之前这个队列是无界 Vec，而 RxWorker 那套 8192 帧的反压
+/// 根本不会触发（consumed() 的语义是"已交给引擎"不是"已处理"）。本仓库被同类问题
+/// 咬过一次（DNS 洪水打崩网关）。
+#[test]
+fn rx_queue_is_bounded_and_counted() {
+    let mut e = mk_engine();
+    // 不 poll，一路灌 —— 模拟工作线程卡住而设备在线速发包
+    let payload = [0u8; 1400];
+    const FLOOD: usize = 40_000; // 远超 RX_QUEUE_MAX(16384)
+    for i in 0..FLOOD {
+        e.input(1, &tcp_frame(50000, 443, 0x18, 1000 + i as u32 * 1400, 0, &payload));
+    }
+    assert!(
+        e.rx_overflow > 0,
+        "灌了 {} 帧却一次溢出都没记 —— 队列还是无界的，或者计数没接上",
+        FLOOD
+    );
+    // 溢出之后仍必须能正常工作（丢的是最旧的，不是把栈打死）
+    let mut evs = Vec::new();
+    e.poll_collect(10, &mut evs);
+}
+

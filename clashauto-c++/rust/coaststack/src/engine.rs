@@ -78,11 +78,30 @@ pub struct QueueDevice {
 }
 
 impl QueueDevice {
+    /// 收队列上限（帧）。超出即丢最旧的，并记 rx_dropped。
+    ///
+    /// ★ 为什么必须有界：被劫持设备是**不可信输入源**，而这个队列此前是无界 Vec ——
+    ///   RxWorker 那套 8192 帧的高水位反压**根本不会触发**，因为它的 consumed() 语义是
+    ///   「已交给引擎」而非「已处理」，工作线程永远"跟得上"。真实积压全落在这里，
+    ///   没上限、没计数、没反压。本仓库被同类问题咬过（DNS 洪水打崩网关）。
+    ///
+    /// 取 16384：千兆线速下一拍（25ms 兜底周期）约 2000 帧，留 8 倍余量；
+    /// 满帧时约 24 MB，是能接受的最坏驻留。丢最旧而不是最新 —— 新帧承载的是当前
+    /// 窗口的进展，旧帧多半已经因为出窗而无用了。
+    const RX_QUEUE_MAX: usize = 16384;
+
     fn new(mtu: usize) -> Self {
         Self { rx: VecDeque::new(), tx: Vec::new(), mtu, rx_budget: usize::MAX }
     }
-    fn push_rx(&mut self, frame: Vec<u8>) {
+    /// 返回 false = 队列已满，这一帧被丢（调用方据此记 rx_dropped）。
+    fn push_rx(&mut self, frame: Vec<u8>) -> bool {
+        if self.rx.len() >= Self::RX_QUEUE_MAX {
+            self.rx.pop_front(); // 丢最旧
+            self.rx.push_back(frame);
+            return false;
+        }
         self.rx.push_back(frame);
+        true
     }
     fn take_tx(&mut self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.tx)
@@ -211,6 +230,9 @@ pub struct Engine {
     pub conns_closed: u64,
     pub conns_aborted: u64,
     pub conns_refused: u64,
+    /// 收队列满而丢掉的帧数。非 0 = 工作线程跟不上（不是链路丢包），
+    /// 与 txdrop/rxdrop 分属不同环节，别混。
+    pub rx_overflow: u64,
     pub tx_frames: u64,
 }
 
@@ -225,6 +247,7 @@ impl Engine {
             conns_closed: 0,
             conns_aborted: 0,
             conns_refused: 0,
+            rx_overflow: 0,
             tx_frames: 0,
         }
     }
@@ -346,7 +369,9 @@ impl Engine {
         let Some(n) = self.nics.get_mut(&nic) else { return false };
         let mut buf = frame.to_vec();
         portmap::rewrite_rx(&mut buf, &mut n.portmap);
-        n.device.push_rx(buf);
+        if !n.device.push_rx(buf) {
+            self.rx_overflow += 1;
+        }
         true
     }
 
