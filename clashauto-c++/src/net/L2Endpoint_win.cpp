@@ -956,7 +956,24 @@ public:
                 return false; // 一个合法 MAC 都没有：不装，交用户态兜底
             // 末尾「或 arp」:必须捕获 ARP——尤其真网关广播的 who-has(携带「网关在真 MAC」会把设备
             // 解毒),LanGateway 收到后立刻反制重投。ARP 低频,全收几乎零成本。契约见 IL2Endpoint.h。
-            expr = "(" + macClause + ") or arp";
+            //
+            // ★「或 icmp6」是同一条理由的 v6 版本，**这里一度漏掉，代价是 v6 的防守整个失效**。
+            //   上面 macs 为空那一档放行了 icmp6，有设备在册这一档却没有 —— 于是「一开始代理，
+            //   真路由器的 RA/NA 就在内核这层被丢掉」（它的源 MAC 不在册，也不是 ARP）。而网关
+            //   对抗「被解毒」全靠看见路由器的帧就立刻反投：LanGateway_linux.cpp 的
+            //   learnRouterFromRa（学 v6 路由器）与紧随其后的 reassertNow（v6 反制）。两者的
+            //   触发帧都被挡在内核外 ⇒ 代理期间 v6 侧**只有我们 1s 一轮的周期重投，没有任何反制**，
+            //   而 v4 侧因为放行了 arp 一直是好的。
+            //   真机现场（2026-08-05，小米路由器 cc:d8:43:9b:e3:b6 + 米系手机，v6 前缀
+            //   240e:3a1:7ed3:daa0::/64 正常下发）：手机遵循 Happy Eyeballs 主走 v6，路由器每发
+            //   一次 RA/NA 就把它的邻居缓存治好一次、流量改走真路由器，我们再抢回来 —— 来回拉锯，
+            //   每切换一次在途的 v6 连接断一批，表现就是「有网但是不稳定」。
+            //   Linux 端（L2Endpoint_linux）两种状态下**都**放行 ARP+NDP，所以这是 Windows 独有
+            //   的偏差，不是取舍。
+            //   代价：非在册源的 ICMPv6(NS/NA/RS/RA/MLD) 也会进用户态，量级与 ARP 同级（低频）。
+            //   它们在 LanGateway 的收帧链里走到 victim 判定时会被计进 **nonVictim** 后丢弃 ——
+            //   所以这项改动会让诊断行的 nonVictim 抬高一截，那是预期内的，别当成回归。
+            expr = "(" + macClause + ") or arp or icmp6";
         }
 
         struct bpf_program prog;
