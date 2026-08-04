@@ -1285,3 +1285,83 @@ R20 那句「已穷尽」栽在两点上：① 只枚举了**用户态 API 的�
 **尚未测**：物理网卡/virtio-net 上复测（本机 QEMU e1000 + 嵌套 Hyper-V，绝对值偏悲观，
 公开数据显示 virtio+vhost 有 10–20× 差距）；XDP-for-Windows 作为以太网快路径（微软已签名、
 真 L2 TX、NBL 池化+串链+单次调用，但不支持 Wi-Fi、无安装器、用户基数近零）。
+
+---
+
+### R22 · 2026-08-04 · 落地：smoltcp 接进 NetStack（Windows），v4/v6 全通
+
+R19–R21 把「该不该换」和「换了赚多少」量清楚之后，这一轮是工程落地。四个阶段全部完成，
+默认仍走 lwIP，`COAST_STACK=smoltcp` 切换。
+
+| 阶段 | 内容 | commit |
+|---|---|---|
+| 1 | Rust staticlib 骨架 + C ABI + CMake/CI（只 Windows） | `dc9755e` |
+| 2 | smoltcp 引擎本体（catch-all 改写 + 转发循环） | `a6a8b04` |
+| 3 | 接进 NetStack + `COAST_STACK` 灰度开关 + A/B 自测 | `5909643` |
+| 4 | v6 双栈（曾不通，见下） | `5720123` `1190f62` |
+
+**范围**：只换 **TCP**。UDP/DNS 那 700 行手工 NAT 原样共享（本来就不经 lwIP）；
+ARP/NDP 投毒仍归 Arp/NdpSpoofer；SOCKS 拨号与每设备身份仍在 C++ 侧。
+**只在 Windows 编**，mac/Linux 的 CI 与外部签名仓库一行未动。
+
+#### 测试抓到的三个真问题（都不是靠读代码发现的）
+
+1. **回包永久黑洞**（Phase 2）：E2E 报「ConnNew 有、出帧=[]」。smoltcp 不知道设备 MAC，
+   发的是 ARP 请求 —— 而生产里 ARP 帧被 LanGateway 截给 ArpSpoofer，**回复永远等不到**。
+   修法：从每个设备帧的 (源MAC,源IP) 自动学，合成 ARP 应答喂进栈。比 lwIP 的
+   `etharp_add_static_entry` 还省，连 API 都不用加。
+
+2. **SYN 洪水放大**（Phase 3）：A/B 自测在 **lwip 侧**先红了 ——「出帧=2 SYN-ACK=2 但没有
+   SOCKS CONNECT」。查出 smoltcp 在 `SynReceived` 就 promote 并拨上游，而 lwIP 是三次握手
+   完成才 accept。那等于**每个 SYN 各建一条上游 SOCKS 连接**。
+   ★ **只测 smoltcp 一条栈是发现不了的**（它会一直绿）。这就是 A/B 的价值。
+
+3. **v6 完全不通**（Phase 4）：根因**不是**邻居注入，是**路由**。
+   我先猜了四种邻居注入方式（单播 NA / 组播 NA / 关 ICMPv6 校验验证 / 代答它自己的 NS），
+   全部白费。改用 smoltcp 的 `net_trace` 一次定位：
+   ```
+   filled 2408:8200::…:bb => 02-00-00-00-00-bb   ← 邻居注入其实一直是好的
+   sending SYN|ACK
+   address fe80::5bff:fe00:2 not in neighbor cache, sending NS
+   ```
+   设备的全局 v6 相对本机唯一的 v6 地址（EUI-64 链路本地）是 **off-link**，回包走默认路由，
+   而默认路由的下一跳是**本机自己的链路本地地址** —— 当然不在邻居缓存里。
+   **v4 没这问题纯属巧合**：设备 IP 与本机同 /24，天然 on-link。
+   修法：每设备一条 **/128 直连路由**（不能图省事把默认路由下一跳指向设备 —— 多设备时
+   所有回包会发给最后学到的那个 MAC）。需放大 smoltcp 的构建期路由槽上限。
+   ★ **教训：猜了四轮不如开一次日志。** 这类「包被静默丢弃」的问题，被测组件自己的
+   trace 是最短路径。
+
+#### 两个测试盲点（都堵上了）
+
+- **lwIP 会替 smoltcp 把测试跑绿**：两者对外行为一致，同一自测在两条路上都 PASS。
+  故自测先断言 `NetStack::activeTcpStack()` == 期望值。反证已验。
+- **单实例守卫会让自测静默返回 0**：自测最初放在守卫之后，而本机 Coast 正在跑 ——
+  `notifyExistingAndQuit()` 直接 `return 0`，**断言故意改坏也返回 0**。已移到守卫之前。
+  （顺带发现 `COAST_TPROXY_SELFTEST` / `COAST_NDP_RA_SELFTEST` 仍在守卫之后，同坑未修。）
+
+#### 当前验证状态
+
+| 项 | 结果 |
+|---|---|
+| Rust 单测 | **19 passed / 0 ignored** |
+| C++ ABI 自证（`COAST_RUSTSTACK_SELFTEST`） | PASS |
+| A/B 网关自测（`COAST_SMOLGW_SELFTEST`）smoltcp | PASS |
+| 同上 lwip（同一套断言） | PASS |
+| 构建 msvc-x64 / msvc-arm64 / mingw-gnu | 全过 |
+
+#### ★ 尚未做：真机验证
+
+**上面所有验证用的都是合成帧 + 假二层端点 + 假 SOCKS。** 证明了协议逻辑、端口还原、
+每设备身份、背压语义与握手时机，**没有证明它在真 Npcap + 真设备 + 真 mihomo 下能用**。
+
+真机验证配方（与 R1 的夹具同构，**不需要 ARP 投毒**，因而没有"做到一半设备断网"的风险）：
+1. 在靶机（如 `192.168.20.239`）上加静态路由与静态邻居，把一段测试网段指向 Windows 网卡：
+   `ip route add 203.0.113.0/24 via <win-ip>` + `ip neigh replace <win-ip> lladdr <win-mac>`
+2. Windows 侧以管理员起 Coast（Npcap 抓包要提权），`COAST_STACK=smoltcp`，
+   并把靶机登记为设备（`COAST_GATEWAY_TESTDEV=<靶机IP>`）
+3. 靶机 `curl http://203.0.113.5/`，看 `gateway-diag.log` 的 `tcpAcc` 是否 >0
+4. 同样步骤跑一遍 `COAST_STACK=lwip` 做 A/B，对比 `usPerTx`/`pump`/`late`/CPU
+5. **开量前必须确认接管生效**（`L2Endpoint_win.cpp:740` 的教训）
+
+**在这一步做完之前，不要把默认值从 lwip 改掉。**
