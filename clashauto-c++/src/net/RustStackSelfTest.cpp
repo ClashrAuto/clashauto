@@ -86,6 +86,9 @@ const uint8_t kDevIp[4]  = {10, 99, 0, 1};
 const uint8_t kOurIp[4]  = {10, 99, 0, 2};
 const uint8_t kDstIp[4]  = {93, 184, 216, 34}; // 设备想访问的公网地址（非本机）
 
+/// 设备侧通告窗口。默认满开；下行拥塞用例调小它，逼出 toStack 的部分写路径。
+uint16_t g_devWnd = 0xFFFF;
+
 // 返回 54 字节的 eth+ip+tcp 帧
 void buildTcp(uint8_t *f, uint16_t sport, uint16_t dport, uint8_t flags, uint32_t seq,
               uint32_t ack)
@@ -109,7 +112,9 @@ void buildTcp(uint8_t *f, uint16_t sport, uint16_t dport, uint8_t flags, uint32_
     t[8] = uint8_t(ack >> 24); t[9] = uint8_t(ack >> 16);
     t[10] = uint8_t(ack >> 8); t[11] = uint8_t(ack);
     t[12] = 0x50; t[13] = flags;                     // offset 5
-    t[14] = 0xFF; t[15] = 0xFF;                      // window
+    // window：默认满开；下行拥塞用例把它调小来模拟"设备侧慢"（见 g_devWnd）
+    t[14] = static_cast<uint8_t>(g_devWnd >> 8);
+    t[15] = static_cast<uint8_t>(g_devWnd & 0xff);
     uint32_t ph = 0;
     ph = onesSum(kDevIp, 4, ph);
     ph = onesSum(kDstIp, 4, ph);
@@ -882,8 +887,17 @@ int runGatewayThroughputBench()
             std::fprintf(stderr, "[gwbench] FAIL: 下行基准拿不到隧道 socket\n");
             return 3;
         }
+        // ★ 拥塞用例：把设备通告窗口调小，逼出 smolPumpToStack 的**部分写**路径 ——
+        //   `toStack.remove(0, wrote)` 每次要 memmove 剩余部分，队列深时是 O(n²)。
+        //   判据不能看吞吐（窗口小了吞吐本来就降），要看 **CPU/字节**：
+        //   若它随窗口变小而显著上升，就是那个 memmove 在放大。
+        if (qEnvironmentVariableIsSet("COAST_GW_BENCH_DEVWND")) {
+            const int w = qEnvironmentVariableIntValue("COAST_GW_BENCH_DEVWND");
+            if (w >= 512 && w <= 65535)
+                g_devWnd = uint16_t(w);
+        }
         QByteArray blob(256 * 1024, 'D');
-        const qint64 dtarget = 32 * 1024 * 1024;
+        const qint64 dtarget = (g_devWnd < 16384) ? 4 * 1024 * 1024 : 32 * 1024 * 1024;
         QElapsedTimer dwall;
         dwall.start();
         const double dcpu0 = cpuSeconds();
@@ -923,12 +937,13 @@ int runGatewayThroughputBench()
         // 下行的"帧"按 MSS 计（栈自己分段），用 1460 折算
         const double dframes = double(ep.dataBytes) / 1460.0;
         std::fprintf(stderr,
-                     "[gwbench][下行] 上线 %lld B / %.2fs → %.0f Mb/s；CPU %.2fs "
+                     "[gwbench][下行] 设备窗口=%u 上线 %lld B / %.2fs → %.0f Mb/s；CPU %.2fs "
                      "(%.3f 核/Gbps, %.2f us/帧, %.2f ns/字节)\n",
-                     static_cast<long long>(ep.dataBytes), dsecs, dmbps, dcpu, dcore,
+                     unsigned(g_devWnd), static_cast<long long>(ep.dataBytes), dsecs, dmbps,
+                     dcpu, dcore,
                      (dframes > 0 ? dcpu * 1e6 / dframes : 0.0),
                      (ep.dataBytes > 0 ? dcpu * 1e9 / double(ep.dataBytes) : 0.0));
-        if (ep.dataBytes < dtarget / 8) {
+        if (ep.dataBytes < dtarget / 16) {
             std::fprintf(stderr, "[gwbench][下行] FAIL: 只搬了 %lld B —— 路径有阻塞\n",
                          static_cast<long long>(ep.dataBytes));
             return 2;

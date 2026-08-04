@@ -60,7 +60,15 @@ struct SmolConn {
     NetStack::Impl *impl = nullptr;
     quint64 id = 0;              // coaststack 的连接 id（0 恒无效）
     Socks5Tcp *socks = nullptr;
-    QByteArray toStack;          // socks→设备 方向待写进栈的字节（受 coast_conn_sndbuf 限流）
+    // 下行待写队列。★ 消费端用**偏移游标** `toStackOff`，不用 `remove(0,n)` ——
+    //   remove 每次都要 memmove 剩余部分，而拥塞时（设备窗口小 → coast_conn_sndbuf 只给一点
+    //   → 反复部分写）它退化成 O(n²)。实测（COAST_GW_BENCH_DIR=down + DEVWND）：
+    //     设备窗口 65535 → 19.5 ns/字节
+    //     设备窗口  1024 → **309 ns/字节（16 倍）**、38.6 核/Gbps
+    //   而这恰好发生在"设备侧慢"——最不该雪上加霜的场景（弱信号 Wi-Fi 设备下载）。
+    QByteArray toStack;
+    int toStackOff = 0;          // toStack 里已经写进栈的前缀长度
+    int pendingDown() const { return toStack.size() - toStackOff; }
     quint32 pendingRecved = 0;   // 已交给我们、但还没 coast_conn_recved 归还的窗口字节
     bool upThrottled = false;
     bool downPaused = false;
@@ -749,7 +757,7 @@ bool smolPumpToStack(SmolConn *c)
     if (!c || !c->impl || !c->impl->smol)
         return false;
     bool wroteAny = false;
-    while (!c->toStack.isEmpty()) {
+    while (c->pendingDown() > 0) {
         const int room = coast_conn_sndbuf(c->impl->smol, c->id);
         if (room < 0) {
             smolDestroyConn(c, true);
@@ -757,10 +765,11 @@ bool smolPumpToStack(SmolConn *c)
         }
         if (room == 0)
             break; // 等 conn_sent 回调再续
-        const int n = qMin<int>(room, c->toStack.size());
+        const int n = qMin<int>(room, c->pendingDown());
         const int wrote =
             coast_conn_send(c->impl->smol, c->id,
-                            reinterpret_cast<const uint8_t *>(c->toStack.constData()),
+                            reinterpret_cast<const uint8_t *>(c->toStack.constData())
+                                + c->toStackOff,
                             static_cast<size_t>(n));
         if (wrote < 0) {
             smolDestroyConn(c, true);
@@ -768,8 +777,16 @@ bool smolPumpToStack(SmolConn *c)
         }
         if (wrote == 0)
             break;
-        c->toStack.remove(0, wrote);
+        c->toStackOff += wrote;
         wroteAny = true;
+    }
+    // 排空即清零；否则等前缀攒够一批再压缩一次 —— 摊还 O(1)，且内存不会无界增长。
+    if (c->pendingDown() <= 0) {
+        c->toStack.clear();
+        c->toStackOff = 0;
+    } else if (c->toStackOff >= kToLwipHighWater) {
+        c->toStack.remove(0, c->toStackOff);
+        c->toStackOff = 0;
     }
     // coast_conn_send 只是把字节塞进发送缓冲，**成帧要等 poll**。
     // 不排这一次，下行数据最多躺 25 ms 才上线。
@@ -778,7 +795,7 @@ bool smolPumpToStack(SmolConn *c)
 
     // 下行水位：顶到高水位让 socks 停读，回落到低水位再放开（与 lwIP 侧同参数）
     if (c->socks) {
-        const int q = c->toStack.size();
+        const int q = c->pendingDown();
         if (!c->downPaused && q >= kToLwipHighWater) {
             c->downPaused = true;
             ++GatewayDiag::c.downPauseHits;
@@ -793,7 +810,7 @@ bool smolPumpToStack(SmolConn *c)
     // ★ 必须**先把窗口还满**：coast_conn_close 在窗口未还满时返回 COAST_ERR_STATE。
     //   lwIP 那边同样的情形是静默退化成 RST（设备"下载到一半被断"），这里是显式失败，
     //   所以这两步的顺序不能反。
-    if (c->socksClosed && c->toStack.isEmpty() && !c->stackClosed) {
+    if (c->socksClosed && c->pendingDown() <= 0 && !c->stackClosed) {
         smolFlushRecvWindow(c);
         if (coast_conn_close(c->impl->smol, c->id) == COAST_OK) {
             c->stackClosed = true;
