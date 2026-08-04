@@ -64,8 +64,18 @@ public final class ConfigBuilder: @unchecked Sendable {
         // DNS 监听口：被代理设备的 UDP :53 也被重定向过来。不转投的话设备会拿着它自己配的
         // DNS（常是路由器）去查，经我们转发出去解析不到，表现为「直连 IP 通、用域名全超时」。
         // 转过来之后它拿到 fake-ip，域名规则才匹配得上。
-        yaml = YAMLSurgery.setNestedScalar(yaml, section: "dns", key: "listen",
-                                           value: "0.0.0.0:" + String(DeviceStore.dnsPort))
+        //
+        // ★ **只有真在当网关时才绑 `0.0.0.0`。** 一台设备都没接管的时候绑全网卡，等于在局域网上
+        //   开了一个谁都能查的 DNS —— 实测从另一台机器 `dig @<本机> -p 1053` 直接有应答，
+        //   而且回的是 **fake-ip**（198.18.x.x），对局域网里其他主机毫无意义：谁误用了谁的
+        //   域名解析就坏掉。redir-port 那行注释说的「不对外广播」对它自己成立（核心把 redir
+        //   绑在 127.0.0.1），但对这行**不成立**，两者不能共用一套说法。
+        //   Qt 端同一处一直是 `127.0.0.1:1053`（它走用户态栈中继，回环就够）；
+        //   macOS 这条线走 PF rdr，包是内核改写目的地送进来的，当网关时确实需要非回环地址。
+        let actingAsGateway = !DeviceStore(configDir: directory).proxiedDevices().isEmpty
+        yaml = YAMLSurgery.setNestedScalar(
+            yaml, section: "dns", key: "listen",
+            value: (actingAsGateway ? "0.0.0.0:" : "127.0.0.1:") + String(DeviceStore.dnsPort))
         // 顶层 ipv6:true —— 让核心**接受并拨出** IPv6 连接。透明网关会把被接管设备的 v6 TCP
         // 经 PF rdr 送进 redir 口(见 Redirector 的 inet6 规则);ipv6:false 时核心会直接丢弃这些
         // v6 连接,整条 v6 接管等于白做。dns.ipv6 仍保持 plugin.yaml 里的 false —— AAAA 回空 →
