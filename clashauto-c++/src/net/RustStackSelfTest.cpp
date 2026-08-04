@@ -267,6 +267,7 @@ public:
     bool send(const QByteArray &f) override
     {
         noteAck(f);
+        noteData(f);
         ++sent;
         if (f.size() >= 54 && quint8(f[12]) == 0x08 && quint8(f[13]) == 0x00
             && quint8(f[23]) == 6 && (quint8(f[47]) & 0x12) == 0x12) {
@@ -294,6 +295,25 @@ public:
                 | (quint32(quint8(f[44])) << 8) | quint32(quint8(f[45]));
         lastWnd = quint32((quint8(f[48]) << 8) | quint8(f[49]));
     }
+    // 出方向数据帧：累计载荷长度（下行基准据此回 ACK 并计吞吐）
+    void noteData(const QByteArray &f)
+    {
+        if (f.size() <= 54 || quint8(f[12]) != 0x08 || quint8(f[13]) != 0x00
+            || quint8(f[23]) != 6)
+            return;
+        const int ihl = (quint8(f[14]) & 0x0F) * 4;
+        const int thl = ((quint8(f[34 + 12]) >> 4) & 0x0F) * 4;
+        const int total = (quint8(f[16]) << 8) | quint8(f[17]);
+        const int plen = total - ihl - thl;
+        if (plen <= 0)
+            return;
+        if (!sawData) {
+            sawData = true;
+            firstDataSeq = (quint32(quint8(f[38])) << 24) | (quint32(quint8(f[39])) << 16)
+                         | (quint32(quint8(f[40])) << 8) | quint32(quint8(f[41]));
+        }
+        dataBytes += plen;
+    }
     QByteArray localMac() const override { return m_mac; }
     int ifIndex() const override { return 1; }
     int mtu() const override { return 1500; }
@@ -307,6 +327,10 @@ public:
     //（Rust 侧那三次返工全栽在这上面，别在 C++ 侧再栽一次）。
     quint32 lastAck = 0;
     quint32 lastWnd = 65535;
+    // 下行基准用：出方向 TCP 帧里的载荷字节总数，以及第一段数据的起始序号。
+    qint64 dataBytes = 0;
+    quint32 firstDataSeq = 0;
+    bool sawData = false;
     quint16 synAckSport = 0;
     quint32 synAckSeq = 0;
 
@@ -336,7 +360,8 @@ public:
     bool gotConnect = false;
     QString user;
     quint16 dport = 0;
-    qint64 rxBytes = 0; // 隧道建立后收到的字节（吞吐基准的判据）
+    qint64 rxBytes = 0;             // 隧道建立后收到的字节（上行基准的判据）
+    QTcpSocket *tunnel = nullptr;   // 隧道 socket（下行基准从这里灌数据）
 
 private:
     struct St { int phase = 0; QByteArray buf; QString user; };
@@ -395,6 +420,7 @@ private:
                 const char rep[10] = {0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
                 s->write(rep, 10);
                 c->phase = 3; // 之后一律计入 rxBytes
+                tunnel = s;   // 下行基准要用它往回灌
             }
             c->buf.clear();
             return;
@@ -834,6 +860,76 @@ int runGatewayThroughputBench()
     // 等 SOCKS 回复被 Socks5Tcp 消化（established 之后写才会真正流向 socket）
     for (int i = 0; i < 100; ++i)
         QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+
+    // ═══════════════ 下行基准（COAST_GW_BENCH_DIR=down）═══════════════
+    //
+    // ★ 存在的理由：文档里一直写着"下行没做归因，但结构对称，预计结论类似" ——
+    //   那是**假设**。而下行有一处上行没有的嫌疑：`SmolConn::toStack` 是 QByteArray，
+    //   每次部分写之后 `remove(0, wrote)` 会 memmove 剩余部分，队列深时是 O(n²)。
+    //   假设必须去量。
+    //
+    // 路径：假 SOCKS 写 → 回环 → Socks5Tcp::dataReceived → toStack → coast_conn_send
+    //       → poll → out_frame → FakeEp（丢弃并计数）
+    // 设备侧由本函数按 FakeEp 统计到的载荷量回 ACK，保证窗口不关死。
+    if (qEnvironmentVariableIsSet("COAST_GW_BENCH_DIR")
+        && qgetenv("COAST_GW_BENCH_DIR") == QByteArray("down")) {
+        if (!socks.tunnel) {
+            std::fprintf(stderr, "[gwbench] FAIL: 下行基准拿不到隧道 socket\n");
+            return 3;
+        }
+        QByteArray blob(256 * 1024, 'D');
+        const qint64 dtarget = 32 * 1024 * 1024;
+        QElapsedTimer dwall;
+        dwall.start();
+        const double dcpu0 = cpuSeconds();
+        int idle = 0;
+        quint32 devAck = 0;
+
+        while (ep.dataBytes < dtarget && dwall.elapsed() < 20000) {
+            // 假 SOCKS 侧尽量灌（写缓冲有上限时 Qt 自己会攒着）
+            while (socks.tunnel->bytesToWrite() < 4 * 1024 * 1024)
+                socks.tunnel->write(blob);
+
+            const qint64 before = ep.dataBytes;
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
+
+            // 设备回 ACK：确认 FakeEp 已经收到的全部载荷，否则窗口很快关死
+            if (ep.sawData) {
+                const quint32 want = ep.firstDataSeq + quint32(ep.dataBytes);
+                if (want != devAck) {
+                    devAck = want;
+                    // 设备在下行模式里不发数据，自身序号恒为 1001（握手后的下一个）
+                    buildTcp(f, 51000, 443, 0x10, 1001, devAck);
+                    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), 54));
+                }
+            }
+            if (ep.dataBytes == before) {
+                if (++idle > 600)
+                    break;
+            } else {
+                idle = 0;
+            }
+        }
+
+        const double dsecs = double(dwall.elapsed()) / 1000.0;
+        const double dcpu = cpuSeconds() - dcpu0;
+        const double dmbps = double(ep.dataBytes) * 8.0 / dsecs / 1e6;
+        const double dcore = (dmbps > 1.0) ? (dcpu / dsecs) / (dmbps / 1000.0) : 0.0;
+        // 下行的"帧"按 MSS 计（栈自己分段），用 1460 折算
+        const double dframes = double(ep.dataBytes) / 1460.0;
+        std::fprintf(stderr,
+                     "[gwbench][下行] 上线 %lld B / %.2fs → %.0f Mb/s；CPU %.2fs "
+                     "(%.3f 核/Gbps, %.2f us/帧, %.2f ns/字节)\n",
+                     static_cast<long long>(ep.dataBytes), dsecs, dmbps, dcpu, dcore,
+                     (dframes > 0 ? dcpu * 1e6 / dframes : 0.0),
+                     (ep.dataBytes > 0 ? dcpu * 1e9 / double(ep.dataBytes) : 0.0));
+        if (ep.dataBytes < dtarget / 8) {
+            std::fprintf(stderr, "[gwbench][下行] FAIL: 只搬了 %lld B —— 路径有阻塞\n",
+                         static_cast<long long>(ep.dataBytes));
+            return 2;
+        }
+        return 0;
+    }
 
     // ★ 短路必须在握手**之后**才打开：STAGE>=2 关掉 poll，而握手本身要 poll。
     if (qEnvironmentVariableIsSet("COAST_GW_BENCH_STAGE"))
