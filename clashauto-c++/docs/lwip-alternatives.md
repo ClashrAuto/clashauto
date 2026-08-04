@@ -1417,3 +1417,58 @@ SSH 帧也被喂进了栈，smoltcp 当成"要代理的连接"去终结、回了
 - **多设备并发**、**长时间稳定性**、**ARM64 运行时**（矩阵里没有 ARM64 runner）。
 
 **默认仍是 lwip。** 改默认值之前至少还需要上面第一、二项。
+
+---
+
+## 附：彻底移除 lwIP 的执行计划（目标架构已确定）
+
+**目标架构**（用户 2026-08-04 明确）：
+
+| 平台 | 数据面 | 用户态栈 |
+|---|---|---|
+| Linux | TPROXY（`TproxyRules.cpp`，内核转发） | **不需要** |
+| macOS | pf rdr + DIOCNATLOOK（`PfRules.cpp`，内核） | **不需要** |
+| Windows | **smoltcp**（`rust/coaststack` + `NetStack.cpp` 桥接） | 需要 |
+
+关键推论：**用户态栈只有 Windows 需要**。因此
+
+- `NetStack.cpp` 整个可以收进 `if(WIN32)` —— Linux/mac 上连 UDP NAT 那 700 行都不需要
+  （内核重定向把 TCP/UDP 一并接管了）。
+- **`integemjack/schat.build` 那个静默失败的外部依赖被绕开**（mac 不需要 Rust 工具链）。
+  这是本方案相对"三端都上 Rust"的最大优势，别丢掉。
+  （曾有一版 commit 把 coaststack 改成三端构建，基于"Linux/mac 需要用户态栈兜底"的
+   错误假设，已 revert：`68d320a`。）
+
+### 已完成
+1. coaststack 三端构建 → **已撤回**（`68d320a`），确认只需 Windows。
+
+### 剩余步骤（每步都能单独验证）
+2. **`NetStack.cpp` 拆掉 lwIP 路径**（最大一块）：101 处 lwIP 引用、约一半代码。
+   删除清单见 R22 之前各轮：`sys_now` / `pbufToBytes` / `lwipNetifInit` / `lwipLinkOutput` /
+   `lwipTcpAccept|Recv|Sent|Err` / `TcpConn` 与 **`ConnWatch`/`g_destroyedConn`/
+   `markConnDestroyed` 那 ~60 行**（poll 模型不需要）/ `pollLwipPoolStats` /
+   `lwipStatsLine` 的池与 stats 部分。`COAST_STACK` 开关退化为恒 smoltcp（或整个删掉）。
+   ★ **UDP/DNS 那 700 行原样保留**（对 lwIP 零依赖，只借 `Nic` 的 `ep`/`localMac6`）。
+3. **CMake 收口**：`NetStack.cpp` / `NdpSpoofer` / `coaststack` 移进 `if(WIN32)`；
+   Linux/mac 只留 `TproxyRules` / `PfRules` / `LanGateway` / L2 端点。
+   ⚠️ `LanGateway_linux.cpp` 会 `new NetStack`，需加 `#ifdef` 守卫，否则 Linux/mac 编不过。
+   **本机是 Windows，改不动就验不了 —— 这一步必须靠 CI 验证。**
+4. **删 `third_party/lwip`**（124 个 .c / 5.2 MB）+ `src/net/lwip_port/` + 6 处 Coast 补丁
+   （`ip4.c`/`ip6.c` accept-all、`tcp_in.c` 通配端口+TW 复用、`nd6.c` 静态邻居、
+   `coast_lwip_diag`）。CMakeLists 里那 30 行 `${LWIP_DIR}/...` 一并删。
+5. **CI**：Windows job 已有 rust toolchain；确认 Linux/mac job 不再需要 `LANGUAGES C`
+   （lwIP 是唯一的 C 源）。`gateway-selftest` job 跑在 Linux 上、依赖 TAP+NetStack，
+   **删 NetStack 后它会失效**，需要改成跑 TPROXY 自测或直接移除。
+6. **验证**：v6 真机端到端；真 SOCKS 的双向数据往返；真流量下的吞吐/CPU A/B。
+
+### ⚠️ 这个架构的一个直接后果（需产品侧确认）
+删掉 lwIP 后，**Linux/macOS 上没有任何用户态兜底**：TPROXY 装不上（缺 nft / 权限不足）
+或 pf 规则装不上时，网关**直接不可用**，而不是像现在这样降级到 lwIP。
+内核方案本来就是那两个平台的正解。**已确认：直接报错不可用即可**（用户 2026-08-04：
+"报错就行，留以后修复"）。UI 与文案的完善列为后续项，不阻塞本次移除。
+
+### 顺带：一个未修的既有隐患
+`COAST_TPROXY_SELFTEST` 与 `COAST_NDP_RA_SELFTEST` 两个钩子放在**单实例守卫之后**，
+本机已有实例在跑时 `notifyExistingAndQuit()` 直接 `return 0` —— 于是**断言故意改坏也返回 0**，
+和"通过"完全撞车（`COAST_RUSTSTACK_SELFTEST` 就是这么被骗过一次，已移到守卫之前）。
+删 lwIP 时顺手把这两个也挪上去。
