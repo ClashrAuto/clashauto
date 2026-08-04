@@ -1,5 +1,6 @@
 #include "CoreController.h"
 #include <QTcpSocket>
+#include <QNetworkProxy>
 #include <QHostAddress>
 #include <cstring>
 
@@ -967,6 +968,11 @@ void CoreController::clearStaleSystemProxy()
     // 条件②：能连上就说明有人在听（可能是用户手动起的核心），一律不动。
     {
         QTcpSocket probe;
+        // ★ 这一探的结论会决定「要不要清掉陈旧的系统代理」，所以**不能经过代理**：
+        //   系统代理此刻很可能正指向我们自己的核心，让它去中转一次到 127.0.0.1 的连接，
+        //   得到的是代理的可达性、不是「本机这个端口有没有人在听」——答案反了，
+        //   后果是把用户手动起的核心当成残留、或把真残留当成有人在用。
+        probe.setProxy(QNetworkProxy::NoProxy);
         probe.connectToHost(QHostAddress::LocalHost, port);
         if (probe.waitForConnected(150)) {
             probe.abort();

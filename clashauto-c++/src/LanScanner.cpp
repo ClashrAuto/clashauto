@@ -785,6 +785,10 @@ void LanScanner::runProbes(QVector<QPair<quint32, quint16>> jobs, std::function<
             ++(*inFlight);
             ++made;
             auto *sock = new QTcpSocket(this);
+            // 与 refreshLiveness 那处同一个理由，且这里量大得多（整段网段 × 端口）：
+            // 局域网探测问的是「这个地址有没有人应答」，经代理出去问的是
+            // 「代理服务器能不能连上它」—— 答案无关，还会把整段内网地址送给代理。
+            sock->setProxy(QNetworkProxy::NoProxy);
             auto *timer = new QTimer(sock);
             timer->setSingleShot(true);
             timer->setInterval(kProbeTimeoutMs);
