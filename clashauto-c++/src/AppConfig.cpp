@@ -103,19 +103,26 @@ AppConfig AppConfigLoader::load()
     config.increment = boolFromYaml(yaml, "increment", config.increment);
     config.closeToTray = boolFromYaml(yaml, "mini", config.closeToTray);
     config.autoStart = boolFromYaml(yaml, "sys", config.autoStart);
-    // 数据面模式。配置键 gatewayTproxy；环境变量 COAST_GATEWAY_DATAPATH 优先（tproxy / lwip），
-    // 供测试与"线上出问题时不改配置就能退回去"用。
+    // 数据面模式。配置键 gatewayTproxy；环境变量 COAST_GATEWAY_DATAPATH 优先
+    // （tproxy / pf / userspace），供测试与"线上出问题时不改配置就能退回去"用。
+    // ★ `lwip` 仍作为 `userspace` 的**别名**接受：lwIP 本身已被删除（Windows 换成了
+    //   rust/coaststack 的 smoltcp，见 docs/lwip-alternatives.md），但这个值散落在早期的
+    //   排查笔记和运维习惯里，静默不认会让人以为开关坏了。语义没变，一直都是
+    //   "两条内核态数据面都关掉、走用户态栈"。
+    //   注意它现在的后果比以前重：Linux/macOS 上根本没有用户态栈了（NetStack_stub.cpp
+    //   的 init() 直接返回失败），所以在那两个平台上它等于**把网关关掉**。
     config.gatewayTproxy = boolFromYaml(yaml, "gatewayTproxy", config.gatewayTproxy);
     const QByteArray dpEnv = qgetenv("COAST_GATEWAY_DATAPATH").trimmed().toLower();
+    const bool dpUserspace = (dpEnv == "userspace" || dpEnv == "lwip");
     if (dpEnv == "tproxy")
         config.gatewayTproxy = true;
-    else if (dpEnv == "lwip")
+    else if (dpUserspace)
         config.gatewayTproxy = false;
     // 无节点兜底行为（默认回落直连，见 AppConfig.h 的说明）。环境变量优先，供测试/应急。
     config.noNodeReject = boolFromYaml(yaml, "noNodeReject", config.noNodeReject);
     config.gatewayPf = boolFromYaml(yaml, "gatewayPf", config.gatewayPf);
-    // 与 tproxy 共用同一个环境变量开关：lwip 时两条内核态数据面都关掉。
-    if (dpEnv == "lwip")
+    // 与 tproxy 共用同一个环境变量开关：userspace 时两条内核态数据面都关掉。
+    if (dpUserspace)
         config.gatewayPf = false;
     else if (dpEnv == "pf")
         config.gatewayPf = true;

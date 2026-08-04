@@ -20,37 +20,19 @@
 #include <memory>
 #include <utility>
 
+// TCP 数据面 = Rust(smoltcp)，经 C ABI 调用（rust/coaststack，头见 src/net/coaststack.h）。
+// ★ 这个 TU 现在**只在 Windows 编**（见根 CMakeLists.txt）：Linux 走 TPROXY、macOS 走 pf rdr，
+//   它们不需要用户态栈；非 Windows 由 NetStack_stub.cpp 顶上（init() 直接失败）。
 extern "C" {
-#include "lwip/etharp.h"
-#include "lwip/ethip6.h"
-#include "lwip/init.h"
-#include "lwip/ip_addr.h"
-#include "lwip/memp.h"
-#include "lwip/nd6.h"
-#include "lwip/netif.h"
-#include "coast_lwip_diag.h"
-#include "lwip/stats.h"
-#include "lwip/tcp.h"
-// 内部头：closeDeviceConns 要遍历 tcp_active_pcbs（换址时关掉旧 IP 的孤儿连接）。
-// 公共 lwip/tcp.h 不导出活动 pcb 链表。本项目已 vendor lwIP 并打过补丁，port 层引 priv 头是常规做法。
-#include "lwip/priv/tcp_priv.h"
-#include "lwip/timeouts.h"
-#include "netif/ethernet.h"
-
-// Rust(smoltcp) 数据面 —— 只在 Windows 且开了 COAST_RUST 时编入（见根 CMakeLists.txt）。
-// 与 lwIP **并存**，由运行时开关 COAST_STACK 选一条走；默认仍是 lwIP。
-#ifdef COAST_HAVE_RUST_STACK
 #include "coaststack.h"
-#endif
 }
 
-// lwIP(NO_SYS) 需要单调毫秒时钟。
-extern "C" u32_t sys_now(void)
-{
-    using namespace std::chrono;
-    static const steady_clock::time_point t0 = steady_clock::now();
-    return static_cast<u32_t>(duration_cast<milliseconds>(steady_clock::now() - t0).count());
-}
+#ifndef COAST_HAVE_RUST_STACK
+// lwIP 已被彻底移除（见 docs/lwip-alternatives.md 的「彻底移除 lwIP 的执行计划」），
+// 用户态栈只剩 smoltcp 这一条 —— 关掉 COAST_RUST 就没有任何 TCP 数据面可用了，
+// 与其编出一个运行期才发现是空壳的二进制，不如在这里直接停下。
+#  error "NetStack.cpp 需要 Rust 数据面：请开启 CMake 选项 COAST_RUST（默认 ON）"
+#endif
 
 namespace {
 
@@ -67,28 +49,13 @@ struct DeviceInfo {
     bool reject = false;
 };
 
-// 一条被终结的 TCP 连接：lwIP pcb ↔ 到 mihomo 的 Socks5Tcp。
-struct TcpConn {
-    NetStack::Impl *impl = nullptr;
-    struct tcp_pcb *pcb = nullptr;
-    Socks5Tcp *socks = nullptr;
-    QByteArray toLwip;    // socks→设备 方向待写入 lwIP 的字节（受 tcp_sndbuf 限流）
-    // 上行背压：已经交给 socks、但**还没**用 tcp_recved 归还给 lwIP 的接收窗口字节数。
-    // 上限天然是 TCP_WND(128 KiB)——lwIP 不会送来超过已通告窗口的数据。
-    // 必须是 quint32（不是 u16_t）：TCP_WND 开窗口缩放后已经超过 65535 了。
-    quint32 pendingRecved = 0;
-    bool upThrottled = false;  // 上行处于「等排空」状态（高/低水位的迟滞标志）
-    bool downPaused = false;   // 下行已让 socks 停止读取（toLwip 顶到高水位）
-    bool socksClosed = false;  // socks 侧已关闭：等 toLwip 排空后再优雅关 lwIP 侧
-    bool established = false;
-    bool lwipClosed = false;
-};
-
-#ifdef COAST_HAVE_RUST_STACK
 // 一条经 smoltcp 终结的 TCP 连接 ↔ 到 mihomo 的 Socks5Tcp。
-// 与上面的 TcpConn 是同一件事的两个栈版本；**故意不合并**：
-// 合并会让每个字段都要带一个"哪个栈"的分支，而两边的生命周期规则差别很大
-// （lwIP 是回调里可能同步销毁 + 必须回 ERR_ABRT；smoltcp 是 poll 模型，没有这一类问题）。
+//
+// ★ 这里曾经还有一个 lwIP 版的 `TcpConn`，连同 ~60 行 `ConnWatch`/`g_destroyedConn`/
+//   `markConnDestroyed` 的重入防护。它们存在只因 lwIP 的回调可能**同步销毁**上下文、
+//   且销毁后必须回 ERR_ABRT 给 tcp_in.c。coaststack 是 poll 模型（回调在 coast_stack_poll
+//   内部发出，且引擎保证发回调时不持有自身借用），这一整类问题结构性地消失了 ——
+//   这是换栈最大的**结构性**收益，比性能数字更值钱。
 struct SmolConn {
     NetStack::Impl *impl = nullptr;
     quint64 id = 0;              // coaststack 的连接 id（0 恒无效）
@@ -101,14 +68,14 @@ struct SmolConn {
     bool established = false;
     bool stackClosed = false;
 };
-#endif
 
 } // namespace
 
-// 一张网卡对应的 netif 上下文。指针存进 netif->state，C 回调据此拿到「该从哪个二层端点发出去」
-// 和「本机在这张卡上的 MAC」——多网卡就是靠它区分的。
+// 一张网卡的上下文：出帧回调据 nic id 反查到它，取「该从哪个二层端点发出去」和
+// 「本机在这张卡上的 MAC」——多网卡就是靠它区分的。
+// （lwIP 时代这里还内嵌一个 `struct netif`，要求地址稳定；smoltcp 每张卡一个独立
+//   Interface 实例、由 Rust 侧按 nic id 持有，C++ 这边只剩纯数据。）
 struct NetStack::Nic {
-    struct netif nif;          // 必须是稳定地址：Nic 一律堆分配，不放进会搬家的容器里
     IL2Endpoint *ep = nullptr;
     QByteArray localMac6;
     QString localIp, netmask;
@@ -197,19 +164,17 @@ constexpr qint64 kUdpDnsIdleMs = 15000;
 // 它走不通 → 名字解析时断时通）」，而是转投 mihomo 自己的 fake-ip DNS，走它的国内外分流后再回封给设备。
 constexpr quint16 kDnsHijackPort = 1053;
 
-// lwIP 定时器泵的周期，以及「UDP 流老化 + 内存池诊断」相对它的分频比（详见 NetStack::init）。
-// 25ms × 8 = 200ms，老化/诊断的实际节奏与改动前一致。
-constexpr int kLwipPumpIntervalMs = 25;
+// 定时器泵的周期，以及「UDP 流老化」相对它的分频比（详见 NetStack::init）。
+// 25ms × 8 = 200ms，老化的实际节奏与 lwIP 时代一致。
+constexpr int kPumpIntervalMs = 25;
 constexpr int kHousekeepEveryTicks = 8;
 
-// 诊断采样里附带的 lwIP 内部量。这些只有 lwIP 头才拿得到，所以由本 TU 拼好字符串交给
-// GatewayDiag（它是跨平台 TU，不该碰 lwIP）。取的都是**这条链路真正会出问题**的量：
-//   · rexmit/rto —— 重传次数。发方丢帧修好之后，这一栏就是「还有没有在丢」的直接证据；
-//     它和 txdrop 的区别是：txdrop 是我们自己丢的，rexmit 还包含设备侧/空口丢的。
-//   · 各池的 used/max/err —— 池子耗尽是静默杀连接的（见 lwipopts.h 的 MEMP_NUM_TCP_PCB 一段），
-//     max 是高水位线，能回答「离上限还有多远」，不必等到 err 涨了才发现。
-// 计数器是 u16（LWIP_STATS_LARGE=0），窗口内增量用 u16 运算算，回绕一次也是对的。
-QString lwipStatsLine();
+// 诊断采样里附带的栈内部量。只有 coaststack 才拿得到，所以由本 TU 拼好字符串交给
+// GatewayDiag（它是跨平台 TU，不该碰数据面）。取的都是**这条链路真正会出问题**的量。
+// ★ 换栈顺带补上了一件 lwIP 做不到的事：**真正的重传计数**。lwIP 的 struct stats_proto
+//   根本没有这个字段（tcp_out.c 那三个重传入口一个计数都不加），当年只能拿 xmit 总数
+//   当近似；现在 retransmits 是引擎自己数的实数。
+QString smolStatsLine();
 
 // 容量兜底：句柄和 mihomo 侧的关联数都是有限资源。BT/DHT 这类应用通常共用一个源端口广撒（对本
 // 方案友好），但「源端口也乱换」的极端情况必须挡住，不能让一台设备把整个进程的 fd 吃光。
@@ -231,8 +196,7 @@ bool isShortLivedUdpPort(quint16 dport)
     return dport == 53 || dport == 5353 || dport == 5355 || dport == 853 || dport == 123;
 }
 
-// 单调毫秒。和 sys_now() 同一个 steady_clock，但用 64 位：老化算的是「多久没用」，
-// 不想为了 u32 的 49 天回绕再套一层回绕安全的减法。
+// 单调毫秒。老化算的是「多久没用」，用 64 位免得为 u32 的 49 天回绕再套一层回绕安全的减法。
 qint64 monoMs()
 {
     using namespace std::chrono;
@@ -280,10 +244,8 @@ void lruTouch(UdpFlow *f)
 struct NetStack::Impl {
     quint16 socksPort = 0;
     NetStack *owner = nullptr;
-    struct tcp_pcb *listener = nullptr;
-    QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的 netif 上下文
+    QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的上下文
     QHash<QString, DeviceInfo> devices;      // 设备 IP（v4 或 v6 串）→ {mac,user}
-    QHash<QString, Nic *> deviceV6Nic;       // 设备 v6 串 → 其所在网卡（removeDeviceV6 摘 nd6 静态项用）
     QHash<QString, UdpSess *> udp;           // 设备 IP（v4 或 v6 串）→ UDP 会话
     UdpLru udpLruShort;                      // 短档(DNS 类)流的 LRU
     UdpLru udpLruLong;                       // 长档(一般 UDP)流的 LRU
@@ -306,18 +268,15 @@ struct NetStack::Impl {
         qint64 sentMs = 0;
     };
     QHash<quint16, DnsPending> dnsPending;
-#ifdef COAST_HAVE_RUST_STACK
-    // ———— smoltcp 数据面（COAST_STACK=smoltcp 时启用；默认关，走 lwIP）————
-    // 只接管 **TCP**：UDP/DNS 那 700 行（UdpFlow/UdpLru/hijackDns/onUdpResponse）原样共享，
-    // 它们本来就不经 lwIP，与选哪个 TCP 栈无关。
-    bool useSmol = false;
+    // ———— smoltcp 数据面 ————
+    // 只接管 **TCP**：UDP/DNS 那 700 行（UdpFlow/UdpLru/hijackDns/onUdpResponse）与它无关，
+    // 那部分从来就没走过任何用户态 TCP 栈，删 lwIP 时一行都没动。
     CoastStack *smol = nullptr;
     QHash<quint64, SmolConn *> smolConns;      // coast conn id → 桥接上下文
     QHash<IL2Endpoint *, quint32> nicIds;      // 二层端点 → coaststack 的 nic id
     QHash<quint32, Nic *> nicById;             // 反查（出帧回调要据 nic id 找端点）
     quint32 nextNicId = 1;
     QElapsedTimer smolClock;                   // 给 coast_stack_poll 的单调毫秒
-#endif
     QTimer *timer = nullptr;
     int pumpTick = 0;        // 泵的拍数计数器，给「老化 + 池诊断」分频用（见 init() 里的说明）
     QElapsedTimer pumpClock; // 量每一拍的真实间隔 → 迟到量 = 工作线程饱和度
@@ -438,83 +397,20 @@ void destroyUdpSess(NetStack::Impl *d, UdpSess *s)
 // ———————————————————————————— 前置：C 回调 ————————————————————————————
 namespace {
 
-// lwIP 本身只能有一个实例（lwip_init 全局、ARP 表全局、PCB 链全局），所以「栈」确实是单例：
-// g_impl 只用来给 TCP accept 这类**与网卡无关**的全局回调取上下文（监听 pcb、设备表、socks 端口）。
-// 与网卡相关的东西（二层端点、本机 MAC）一律从 netif->state 取，不走这里——多网卡的关键。
+// 「栈」是单例：g_impl 给与网卡无关的全局上下文取用（设备表、socks 端口、smol 句柄）。
+// 与网卡相关的东西（二层端点、本机 MAC）一律按 nic id 从 nicById 反查，不走这里——多网卡的关键。
 //
-// 线程前提：g_impl（以及下方的 ConnWatch / g_destroyedConn 哨兵）都是进程级全局，只在「lwIP 只跑在
-// 一个线程」这个前提下成立。这个前提仍然成立——全进程只有一个 NetStack 实例（init() 里用 g_impl 判重），
-// 而它始终被单一线程拥有（App 里是 LanGateway 的工作线程，自测里是主线程，二者从不并存）。绝不能出现
-// 两个线程同时碰 lwIP/这些全局的情况。
+// 线程前提：g_impl 是进程级全局，只在「数据面只跑在一个线程」这个前提下成立。这个前提仍然
+// 成立——全进程只有一个 NetStack 实例（init() 里用 g_impl 判重），而它始终被单一线程拥有
+// （App 里是 LanGateway 的工作线程，自测里是主线程，二者从不并存）。coaststack 自身也要求
+// 单线程（coaststack.h「线程模型」一节），两边前提一致。
 NetStack::Impl *g_impl = nullptr;
 bool g_debug = false;             // COAST_GATEWAY_DEBUG=1 时打诊断日志（自测/联调用）
 
-NetStack::Nic *nicOf(struct netif *netif)
-{
-    return netif ? static_cast<NetStack::Nic *>(netif->state) : nullptr;
-}
-
-// pbuf 链 → QByteArray。仍有两个调用点：linkoutput（要一整帧连续字节交给二层端点）和
-// lwipTcpRecv 的**多段链**慢路径。上行单段 pbuf 的快路径已经绕开它（零拷贝），别顺手删。
-QByteArray pbufToBytes(struct pbuf *p)
-{
-    QByteArray out;
-    out.reserve(p->tot_len);
-    for (struct pbuf *q = p; q != nullptr; q = q->next) {
-        out.append(static_cast<const char *>(q->payload), q->len);
-        if (q->tot_len == q->len)
-            break;
-    }
-    return out;
-}
-
-// netif linkoutput：lwIP 要发一帧 → 序列化 → 从**该 netif 自己的**二层端点发出
-//（dst MAC 已由静态 ARP 填好）。多网卡就靠这里分流：绝不能回到某个全局端点上。
-//
-// ★ 恒返回 ERR_OK、**故意**忽略 send() 的返回值。这不是偷懒，但也曾经是个坑：
-//   端点侧原本「内核缓冲一满就把帧丢掉并 return false」，配上这里的忽略，就成了完全无声的
-//   本机→设备丢包（LINK_STATS 也是关的），只能靠 lwIP 几百毫秒后的重传兜底 —— 被代理设备的
-//   现象是「访问什么都慢、偶尔打不开」。现在端点自己带积压队列 + 丢帧计数（见
-//   L2Endpoint_linux.cpp / L2Endpoint_mac.cpp 的「发方」一节），send() 返回 false 已经意味着
-//   「链路真的喂不进去了」，此时最合理的处置恰好就是交给 TCP 重传，所以这里保持不变。
-err_t lwipLinkOutput(struct netif *netif, struct pbuf *p)
-{
-    NetStack::Nic *nic = nicOf(netif);
-    if (nic && nic->ep) {
-        const QByteArray f = pbufToBytes(p);
-        if (g_debug)
-            std::fprintf(stderr, "NETSTACK OUT nic=%s len=%d\n",
-                         nic->localIp.toLatin1().constData(), int(f.size()));
-        nic->ep->send(f);
-    }
-    return ERR_OK;
-}
-
-err_t lwipNetifInit(struct netif *netif)
-{
-    netif->name[0] = 'c';
-    netif->name[1] = 't';
-    netif->output = etharp_output;      // IPv4 出口经 ARP（静态表已填，不会真发 ARP 请求）
-#if LWIP_IPV6
-    netif->output_ip6 = ethip6_output;  // IPv6 出口经 nd6（静态邻居已填，见 nd6.c 补丁）
-#endif
-    netif->linkoutput = lwipLinkOutput; // 二层出口（L3 无关，v4/v6 共用）
-    netif->mtu = 1500;
-    netif->hwaddr_len = 6;
-    if (NetStack::Nic *nic = nicOf(netif))
-        std::memcpy(netif->hwaddr, nic->localMac6.constData(), 6);
-    netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP | NETIF_FLAG_ETHERNET
-                   | NETIF_FLAG_LINK_UP | NETIF_FLAG_UP;
-    return ERR_OK;
-}
-
-void closeConn(TcpConn *c, bool abort);
-
 // 把所有网卡攒着的出帧一次性交给驱动（契约与理由见 IL2Endpoint::flushTx）。
-// 为什么不挑「这条连接对应的那张卡」：TcpConn 手里只有 pcb，反查 netif→Nic 要多绕一圈，而网卡
-// 数是个位数、空队列的 flushTx 只是一次判空 —— 全刷一遍更简单也更不容易漏。
-// **绝对安全**：flushTx 只走到 pcap_sendqueue_transmit，不发任何 Qt 信号，回不到 TcpConn 上
-// （与 ConnWatch 上方那张「确认安全」清单里的 tcp_output 同类）。
+// 为什么不挑「这条连接对应的那张卡」：网卡数是个位数、空队列的 flushTx 只是一次判空 ——
+// 全刷一遍更简单也更不容易漏。
+// **绝对安全**：flushTx 只走到 pcap_sendqueue_transmit，不发任何 Qt 信号，回不到连接上。
 void flushNicTx(NetStack::Impl *d)
 {
     if (!d)
@@ -527,592 +423,76 @@ void flushNicTx(NetStack::Impl *d)
 
 // ————————————————————— 背压：两个方向都必须有闸 —————————————————————
 //
-// 这条链路是「设备 ⇄ lwIP ⇄ Socks5Tcp(QTcpSocket) ⇄ mihomo」，两头的速率毫不相干。谁慢谁就是
+// 这条链路是「设备 ⇄ smoltcp ⇄ Socks5Tcp(QTcpSocket) ⇄ mihomo」，两头的速率毫不相干。谁慢谁就是
 // 瓶颈，而中间的队列如果没有闸，就会替瓶颈**无界地**缓冲——内存一路涨到 OOM。
 //
-// 【上行 设备→mihomo】lwIP 的接收窗口本来就是现成的闸门：收到设备数据后**先不**调 tcp_recved，
-//   窗口就一直关小着，设备的 TCP 自己会减速。等 QTcpSocket 真把字节交给内核
-//   （upstreamBytesWritten）、待发队列降下来了，再一次性把窗口还回去。
-//   老代码是无条件立刻 tcp_recved(全开)：等于不停对设备喊「随便发」，而字节全堆在
+// 【上行 设备→mihomo】栈的接收窗口本来就是现成的闸门：收到设备数据后**先不**调
+//   coast_conn_recved，窗口就一直关小着，设备的 TCP 自己会减速。等 QTcpSocket 真把字节交给
+//   内核（upstreamBytesWritten）、待发队列降下来了，再一次性把窗口还回去。
+//   反例（lwIP 时代的老代码）是无条件立刻全开窗口：等于不停对设备喊「随便发」，而字节全堆在
 //   QTcpSocket 的写缓冲里（Qt 的写缓冲没有上限）。
 //
-// 【下行 mihomo→设备】toLwip 是队列：只能按 tcp_sndbuf 往 lwIP 灌，灌不进去的留着。老代码任由
-//   它涨，且 QTcpSocket 没设 setReadBufferSize，Qt 会一直往上读 → 设备慢（WiFi 信号差）时同样
-//   无界。现在超过高水位就让 Socks5Tcp 停止读 socket（读缓冲填满 → 收窗关闭 → 压回远端），
+// 【下行 mihomo→设备】toStack 是队列：只能按 coast_conn_sndbuf 往栈里灌，灌不进去的留着。
+//   且 QTcpSocket 没设 setReadBufferSize，Qt 会一直往上读 → 设备慢（WiFi 信号差）时同样无界。
+//   所以超过高水位就让 Socks5Tcp 停止读 socket（读缓冲填满 → 收窗关闭 → 压回远端），
 //   降到低水位再恢复。
 //
 // —— 为什么不会死锁（改这块最容易写出「双方互等」）——
 //  上行：只要 pendingRecved>0 且窗口没还，就必然存在「QTcpSocket 里没发完的字节」。目的地是
-//    本机回环的 mihomo，内核迟早排空 → upstreamBytesWritten 必然到来 → flushRecvWindow 必然
-//    把窗口还上。唯一的例外是 socket 出错，而那条路走 failed/closed → closeConn 把整条连接
-//    拆掉，不存在「等一个永远不来的事件」的稳态。另外 c->socks 已经为空时**无条件**归还：
-//    没有排空者了，扣着窗口只会让连接永久僵住。
-//  下行：恢复读取的触发点是 pumpToLwip，而 pumpToLwip 挂在 tcp_sent 上 —— 只要设备还在 ACK，
-//    tcp_sent 就会来；设备彻底不响应时 lwIP 自己重传超时 → tcp_err → 拆连接。而且恢复是
-//    **排队**执行的（Socks5Tcp::setReadPaused），绝不在 lwIP 回调里同步重入。
+//    本机回环的 mihomo，内核迟早排空 → upstreamBytesWritten 必然到来 → smolFlushRecvWindow
+//    必然把窗口还上。唯一的例外是 socket 出错，而那条路走 failed/closed → smolDestroyConn 把
+//    整条连接拆掉，不存在「等一个永远不来的事件」的稳态。另外 c->socks 已经为空时**无条件**
+//    归还：没有排空者了，扣着窗口只会让连接永久僵住。
+//  下行：恢复读取的触发点是 smolPumpToStack，而它挂在 conn_sent 回调上 —— 只要设备还在 ACK，
+//    conn_sent 就会来；设备彻底不响应时栈自己重传超时 → conn_closed → 拆连接。而且恢复是
+//    **排队**执行的（Socks5Tcp::setReadPaused），绝不在栈回调里同步重入。
 //
 // —— 水位取值 —— 高水位 64 KiB、低水位 16 KiB（¼）。
 //  低水位的作用是迟滞：免得在水位线上反复 暂停/恢复 抖动（每次恢复都要过一趟事件循环，
-//  抖起来纯属浪费）。上行同理：queued 掉到 16 KiB 才还窗口，一次还一大块，tcp_recved 内部的
-//  TCP_WND_UPDATE_THRESHOLD（= min(TCP_WND/4, 4*TCP_MSS) = 5840 B）判据才会真的触发窗口通告。
-//  ★ 这两个数**故意不跟着** lwIP 的单连接预算走。原本它们是照着 TCP_SND_BUF = TCP_WND = 60 KiB
-//  取的「≈ 一个满 sndbuf」；窗口缩放把预算提到 128 KiB 之后没有同步上调，因为：
-//    · 这里的队列是 QByteArray / QTcpSocket 读缓冲，落在**普通堆**上，按连接数线性膨胀
-//      （2048 条 × 128 KiB = 256 MiB 的病态上限），而 lwIP 那 128 KiB 是有池子封顶的；
-//    · 吞吐上也不需要 —— 下行管道深度 = lwIP 在途 128 KiB + toLwip 排队 64 KiB，
-//      toLwip 只需覆盖「lwIP 腾出空间 → 我们补上」这一次事件循环的往返，64 KiB 绰绰有余。
+//  抖起来纯属浪费）。上行同理：queued 掉到 16 KiB 才还窗口，一次还一大块。
+//  ★ 这两个数**故意不跟着**栈的单连接预算走：这里的队列是 QByteArray / QTcpSocket 读缓冲，
+//    落在**普通堆**上、按连接数线性膨胀（2048 条 × 128 KiB = 256 MiB 的病态上限）。
+//    吞吐上也不需要更大 —— toStack 只需覆盖「栈腾出空间 → 我们补上」这一次事件循环的往返。
+//  （名字里的 kToLwip* 是 lwIP 时代留下的，换栈时**故意没改**：它们的含义、取值、以及上面
+//    这段论证一个字都没变，改名只会让 git blame 断掉。）
 constexpr int kUpQueueHighWater = 64 * 1024;
 constexpr int kUpQueueLowWater = 16 * 1024;
 constexpr int kToLwipHighWater = 64 * 1024;
 constexpr int kToLwipLowWater = 16 * 1024;
 
-// ——————————————— 「c 是不是在这次调用里被拆掉了」的通用判据 ———————————————
+// ————————————— 诊断：把 coaststack 的计数器读出来 —————————————
 //
-// 本文件里有一类调用**可能同步销毁 TcpConn**——不只是 lwIP 回调，Qt 的直连信号一样能做到。
-// 清单（调用之后必须先查判据，才可以再碰 c）：
-//   ★ Socks5Tcp::write()      established 之后落到 QTcpSocket::write；Qt 在写入途中发现对端
-//                             已 RST 会 setErrorAndEmit **同步**发 errorOccurred →
-//                             Socks5Tcp emit failed → 我们的 failed 槽是直连(context 同线程)
-//                             → closeConn → delete c。两个重载（QByteArray / 裸指针）都算，
-//                             所以上行热路径上**一个包只调一次** write（见 lwipTcpRecv）。
-//   ★ Socks5Tcp::closeTunnel() 同步 emit closed() → closed 槽 → pumpToLwip → 可能 closeConn。
-//   ★ pumpToLwip()            内部 tcp_write 出错会 abort；socksClosed 排空后会优雅关闭。
-//   ★ closeConn()             本体。
+// 对应 lwIP 时代的 lwipStatsLine() + pollLwipPoolStats()。那一版要盯 9 个内存池的
+// used/max/err，还得配一套 30s 节流的告警 —— 因为 lwIP 的池子耗尽是**静默**的：既不打日志
+// 也不向上层报错，tcp_alloc 甚至会悄悄杀掉一条活着的连接，不主动去读就等于没开统计。
+// smoltcp 没有固定池（连接表是 Vec、缓冲区堆分配），「池见底 → 静默杀连接」这一整类故障
+// 结构性地不存在，所以这里只报真正有用的量，那两百行监视代码一并作废。
 //
-// 反过来，**确认安全、不需要保护**的调用（别为它们加噪音）：
-//   · tcp_recved / tcp_write / tcp_output / tcp_sndbuf —— 纯 lwIP，只会往下走到 netif
-//     linkoutput → IL2Endpoint::send()，而后者是裸的 pcap_sendpacket / ::sendto，不发任何
-//     Qt 信号、也不嵌套事件循环，回不到 TcpConn 上。
-//   · Socks5Tcp::bytesToWrite() / isEstablished() —— 纯 getter。
-//   · Socks5Tcp::setReadPaused() —— 暂停只置个标志；恢复走 Qt::QueuedConnection 补读，
-//     故意**不**同步 emit dataReceived（见 Socks5Client.cpp 里的理由）。
-//   · deleteLater() —— 定义上就是延后。
-//
-// 判据用两个全局量（NO_SYS + 全程主事件循环，单线程，够用）：
-//   g_destroyedConn    最近一次被 delete 的 TcpConn 地址。只做**指针比较，绝不解引用**。
-//   g_destroyedByAbort 那次销毁走的是不是 tcp_abort。这是**另一件事**，不能和「c 还在不在」
-//                      混用一个标志：lwIP 要求回调里 tcp_abort 过就必须返回 ERR_ABRT
-//                      （tcp_in.c 的 `aborted:` 标签只有这条路能到），而 tcp_close 不需要
-//                      （lwIP 自己有 tcp_trigger_input_pcb_close 延迟释放）。优雅关闭同样
-//                      会 delete c，却**不该**回 ERR_ABRT。
-TcpConn *g_destroyedConn = nullptr;
-bool g_destroyedByAbort = false;
-
-// 每个 delete c 的地方都必须先过这里。
-void markConnDestroyed(TcpConn *c, bool byAbort)
+// 保留的两条**必须有等价物**（换栈计划里的硬要求）：
+//   · refuse     —— 对应 lwIP 的 prioKill：资源不够导致「无声故障」的唯一可见信号。
+//   · pollGapMax —— 对应 fastGapMax：泵的最坏间隔。平均值会把毛刺抹平，而延迟 ACK/重传
+//     等的就是下一拍，**最坏间隔才决定性**。瞬时量，读完清零（引擎侧清）。
+// ★ rexmit 是 lwIP 从来给不出的（struct stats_proto 根本没有重传字段，tcp_out.c 那三个
+//   重传入口一个计数都不加），当年只能拿 xmit 总数当近似 —— 换栈顺手补上了真数。
+QString smolStatsLine()
 {
-    g_destroyedConn = c;
-    g_destroyedByAbort = byAbort;
-}
+    if (!g_impl || !g_impl->smol)
+        return QString();
+    CoastStats s {};
+    coast_stack_stats(g_impl->smol, &s);
 
-// 把「可能销毁 c」的一段调用夹住：构造时清账，之后 alive() 判断能不能继续碰 c，
-// needsAbortReturn() 判断 lwIP 回调该不该回 ERR_ABRT。
-// 嵌套是安全的：清账只发生在销毁之前；真被销毁了就不会再有后续代码拿着同一个 c 去新建 watch。
-class ConnWatch
-{
-public:
-    explicit ConnWatch(TcpConn *c) : m_c(c)
-    {
-        g_destroyedConn = nullptr;
-        g_destroyedByAbort = false;
-    }
-    bool alive() const { return g_destroyedConn != m_c; }
-    bool needsAbortReturn() const { return g_destroyedConn == m_c && g_destroyedByAbort; }
-
-private:
-    TcpConn *m_c;
-};
-
-// 无条件把攒着的接收窗口还给 lwIP。
-void giveBackRecvWindow(TcpConn *c)
-{
-    if (!c || !c->pcb || c->lwipClosed)
-        return;
-    // 先扣账再调用：tcp_recved 内部可能立刻 tcp_output → linkoutput，保持状态自洽。
-    // 循环+钳位**不是**防御性冗余：tcp_recved() 的形参恒为 u16_t（打开 LWIP_WND_SCALE 也不变，
-    // lwIP 把 raw API 的窗口参数一律钳在 u16 上），而 pendingRecved 的上限是 TCP_WND = 128 KiB，
-    // 已经超过 0xFFFF —— 单次调用还不完，必须分多次。
-    while (c->pendingRecved > 0) {
-        const u16_t give = static_cast<u16_t>(qMin<quint32>(c->pendingRecved, 0xFFFFu));
-        c->pendingRecved -= give;
-        tcp_recved(c->pcb, give);
-    }
-    c->upThrottled = false;
-    // tcp_recved 打开窗口后 lwIP 会立刻打一个窗口更新 ACK 出去 —— 那是**设备上行**能不能继续
-    // 发的唯一许可。本函数最常见的调用点是 Socks5Tcp::upstreamBytesWritten（socket 回调），
-    // 既不在收帧排空里也不在 pumpToLwip 里，不在这里收口就要等泵那一拍，等于给上行凭空加 25 ms。
-    flushNicTx(c->impl);
-}
-
-// 按 SOCKS 侧的排空进度决定要不要归还接收窗口（高/低水位迟滞）。
-void flushRecvWindow(TcpConn *c)
-{
-    if (!c || !c->pcb || c->lwipClosed || c->pendingRecved == 0)
-        return;
-    if (c->socks) {
-        const qint64 queued = c->socks->bytesToWrite();
-        const qint64 mark = c->upThrottled ? kUpQueueLowWater : kUpQueueHighWater;
-        if (queued > mark) {
-            if (!c->upThrottled)
-                ++GatewayDiag::c.upThrottleHits; // 只数「进入节流态」的沿，不数每次评估
-            c->upThrottled = true; // 继续扣着窗口，等 upstreamBytesWritten 再来评估
-            return;
-        }
-    }
-    // socks 为空（失败/已拆）时落到这里：无条件归还，见上文死锁分析。
-    giveBackRecvWindow(c);
-}
-
-// 下行水位：toLwip 堆过高就让 Socks5Tcp 停止读 socket，降下来再恢复。
-void updateDownstreamPause(TcpConn *c)
-{
-    if (!c || !c->socks)
-        return;
-    const int queued = c->toLwip.size();
-    if (!c->downPaused && queued >= kToLwipHighWater) {
-        ++GatewayDiag::c.downPauseHits;
-        c->downPaused = true;
-        c->socks->setReadPaused(true);
-    } else if (c->downPaused && queued <= kToLwipLowWater) {
-        c->downPaused = false;
-        c->socks->setReadPaused(false); // 补读是排队执行的，不会在这里重入
-    }
-}
-
-// 把 socks→设备方向的待写字节尽量写进 lwIP（受发送窗口限流），tcp_sent 回调后再续。
-// **返回 true 表示连接已在本函数里被销毁**（等价于外层 ConnWatch 的 !alive()）：调用方不得
-// 再碰 c；调用方若是 lwIP 回调，还要照 ConnWatch::needsAbortReturn() 决定是否回 ERR_ABRT。
-// 本函数内部除 closeConn 外没有别的「可能销毁 c」的调用：updateDownstreamPause 只会置标志或
-// 排队补读，tcp_* 全是纯 lwIP（理由见 ConnWatch 上方清单），所以不需要再夹一层 watch。
-bool pumpToLwip(TcpConn *c)
-{
-    if (!c || !c->pcb || c->lwipClosed)
-        return false;
-    while (!c->toLwip.isEmpty()) {
-        // u16_t 是**对的**，不是窗口缩放漏改的窄化：tcp_sndbuf(pcb) 展开成 TCPWND16(pcb->snd_buf)
-        // = (u16_t)LWIP_MIN(x, 0xFFFF)，lwIP 自己就把它钳在 65535（tcp_write 的 len 形参也只有
-        // u16_t，收不下更多）。TCP_SND_BUF = 128 KiB 时它报的是 65535 而不是回绕成 0 ——
-        // 外面这个 while 会再转一圈把剩下的窗口用掉。
-        const u16_t space = tcp_sndbuf(c->pcb);
-        if (space == 0)
-            break;
-        const int n = qMin<int>(space, c->toLwip.size());
-        const err_t e = tcp_write(c->pcb, c->toLwip.constData(), n, TCP_WRITE_FLAG_COPY);
-        if (e == ERR_MEM)
-            break;        // 缓冲不足，等 tcp_sent 再来
-        if (e != ERR_OK) {
-            closeConn(c, true);
-            return true;
-        }
-        c->toLwip.remove(0, n);
-    }
-    tcp_output(c->pcb);
-    // ★ flushTx 的第二个调用点：上面这一串 tcp_write + tcp_output 是「下行数据到了 → 打给设备」
-    //   的主路，一次能吐出几十个段。它们由 mihomo 的 socket 回调触发，**不在**收帧排空里，
-    //   所以必须在这里自己收口，否则要等泵那一拍（最多 25 ms）才发得出去。
-    flushNicTx(c->impl);
-    // 排空到低水位 → 恢复从 socks 读。放在这里是因为 tcp_sent 是下行唯一的「有进展」信号。
-    updateDownstreamPause(c);
-    // socks 早已关闭、下行残余也全交给 lwIP 了 → 现在才轮到优雅关闭本端。
-    // 老代码只在「closed 到达那一刻 toLwip 恰好为空」时才关，否则 pcb 就一直挂着等设备自己超时；
-    // 加了下行水位之后 toLwip 非空的概率更高，这个洞必须一起补。
-    if (c->socksClosed && c->toLwip.isEmpty()) {
-        closeConn(c, false);
-        return true;
-    }
-    return false;
-}
-
-void closeConn(TcpConn *c, bool abort)
-{
-    if (!c)
-        return;
-    // 先断开 socks 的全部信号：本函数经常正是从 socks 自己的槽里进来的，而下面就要 delete c。
-    // 不断开的话，closeTunnel() 同步 emit 的 closed()、以及 setReadPaused 排进事件队列的补读，
-    // 都会带着一个悬垂的 c 再进来一次。（UDP 侧的 destroyUdpFlow 早就是这个套路。）
-    if (c->socks)
-        QObject::disconnect(c->socks, nullptr, nullptr, nullptr);
-    bool aborted = false;
-    if (c->pcb && !c->lwipClosed) {
-        tcp_arg(c->pcb, nullptr);
-        tcp_recv(c->pcb, nullptr);
-        tcp_sent(c->pcb, nullptr);
-        tcp_err(c->pcb, nullptr);
-        if (abort) {
-            ++GatewayDiag::c.tcpAborted;
-            tcp_abort(c->pcb);
-            aborted = true; // 若身处 lwIP 回调，调用方要据此回 ERR_ABRT
-        } else {
-            // 优雅关闭前**必须**把扣着的接收窗口还回去：tcp_close 一看到 rcv_wnd != TCP_WND_MAX
-            // 就认定「上层没把对端的数据收完」，改发 RST 而不是 FIN（tcp_close_shutdown 里的
-            // rst_on_unacked_data 分支）——设备侧会连带丢掉已经收到的下行数据。
-            // 这是引入上行背压之后新出现的坑，不还窗口就会变成「下载到一半被 RST」。
-            giveBackRecvWindow(c);
-            if (tcp_close(c->pcb) == ERR_OK) {
-                ++GatewayDiag::c.tcpClosed;
-            } else {
-                ++GatewayDiag::c.tcpAborted; // 优雅关不掉，退化成 RST
-                tcp_abort(c->pcb);
-                aborted = true;
-            }
-        }
-        c->lwipClosed = true;
-    }
-    c->pcb = nullptr;
-    if (c->socks) {
-        // 此刻 socks 的信号已全部断开，closeTunnel() 同步 emit 的 closed() 回不到我们身上，
-        // 所以这里不会递归回 closeConn。
-        c->socks->closeTunnel();
-        c->socks->deleteLater();
-        c->socks = nullptr;
-    }
-    // 上面 tcp_close/tcp_abort 打出去的 FIN/RST 也要收口：本函数最常从 socks 的 failed/closed
-    // 槽（socket 回调）进来，不在任何一个批量提交点上。晚 25 ms 关连接不致命，但设备侧会多挂
-    // 一条半开连接，没必要。
-    flushNicTx(c->impl);
-    markConnDestroyed(c, aborted); // 必须在 delete 之前登记，外层 ConnWatch 靠它判存活
-    delete c;
-}
-
-// 设备→服务器 方向（lwIP 收到设备数据）→ 写给 socks。
-err_t lwipTcpRecv(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err)
-{
-    Q_UNUSED(pcb);
-    auto *c = static_cast<TcpConn *>(arg);
-    if (!c)
-        return ERR_OK;
-    // 本回调里有三处「可能当场把 c 拆掉」的调用（closeConn / closeTunnel / write），全程夹住。
-    ConnWatch watch(c);
-    if (err != ERR_OK) {
-        if (p)
-            pbuf_free(p);
-        closeConn(c, true);       // 之后不得再碰 c
-        // 老代码这里固定回 ERR_OK，而上面刚 tcp_abort 过 → tcp_input 会继续用已释放的 pcb。
-        return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
-    }
-    if (p == nullptr) {           // 设备侧关闭 → 关 socks 上行
-        if (c->socks)
-            c->socks->closeTunnel(); // 同步 emit closed() → 我们的槽可能当场收掉 c
-        return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK; // 之后不得再碰 c
-    }
-    const u16_t len = p->tot_len;
-    // 窗口先记账、**不**立刻归还：归还与否交给 flushRecvWindow 按 SOCKS 侧排空进度判断。
-    c->pendingRecved += len;
-    if (c->socks) {
-        // 设备上行的**每个**数据包都走这里，所以这条路上一次多余的堆分配+全量拷贝都不能有。
-        //
-        // 快路径（绝大多数）：单段 pbuf —— 一帧 ≤1514 < PBUF_POOL_BUFSIZE(1600)，收上来就是
-        // 一整块连续内存。直接把 payload 指针交给 socks，省掉 pbufToBytes 的 QByteArray。
-        // 判据用 tot_len==len 而不是 next==nullptr：pbuf 的 next 也可能挂着「下一个包」
-        // （队列语义），只有 tot_len==len 才真的保证载荷全在这一段里。
-        //
-        // 慢路径：多段链（lwIP 把补齐的乱序段 pbuf_cat 起来一起上交，打开 SACK 之后更常见）
-        // —— 先拼成连续字节再写。这条路保持原样，宁可多一次拷贝。
-        //
-        // ★★ 为什么这里**只调一次** write，而不是「对 pbuf 链逐段循环 write」：
-        //    write() 是那张「可能同步 delete c」清单上的第一条（对端已 RST 时 Qt 在 write
-        //    内部就把 errorOccurred 发出来 → failed 槽 → closeConn → delete c）。逐段循环的话，
-        //    第一段写完 c 就可能已经析构，第二次迭代 c->socks 就是 use-after-free。
-        //    维持「一次调用 + 紧跟一次 watch.alive() 判断」这个形状，重入面才只有一个点。
-        //    要改成多次 write，必须每次之后都 watch.alive() 并跳出——收益远不抵风险。
-        //
-        // ★★ 零拷贝依赖的前提（见 Socks5Client.h 里 write(const char*, qsizetype) 的契约）：
-        //    payload 指针只需在 write 调用期间有效。established 后 write 落到 QIODevice::write，
-        //    字节当场被拷进 QTcpSocket 写缓冲；握手未完成时 Socks5Tcp 会深拷贝进 pending。
-        //    那边一旦改成「把指针存进队列晚点再发」，这里立刻变成悬垂指针。
-        if (p->tot_len == p->len)
-            c->socks->write(static_cast<const char *>(p->payload), qsizetype(p->len));
-        else
-            c->socks->write(pbufToBytes(p));
-    }
-    // pbuf 必须在 write **之后**才归还：零拷贝路径上 socks 拿的就是 p->payload 里的字节。
-    // 这里放在 alive() 判断之前，是因为 p 的所有权自始至终在本回调手上，与 c 死没死无关
-    //（lwIP 把 pbuf 交给 recv 回调后就不再引用它，tcp_abort 也不会碰它）——
-    // c 就算刚在 write 里被拆掉，这一次 pbuf_free 依然要、且只要执行一次。
-    pbuf_free(p);
-    if (!watch.alive())
-        return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
-    flushRecvWindow(c);
-    return ERR_OK;
-}
-
-err_t lwipTcpSent(void *arg, struct tcp_pcb *pcb, u16_t len)
-{
-    Q_UNUSED(pcb);
-    Q_UNUSED(len);
-    auto *c = static_cast<TcpConn *>(arg);
-    if (!c)
-        return ERR_OK;
-    ConnWatch watch(c);
-    pumpToLwip(c); // 可能当场把连接收掉（tcp_write 失败 abort / socksClosed 排空后优雅关闭）
-    return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
-}
-
-void lwipTcpErr(void *arg, err_t err)
-{
-    Q_UNUSED(err);
-    auto *c = static_cast<TcpConn *>(arg);
-    if (!c)
-        return;
-    c->pcb = nullptr;          // lwIP 已释放 pcb
-    c->lwipClosed = true;
-    if (c->socks) {
-        // 同 closeConn：先断信号，否则 closeTunnel/排队补读会带着悬垂的 c 回来。
-        QObject::disconnect(c->socks, nullptr, nullptr, nullptr);
-        c->socks->closeTunnel();
-        c->socks->deleteLater();
-        c->socks = nullptr;
-    }
-    // byAbort=false：pcb 是 lwIP 自己释放的，不是我们 tcp_abort 的；tcp_err 也没有返回值可回。
-    markConnDestroyed(c, false);
-    delete c;
-}
-
-// 新 SYN 被 catch-all 监听接受：local_ip/port = 设备想访问的服务器；remote = 设备。
-err_t lwipTcpAccept(void *arg, struct tcp_pcb *newpcb, err_t err)
-{
-    Q_UNUSED(arg);
-    if (err != ERR_OK || newpcb == nullptr)
-        return ERR_VAL;
-    if (g_impl && g_impl->listener)
-        tcp_accepted(g_impl->listener);
-
-    const QString serverIp = QString::fromLatin1(ipaddr_ntoa(&newpcb->local_ip));
-    const quint16 serverPort = newpcb->local_port;
-    QString victimIp = QString::fromLatin1(ipaddr_ntoa(&newpcb->remote_ip));
-    // ★ v6 键规范化：lwIP 的 ip6addr_ntoa 输出**大写** hex（"2001:DB8:C0A::239"），而 addDeviceV6
-    //   存进 devices 表的键来自 QHostAddress::toString()（**小写**，"2001:db8:c0a::239"）。不统一
-    //   会导致 userForIp 落空 → v6 连接以空 user 拨 7899（每设备 listener 需 dev-<mac> 认证）→ 认证失败、
-    //   且 /connections 无法按 inboundUser 归属到设备。经 QHostAddress 往返统一成小写规范形（v4 是恒等，
-    //   无副作用）。放在冷路径的 accept 里，开销可忽略。
-    if (victimIp.contains(QLatin1Char(':'))) {
-        const QString canon = QHostAddress(victimIp).toString();
-        if (!canon.isEmpty())
-            victimIp = canon;
-    }
-    const QString user = g_impl ? g_impl->userForIp(victimIp) : QString();
-    if (g_debug)
-        std::fprintf(stderr, "NETSTACK ACCEPT server=%s:%u victim=%s user=%s\n",
-                     serverIp.toLatin1().constData(), serverPort,
-                     victimIp.toLatin1().constData(), user.toLatin1().constData());
-
-    ++GatewayDiag::c.tcpAccepted;
-    auto *c = new TcpConn;
-    c->impl = g_impl;
-    c->pcb = newpcb;
-    c->socks = new Socks5Tcp(g_impl->owner);
-
-    tcp_arg(newpcb, c);
-    tcp_recv(newpcb, lwipTcpRecv);
-    tcp_sent(newpcb, lwipTcpSent);
-    tcp_err(newpcb, lwipTcpErr);
-    tcp_nagle_disable(newpcb);
-
-    // 下面这些槽都是**直连**（context 是 NetStack，同一个线程），所以它们跑在信号发射者的栈上。
-    // 凡是会销毁 c 的调用（pumpToLwip / closeConn）一律放在**最后一句**，槽返回后就没人再碰 c
-    // 了——这样才不必在每个槽里再夹一层 ConnWatch。改这几个 lambda 时务必保持这个形状。
-    QObject::connect(c->socks, &Socks5Tcp::established, g_impl->owner, [c]() {
-        c->established = true;
-        // 握手期扣下的窗口在这里重新评估一次：pending 刚被冲进 socket，水位变了。
-        // flushRecvWindow 不会销毁 c（只有 getter + 纯 lwIP 调用），故无需保护。
-        flushRecvWindow(c);
-    });
-    QObject::connect(c->socks, &Socks5Tcp::upstreamBytesWritten, g_impl->owner, [c](qint64) {
-        // 上行真的排空了一点 → 按量把 lwIP 的接收窗口还回去。这是上行唯一的推进点，
-        // 也正是「不会死锁」的依据：只要还扣着窗口，就一定还有没发完的字节在等这个信号。
-        flushRecvWindow(c);
-    });
-    QObject::connect(c->socks, &Socks5Tcp::dataReceived, g_impl->owner, [c](const QByteArray &d) {
-        c->toLwip.append(d);
-        pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
-    });
-    QObject::connect(c->socks, &Socks5Tcp::failed, g_impl->owner, [c](const QString &) {
-        ++GatewayDiag::c.socksFailed; // 拨 mihomo 失败：认证/端口/核心没起来，都汇到这一栏
-        closeConn(c, true); // ★ 必然销毁 c —— 必须是最后一句
-    });
-    QObject::connect(c->socks, &Socks5Tcp::closed, g_impl->owner, [c]() {
-        // socks 关闭：先记账，把剩余下行写完之后再优雅关闭 lwIP 侧（收口在 pumpToLwip 里，
-        // 排空后自己会 closeConn）。
-        c->socksClosed = true;
-        pumpToLwip(c); // ★ 可能销毁 c —— 必须是最后一句
-    });
-
-    // ★ 必须夹 ConnWatch，理由与 lwipTcpRecv 里那处**完全相同**，只是这里一直漏着：
-    //   connectTo() 可能**同步** emit failed（拨 mihomo 当场失败：端口没监听/连接被拒/
-    //   本机资源紧张），我们的 failed 槽是直连的 → 当场 closeConn(c, true) → tcp_abort(pcb)
-    //   → pcb 被 memp_free 回收。而 lwIP 的 tcp_process 在 SYN_RCVD 分支里是这么写的：
-    //       TCP_EVENT_ACCEPT(...);
-    //       if (err != ERR_OK) { ...; return ERR_ABRT; }
-    //       tcp_receive(pcb);          // ← 回调回 ERR_OK 就立刻拿同一个 pcb 继续用
-    //   所以固定回 ERR_OK ＝ 让 lwIP 对**已释放的 pcb** 调 tcp_receive，读到 state=0/
-    //   local_port=0，撞死在 "tcp_receive: wrong state" 断言上 —— 整个进程 abort，
-    //   **所有**被代理设备一起断网（不只是肇事那条连接）。
-    //   真机复现：被代理设备一边 DNS 洪水(120 并发 ~3000qps)一边跑 TCP，两次两中；
-    //   纯 DNS 或纯 TCP 都不崩 —— 洪水的作用是把泵饿到迟到近 300ms，把这个平时极窄的
-    //   同步失败窗口拉大到必现。closeConn 早就算好了 aborted 并登记给 ConnWatch，
-    //   只差这里把它取出来回给 lwIP。
-    ConnWatch watch(c);
-    c->socks->connectTo(g_impl->socksPort, serverIp, serverPort, user);
-    return watch.needsAbortReturn() ? ERR_ABRT : ERR_OK;
-}
-
-// ————————————— lwIP 内存池诊断：把 LWIP_STATS 真正读出来 —————————————
-//
-// lwipopts.h 打开了 MEM_STATS/MEMP_STATS，但统计只是被「存下来」——池子耗尽时 lwIP 既不打日志
-// 也不向上层报错（tcp_alloc 甚至会悄悄杀掉一条活着的连接），所以必须有人主动去读，否则等于没开。
-//
-// 成本控制（这条路挂在 200ms 的 lwIP 定时器上，绝不能给 GUI 线程添负担）：
-//  · 常态 = 对下面这张表（9 项）各做一次 u16 比较，没变化立刻 return，零字符串分配；
-//  · 只有 err 计数**相对上次上报**发生变化才考虑打日志，且两次上报至少隔 30s ——
-//    池子一旦见底会每 200ms 都有新失败，不节流就是刷屏；
-//  · 被节流吃掉的那一次**不更新基线**，攒着的失败会在下一个窗口一并报出来，不会被吞。
-// 注意 LWIP_STATS_LARGE=0 → 计数器是 u16_t 会回绕，所以判据是「与上次不相等」而非「变大了」。
-struct MempWatch {
-    memp_t pool;
-    const char *name;
-};
-constexpr MempWatch kMempWatch[] = {
-    {MEMP_TCP_PCB, "TCP_PCB(并发连接)"},
-    {MEMP_TCP_PCB_LISTEN, "TCP_PCB_LISTEN"},
-    {MEMP_TCP_SEG, "TCP_SEG(发送/乱序段)"},
-    {MEMP_PBUF, "PBUF(壳)"},
-    {MEMP_PBUF_POOL, "PBUF_POOL(入站帧)"},
-    {MEMP_UDP_PCB, "UDP_PCB"},
-    {MEMP_REASSDATA, "REASSDATA(分片重组)"},
-#if ARP_QUEUEING
-    // 注意：lwIP 2.x 里 ARP_QUEUEING 默认是 0，此时 memp_std.h 根本不会生成 MEMP_ARP_QUEUE
-    //（lwipopts.h 里的 MEMP_NUM_ARP_QUEUE 也就是个死配置）。跟着开关走，别硬写。
-    {MEMP_ARP_QUEUE, "ARP_QUEUE"},
-#endif
-    {MEMP_SYS_TIMEOUT, "SYS_TIMEOUT"},
-};
-constexpr int kMempWatchCount = int(sizeof(kMempWatch) / sizeof(kMempWatch[0]));
-constexpr qint64 kPoolReportMinIntervalMs = 30000;
-
-void pollLwipPoolStats()
-{
-    static u16_t lastErr[kMempWatchCount] = {};
-    static u16_t lastHeapErr = 0;
-    static qint64 lastReportMs = -kPoolReportMinIntervalMs;
-
-    bool changed = (lwip_stats.mem.err != lastHeapErr);
-    for (int i = 0; !changed && i < kMempWatchCount; ++i) {
-        const struct stats_mem *m = lwip_stats.memp[kMempWatch[i].pool];
-        if (m && m->err != lastErr[i])
-            changed = true;
-    }
-    if (!changed)
-        return; // 绝大多数 tick 在这里就结束了
-    const qint64 now = monoMs();
-    if (now - lastReportMs < kPoolReportMinIntervalMs)
-        return; // 节流：基线不动，攒到下个窗口一起报
-    lastReportMs = now;
-
-    QString detail;
-    for (int i = 0; i < kMempWatchCount; ++i) {
-        const struct stats_mem *m = lwip_stats.memp[kMempWatch[i].pool];
-        if (!m)
-            continue;
-        if (m->err != lastErr[i]) {
-            detail += QStringLiteral("%1 分配失败(err=%2 用量=%3 高水位=%4); ")
-                          .arg(QLatin1String(kMempWatch[i].name))
-                          .arg(uint(m->err))
-                          .arg(uint(m->used))
-                          .arg(uint(m->max));
-            lastErr[i] = m->err;
-        }
-    }
-    if (lwip_stats.mem.err != lastHeapErr) {
-        detail += QStringLiteral("堆(mem.c) 分配失败(err=%1 用量=%2 高水位=%3 容量=%4); ")
-                      .arg(uint(lwip_stats.mem.err))
-                      .arg(uint(lwip_stats.mem.used))
-                      .arg(uint(lwip_stats.mem.max))
-                      .arg(uint(lwip_stats.mem.avail));
-        lastHeapErr = lwip_stats.mem.err;
-    }
-    qWarning().noquote() << "NetStack: lwIP 内存吃紧 ——" << detail
-                         << "(TCP_PCB 耗尽会静默丢 SYN、甚至挤掉活连接；其余多为降速。"
-                            "上限见 lwipopts.h)";
-}
-
-// 诊断采样的 lwIP 那一段（声明见本文件上方常量区的注释）。
-QString lwipStatsLine()
-{
-    QString out;
-
-#if TCP_STATS
-    // ★ lwIP **没有**重传计数器：struct stats_proto 只有 xmit/recv/fw/drop/chkerr/lenerr/
-    //   memerr/rterr/proterr/opterr/err/cachehit 这几个，tcp_out.c 的三个重传入口
-    //   （tcp_rexmit / tcp_rexmit_fast / tcp_rexmit_rto_commit）一个计数都不加。
-    //   所以这里报的是实际存在的量，别指望从中直接读出「重传了几次」：
-    //     · xmit/recv —— 本窗口收发的 TCP 段数。xmit 明显大于设备侧应有的量 = 在重传，
-    //       这是目前能拿到的最接近的信号（粗，但零成本）。
-    //     · drop —— 入站被丢的段（校验/序号/无 pcb 等）。
-    //     · memerr —— 分配不到 pbuf/seg，直接对应 lwipopts.h 里那几个池的容量。
-    //   真要精确的 rexmit 计数，得往 vendored lwIP 打一个 Coast 补丁（tcp_out.c 三处 +
-    //   一个自有计数器），和已有的 accept-all / nd6 静态邻居补丁同一路数 —— 留给以后。
-    // 上一窗口的快照。u16 计数器（LWIP_STATS_LARGE=0）的增量用 u16 运算，回绕一次结果依然正确。
-    static u16_t lastXmit = 0, lastRecv = 0, lastDrop = 0, lastMemerr = 0;
-    const u16_t xmit = lwip_stats.tcp.xmit, recv = lwip_stats.tcp.recv;
-    const u16_t drop = lwip_stats.tcp.drop, memerr = lwip_stats.tcp.memerr;
-    out += QStringLiteral("tcpXmit=%1 tcpRecv=%2 tcpDrop=%3 tcpMemerr=%4")
-               .arg(uint(u16_t(xmit - lastXmit)))
-               .arg(uint(u16_t(recv - lastRecv)))
-               .arg(uint(u16_t(drop - lastDrop)))
-               .arg(uint(u16_t(memerr - lastMemerr)));
-    lastXmit = xmit;
-    lastRecv = recv;
-    lastDrop = drop;
-    lastMemerr = memerr;
-#endif
-
-    // 池子只报「用量/高水位/失败数」三元组，且只报有意义的那几个（全报会把行撑爆）。
-    struct { memp_t pool; const char *name; } kPools[] = {
-        {MEMP_TCP_PCB, "pcb"},
-        {MEMP_TCP_SEG, "seg"},
-        {MEMP_PBUF_POOL, "pbuf"},
-    };
-    for (const auto &p : kPools) {
-        const struct stats_mem *m = lwip_stats.memp[p.pool];
-        if (!m)
-            continue;
-        out += QStringLiteral(" %1=%2/%3/%4")
-                   .arg(QLatin1String(p.name))
-                   .arg(uint(m->used))
-                   .arg(uint(m->max))   // 高水位：离 lwipopts.h 里的上限还有多远
-                   .arg(uint(m->err));  // 非 0 = 撞过上限，已经在静默降级了
-    }
-    out += QStringLiteral(" heap=%1/%2/%3")
-               .arg(uint(lwip_stats.mem.used))
-               .arg(uint(lwip_stats.mem.max))
-               .arg(uint(lwip_stats.mem.err));
-
-    // ★ `coast_lwip_diag` 那一组以前**只写不读**：头文件里写着「读取方是 lwipStatsLine()」，
-    //   但这里并没有打印它们。于是 lwipopts.h 中关于 twKill / synHitTw / backlog 静默丢 SYN
-    //   的那几大段论证，全都无法在运行时核对 —— 计数器攒着，谁也看不见。补上。
-    //   这几条恰恰是 lwIP **不会回调上层**的静默路径，看不见就等于没有。
-    //   按窗口出增量（与本行其余字段一致），全 0 的窗口整段省略，免得把行撑爆。
-    {
-        static struct coast_lwip_diag prev = {};
-        const struct coast_lwip_diag &n = coast_lwip_diag;
-        const unsigned dBacklog = n.syn_drop_backlog - prev.syn_drop_backlog;
-        const unsigned dSynTw   = n.syn_hit_timewait - prev.syn_hit_timewait;
-        const unsigned dTwKill  = n.tw_killed - prev.tw_killed;
-        const unsigned dPrio    = n.prio_killed - prev.prio_killed;
-        const unsigned dAlloc   = n.alloc_fail - prev.alloc_fail;
-        const unsigned dFast    = n.fasttmr_runs - prev.fasttmr_runs;
-        const unsigned dDack    = n.delayed_acks - prev.delayed_acks;
-        if (dBacklog || dSynTw || dTwKill || dPrio || dAlloc || dFast || dDack) {
-            out += QStringLiteral(" synDropBl=%1 synHitTw=%2 twKill=%3 prioKill=%4"
-                                  " allocFail=%5 fastTmr=%6 dAck=%7 fastGapMax=%8ms")
-                       .arg(dBacklog).arg(dSynTw).arg(dTwKill).arg(dPrio)
-                       .arg(dAlloc).arg(dFast).arg(dDack)
-                       .arg(coast_lwip_diag.fasttmr_max_gap_ms);
-        }
-        // 最坏间隔是**瞬时量**，读完清零，下个窗口重新找峰值（与 txBacklogPeak 同约定）。
-        coast_lwip_diag.fasttmr_max_gap_ms = 0;
-        prev = n;
-    }
+    // 累计量报**窗口增量**（与 GatewayDiag 其余字段一致），瞬时量原样报。
+    static CoastStats prev {};
+    QString out = QStringLiteral("stackRx=%1 stackTx=%2 stackDrop=%3 rexmit=%4 refuse=%5"
+                                 " conns=%6 pollGapMax=%7ms")
+                      .arg(s.rx_frames - prev.rx_frames)
+                      .arg(s.tx_frames - prev.tx_frames)
+                      .arg(s.rx_dropped - prev.rx_dropped)
+                      .arg(s.retransmits - prev.retransmits)
+                      .arg(s.conns_refused - prev.conns_refused)
+                      .arg(s.conns_active)
+                      .arg(s.poll_max_gap_ms);
+    prev = s;
     return out;
 }
 
@@ -1191,7 +571,7 @@ void sendUdpResponse6(UdpSess *s, quint16 vport, const QHostAddress &fromIp, qui
 
     s->nic->ep->send(frame);
     // UDP/DNS 回程是**单帧**且延迟敏感，而它由 socks 的 UDP 回调触发 —— 既不在收帧排空里、
-    // 也不在 pumpToLwip 里，不在这里收口就要等泵那一拍（最多 25 ms）才发出去，DNS 会直接慢一档。
+    // 也不在 smolPumpToStack 里，不在这里收口就要等泵那一拍（最多 25 ms）才发出去，DNS 会直接慢一档。
     s->nic->ep->flushTx();
 }
 
@@ -1247,51 +627,21 @@ void sendUdpResponse4(UdpSess *s, quint16 vport, const QHostAddress &fromIp, qui
 
     s->nic->ep->send(frame);
     // UDP/DNS 回程是**单帧**且延迟敏感，而它由 socks 的 UDP 回调触发 —— 既不在收帧排空里、
-    // 也不在 pumpToLwip 里，不在这里收口就要等泵那一拍（最多 25 ms）才发出去，DNS 会直接慢一档。
+    // 也不在 smolPumpToStack 里，不在这里收口就要等泵那一拍（最多 25 ms）才发出去，DNS 会直接慢一档。
     s->nic->ep->flushTx();
 }
 
 } // namespace
 
-// ———————————————————————————— NetStack ————————————————————————————
-NetStack::NetStack(quint16 socksPort, QObject *parent)
-    : QObject(parent), d(new Impl)
-{
-    d->socksPort = socksPort;
-    d->owner = this;
-}
-
-NetStack::~NetStack()
-{
-    // 诊断日志收尾：写掉最后一个采样窗口 + 一条停机标记。放在这里而不是 LanGateway::disableAll，
-    // 是因为**本析构在工作线程上跑**（见 LanGateway_linux.cpp 的线程模型），与所有 sample() 调用
-    // 同线程 —— GatewayDiag 的单线程前提得以保持。此刻 d->timer 还没被 delete d 干掉，但我们已经
-    // 不再回事件循环了，不会有第二个 sample 并发进来。
-    // 注意：进程被直接杀掉时（见 main_qml.cpp 里关于 aboutToQuit 跑不到的说明）这里不会执行，
-    // 最多丢最后一个未满 10s 的窗口 —— 可以接受，不为它加复杂度。
-    if (d->inited)
-        GatewayDiag::flush(lwipStatsLine(), "stop");
-
-    for (UdpSess *s : std::as_const(d->udp))
-        destroyUdpSess(d, s);
-    d->udp.clear();
-    for (Nic *n : d->nics) {
-        if (d->inited)
-            netif_remove(&n->nif);
-        delete n;
-    }
-    if (g_impl == d)
-        g_impl = nullptr;
-    delete d;
-}
 
 // ═══════════════════════ smoltcp 数据面桥接 ═══════════════════════
 //
-// 与 lwIP 那一侧同构，但**没有** ConnWatch/g_destroyedConn/needsAbortReturn 那一整套 ——
-// coaststack 是 poll 模型：回调在 coast_stack_poll 内部同步发出，且引擎保证发回调时不持有
-// 自身借用，所以回调里可以安全地反过来调 coast_*（含当场 abort）。lwIP 那边 ~60 行的重入
-// 防护（NetStack.cpp 的 ConnWatch 一段）在这里结构性地不需要。
-#ifdef COAST_HAVE_RUST_STACK
+// 这里**没有**任何「回调里对象可能被同步销毁」的防护，是刻意的：coaststack 是 poll 模型 ——
+// 回调在 coast_stack_poll 内部同步发出，且引擎保证发回调时不持有自身借用，所以回调里可以
+// 安全地反过来调 coast_*（含当场 abort）。lwIP 那边为此写了 ~60 行 ConnWatch/g_destroyedConn/
+// needsAbortReturn，还得在每个 lwIP 回调的返回值上区分 ERR_ABRT 与 ERR_OK；漏一处的后果是
+// tcp_receive 对已释放的 pcb 撞断言 → **整个进程 abort、所有被代理设备一起断网**（真机复现过）。
+// 这一整类问题随 lwIP 一起没了。
 namespace {
 
 void smolDestroyConn(SmolConn *c, bool abortIt);
@@ -1513,15 +863,55 @@ void smolConnClosed(void *user, CoastConnId id, bool isAbort)
 }
 
 } // namespace
-#endif // COAST_HAVE_RUST_STACK
+
+// ———————————————————————————— NetStack ————————————————————————————
+NetStack::NetStack(quint16 socksPort, QObject *parent)
+    : QObject(parent), d(new Impl)
+{
+    d->socksPort = socksPort;
+    d->owner = this;
+}
+
+NetStack::~NetStack()
+{
+    // 诊断日志收尾：写掉最后一个采样窗口 + 一条停机标记。放在这里而不是 LanGateway::disableAll，
+    // 是因为**本析构在工作线程上跑**（见 LanGateway_linux.cpp 的线程模型），与所有 sample() 调用
+    // 同线程 —— GatewayDiag 的单线程前提得以保持。此刻 d->timer 还没被 delete d 干掉，但我们已经
+    // 不再回事件循环了，不会有第二个 sample 并发进来。
+    // 注意：进程被直接杀掉时（见 main_qml.cpp 里关于 aboutToQuit 跑不到的说明）这里不会执行，
+    // 最多丢最后一个未满 10s 的窗口 —— 可以接受，不为它加复杂度。
+    if (d->inited)
+        GatewayDiag::flush(smolStatsLine(), "stop");
+
+    for (UdpSess *s : std::as_const(d->udp))
+        destroyUdpSess(d, s);
+    d->udp.clear();
+    // ★ 顺序：先拆桥接连接 → 再释放栈 → 最后删 Nic。三步都不能换位：
+    //   · coast_stack_free 只是 Drop 整个引擎，**不发** conn_closed 回调（ffi.rs 就是一句
+    //     Box::from_raw + drop）。所以 SmolConn 和它挂着的 Socks5Tcp 必须由这里主动收掉，
+    //     否则每次关网关都泄漏一批连接对象。
+    //   · 拆连接要回头调 coast_conn_abort，所以必须在 free **之前**；
+    //   · 出帧回调要按 nic id 查 Nic*，所以 Nic 必须活到 free **之后**。
+    const QList<SmolConn *> conns = d->smolConns.values();
+    for (SmolConn *c : conns)
+        smolDestroyConn(c, true); // 进程/网关要停了，没有可优雅关闭的对端
+    d->smolConns.clear();
+    if (d->smol) {
+        coast_stack_free(d->smol);
+        d->smol = nullptr;
+    }
+    for (Nic *n : d->nics)
+        delete n;
+    if (g_impl == d)
+        g_impl = nullptr;
+    delete d;
+}
 
 const char *NetStack::activeTcpStack() const
 {
-#ifdef COAST_HAVE_RUST_STACK
-    if (d->useSmol && d->smol)
-        return "smoltcp";
-#endif
-    return "lwip";
+    // lwIP 移除后只剩一条路，但这个方法**不删**：自测和诊断日志都据它证明"跑的是哪条数据面"，
+    // 而 init() 失败时 d->smol 为空 —— 那时报 "none" 比报一个不存在的栈诚实。
+    return d->smol ? "smoltcp" : "none";
 }
 
 bool NetStack::init(QString *err)
@@ -1536,71 +926,41 @@ bool NetStack::init(QString *err)
     g_impl = d;
     g_debug = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
 
-#ifdef COAST_HAVE_RUST_STACK
-    // ———— TCP 栈选择：COAST_STACK=smoltcp|lwip，默认 lwip ————
-    // 与 COAST_GATEWAY_DATAPATH（AppConfig.cpp）同一套"env 覆盖、供线上不改配置就能退回去"
-    // 的范式。**只影响 TCP**：UDP/DNS 那 700 行两条路径共用，不受此开关影响。
-    // 收益与边界见 docs/lwip-alternatives.md（R19–R21：Windows 上真正的绑定约束是 Npcap
-    // 发送路径，换栈是省 CPU 约 1/3，不是提高吞吐天花板）。
-    d->useSmol = qgetenv("COAST_STACK").trimmed().toLower() == "smoltcp";
-    if (d->useSmol) {
-        CoastCallbacks cb {};
-        cb.out_frame = smolOutFrame;
-        cb.conn_new = smolConnNew;
-        cb.conn_data = smolConnData;
-        cb.conn_sent = smolConnSent;
-        cb.conn_closed = smolConnClosed;
-        d->smol = coast_stack_new(&cb, d);
-        if (!d->smol) {
-            g_impl = nullptr;
-            if (err)
-                *err = QStringLiteral("coaststack 初始化失败");
-            return false;
-        }
-        d->smolClock.start();
-        qInfo("[NetStack] TCP 数据面 = smoltcp (%s)", coast_stack_version());
-    }
-#endif
-
-    lwip_init();
-
-    // catch-all TCP 监听：绑**双栈任意 IP**（IP_ANY_TYPE）+ 端口 0（配合 tcp_in.c 补丁通配任意目的
-    // 端口）。监听是全局的、与网卡无关：哪张卡进来的 v4/v6 SYN 都命中它，accept 里再按设备 IP 查身份。
-    // ★ 必须用 tcp_new_ip_type(IPADDR_TYPE_ANY) + IP_ANY_TYPE，不能用旧的 tcp_new()+IP_ADDR_ANY：
-    //   后者的 pcb 类型是 IPv4，tcp_in.c 的监听匹配里 v6 SYN 走不到「ANY_TYPE 通配」那条分支，会被
-    //   IP 版本精确匹配挡掉 → v6 SYN 无人 accept。ANY_TYPE 让同一个监听器同时收 v4/v6。
-    struct tcp_pcb *pcb = tcp_new_ip_type(IPADDR_TYPE_ANY);
-    if (!pcb) {
+    // ———— 建栈 ————
+    // catch-all（接住发往**任意** IP:port 的 SYN）由 Rust 侧实现：smoltcp 的 any_ip + 一层
+    // phy 端口改写 shim。lwIP 时代这件事要在 vendored 源码上打三个补丁（ip4.c/ip6.c 的
+    // accept-all + tcp_in.c 的通配端口），补丁没了，监听器/backlog/`local_port = 0` 这一整段
+    // 也跟着没了 —— 引擎内部自带监听，这里只管建。
+    CoastCallbacks cb {};
+    cb.out_frame = smolOutFrame;
+    cb.conn_new = smolConnNew;
+    cb.conn_data = smolConnData;
+    cb.conn_sent = smolConnSent;
+    cb.conn_closed = smolConnClosed;
+    d->smol = coast_stack_new(&cb, d);
+    if (!d->smol) {
         g_impl = nullptr;
         if (err)
-            *err = QStringLiteral("tcp_new 失败");
+            *err = QStringLiteral("coaststack 初始化失败");
         return false;
     }
-    tcp_bind(pcb, IP_ANY_TYPE, 0);
-    d->listener = tcp_listen_with_backlog(pcb, TCP_DEFAULT_LISTEN_BACKLOG);
-    if (!d->listener) {
-        tcp_close(pcb);
-        g_impl = nullptr;
-        if (err)
-            *err = QStringLiteral("tcp_listen 失败");
-        return false;
-    }
-    d->listener->local_port = 0; // 通配任意目的端口
-    tcp_accept(d->listener, lwipTcpAccept);
+    d->smolClock.start();
+    qInfo("[NetStack] TCP 数据面 = smoltcp (%s)", coast_stack_version());
 
-    // lwIP 定时器泵（TCP 重传/超时/ARP 老化）+ UDP 流老化 + 内存池诊断。
+    // 栈的定时器泵（TCP 重传/延迟 ACK/TIME_WAIT 回收）+ 收帧排空兜底 + UDP 流老化。
     //
-    // ★ 泵的周期必须**明显细于** lwIP 自己的 TCP 定时器周期（TCP_TMR_INTERVAL，见 lwipopts.h），
-    //   否则每一拍都要等下一次泵才跑得到，实际周期被拉长到「泵周期与 TCP 周期的公倍数量级」。
-    //   老值 200ms 配 lwIP 默认的 250ms 就是这个毛病：tcp_fasttmr（延迟 ACK）实际约 400ms 一次、
-    //   tcp_slowtmr（**重传**）约 600ms 一次 —— 本机→设备方向一旦丢一帧，恢复要大半秒起步。
-    //   被代理设备的表现就是「访问什么都慢、偶尔打不开」，且与目标在国内还是国外无关。
-    //   现在 TCP_TMR_INTERVAL 降到 100ms、泵降到 25ms（1/4 周期，留足抖动余量）。
+    // ★ 25ms 这个值是 lwIP 时代量出来的，换栈后**保持不变**（引擎的 poll 语义与 lwIP 的
+    //   sys_check_timeouts 同类：都是"到点才干活，没到点空转"）。当年的教训值得留着：
+    //   泵周期必须**明显细于**栈自己的 TCP 定时器周期，否则每一拍都要等下一次泵才跑得到，
+    //   实际周期被拉长到两者的公倍数量级 —— 老值 200ms 配 lwIP 默认的 250ms 就是这个毛病：
+    //   延迟 ACK 实际约 400ms 一次、**重传**约 600ms 一次，本机→设备方向一旦丢一帧，恢复要
+    //   大半秒起步。被代理设备的表现是「访问什么都慢、偶尔打不开」，且与目标在国内还是国外无关。
+    //   coast_stack_poll 会返回建议的下次延迟，将来要自适应就从那里接（现在固定周期够用）。
     // 成本：空转一拍就是「读一次时钟 + 比一次链表头」，40 次/秒可以忽略；且这个定时器只在网关
     //   开着时存在，跑在 LanGateway 的工作线程上，不碰 GUI 线程。
-    // 老化和诊断**不跟着提频**：它们本来就是 200ms 一次的量级，没必要 8 倍频，按拍数分频即可。
+    // 老化**不跟着提频**：它本来就是 200ms 一次的量级，没必要 8 倍频，按拍数分频即可。
     d->timer = new QTimer(this);
-    d->timer->setInterval(kLwipPumpIntervalMs);
+    d->timer->setInterval(kPumpIntervalMs);
     // ★ 必须显式 PreciseTimer —— 默认的 Qt::CoarseTimer 在 **Windows** 上把这个泵毁掉两次：
     //   1) 粒度：CoarseTimer 走 SetTimer/WM_TIMER，受系统时钟节拍（默认 15.6ms）约束，25ms 实际
     //      变成 31.25ms。真机 gateway-diag.log 里 6033 个采样窗口有 5933 个泵周期正好是 31ms
@@ -1608,28 +968,28 @@ bool NetStack::init(QString *err)
     //   2) 饥饿：WM_TIMER 是**队列空时才合成**的最低优先级消息。数据面忙起来（Npcap 收帧事件 +
     //      上百条到 mihomo 的 socket 通知挤满消息队列）时它会被无限期推后 —— 同一份日志里，设备
     //      下行 >600 帧/秒的窗口泵周期滑到 45ms、26% 的拍迟到 2 倍以上、最坏一次迟到 631ms。
-    //      泵一停就是 lwIP 的重传/延迟 ACK 全停，对外表现是所有被代理设备同时卡住半秒。
+    //      泵一停就是栈的重传/延迟 ACK 全停，对外表现是所有被代理设备同时卡住半秒。
     //   PreciseTimer 在 Qt 的 Windows 事件分发器里走 timeSetEvent（多媒体定时器）：既不受 15.6ms
     //   节拍限制，也不再是 WM_TIMER，因而不被消息队列里的收帧/socket 事件饿死。
     //   linux/mac 上两种类型都是 timerfd/kqueue，本行无副作用。
     d->timer->setTimerType(Qt::PreciseTimer);
     d->pumpClock.start();
     connect(d->timer, &QTimer::timeout, this, [this] {
-        // ★ 泵的迟到量 = 工作线程的饱和度。这一拍本该 kLwipPumpIntervalMs 之后就到，迟到多少就
-        //   说明上一拍的活（收帧 → lwIP → SOCKS 读写）占了多少额外时间。这是**唯一**能把
+        // ★ 泵的迟到量 = 工作线程的饱和度。这一拍本该 kPumpIntervalMs 之后就到，迟到多少就
+        //   说明上一拍的活（收帧 → 栈 → SOCKS 读写）占了多少额外时间。这是**唯一**能把
         //   「链路丢包」和「本机算不过来」分开的指标：前者只涨 txdrop/rxdrop，后者只涨这里。
         const qint64 elapsed = d->pumpClock.restart();
-        const qint64 lag = elapsed - kLwipPumpIntervalMs;
+        const qint64 lag = elapsed - kPumpIntervalMs;
         ++GatewayDiag::c.pumpTicks;
-        if (elapsed > 2 * kLwipPumpIntervalMs) {
+        if (elapsed > 2 * kPumpIntervalMs) {
             ++GatewayDiag::c.pumpLateTicks;
             if (lag > GatewayDiag::c.pumpMaxLagMs)
                 GatewayDiag::c.pumpMaxLagMs = lag;
         }
 
         // ★ 收帧排空兜底（Windows 才有实际动作，见 IL2Endpoint::drainNow 的注释）。
-        //   放在 sys_check_timeouts() **之前**：先把已经到达的帧喂进 lwIP，再跑它的定时器 ——
-        //   否则新到的 ACK 要多等一整拍才被 lwIP 看到，等于白排空。
+        //   放在 coast_stack_poll() **之前**：先把已经到达的帧喂进栈，再跑它的定时器 ——
+        //   否则新到的 ACK 要多等一整拍才被栈看到，等于白排空。
         //   先快照 key 再遍历：排空会同步触发 frameReceived → inputFrame，虽然帧处理路径不会
         //   增删网卡，但直接在 QHash 上边遍历边回调是自找麻烦。网卡数是个位数，这份拷贝可忽略。
         if (!d->nics.isEmpty()) {
@@ -1640,29 +1000,25 @@ bool NetStack::init(QString *err)
             }
         }
 
-        sys_check_timeouts();
-#ifdef COAST_HAVE_RUST_STACK
-        // smoltcp 的定时器（重传/延迟 ACK/TIME_WAIT 回收）。回调在这里同步发出：
-        // 出帧 → ep->send()，随后与 lwIP 共用同一次 flushNicTx 收口。
-        if (d->useSmol && d->smol)
+        // 栈的定时器（重传/延迟 ACK/TIME_WAIT 回收）。回调在这里同步发出：
+        // 出帧 → ep->send()，随后由下面那次 flushNicTx 统一收口。
+        if (d->smol)
             coast_stack_poll(d->smol, static_cast<quint64>(d->smolClock.elapsed()));
-#endif
         // ★ flushTx 的第三个调用点，同时是**兜底**：重传、延迟 ACK、ARP/NDP 周期投毒这些帧
-        //   既不在收帧排空里、也不在 pumpToLwip 里，只有这里能收口。它也保证了「任何漏掉
+        //   既不在收帧排空里、也不在 smolPumpToStack 里，只有这里能收口。它也保证了「任何漏掉
         //   flush 的出帧路径最迟 25 ms 也会被发出去」——加新的出帧路径时这条兜底是安全网，
         //   但别拿它当主路（25 ms 的延迟对 TCP 自时钟是致命的）。
         flushNicTx(d);
         if (++d->pumpTick >= kHousekeepEveryTicks) {
             d->pumpTick = 0;
             reapUdpFlows(d);
-            pollLwipPoolStats();
         }
         // 诊断采样：按墙钟判间隔（不按拍数——泵一旦迟到，拍数和真实时间就对不上了）。
         if (GatewayDiag::enabled()) {
             const qint64 now = QDateTime::currentMSecsSinceEpoch();
             if (now - d->lastDiagMs >= GatewayDiag::sampleIntervalMs()) {
                 d->lastDiagMs = now;
-                GatewayDiag::sample(lwipStatsLine());
+                GatewayDiag::sample(smolStatsLine());
             }
         }
     });
@@ -1688,82 +1044,56 @@ bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QStrin
     if (d->nics.contains(ep))
         return true;
 
-    // netif 的 IP/掩码用**本机在这张卡上的真实地址**，不能再用早期的 0.0.0.1 // 0.0.0.0 占位：
-    //  · ip4_route 会跳过 IP 为 0.0.0.0 的 netif（回包找不到出口而被丢），所以 IP 必须非零；
-    //  · 掩码若给 0.0.0.0，该 netif「匹配一切」，多网卡时 ip4_route 永远返回链表第一张 →
-    //    B 网段设备的回包会从 A 网卡发出去。用真实掩码，出方向按子网各归各的。
-    ip4_addr_t nip, nmask, ngw;
-    if (!ip4addr_aton(localIp.toLatin1().constData(), &nip) || ip4_addr_isany_val(nip)) {
+    // 用**本机在这张卡上的真实地址/掩码**，不能给 0.0.0.1 // 0.0.0.0 这类占位：栈据它判断
+    // 「哪些目的是本网段的」，掩码给错会让多网卡场景下 B 网段设备的回包从 A 网卡发出去。
+    // 校验放在这里而不是丢给 Rust：QHostAddress 的报错能直接告诉用户是哪一个字段不合法。
+    const QHostAddress ipAddr(localIp);
+    if (ipAddr.protocol() != QAbstractSocket::IPv4Protocol || ipAddr.toIPv4Address() == 0) {
         if (err)
             *err = QStringLiteral("本机 IP 非法: ") + localIp;
         return false;
     }
-    if (!ip4addr_aton(netmask.toLatin1().constData(), &nmask) || ip4_addr_isany_val(nmask)) {
+    const QHostAddress maskAddr(netmask);
+    if (maskAddr.protocol() != QAbstractSocket::IPv4Protocol || maskAddr.toIPv4Address() == 0) {
         if (err)
             *err = QStringLiteral("子网掩码非法: ") + netmask;
         return false;
     }
-    ip4_addr_set_zero(&ngw);
 
     auto *nic = new Nic;
     nic->ep = ep;
     nic->localMac6 = localMac6;
     nic->localIp = localIp;
     nic->netmask = netmask;
-    // state 必须在 netif_add 之前就绪：lwipNetifInit 里要用它填 hwaddr。
-    if (netif_add(&nic->nif, &nip, &nmask, &ngw, nic, lwipNetifInit, ethernet_input) == nullptr) {
-        delete nic;
+
+    const quint32 ipHost = ipAddr.toIPv4Address();   // QHostAddress 给的是**主机序**
+    CoastAddr a {};
+    a.is_v6 = false;
+    a.bytes[0] = uchar((ipHost >> 24) & 0xFF);       // CoastAddr.bytes 是网络序
+    a.bytes[1] = uchar((ipHost >> 16) & 0xFF);
+    a.bytes[2] = uchar((ipHost >> 8) & 0xFF);
+    a.bytes[3] = uchar(ipHost & 0xFF);
+    // 掩码 → 前缀长度。数的是**前导 1 的个数**，遇到第一个非全 1 字节就停 —— 不连续的掩码
+    // （255.0.255.0 这种病态输入）按其前缀部分处理，不会数出个虚高的值。
+    quint8 prefix = 0;
+    {
+        const quint32 m = maskAddr.toIPv4Address();
+        for (int bit = 31; bit >= 0 && ((m >> bit) & 1u); --bit)
+            ++prefix;
+    }
+
+    const quint32 nid = d->nextNicId++;
+    if (coast_stack_add_nic(d->smol, nid,
+                            reinterpret_cast<const uint8_t *>(nic->localMac6.constData()),
+                            &a, prefix) != COAST_OK) {
         if (err)
-            *err = QStringLiteral("netif_add 失败");
+            *err = QStringLiteral("coaststack add_nic 失败");
+        delete nic;
         return false;
     }
-    if (d->nics.isEmpty())
-        netif_set_default(&nic->nif); // ip4_route 无匹配时的兜底出口
-    netif_set_up(&nic->nif);
-    netif_set_link_up(&nic->nif);
-#if LWIP_IPV6
-    // 给这张卡一个 IPv6 链路本地地址（本机 MAC 派生）。它只当我们发 NS/NA 的源地址与 nd6 内部
-    // 一致性用；不配任何全局 v6——被劫持设备的 v6 目的是「任意公网地址」，由 ip6.c 的 accept-all
-    // 补丁接管，回程由 nd6 静态邻居项（addDeviceV6）直连设备 MAC，都不依赖本机有没有全局 v6。
-    // DAD 已在 lwipopts 关（LWIP_IPV6_DUP_DETECT_ATTEMPTS=0）→ 该地址即刻 PREFERRED，无需等待。
-    // 不设 ip6_autoconfig_enabled：LWIP_IPV6_AUTOCONFIG=0 时该字段根本不存在，且我们本就不做 SLAAC。
-    netif_create_ip6_linklocal_address(&nic->nif, 1);
-#endif
     d->nics.insert(ep, nic);
-#ifdef COAST_HAVE_RUST_STACK
-    if (d->useSmol && d->smol) {
-        const quint32 nid = d->nextNicId++;
-        CoastAddr a {};
-        a.is_v6 = false;
-        // lwIP 的 ip4_addr_t::addr 已是**网络序**，CoastAddr.bytes 也是网络序 → 直接铺字节
-        memcpy(a.bytes, &nip.addr, 4);
-        // 掩码 → 前缀长度：同样按网络序逐字节数前导 1（不引 QtEndian，省一个 include）
-        quint8 prefix = 0;
-        {
-            const uchar *mb = reinterpret_cast<const uchar *>(&nmask.addr);
-            for (int bi = 0; bi < 4; ++bi) {
-                if (mb[bi] == 0xFF) {
-                    prefix += 8;
-                    continue;
-                }
-                for (uchar bit = 0x80; bit && (mb[bi] & bit); bit >>= 1)
-                    ++prefix;
-                break;
-            }
-        }
-        if (coast_stack_add_nic(d->smol, nid, reinterpret_cast<const uint8_t *>(nic->localMac6.constData()),
-                                &a, prefix) != COAST_OK) {
-            if (err)
-                *err = QStringLiteral("coaststack add_nic 失败");
-            d->nics.remove(ep);
-            netif_remove(&nic->nif);
-            delete nic;
-            return false;
-        }
-        d->nicIds.insert(ep, nid);
-        d->nicById.insert(nid, nic);
-    }
-#endif
+    d->nicIds.insert(ep, nid);
+    d->nicById.insert(nid, nic);
     return true;
 }
 
@@ -1772,8 +1102,12 @@ void NetStack::removeNic(IL2Endpoint *ep)
     Nic *nic = d->nics.take(ep);
     if (!nic)
         return;
-    if (d->inited)
-        netif_remove(&nic->nif);
+    // 先从栈里摘掉这张卡：它会连带拆掉卡上的连接（发 conn_closed → smolDestroyConn），
+    // 而那些回调要按 nic id 查 nicById，所以反查表得留到摘完再清。
+    const quint32 nid = d->nicIds.take(ep);
+    if (d->smol && nid)
+        coast_stack_remove_nic(d->smol, nid);
+    d->nicById.remove(nid);
     // 该卡上的 UDP 会话失去出口，一并收掉（设备重新发包会重建）。
     const QStringList victims = d->udp.keys();
     for (const QString &ip : victims) {
@@ -1782,13 +1116,6 @@ void NetStack::removeNic(IL2Endpoint *ep)
             d->udp.remove(ip);
             destroyUdpSess(d, s);
         }
-    }
-    // 指向本卡的 v6 静态邻居索引也清掉（netif_remove 已把 nd6 项随 netif 带走；这里只是别让
-    // deviceV6Nic 留下悬垂的 Nic*，否则之后 removeDeviceV6 会 use-after-free）。
-    const QStringList v6keys = d->deviceV6Nic.keys();
-    for (const QString &ip6 : v6keys) {
-        if (d->deviceV6Nic.value(ip6) == nic)
-            d->deviceV6Nic.remove(ip6);
     }
     delete nic;
 }
@@ -1804,112 +1131,74 @@ void NetStack::addDevice(const QString &ip, const QByteArray &mac6, const QStrin
     if (ip.isEmpty() || mac6.size() != 6)
         return;
     d->devices.insert(ip, DeviceInfo{mac6, socksUser, reject});
-    if (d->inited) {
-        // 预置静态 ARP：lwIP 回包给设备时直接用其 MAC，不发 ARP 请求。
-        ip4_addr_t a;
-        if (ip4addr_aton(ip.toLatin1().constData(), &a)) {
-            struct eth_addr e;
-            std::memcpy(e.addr, mac6.constData(), 6);
-            etharp_add_static_entry(&a, &e);
-        }
-    }
+    // ★ 这里曾经还要 etharp_add_static_entry 预置一条静态 ARP，否则 lwIP 回包给设备时会去
+    //   发 ARP 请求（而 ARP 帧被投毒器截走、根本进不了栈，请求永远等不到应答 → 回程黑洞）。
+    //   coaststack 改成**从设备发来的帧里自学 (src MAC, src IP)** 并合成一条 ARP 应答喂给
+    //   引擎（engine.rs 的 learn_neighbor），所以这里不用也不该再注入 —— 少一份要和真实
+    //   拓扑保持同步的状态。v6 同理，见 addDeviceV6。
 }
 
 // ★ 关掉所有「设备侧 = ip」的 TCP 连接。**换址/移除设备时必须调**，否则旧地址的连接成孤儿：
-//   设备换到新 IP 后再也不对它们发包、靶机回包又发往旧地址收不到，lwIP 的 established 超时
-//   是**24 小时**，于是这些 PCB 实质永久占着。真机实测（40 条连接、换址后静置 60s）PCB
-//   卡在 43 纹丝不动 —— 反复换址（DHCP 续约 / Wi-Fi 漫游）就是慢性 PCB 泄漏，最终把
-//   MEMP_NUM_TCP_PCB 吃光、新连接建不了。
-//   拓扑：被劫持连接里 lwIP 冒充靶机当"服务器"，设备是"客户端" → `pcb->remote_ip` = 设备 IP。
-//   先收集再关：closeConn 会改 tcp_active_pcbs 链表，边遍历边关是 use-after-free。
-// ip 可以是 v4 或 v6 串。★ **必须两栈都处理**：catch-all 监听器是双栈（IP_ANY_TYPE，
-//   见 init），v4/v6 SYN 都会被 accept 建连，所以设备的 v6 TCP 连接同样会在换址/移除后
-//   变成孤儿。只匹配 v4 会把 v6 连接漏在 lwIP 里等 24h established 超时 —— 与 v4 泄漏同性质。
+//   设备换到新 IP 后再也不对它们发包、靶机回包又发往旧地址收不到，于是这些连接实质永久占着
+//   （lwIP 时代的 established 超时是 24 小时；真机实测 40 条连接换址后静置 60s，PCB 卡在 43
+//   纹丝不动 —— 反复换址 DHCP 续约 / Wi-Fi 漫游就是慢性泄漏）。换栈不改变这个必要性。
+// ip 可以是 v4 或 v6 串，两族都必须处理：catch-all 是双栈的，设备的 v6 TCP 连接同样会成孤儿。
 static void closeDeviceConns(NetStack::Impl *d, const QString &ip)
 {
-    Q_UNUSED(d);
-    ip_addr_t want;
-    if (!ipaddr_aton(ip.toLatin1().constData(), &want))
+    if (!d || !d->smol)
         return;
-    // ★ **每次重扫链表、只关一条**，绝不缓存一批裸指针再逐个关。
-    //   先收集后批关看着更省，实则是 use-after-free：closeConn 里 `c->socks->closeTunnel()`
-    //   是**同步**的，可能触发别的连接的槽 → 连锁 delete 掉 victims 里的其它 TcpConn，
-    //   后续迭代就在对已释放内存调用 closeConn。而现成的 g_destroyedConn 哨兵**救不了**——
-    //   它只记「最近一次」被 delete 的那一个地址（单哨兵、非集合），连锁删两个以上就漏。
-    //   重扫的代价是 O(n²) 最坏，但 n 是「这一台设备的连接数」、且只在设备移除/换址时跑一次，
-    //   完全不在数据面热路径上；拿它换掉一个 UAF 是划算的。
-    //   循环上界 = 每轮至少关掉一条，否则 break（防意外的死循环）。
-    for (;;) {
-        TcpConn *victim = nullptr;
-        for (struct tcp_pcb *p = tcp_active_pcbs; p; p = p->next) {
-            // ip_addr_cmp 会先比类型再比地址：v4 want 不会误配 v6 pcb，反之亦然。
-            if (ip_addr_cmp(&p->remote_ip, &want) && p->callback_arg) {
-                victim = static_cast<TcpConn *>(p->callback_arg);
-                break;
-            }
-        }
-        if (!victim)
-            break; // 该地址已无连接
-        closeConn(victim, true); // abort：设备不在这个地址了，没有可优雅关闭的对端
-        // closeConn 必然把这条从 tcp_active_pcbs 摘掉（tcp_abort/tcp_close），
-        // 所以下一轮重扫不会再选中它 —— 循环必然收敛。
+    const QHostAddress a(ip);
+    CoastAddr dev {};
+    if (a.protocol() == QAbstractSocket::IPv6Protocol) {
+        dev.is_v6 = true;
+        const Q_IPV6ADDR raw = a.toIPv6Address();
+        memcpy(dev.bytes, raw.c, 16);
+    } else if (a.protocol() == QAbstractSocket::IPv4Protocol) {
+        const quint32 v4 = a.toIPv4Address();
+        dev.bytes[0] = uchar((v4 >> 24) & 0xFF);
+        dev.bytes[1] = uchar((v4 >> 16) & 0xFF);
+        dev.bytes[2] = uchar((v4 >> 8) & 0xFF);
+        dev.bytes[3] = uchar(v4 & 0xFF);
+    } else {
+        return; // 解析不出来的地址串：什么都不做，别拿一个全零地址去批量关连接
     }
+    // 引擎内部按设备地址整批关，每关一条发一次 conn_closed → smolDestroyConn 收桥接侧。
+    // lwIP 那边这件事要遍历 tcp_active_pcbs（还得引 priv 头），且**每关一条就得重扫一遍链表**
+    // ——因为 closeConn 会同步触发别的连接的槽、连锁 delete 掉已经收集好的裸指针，先收集后批关
+    // 是 use-after-free。回调模型没有这个问题，那段 O(n²) 的重扫循环一并作废。
+    coast_stack_close_device_conns(d->smol, &dev);
 }
 
 void NetStack::removeDevice(const QString &ip)
 {
     d->devices.remove(ip);
-    closeDeviceConns(d, ip); // 先把该 IP 的 TCP 连接关掉，别让它们成孤儿泄漏 PCB
+    closeDeviceConns(d, ip); // 先把该 IP 的 TCP 连接关掉，别让它们成孤儿泄漏
     if (auto *s = d->udp.take(ip))
         destroyUdpSess(d, s);
-    if (d->inited) {
-        ip4_addr_t a;
-        if (ip4addr_aton(ip.toLatin1().constData(), &a))
-            etharp_remove_static_entry(&a);
-    }
 }
 
 void NetStack::addDeviceV6(IL2Endpoint *from, const QString &ip6, const QByteArray &mac6,
                            const QString &socksUser, bool reject)
 {
+    Q_UNUSED(from); // 邻居/路由由引擎从实帧自学，不再需要「装到哪个 netif 上」
     if (ip6.isEmpty() || mac6.size() != 6)
         return;
-    // 与 v4 共用 devices 表：key 是 v6 地址串，和 v4 的点分串天然不冲突。lwipTcpAccept 里
+    // 与 v4 共用 devices 表：key 是 v6 地址串，和 v4 的点分串天然不冲突。smolConnNew 里
     // userForIp(victimIp) 用的就是这张表，v6 连接的 victimIp 是 v6 串，正好命中。
     d->devices.insert(ip6, DeviceInfo{mac6, socksUser, reject});
-    if (!d->inited)
-        return;
-    Nic *nic = d->nics.value(from);
-    if (!nic)
-        return;
-#if LWIP_IPV6
-    ip6_addr_t a;
-    if (!ip6addr_aton(ip6.toLatin1().constData(), &a))
-        return;
-    // 预置静态邻居：lwIP 回包给设备时直接用其 MAC，把该 v6 目的当 on-link，不发 NS（见 nd6.c 补丁）。
-    // LWIP_IPV6_SCOPES=0 → 无需给地址 assign zone。
-    nd6_add_static_neighbor_entry(&a, &nic->nif,
-                                  reinterpret_cast<const u8_t *>(mac6.constData()));
-    d->deviceV6Nic.insert(ip6, nic);
-#endif
+    // ★ v6 这边曾经要 nd6_add_static_neighbor_entry 预置静态邻居。现在由引擎自学，而且它做的
+    //   **不止**是邻居：还要给设备的全局 v6 加一条 /128 直连路由。这条是靠 smoltcp 的 net_trace
+    //   抓出来的 —— 邻居注入一直是好的，坏的是路由：设备的全局 v6 相对本机唯一的 v6 地址
+    //   （EUI-64 链路本地）是 off-link，回包走默认路由、下一跳解析到本机自己的链路本地，
+    //   于是永远只发 NS。在此之前靠猜试了四种邻居注入方式，全是白费。
 }
 
 void NetStack::removeDeviceV6(const QString &ip6)
 {
     d->devices.remove(ip6);
-    closeDeviceConns(d, ip6); // 同 v4：关掉该 v6 地址的 TCP 连接，别让它成孤儿泄漏 PCB
+    closeDeviceConns(d, ip6); // 同 v4：关掉该 v6 地址的 TCP 连接，别让它成孤儿
     if (auto *s = d->udp.take(ip6))
         destroyUdpSess(d, s);
-    Nic *nic = d->deviceV6Nic.take(ip6);
-#if LWIP_IPV6
-    if (d->inited && nic) {
-        ip6_addr_t a;
-        if (ip6addr_aton(ip6.toLatin1().constData(), &a))
-            nd6_remove_static_neighbor_entry(&a, &nic->nif);
-    }
-#else
-    Q_UNUSED(nic);
-#endif
 }
 
 void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
@@ -1927,71 +1216,47 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
                      nic->localIp.toLatin1().constData(), int(frame.size()), ethType, proto);
     }
 
-    // ARP/NDP 等不喂 lwIP（投毒由 Arp/NdpSpoofer 负责，避免 lwIP 误答）。LanGateway 已在上游把
+    // ARP/NDP 不进栈（投毒由 Arp/NdpSpoofer 负责，避免栈误答）。LanGateway 已在上游把
     // ARP 与 ICMPv6-NDP(NS/NA/RS/RA) 截走不喂进来；这里只按 ethertype 分 v4/v6 两条数据路径。
+    //
+    // ★ 分流只有三个去向：**UDP → 手工 NAT，TCP → 栈，其余一律丢**。
+    //   lwIP 时代还有第三条「非 UDP 一股脑喂进去，让 lwIP 自己挑」的兜底，顺带回应 ICMP echo。
+    //   现在没有了：coaststack 只实现 TCP（coaststack.h「职责边界」一节），喂别的协议进去只会
+    //   让它 rx_dropped++。丢掉 ICMP 的后果是被劫持设备**ping 不通公网**（它的 ping 本来也只是
+    //   由我们代答、并不真的探测远端可达性，误导性大于价值）；真要恢复，该做的是在这里手工
+    //   构造 echo reply，而不是把一个通用栈塞回数据面。
     if (ethType == 0x86DD) { // IPv6
         if (frame.size() < 14 + 40)
             return;
-        // NDP 从不带扩展头；这里只看紧邻的 next header。有扩展头的（罕见）会当作「非 UDP」喂给
-        // lwIP，lwIP 处理不了就丢——首个版本可接受（TCP 被 MSS 钳住不分片、UDP 无扩展头）。
+        // NDP 从不带扩展头；这里只看紧邻的 next header。带扩展头的（罕见）next header 不是 6/17，
+        // 会落到下面的丢弃分支 —— 可接受（TCP 被 MSS 钳住不分片、UDP 无扩展头）。
         const quint8 nexthdr = f[14 + 6];
         if (nexthdr == 17) { // UDP：手工拦截转发（含 DNS）
             handleUdpFrame6(nic, frame);
             return;
         }
-#ifdef COAST_HAVE_RUST_STACK
-        // v6 TCP 也交给 smoltcp。ICMPv6-echo 之类仍走 lwIP —— 那不是数据面。
-        // ★ v6 曾经不通，根因不是邻居注入（那一直是好的），而是**路由**：设备的全局 v6
-        //   相对本机唯一的 v6 地址（EUI-64 链路本地）是 off-link，回包走默认路由、下一跳
-        //   解析到本机自己的链路本地 → 永远只发 NS。修法是每设备一条 /128 直连路由
-        //   （engine.rs 的 learn_neighbor_v6）。这条是靠 smoltcp 的 net_trace 抓出来的，
-        //   之前靠猜试了四种邻居注入方式全是白费。
-        if (d->useSmol && d->smol && nexthdr == 6) {
-            const quint32 nid = d->nicIds.value(from, 0);
-            if (nid)
-                coast_stack_input(d->smol, nid,
-                                  reinterpret_cast<const uint8_t *>(frame.constData()),
-                                  static_cast<size_t>(frame.size()));
+        if (nexthdr != 6)
+            return;
+    } else if (ethType == 0x0800) { // IPv4
+        if (frame.size() < 14 + 20)
+            return;
+        const uchar *ip = f + 14;
+        const quint8 proto = ip[9];
+        if (proto == 17) { // UDP：手工拦截转发（含 DNS）
+            handleUdpFrame(nic, frame, (ip[0] & 0x0F) * 4);
             return;
         }
-#endif
-        // TCP/ICMPv6-echo 等交给 lwIP（accept-all v6 补丁把无主单播收到 inp 上）。
-        struct pbuf *p6 = pbuf_alloc(PBUF_RAW, static_cast<u16_t>(frame.size()), PBUF_POOL);
-        if (!p6)
+        if (proto != 6)
             return;
-        pbuf_take(p6, frame.constData(), static_cast<u16_t>(frame.size()));
-        if (nic->nif.input(p6, &nic->nif) != ERR_OK)
-            pbuf_free(p6);
-        return;
+    } else {
+        return; // 非 IP
     }
-    if (ethType != 0x0800) // 只剩 IPv4
-        return;
-    if (frame.size() < 14 + 20)
-        return;
-    const uchar *ip = f + 14;
-    const int ihl = (ip[0] & 0x0F) * 4;
-    const quint8 proto = ip[9];
 
-    if (proto == 17) { // UDP：手工拦截转发（含 DNS）
-        handleUdpFrame(nic, frame, ihl);
-        return;
-    }
-#ifdef COAST_HAVE_RUST_STACK
-    if (d->useSmol && d->smol && proto == 6) {
-        const quint32 nid = d->nicIds.value(from, 0);
-        if (nid)
-            coast_stack_input(d->smol, nid, reinterpret_cast<const uint8_t *>(frame.constData()),
-                              static_cast<size_t>(frame.size()));
-        return;
-    }
-#endif
-    // TCP/ICMP 等交给 lwIP —— 注入**收到它的那个 netif**（accept-all 补丁会把无主单播收到 inp 上）。
-    struct pbuf *p = pbuf_alloc(PBUF_RAW, static_cast<u16_t>(frame.size()), PBUF_POOL);
-    if (!p)
-        return;
-    pbuf_take(p, frame.constData(), static_cast<u16_t>(frame.size()));
-    if (nic->nif.input(p, &nic->nif) != ERR_OK)
-        pbuf_free(p);
+    // 到这里必定是 v4 或 v6 的 TCP 帧 —— 交给栈。
+    const quint32 nid = d->nicIds.value(from, 0);
+    if (nid)
+        coast_stack_input(d->smol, nid, reinterpret_cast<const uint8_t *>(frame.constData()),
+                          static_cast<size_t>(frame.size()));
 }
 
 // ———————————————————————————— UDP 拦截 ————————————————————————————

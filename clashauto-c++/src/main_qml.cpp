@@ -152,8 +152,6 @@ int main(int argc, char *argv[])
     //
     // ★ 必须放在**单实例守卫之前**。守卫在本机已有实例时会直接 return 0，
     //   而"退出码 0"恰好和"自测通过"撞车 —— 我就是这么被骗了一次：断言故意改坏也返回 0。
-    //   下面 COAST_TPROXY_SELFTEST / COAST_NDP_RA_SELFTEST 两个钩子目前仍在守卫之后，
-    //   有实例在跑时它们会静默"通过"，同一个坑还开着。
     if (qEnvironmentVariableIsSet("COAST_RUSTSTACK_SELFTEST"))
         return runRustStackSelfTest();
     // NetStack 级：整条 smoltcp 路径（要建 NetStack + 假 SOCKS，仍不碰真网卡/不需要 root）
@@ -175,6 +173,12 @@ int main(int argc, char *argv[])
     // 路由器」这条路在没有 IPv6 的网络上永远跑不到（本项目的测试台就是如此），没有它等于零覆盖。
     // ★ 这个钩子**不再限于 POSIX**：NdpSpoofer 在 Windows 上同样编进产物，以前却连这一个
     //   纯解析自测都跑不了（钩子被上面那个守卫罩住了）。见 GatewaySelfTest.cpp 里的说明。
+    // ★★ 位置从守卫**之后**挪到了这里。原因：lwIP 移除后，Linux 的发布门禁
+    //    （validate/gateway_selftest.sh）只剩这一条 —— 它要是能静默"通过"，那条门禁就等于没有。
+    //    挪上来是安全的：本函数不碰内核状态、不建 GUI、不与运行中的实例争任何资源。
+    if (qEnvironmentVariableIsSet("COAST_NDP_RA_SELFTEST"))
+        return runNdpRaSelfTest();
+
     // ★★ 单实例守卫**必须在 removeStale() 之前**：下一行会按固定表名清理内核里的陈旧规则，
     //    而它分不清那是"上次崩溃的残留"还是"另一个活着的实例正在用的"。真机复现过：第二个
     //    实例起来又退出，把生产实例的 nft 表/劫持/策略路由全清空，生产实例却毫不知情地继续
@@ -182,8 +186,22 @@ int main(int argc, char *argv[])
     //    豁免 --tun-elevated：Windows 开增强时以管理员重启自身，旧的非提权实例尚未退干净，
     //    走探测会连上它并把自己当成二次启动退出 —— 增强就永远开不起来。
     if (!app.arguments().contains(QStringLiteral("--tun-elevated"))
-        && SingleInstance::notifyExistingAndQuit())
+        && SingleInstance::notifyExistingAndQuit()) {
+        // ★ 剩下的 TPROXY / pf 规则层自测**必须**留在守卫之后：它们会往内核里真装 nft/pf 规则，
+        //   与正在跑的生产实例并存是危险的。但"守卫命中就 return 0"和"自测通过"撞车 ——
+        //   于是在这里把它区分开：请求了自测却被守卫挡下，一律报失败。
+        //   这个坑真骗过我一次（断言故意改坏，退出码仍是 0），别再让它重演。
+        for (const char *hook : {"COAST_TPROXY_SELFTEST", "COAST_PF_SELFTEST"}) {
+            if (qEnvironmentVariableIsSet(hook)) {
+                std::fprintf(stderr,
+                             "SELFTEST: %s 被单实例守卫挡下（本机已有 Coast 在跑）——"
+                             "报失败而不是静默返回 0。请先退出那个实例。\n",
+                             hook);
+                return 3;
+            }
+        }
         return 0;
+    }
     SingleInstance singleInstance;
 
     // 透明网关**规则层**自测（COAST_TPROXY_SELFTEST=1）：装 nft/策略路由 → 核对 → 增删设备
@@ -196,9 +214,6 @@ int main(int argc, char *argv[])
 
     if (qEnvironmentVariableIsSet("COAST_TPROXY_SELFTEST"))
         return runTproxyRulesSelfTest();
-
-    if (qEnvironmentVariableIsSet("COAST_NDP_RA_SELFTEST"))
-        return runNdpRaSelfTest();
 
     // pf 规则层自测（COAST_PF_SELFTEST=1，macOS）：与上面的 TPROXY 自测同一套约定 ——
     // 装载 → 核对规则与挂载点 → 增删设备 → 拆除 → 核对拆干净。需要 root。

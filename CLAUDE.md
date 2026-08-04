@@ -26,6 +26,7 @@ The git repo root tracks:
 ```powershell
 # From clashauto-c++/. Put Qt + MinGW on PATH first.
 $env:Path='C:\Qt\Tools\mingw1310_64\bin;C:\Qt\6.8.3\mingw_64\bin;' + $env:Path
+$env:NPCAP_SDK='C:\Users\ultra\npcap-sdk'   # Windows only: L2Endpoint_win.cpp needs pcap.h
 cmake -S . -B build-ninja -G Ninja `
   -DCMAKE_PREFIX_PATH=C:\Qt\6.8.3\mingw_64 `
   -DCMAKE_CXX_COMPILER=C:\Qt\Tools\mingw1310_64\bin\g++.exe
@@ -33,11 +34,13 @@ cmake --build build-ninja
 .\build-ninja\Coast.exe          # OUTPUT_NAME is "Coast" on Windows (was clashauto.exe)
 ```
 
+**Windows builds also need `cargo` on PATH** — the transparent gateway's TCP data plane is a Rust staticlib (`rust/coaststack`, smoltcp; see `src/net/coaststack.h`). It's Windows-only: Linux uses TPROXY and macOS uses pf rdr, so neither needs a userspace stack (`NetStack.cpp` is `if(WIN32)`; the other platforms link `NetStack_stub.cpp`, whose `init()` just fails). `-DCOAST_RUST=OFF` skips cargo entirely and falls back to that same stub — the gateway is then unavailable on Windows too, but the app builds and runs. There is **no lwIP** any more (removed 2026-08; the whole 23-round evaluation and the removal record are in `clashauto-c++/docs/lwip-alternatives.md`).
+
 `find_package(Qt6 … Widgets Network Qml Quick QuickControls2)`. `AUTOMOC`/`AUTORCC`/`AUTOUIC` are on, so new `Q_OBJECT` classes and `.qrc`/`.qml` changes are picked up — but **new `.cpp` files must be added by hand** to `CMakeLists.txt` (`BACKEND_SOURCES` / `QML_GLUE_SOURCES`), and new `.qml` files to the `qt_add_qml_module(... QML_FILES ...)` list. Build dirs: only `build-ninja/`, `build-qml/`, `build-release/` are in `.gitignore` — there is **no `build-*` wildcard**, so any other build dir you create shows up as untracked.
 
 ## Verifying a release — `validate/`
 
-There is **no unit-test framework**. Verification = CI builds+packages green, then `validate/` checks the packaged artifacts:
+There is **no unit-test framework** for the C++ side (the Rust crate has `cargo test`: 19 tests, run in CI). Verification = CI builds+packages green, then `validate/` checks the packaged artifacts. Headless self-test hooks worth knowing (all are env vars on the built binary, exit 0 = pass): `COAST_RUSTSTACK_SELFTEST` (Rust C-ABI round trip), `COAST_SMOLGW_SELFTEST` (whole gateway data plane: synthetic frames → SYN-ACK → SOCKS CONNECT with the right per-device user), `COAST_NDP_RA_SELFTEST` (RA parsing — the only guard against the silent "dual-stack device leaks IPv6" failure), `COAST_TPROXY_SELFTEST` / `COAST_PF_SELFTEST` (kernel rule layers; need root). ⚠️ The TPROXY/pf **data planes** have no end-to-end self-test — a known gap, not a solved problem.
 
 ```bash
 bash validate/run.sh      # Docker: pull latest release's Coast artifacts + verify all platforms

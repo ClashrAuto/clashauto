@@ -225,27 +225,26 @@ jobs:
             exit $LASTEXITCODE
           }
 
-      - name: coaststack A/B gateway self-test
-        # 同一套断言跑两条 TCP 栈（smoltcp 与 lwip），两条都必须 PASS。
-        # 只测一条只能说明"这条能跑"；两条都测才说明**换栈后行为一致**。
-        # 这个 A/B 已经抓到过一个真缺陷：smoltcp 侧一度在 SynReceived 就拨上游
-        # （lwIP 是握手完成才 accept），等于 SYN 洪水每个 SYN 都建一条上游连接。
+      - name: coaststack gateway self-test
+        # 整条数据面（NetStack + smoltcp）的行为自证：合成帧进去，断言 SYN-ACK 的源端口被还原成
+        # 原始目的端口、且拨出去的 SOCKS CONNECT 带着**该设备**的用户名。
         # 不碰真网卡、不需要 root：假二层端点 + 假 SOCKS + 合成帧。
+        #
+        # ★ 这一步曾是 smoltcp vs lwIP 的 A/B（同一套断言跑两条栈）。lwIP 已整体移除，没有第二条
+        #   栈可比了。记一笔它的价值：那个 A/B 抓到过一个真缺陷 —— smoltcp 侧一度在 SynReceived
+        #   就拨上游（lwIP 是握手完成才 accept），等于 SYN 洪水每个 SYN 都建一条上游连接。
+        #   **只测新实现是发现不了这类差异的**，以后再换任何数据面，先把对照跑起来。
         if: matrix.arch == 'x64'
         shell: pwsh
         run: |
           $exe = Join-Path $env:BUILD_DIR "Release\Coast.exe"
-          foreach ($st in @("smoltcp", "lwip")) {
-            $env:COAST_STACK = $st
-            $env:COAST_SMOLGW_SELFTEST = "1"
-            & $exe
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::网关自测在 $st 上失败（exit=$LASTEXITCODE）"
-              exit $LASTEXITCODE
-            }
-            Write-Host "gateway self-test OK on $st"
+          $env:COAST_SMOLGW_SELFTEST = "1"
+          & $exe
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::网关数据面自测失败（exit=$LASTEXITCODE）"
+            exit $LASTEXITCODE
           }
-          Remove-Item Env:\COAST_STACK, Env:\COAST_SMOLGW_SELFTEST
+          Remove-Item Env:\COAST_SMOLGW_SELFTEST
 
       - name: Stage portable app
         shell: pwsh
@@ -1059,8 +1058,12 @@ jobs:
   # 透明网关 headless 自测：下载打好的 linux-x64 包（自带 Qt，offscreen 可独立跑），用 TAP 把真实
   # 内核 TCP 当被劫持设备，经 NetStack 拨内置假 SOCKS，验证「用户态栈转发 + 每设备身份」——不需真机/真实 ARP。
   # 独立 job：不阻塞 release（release 已由 linux/windows job 发布），失败只作可见告警。
+  # ★ 这个 job 曾经跑「TAP + 用户态栈」的数据面自测。lwIP 移除后 Linux 只有 TPROXY（内核转发），
+  #   没有用户态栈可测，那部分已迁到 windows job 的 "coaststack gateway self-test"。
+  #   这里保留的是 **NDP RA 解析自测** —— 与数据面无关、却守着「双栈设备 v6 漏代理」这条
+  #   静默故障线。详见 validate/gateway_selftest.sh 的头注释。
   gateway-selftest:
-    name: Gateway self-test (Linux netstack)
+    name: NDP RA parse self-test (Linux)
     needs: [linux]
     if: github.event_name == 'push'
     runs-on: ubuntu-22.04
@@ -1079,18 +1082,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libopengl0 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 libfreetype6 ethtool tcpdump
-      - name: Run headless gateway self-test
+            libopengl0 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 libfreetype6
+      - name: Run headless self-test
         shell: bash
         run: |
           set -euo pipefail
-          sudo modprobe tun 2>/dev/null || true
           mkdir -p app
           tar -C app -xzf dl/Coast-*-linux-x64-portable.tar.gz
           BIN="$(find app -type f -name coast | head -1)"
           test -n "$BIN" || { echo "找不到 coast 二进制"; exit 1; }
           chmod +x "$BIN"
-          sudo bash validate/gateway_selftest.sh "$BIN"
+          bash validate/gateway_selftest.sh "$BIN"
 
   # macOS **两条产品线的正式包都不在本 CI 打**（本仓库没有、也不该有 Developer ID 私钥）
   # ——由外部构建仓库的「专用分支」承载（该分支已配签名+公证 secret，workflow 用 on:push

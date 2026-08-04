@@ -369,13 +369,10 @@ int runSmolGatewaySelfTest()
         return 3;
     }
 
-    // A/B 夹具：默认测 smoltcp；显式 COAST_STACK=lwip 则用**同一套断言**测 lwIP。
-    // 两条都 PASS 才说明"换栈后行为一致"，只测一条只能说明"这条能跑"。
-    QByteArray want = qgetenv("COAST_STACK").trimmed().toLower();
-    if (want.isEmpty()) {
-        want = "smoltcp";
-        qputenv("COAST_STACK", want);
-    }
+    // ★ 这里原本是个 A/B 夹具：同一套断言分别跑 smoltcp 与 lwIP，两条都 PASS 才算"换栈后
+    //   行为一致"。**那个 A/B 抓到过一个真 bug**（smoltcp 在 SynReceived 就 promote、lwIP 只在
+    //   Established 才 accept —— 只测 smoltcp 永远发现不了 SYN 洪水放大），所以它值得记一笔。
+    //   lwIP 移除后没有第二条栈可比了，夹具退化成"确认跑在 smoltcp 上"。
     NetStack net(kSocksPort);
     QString err;
     if (!net.init(&err)) {
@@ -383,12 +380,10 @@ int runSmolGatewaySelfTest()
         return 1;
     }
 
-    // ★ 先证明测的确实是 smoltcp 那条路。lwIP 的 accept-all 对外行为与 catch-all 一致，
-    //   同一个断言在两条路上都会 PASS —— 没有这一条，这个自测证明不了任何东西。
-    if (want != QByteArray(net.activeTcpStack())) {
-        std::fprintf(stderr,
-                     "[smolgw] FAIL: 没跑在 smoltcp 上（实际=%s）——这个自测对 lwIP 也会绿，\n"
-                     "         所以必须先确认路径，否则等于没测\n",
+    // ★ 先证明测的确实是那条数据面。断言本身对任何 catch-all 实现都会绿，
+    //   不确认路径就等于没测（COAST_RUST=OFF 时 init 会失败，这里则会报 none）。
+    if (QByteArray(net.activeTcpStack()) != QByteArray("smoltcp")) {
+        std::fprintf(stderr, "[smolgw] FAIL: 没跑在 smoltcp 上（实际=%s）\n",
                      net.activeTcpStack());
         return 3;
     }
@@ -557,20 +552,15 @@ int runSmolGatewayRealNicSelfTest()
         return 3;
     }
 
-    QByteArray want = qgetenv("COAST_STACK").trimmed().toLower();
-    if (want.isEmpty()) {
-        want = "smoltcp";
-        qputenv("COAST_STACK", want);
-    }
-
     NetStack net(kSocksPort);
     QString err;
     if (!net.init(&err)) {
         std::fprintf(stderr, "[realnic] FAIL: NetStack::init: %s\n", err.toLatin1().constData());
         return 1;
     }
-    if (want != QByteArray(net.activeTcpStack())) {
-        std::fprintf(stderr, "[realnic] FAIL: 期望跑在 %s 上，实际=%s\n", want.constData(),
+    // 同上：先确认路径再断言（lwIP 移除后只剩一条，但"跑的是哪条"仍要写在日志里）。
+    if (QByteArray(net.activeTcpStack()) != QByteArray("smoltcp")) {
+        std::fprintf(stderr, "[realnic] FAIL: 期望跑在 smoltcp 上，实际=%s\n",
                      net.activeTcpStack());
         return 3;
     }

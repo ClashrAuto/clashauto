@@ -1416,7 +1416,9 @@ SSH 帧也被喂进了栈，smoltcp 当成"要代理的连接"去终结、回了
   收益预期仍按 R19–R21 的「总 CPU 降约 1/3」，**不是 4.2×**。
 - **多设备并发**、**长时间稳定性**、**ARM64 运行时**（矩阵里没有 ARM64 runner）。
 
-**默认仍是 lwip。** 改默认值之前至少还需要上面第一、二项。
+~~**默认仍是 lwip。** 改默认值之前至少还需要上面第一、二项。~~
+→ **已作废（R24）**：lwIP 已整体移除，没有"默认值"可选了，也没有对照对象可做那个 A/B。
+  代价明写在 R24 末尾。
 
 ---
 
@@ -1472,3 +1474,87 @@ SSH 帧也被喂进了栈，smoltcp 当成"要代理的连接"去终结、回了
 本机已有实例在跑时 `notifyExistingAndQuit()` 直接 `return 0` —— 于是**断言故意改坏也返回 0**，
 和"通过"完全撞车（`COAST_RUSTSTACK_SELFTEST` 就是这么被骗过一次，已移到守卫之前）。
 删 lwIP 时顺手把这两个也挪上去。
+
+---
+
+## R24 —— lwIP 已移除（2026-08-04）
+
+上面那份执行计划的第 2~5 步全部落地。**这是本文档的终点**：被测对象没有了，不会再有新的轮次。
+
+### 落地的形态
+
+| 平台 | 数据面 | `NetStack.cpp` | 用户态栈 |
+|---|---|---|---|
+| Linux | TPROXY（内核转发） | 不编，用 `NetStack_stub.cpp` | 无 |
+| macOS | pf rdr + DIOCNATLOOK | 不编，用 `NetStack_stub.cpp` | 无 |
+| Windows | 用户态 | 编（`if(WIN32) + COAST_RUST`） | smoltcp |
+
+### 一处与计划不同的做法（更好，值得记）
+
+计划第 3 步写的是「`LanGateway_linux.cpp` 会 `new NetStack`，需加 `#ifdef` 守卫」，并标注
+**「本机是 Windows，改不动就验不了 —— 这一步必须靠 CI 验证」**。
+
+实际没这么做。`LanGateway_linux.cpp` 里有二十来处 `m_net`，而且每一处**早就**有 `if (m_net)`
+守卫（tproxy/pf 模式下 `m_net` 本来就恒为空）。逐处加平台宏 = 二十来个新分支，全部在
+一台编不了 Linux 的机器上盲写。改成加一个 `NetStack_stub.cpp`（`init()` 直接返回失败，
+其余空实现）之后：
+
+- **`LanGateway_linux.cpp` 零改动** —— 上层现成的错误路径原样接住；
+- 而且这个桩**在本机就验证得了**：`cmake -DCOAST_RUST=OFF` 会在 Windows 上编译并链接
+  同一个桩，与 Linux/mac 走的是同一条分支。已实测通过（干净构建、链接成功）。
+
+→ 教训：**当"改不动所以只能靠 CI"时，先找一找有没有能在本机验证的等价改法。**
+把改动收敛到一个新文件里，往往比在二十个调用点上加宏更容易证明它是对的。
+
+### 删掉的东西
+
+- `third_party/lwip`（124 个 `.c`，5.2 MB）+ `src/net/lwip_port/`（`lwipopts.h` / `cc.h` /
+  `coast_lwip_diag.[ch]`）—— 连同 6 处 Coast 补丁（`ip4.c`/`ip6.c` accept-all、
+  `tcp_in.c` 通配端口 + TIME_WAIT 复用、`nd6.c` 静态邻居、`coast_lwip_diag`）。
+- `NetStack.cpp` 从 2349 行降到 1614 行（-1024 / +289）。删掉的成块内容：
+  `sys_now` / `pbufToBytes` / `lwipNetifInit` / `lwipLinkOutput` / `lwipTcpAccept|Recv|Sent|Err` /
+  `TcpConn` / **`ConnWatch` + `g_destroyedConn` + `markConnDestroyed` 那 ~60 行** /
+  `pollLwipPoolStats` + `kMempWatch`（~200 行的池监视）/ `lwipStatsLine`。
+- `project(... LANGUAGES C CXX)` → `LANGUAGES CXX`：lwIP 是工程里最后的 C 源。
+
+### 换掉而不是删掉的东西
+
+- `lwipStatsLine()` → `smolStatsLine()`，读 `coast_stack_stats()`。**两条必须保留的等价物**
+  按计划保住了：`refuse`（对应 `prioKill`，资源不够导致无声故障的唯一可见信号）、
+  `pollGapMax`（对应 `fastGapMax`，最坏间隔；平均值会把毛刺抹平）。
+  顺带补上了 lwIP **从来给不出**的 `rexmit` —— `struct stats_proto` 根本没有重传字段。
+- 静态 ARP / nd6 静态邻居的注入（`etharp_add_static_entry` / `nd6_add_static_neighbor_entry`）
+  → 引擎从设备实帧里**自学**（`engine.rs` 的 `learn_neighbor` / `learn_neighbor_v6`）。
+  少一份要和真实拓扑保持同步的状态。
+- `closeDeviceConns` 遍历 `tcp_active_pcbs`（还得引 priv 头、且每关一条要**重扫一遍链表**
+  以躲开连锁 delete 造成的 UAF）→ 一次 `coast_stack_close_device_conns`。
+- `COAST_GATEWAY_DATAPATH=lwip` → `=userspace`（`lwip` 保留为别名：这个值散落在早期排查
+  笔记和运维习惯里，静默不认会让人以为开关坏了）。
+
+### 门禁的变化（有得有失，失的那部分写清楚）
+
+- **Windows job**：`coaststack A/B gateway self-test` → `coaststack gateway self-test`。
+  A/B 夹具没有第二条栈可比了。★ 记一笔它的价值：那个 A/B **抓到过一个真缺陷** ——
+  smoltcp 侧一度在 `SynReceived` 就拨上游（lwIP 是握手完成才 accept），等于 SYN 洪水里
+  每个 SYN 都建一条上游连接。**只测新实现是发现不了这类差异的。**
+- **Linux job**：`Gateway self-test (Linux netstack)` → `NDP RA parse self-test (Linux)`。
+  TAP 数据面自测测的是用户态栈，Linux 上已经没有了；留着只会得到一条**恒红的门禁**，
+  而恒红的门禁等于没有门禁，只会训练人无视它。
+  ⚠️ **TPROXY 路径目前没有端到端自测 —— 这是一个已知缺口，不是已解决的问题。**
+  `GatewaySelfTest.cpp` 里那套 TAP + 静态邻居 + 真实内核 curl 的脚手架**故意保留**，
+  将来给 TPROXY/pf 写等价自测时可以直接复用。
+- 顺手修掉了计划末尾记的那个隐患：`COAST_NDP_RA_SELFTEST` 挪到单实例守卫**之前**
+  （它现在是 Linux 唯一的门禁，能静默返回 0 的话那条门禁就等于没有）；
+  `COAST_TPROXY_SELFTEST` / `COAST_PF_SELFTEST` 会真装内核规则，必须留在守卫之后，
+  改成**被守卫挡下时显式报失败**而不是 `return 0`。
+  已用「故意改坏一条断言 → 确认退出码变 1」证伪过，不是"跑了就算测了"。
+
+### 验证到哪一步
+
+- Rust 单测 19/19；`COAST_RUSTSTACK_SELFTEST`（ABI）、`COAST_SMOLGW_SELFTEST`（NetStack 级
+  整条路径）、`COAST_NDP_RA_SELFTEST` 三个自测全绿；干净构建 0 error。
+- `-DCOAST_RUST=OFF` 的桩构建也通过（= Linux/mac 走的同一条分支）。
+- **仍未做**：真流量下的吞吐/CPU 复测。原来的说法是「改默认值之前先做这个 A/B」，
+  而现在 lwIP 已经删了，**没有对照对象了**。这是本次移除最实质的代价，明写在这里：
+  smoltcp 在真实负载下若不如预期，**没有退路**。R19–R21 的实测结论（Windows 上真正的
+  绑定约束是 Npcap 发送路径，换栈省约 1/3 总 CPU、吞吐天花板不动）仍是当前的预期依据。

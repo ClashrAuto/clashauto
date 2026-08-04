@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 
 # C 语言用于 vendored lwIP(.c)：不启用则 CMake 会静默忽略 .c 源，链接时报一堆 lwIP 未定义符号。
-project(clashauto_cpp VERSION 1.0.0 LANGUAGES C CXX)
+# LANGUAGES 只剩 CXX：`C` 是为 vendored lwIP（124 个 .c）与 lwip_port/coast_lwip_diag.c 开的，
+# 两者已随 lwIP 一起删除，工程里再没有任何 .c。少一门语言 = 少一次 CMake 的编译器探测
+# （交叉编译 Windows ARM64 时尤其省事）。要加回来只需在这里补一个 C。
+project(clashauto_cpp VERSION 1.0.0 LANGUAGES CXX)
 
 # Version string shown in the app UI. Defaults to the project version for
 # local builds; CI overrides it with -DAPP_VERSION=<major.minor.commitcount>.
@@ -148,14 +151,17 @@ qt_add_qml_module(clashauto-qml
 )
 
 # —— 透明网关：平台相关部分 ——
-# Linux/macOS（POSIX，gcc/clang）：编入用户态栈(vendored lwIP 子集 + NetStack) 与 LanGateway 真实现。
-#   lwIP 走 NO_SYS raw API，移植配置在 src/net/lwip_port/，ip4.c/tcp_in.c 有 accept-all/any-port 补丁。
+# 三端各走各的数据面，**只有 Windows 需要用户态栈**：
+#   · Linux   → TPROXY（TproxyRules.cpp：nftables + 策略路由，内核转发）
+#   · macOS   → pf rdr（PfRules.cpp：DIOCNATLOOK 取原始目的地）
+#   · Windows → 用户态栈（NetStack.cpp + rust/coaststack 的 smoltcp）
+#               —— WfpRedirect.h:91 记着 gatewayTproxy/gatewayPf 在 Windows 上恒为 false。
+# 因此 NetStack.cpp 只在 WIN32 编，非 Windows 由 NetStack_stub.cpp 顶上（init() 直接报错，
+# 不降级；用户已确认「报错就行」）。vendored lwIP 曾经是三端共用的用户态栈，已随此改动整体删除
+# —— 过程与依据见 docs/lwip-alternatives.md。
 #   LanGateway_linux.cpp 实为 POSIX 通用（无平台系统调用；二层差异全在 createL2Endpoint：
-#   Linux AF_PACKET / mac BPF）。netns 自测钩子(GatewaySelfTest, 用 TAP)仅 Linux。
-# Windows：也编真实现——二层用 Npcap（需 Npcap SDK，CI 里下载，见 release.yml），lwIP 用 MSVC
-#          结构体打包(cc.h 有 _MSC_VER 分支)。链 wpcap/Packet/iphlpapi/ws2_32。
+#   Linux AF_PACKET / mac BPF / Windows Npcap）。netns 自测钩子(GatewaySelfTest, 用 TAP)仅 Linux。
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
-    set(LWIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/lwip/src")
     # 网关自测钩子。文件里分两段，守卫也分两段（见 GatewaySelfTest.cpp）：
     #   · 数据面自测(COAST_GATEWAY_SELFTEST)：要 TAP(Linux)/feth+BPF(mac)，只在 POSIX 编；
     #   · RA 解析自测(COAST_NDP_RA_SELFTEST)：纯字节解析，**所有编网关的平台都编，含 Windows**。
@@ -164,7 +170,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     target_sources(clashauto-qml PRIVATE
         src/net/GatewaySelfTest.cpp src/net/GatewaySelfTest.h)
     target_sources(clashauto-qml PRIVATE
-        src/net/NetStack.cpp src/net/NetStack.h
+        src/net/NetStack.h
+        # ★ ArpSpoofer/NdpSpoofer 是**三端都要**的：把设备劫持过来靠的就是 ARP/NDP 投毒，
+        #   与之后用哪条数据面（TPROXY / pf / 用户态栈）无关。别跟着 NetStack 一起收进 WIN32。
         src/net/NdpSpoofer.cpp src/net/NdpSpoofer.h  # IPv6 的 ICMPv6/NDP 投毒器（ArpSpoofer 的 v6 对应物）
         src/net/LanGateway_linux.cpp
         # 内核态转发规则（nftables TPROXY + 策略路由）。非 Linux 由 #if 守卫成空实现,
@@ -173,32 +181,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         # macOS 的内核态转发规则（pf rdr + DIOCNATLOOK 取原始目的地）。与 TproxyRules 同样
         # 三端都编、非 macOS 由 #if 守卫成空实现，省得调用方到处写平台分支。
         src/net/PfRules.cpp src/net/PfRules.h
-        # lwIP 那几条静默丢 SYN/静默杀连接路径的计数器实例（声明在同名 .h，累加在 tcp_in.c）。
-        # 必须是 .c：定义在 C++ 里会被名字修饰，lwIP 侧链接不到。
-        src/net/lwip_port/coast_lwip_diag.c
-        ${LWIP_DIR}/core/init.c        ${LWIP_DIR}/core/def.c
-        ${LWIP_DIR}/core/dns.c         ${LWIP_DIR}/core/inet_chksum.c
-        ${LWIP_DIR}/core/ip.c          ${LWIP_DIR}/core/mem.c
-        ${LWIP_DIR}/core/memp.c        ${LWIP_DIR}/core/netif.c
-        ${LWIP_DIR}/core/pbuf.c        ${LWIP_DIR}/core/raw.c
-        ${LWIP_DIR}/core/stats.c       ${LWIP_DIR}/core/sys.c
-        ${LWIP_DIR}/core/tcp.c         ${LWIP_DIR}/core/tcp_in.c
-        ${LWIP_DIR}/core/tcp_out.c     ${LWIP_DIR}/core/timeouts.c
-        ${LWIP_DIR}/core/udp.c
-        ${LWIP_DIR}/core/ipv4/etharp.c ${LWIP_DIR}/core/ipv4/icmp.c
-        ${LWIP_DIR}/core/ipv4/ip4.c    ${LWIP_DIR}/core/ipv4/ip4_addr.c
-        ${LWIP_DIR}/core/ipv4/ip4_frag.c ${LWIP_DIR}/core/ipv4/acd.c
-        # —— IPv6 双栈：与 ipv4/ 对称的一套核心文件。ip6.c 有 accept-all 补丁、nd6.c 有静态邻居补丁。
-        #   受 lwipopts 开关保护的文件（mld6/ip6_frag 在本移植关着）仍要编——它们内部按宏自缩成近空。
-        ${LWIP_DIR}/core/ipv6/ip6.c    ${LWIP_DIR}/core/ipv6/ip6_addr.c
-        ${LWIP_DIR}/core/ipv6/ip6_frag.c ${LWIP_DIR}/core/ipv6/nd6.c
-        ${LWIP_DIR}/core/ipv6/icmp6.c  ${LWIP_DIR}/core/ipv6/ethip6.c
-        ${LWIP_DIR}/core/ipv6/mld6.c   ${LWIP_DIR}/core/ipv6/inet6.c
-        ${LWIP_DIR}/netif/ethernet.c
     )
-    target_include_directories(clashauto-qml PRIVATE
-        "${LWIP_DIR}/include"
-        "${CMAKE_CURRENT_SOURCE_DIR}/src/net/lwip_port")
+    if(NOT WIN32)
+        target_sources(clashauto-qml PRIVATE src/net/NetStack_stub.cpp)
+    endif()
     # Windows：只要 Npcap SDK 的**头文件**（env NPCAP_SDK 指向解压目录）——wpcap 不进链接行。
     # L2Endpoint_win.cpp 在运行时 LoadLibrary("wpcap.dll") + GetProcAddress 取全部 pcap_*，
     # 所以没装 Npcap 的机器上 Coast 照常启动（只是网关不可用）。原先靠 MSVC 的 /DELAYLOAD 做到
@@ -215,10 +201,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         # （那个仓库推不动、忘了同步也不报红灯，绕开它是 Windows-only 方案的最大红利）。
         # 选型与收益见 docs/lwip-alternatives.md；C ABI 见 src/net/coaststack.h。
         #
-        # COAST_RUST=OFF 可整体关掉（应急/排查用），关掉后不定义 COAST_HAVE_RUST_STACK，
-        # C++ 侧据此走 lwIP 老路。
+        # ★ lwIP 移除后这不再是"两条路里的一条"，而是 **Windows 唯一的数据面**。
+        #   COAST_RUST=OFF 仍保留为应急开关（比如 cargo 装不上还想出个包），但代价明确：
+        #   NetStack.cpp 整个不编、换成桩，**Windows 上网关不可用**（app 其余功能照常）。
+        #   —— 这正是当初把它做成 option 的理由，只是从"退回 lwIP"变成了"网关关掉"。
         option(COAST_RUST "Build the Rust (smoltcp) TCP datapath on Windows" ON)
         if(COAST_RUST)
+            target_sources(clashauto-qml PRIVATE src/net/NetStack.cpp)
             # ★ triple 必须按 **C++ 编译器** 选，不能只看架构：
             #   staticlib 的 ABI/CRT 要与 C++ 工具链一致（MSVC 的 .lib vs MinGW 的 .a），
             #   混了会在链接期炸出一堆缺符号。CI 是 MSVC，本地开发常是 MinGW。
@@ -262,6 +251,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
             # 链接+ABI 自证（COAST_RUSTSTACK_SELFTEST=1）。没有它，"库编出来了"和
             # "库真能被调用、ABI 对得上"在 CI 绿灯里分不清。
             target_sources(clashauto-qml PRIVATE src/net/RustStackSelfTest.cpp)
+        else()
+            # 没有 Rust 数据面 = Windows 上也没有用户态栈 → 用与 mac/Linux 同一个桩。
+            target_sources(clashauto-qml PRIVATE src/net/NetStack_stub.cpp)
         endif()
     endif()
 else()

@@ -61,25 +61,29 @@ struct AppConfig {
     //      邻居表播种），真机验证 curl -6 / ping6 / 禁网策略在 v6 上全部正确。
     //
     //   失败仍是安全的：install 失败时 configureLocal **原地返回、保持未接管状态**，设备继续
-    //   用真网关上网，而不是半开着把人打断网。回退一键可用：配置键 gatewayTproxy: false，
-    //   或环境变量 COAST_GATEWAY_DATAPATH=lwip。
-    //   仅 Linux 有效；Windows/macOS 这个字段恒被忽略，仍走 lwIP —— 它们的替代数据面
-    //   （Windows 自写 WFP 驱动、macOS BPF）尚未实现，那之前 lwIP 不能删。
+    //   用真网关上网，而不是半开着把人打断网。
+    //   ★ 回退的含义**已经变了**：lwIP 被移除后 Linux 上没有用户态兜底，
+    //     `gatewayTproxy: false` / `COAST_GATEWAY_DATAPATH=userspace` 等于**关掉网关**
+    //     （NetStack_stub.cpp 的 init() 直接报错）。这是明确的取舍，不是遗漏。
+    //   仅 Linux 有效；Windows/macOS 这个字段恒被忽略（Windows 走用户态 smoltcp、macOS 走 pf）。
 #if defined(Q_OS_LINUX)
     bool gatewayTproxy = true;
 #else
     bool gatewayTproxy = false;
 #endif
     // macOS 的内核态数据面：pf 的 rdr + DIOCNATLOOK（见 net/PfRules.h）。与 gatewayTproxy
-    // 互斥 —— TPROXY 是 Linux netfilter 独有的，BSD 上没有等价物。两者都 false 时走 lwIP。
+    // 互斥 —— TPROXY 是 Linux netfilter 独有的，BSD 上没有等价物。
+    // ★ 两者都 false 时**没有可用数据面**（用户态栈已随 lwIP 一起从非 Windows 平台移除），
+    //   网关直接报错不可用。
     //
-    // ★ **macOS 默认 true**：目标是「去掉 lwip 架构」，而 lwIP 在 macOS 上同样是单线程用户态栈，
+    // ★ **macOS 默认 true**：目标是「去掉用户态栈架构」，而 lwIP 在 macOS 上同样是单线程，
     //   有着与 Linux 侧实测一致的天花板（跑满千兆约 0.9 核、单核封顶 ~1 Gbps）。pf rdr 走的是
-    //   内核转发，CPU 代价与 Linux 的 TPROXY 同量级。
+    //   内核转发，CPU 代价与 Linux 的 TPROXY 同量级。这个默认值最终让 lwIP 得以整体删除。
     // ★ 已知限制（BSD 固有，不是没写完）：**redir 只代理 TCP**。DNS(UDP53) 由 PfRules 单独
     //   rdr 到核心的 dns.listen 上，不受影响；但其余 UDP（QUIC/HTTP3 等）无法接管，会直连出去。
     //   Linux 的 TPROXY 两者都收，所以这是 macOS 独有的取舍。
-    // 回退：配置键 gatewayPf: false，或环境变量 COAST_GATEWAY_DATAPATH=lwip。
+    // 回退：配置键 gatewayPf: false，或环境变量 COAST_GATEWAY_DATAPATH=userspace
+    //（`lwip` 仍作别名接受）。★ 同 gatewayTproxy：在 macOS 上回退 = 网关不可用，没有兜底。
 #if defined(Q_OS_MACOS)
     bool gatewayPf = true;
 #else

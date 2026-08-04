@@ -28,8 +28,8 @@ for m in Core Network Gui Sql Widgets Qml Quick; do
     INC="$INC -I$QT/lib/Qt$m.framework/Headers"
 done
 INC="$INC -F$QT/lib"
-# lwIP 的移植头（NetStack 及其调用方需要）
-LW="-Isrc/net/lwip_port -Ithird_party/lwip/src/include"
+# 曾经这里要加 lwIP 的移植头（-Isrc/net/lwip_port -Ithird_party/lwip/src/include）。
+# lwIP 已整体删除；macOS 走 pf rdr，NetStack.cpp 只在 Windows 编，本脚本查不到也不该查它。
 
 # 默认查「macOS 上参与编译、且我们最常改」的那几个。传参可覆盖。
 FILES=("$@")
@@ -38,7 +38,7 @@ if [ ${#FILES[@]} -eq 0 ]; then
         src/net/PfRules.cpp
         src/net/TproxyRules.cpp
         src/net/LanGateway_linux.cpp
-        src/net/NetStack.cpp
+        src/net/NetStack_stub.cpp
         src/ConfigBuilder.cpp
         src/AppConfig.cpp
         src/CoreController.cpp
@@ -54,7 +54,7 @@ for f in "${FILES[@]}"; do
         "$MOC" $INC -Isrc -Isrc/net "$f" -o "${f%.cpp}.moc" 2>/dev/null
     fi
     printf "  %-38s " "$(basename "$f")"
-    out=$(clang++ -std=c++17 -fsyntax-only $INC $LW -Isrc -Isrc/net -Isrc/qml "$f" 2>&1)
+    out=$(clang++ -std=c++17 -fsyntax-only $INC -Isrc -Isrc/net -Isrc/qml "$f" 2>&1)
     n=$(printf '%s' "$out" | grep -cE " error:")
     if [ "$n" = "0" ]; then
         echo "OK"

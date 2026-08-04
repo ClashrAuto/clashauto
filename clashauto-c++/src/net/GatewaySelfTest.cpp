@@ -228,6 +228,15 @@ QByteArray envOr(const char *key, const QByteArray &def)
 
 } // namespace
 
+// ★ 2026-08-04：这个数据面自测在 Linux/macOS 上**已经不可能通过**，是刻意的。
+//   它测的是「用户态栈终结 TCP → 拨 SOCKS」，而 lwIP 移除后 Linux 走 TPROXY、macOS 走 pf，
+//   两个平台都没有用户态栈了（NetStack_stub.cpp 的 init() 直接返回失败）。下面第一步的
+//   `net->init()` 会带着一句"本平台的网关数据面是 TPROXY/pf rdr"退出 —— 这正是我们要的：
+//   **响亮地失败，而不是悄悄测了个空壳**。
+//   等价的数据面自测已迁到 Windows：runSmolGatewaySelfTest()（RustStackSelfTest.cpp），
+//   用假二层端点 + 假 SOCKS + 合成帧跑同一套断言，CI 的 windows job 里每次构建都跑。
+//   本函数保留而不删，是因为 TAP 夹具本身仍然有用：将来若要给 TPROXY/pf 写等价的
+//   端到端自测，这套 TAP + 静态邻居 + 真实内核 curl 的脚手架可以直接复用。
 int runGatewaySelfTest()
 {
     const QString tap = QString::fromLatin1(envOr("COAST_SELFTEST_TAP", "cst0"));
