@@ -2,6 +2,7 @@
 #include "IL2Endpoint.h"
 #include "IOutbound.h"
 #include "core/DnsResolver.h"
+#include "core/DnsMessage.h"
 #include "Socks5Client.h"
 
 #include <QDebug>
@@ -175,6 +176,9 @@ constexpr qint64 kUdpDnsIdleMs = 15000;
 // 被劫持设备的 UDP :53 查询不再原样中继到「设备配置的 DNS（常是网关/路由器 IP，经用户态栈中继到
 // 它走不通 → 名字解析时断时通）」，而是转投 mihomo 自己的 fake-ip DNS，走它的国内外分流后再回封给设备。
 constexpr quint16 kDnsHijackPort = 1053;
+// 合成 fake-ip 应答的 TTL。取小值：fake-ip 与域名的映射是**本进程内**的短期约定，
+// 设备缓存太久会在我们重启/换池之后拿着一个已经没人认的假 IP 去连。
+constexpr int kFakeIpTtlSec = 60;
 
 // 定时器泵的周期，以及「UDP 流老化」相对它的分频比（详见 NetStack::init）。
 // 25ms × 8 = 200ms，老化的实际节奏与 lwIP 时代一致。
@@ -262,6 +266,8 @@ struct NetStack::Impl {
     // DNS 旁听器（可空）：把核心分配的 fake-ip 反查回域名，供 accept 改写拨号目标。
     // 见 setDnsLearner —— 没有它，域名类流量只能拿着假 IP 去拨，进程内出站必然路由不到。
     std::shared_ptr<DnsResolver> dnsLearner;
+    // 进程内 DNS 开关（见 setLocalDnsEnabled）。关 = 老行为：:53 全部转投 mihomo。
+    bool localDns = false;
     Socks5OutboundFactory *ownedDefault = nullptr; // 默认工厂，由本对象持有
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的上下文
     QHash<QString, DeviceInfo> devices;      // 设备 IP（v4 或 v6 串）→ {mac,user}
@@ -1486,7 +1492,9 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
     //   不建 UdpFlow、不原样中继到「设备配置的 DNS」（常是网关/路由器 IP，经用户态栈中继到它走不通
     //   → 名字解析时断时通）。回封的源地址伪装成设备原本查询的那个 DNS（dstIpV4:53），设备才收。
     if (dport == 53) {
-        hijackDns(srcIp, sport, QHostAddress(dstIpV4), payload, false);
+        // 进程内 DNS 开着就当场答（fake-ip）；判不了/没开则交回老路（转投 mihomo）。
+        if (!answerDnsLocally(srcIp, sport, QHostAddress(dstIpV4), payload, false))
+            hijackDns(srcIp, sport, QHostAddress(dstIpV4), payload, false);
         return;
     }
 
@@ -1611,7 +1619,9 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
 
     // DNS 劫持（v6，与 v4 同）：设备 :53 转投 mihomo 的 DNS，回封源伪装成设备查询的那个 v6 DNS。
     if (dport == 53) {
-        hijackDns(srcIp, sport, dstAddr, payload, true);
+        // 同 v4：先试进程内当场答，判不了/没开再交回老路。
+        if (!answerDnsLocally(srcIp, sport, dstAddr, payload, true))
+            hijackDns(srcIp, sport, dstAddr, payload, true);
         return;
     }
 
@@ -1793,4 +1803,63 @@ void NetStack::onDnsResponse()
                 sendUdpResponse4(s, p.vport, p.origServer, 53, resp);
         }
     }
+}
+
+// ———————————————— 进程内 DNS：本地当场合成 fake-ip 应答 ————————————————
+//
+// 返回 true = 已经处理完（答了或明确决定不答），调用方不要再走 hijackDns。
+// 返回 false = 没开 / 判不了 → 交给老路（转投 mihomo 的 fake-ip DNS）。
+//
+// ★ 与上游那版的**唯一实质差异**：不自带 forwardDns。上游对"不该 fake"的查询是
+//   每条新建一个 QUdpSocket + 一个 5s singleShot 直发上游；而 v1.1 早在 DNS 洪水那次
+//   把这套换成了**共享 socket + 事务 ID 多路复用**（见 Impl::dnsSock / dnsPending 的说明：
+//   旧写法在洪水下把一台设备的 DNS 变成了拖垮所有设备的放大器）。
+//   所以这里判不了就**返回 false 交回 hijackDns**，复用那条已经加固过的路径 ——
+//   照抄上游等于把修好的坑重新挖开。
+bool NetStack::answerDnsLocally(const QString &victimIp, quint16 vport,
+                                const QHostAddress &origServer, const QByteArray &query, bool v6)
+{
+    if (!d->localDns || !d->dnsLearner)
+        return false; // 没开 / 没装解析器 → 老路
+
+    const coastcore::DnsQuestion q = coastcore::parseDnsQuestion(query);
+    // 只对「公网域名的 A/AAAA、IN 类」合成假 IP。其余（PTR/SRV/内网名/非 IN 类…）一律交回老路：
+    // 合成一个我们答不准的记录，比让它照旧走核心糟得多。
+    const bool fakeable = q.ok && q.qclass == 1
+            && (q.qtype == coastcore::kDnsTypeA || q.qtype == coastcore::kDnsTypeAAAA);
+    if (!fakeable)
+        return false;
+
+    QByteArray resp;
+    if (q.qtype == coastcore::kDnsTypeA) {
+        const QHostAddress fake = d->dnsLearner->fakeFor(q.qname);
+        if (fake.isNull())
+            return false; // 池满等异常 → 保守交回老路
+        resp = coastcore::buildDnsAnswerA(query, q, fake, kFakeIpTtlSec);
+    } else {
+        // AAAA 一律回 NODATA（不是 NXDOMAIN）：fake-ip 池是 v4 的，给 AAAA 回空答案
+        // 会让双栈设备走 v4 —— 正是我们要的。回 NXDOMAIN 则会让它认为整个域名不存在。
+        resp = coastcore::buildDnsNoData(query, q, kFakeIpTtlSec);
+    }
+    if (resp.isEmpty())
+        return false; // 合成失败（理论上不会）→ 保守交回老路
+
+    UdpSess *s = d->udp.value(victimIp);
+    if (!s || !s->nic)
+        return true; // 设备刚被摘掉：查询丢弃即可（UDP 语义），别再往下走
+    ++GatewayDiag::c.dnsLocalFake;
+    // 回封的源地址必须伪装成**设备原本查的那台 DNS**，否则设备不认这个应答。
+    if (v6)
+        sendUdpResponse6(s, vport, origServer, 53, resp);
+    else
+        sendUdpResponse4(s, vport, origServer, 53, resp);
+    return true;
+}
+
+void NetStack::setLocalDnsEnabled(bool on)
+{
+    // 开着时设备的 :53 由我们当场答（fake-ip），不再转投 mihomo 的 fake-ip DNS。
+    // 这是「网关整条数据面不依赖核心」的最后一环 —— 在此之前即便出站走了进程内，
+    // DNS 仍然恒走核心，开关**名不副实**。关掉立刻回到老行为，可热切换。
+    d->localDns = on;
 }

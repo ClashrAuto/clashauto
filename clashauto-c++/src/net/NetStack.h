@@ -278,6 +278,11 @@ public:
     /// 传 nullptr 撤掉。与 setOutboundFactory 同一线程要求。
     void setDnsLearner(std::shared_ptr<DnsResolver> learner);
 
+    /// 进程内 DNS：开着时设备的 :53 由我们**当场答**（合成 fake-ip），不再转投 mihomo。
+    /// 这是「网关整条数据面不依赖核心」的最后一环 —— 在此之前即便出站已走进程内，
+    /// DNS 仍恒走核心。判不了的查询（PTR/SRV/非 IN 类…）仍交回老路，可热切换。
+    void setLocalDnsEnabled(bool on);
+
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。
     // from = 收到该帧的二层端点，用来定位喂给哪张卡（也决定 UDP 回程从哪张卡发出）。
     void inputFrame(IL2Endpoint *from, const QByteArray &frame);
@@ -301,6 +306,9 @@ private:
     //（常是网关/路由器 IP，经用户态栈中继到它走不通 → 名字解析时断时通）。见 .cpp。v6=true 按 v6 回封。
     void hijackDns(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
                    const QByteArray &query, bool v6);
+    // 进程内 DNS：当场合成 fake-ip 应答。返回 false = 没开/判不了，调用方交回 hijackDns。
+    bool answerDnsLocally(const QString &victimIp, quint16 vport, const QHostAddress &origServer,
+                          const QByteArray &query, bool v6);
     // 那条常驻 DNS socket 的收包处理：按事务 ID 找回上下文并回封给设备。见 .cpp。
     void onDnsResponse();
 

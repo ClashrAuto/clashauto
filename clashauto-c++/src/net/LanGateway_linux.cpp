@@ -1812,12 +1812,17 @@ void GatewayWorker::applyCoastCoreLocal()
         // 装 DNS 旁听器：让 accept 把核心分配的 fake-ip 目的地改写成域名。
         // 少了它，域名类流量拿着假 IP 出站必然超时 —— 进程内出站只对 IP 直连类有效。
         m_net->setDnsLearner(m_dnsResolver);
+        // ★ 进程内 DNS 与进程内出站**同一个开关**：开着时设备的 :53 由我们自己答，
+        //   不再转投 mihomo 的 fake-ip DNS。这是「整条数据面不依赖核心」的最后一环 ——
+        //   在此之前即便出站走了进程内，DNS 仍恒走核心，开关名不副实。
+        m_net->setLocalDnsEnabled(m_dnsResolver != nullptr);
         qInfo() << "网关: CoastCore 进程内出站已启用（回退端口" << m_socksPort
                 << "，fake-ip 反查" << (m_dnsResolver ? "已接" : "**未接：域名类将回退核心**") << "）";
     } else {
         // 撤回默认（全走 mihomo）——与「从未启用」完全一致。
         m_net->setOutboundFactory(new Socks5OutboundFactory(m_socksPort));
-        m_net->setDnsLearner(nullptr); // 连 fake-ip 改写也一并撤掉，与从未启用完全一致
+        m_net->setDnsLearner(nullptr);      // 连 fake-ip 改写也一并撤掉
+        m_net->setLocalDnsEnabled(false);   // :53 回到转投 mihomo，与从未启用完全一致
         qInfo() << "网关: CoastCore 进程内出站已停用（恢复默认 SOCKS 全走核心）";
     }
 }
