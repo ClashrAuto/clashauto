@@ -286,10 +286,21 @@ void QmlBridge::persistConfigBool(const QString &key, bool value)
         yaml += line + '\n';
     }
     QFile out(path);
-    if (out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
-        out.write(yaml.toUtf8());
-        out.close();
+    // ★ 写失败必须喊 —— 原来这里 `if (open) { … }`，失败就**什么都不做**：
+    //   用户点了开关、界面也翻过去了，设置却一个字都没落盘，重启回到旧值，
+    //   而全程没有任何提示。实测把 config.yaml chmod 444 就能复现
+    //   （见 PLAN 2026-08-15（六））。判据只能靠 `COAST_SETTINGS_SELFTEST` 写完读回来对，
+    //   那说明这条路在产品里根本没有失败通道。
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        qWarning("设置保存失败（打不开 %s）: %s",
+                 path.toUtf8().constData(), out.errorString().toUtf8().constData());
+        return;
     }
+    if (out.write(yaml.toUtf8()) < 0) {
+        qWarning("设置保存失败（写入 %s）: %s",
+                 path.toUtf8().constData(), out.errorString().toUtf8().constData());
+    }
+    out.close();
 }
 
 bool QmlBridge::systemDark() const
