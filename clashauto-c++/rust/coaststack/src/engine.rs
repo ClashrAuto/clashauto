@@ -230,6 +230,8 @@ pub struct Engine {
     pub conns_closed: u64,
     pub conns_aborted: u64,
     pub conns_refused: u64,
+    /// pump_conns 复用的连接 id 暂存表（避免每轮 poll 一次分配，见该函数）。
+    pump_scratch: Vec<ConnId>,
     /// 收队列满而丢掉的帧数。非 0 = 工作线程跟不上（不是链路丢包），
     /// 与 txdrop/rxdrop 分属不同环节，别混。
     pub rx_overflow: u64,
@@ -247,6 +249,7 @@ impl Engine {
             conns_closed: 0,
             conns_aborted: 0,
             conns_refused: 0,
+            pump_scratch: Vec::new(),
             rx_overflow: 0,
             tx_frames: 0,
         }
@@ -668,8 +671,16 @@ impl Engine {
 
     /// 每条连接：上行数据（peek，不消费）、下行已发出量、结束通知。
     fn pump_conns(&mut self, nid: NicId, out: &mut Vec<Event>) {
-        let ids: Vec<ConnId> = self.conns.iter().filter(|(_, c)| c.nic == nid).map(|(k, _)| *k).collect();
-        for id in ids {
+        // ★ 复用暂存表，别每轮都分配。
+        //   poll 从 40 次/秒提到亚毫秒级（NetStack.cpp 的 schedulePoll）之后，这个函数的
+        //   调用频率涨了一两个数量级 —— 原来每次都 collect 一个新 Vec，在 2000 条连接时
+        //   就是每秒几十 MB 的分配。提频是我们自己做的改动，它带来的成本也得自己收掉。
+        //   ⚠️ 仍是 O(全部连接) 的扫描（按 nic 过滤）。多网卡时是 O(网卡 × 连接)；
+        //      真到那一步应该改成按 nic 建索引，这里先把分配这一半解决掉。
+        let mut ids = core::mem::take(&mut self.pump_scratch);
+        ids.clear();
+        ids.extend(self.conns.iter().filter(|(_, c)| c.nic == nid).map(|(k, _)| *k));
+        for &id in ids.iter() {
             let Some(c) = self.conns.get_mut(&id) else { continue };
             let Some(n) = self.nics.get_mut(&nid) else { continue };
             let s = n.sockets.get_mut::<tcp::Socket>(c.handle);
@@ -726,6 +737,8 @@ impl Engine {
                 out.push(Event::ConnClosed { id, is_abort });
             }
         }
+        self.pump_scratch = ids; // 还回去，下轮接着用
+
         // 已上报结束的连接，清掉（连同 portmap 项，否则表随连接泄漏）
         let dead: Vec<ConnId> = self
             .conns

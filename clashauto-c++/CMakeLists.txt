@@ -226,6 +226,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
             set(COAST_RUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/rust/coaststack")
             set(COAST_RUST_OUT "${COAST_RUST_DIR}/target/${COAST_RUST_TARGET}/release/${COAST_RUST_LIBNAME}")
 
+            # ★ 依赖必须是**全部** .rs，不能手写几个。
+            #   这里原本只列了 lib.rs 与 ffi.rs —— 于是改 engine.rs / portmap.rs 时
+            #   `ninja` 直接报 "no work to do"，Coast.exe 链的还是**上一版**静态库。
+            #   后果极其隐蔽：Rust 单测跑的是新代码（cargo 自己算依赖，而且用的是
+            #   test profile、输出路径都不同），C++ 自测跑的却是旧库，两边都绿，
+            #   而绿灯说明不了任何事情。踩过一次，用 GLOB 收全。
+            #   （GLOB 在 configure 期展开：新增 .rs 文件需要重跑一次 cmake。
+            #     比起"改了不重建"，这个代价可以接受。）
+            file(GLOB COAST_RUST_SRCS "${COAST_RUST_DIR}/src/*.rs")
+
             # --locked：Cargo.lock 已提交，解析结果逐字节可复现（没有 vendor 依赖源码，
             # 理由见 rust/coaststack/README.md）。
             add_custom_command(
@@ -234,7 +244,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
                         --target ${COAST_RUST_TARGET}
                 WORKING_DIRECTORY "${COAST_RUST_DIR}"
                 DEPENDS "${COAST_RUST_DIR}/Cargo.toml" "${COAST_RUST_DIR}/Cargo.lock"
-                        "${COAST_RUST_DIR}/src/lib.rs" "${COAST_RUST_DIR}/src/ffi.rs"
+                        ${COAST_RUST_SRCS}
+                        "${COAST_RUST_DIR}/.cargo/config.toml"
                 COMMENT "cargo build coaststack (${COAST_RUST_TARGET})"
                 VERBATIM)
             add_custom_target(coaststack_build DEPENDS "${COAST_RUST_OUT}")
