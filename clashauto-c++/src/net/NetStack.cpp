@@ -1023,6 +1023,8 @@ NetStack::~NetStack()
         delete n;
     if (g_impl == d)
         g_impl = nullptr;
+    if (d->outFactory && d->outFactory != d->ownedDefault)
+        delete d->outFactory;
     delete d->ownedDefault;
     delete d;
 }
@@ -1036,9 +1038,15 @@ void coastSetBenchStage(int stage)
 
 void NetStack::setOutboundFactory(OutboundFactory *f)
 {
-    // 传 nullptr = 回到默认的 SOCKS5 出站（拨 mihomo）。工厂的生命周期由**调用方**负责，
-    // 本对象只持默认那一个 —— 这样"换出站"与"谁拥有出站配置"这两件事不会缠在一起。
+    // ★ **取得所有权**：旧工厂在这里 delete。调用方每次换出站都 new 一个新的，
+    //   不必自己管旧的 —— 否则每次热切换（改设置/换模式）都漏一个工厂。
+    //   传 nullptr = 回到默认的 SOCKS5（拨 mihomo）。
+    if (f == d->outFactory)
+        return;
+    OutboundFactory *old = d->outFactory;
     d->outFactory = f ? f : static_cast<OutboundFactory *>(d->ownedDefault);
+    if (old && old != d->ownedDefault)
+        delete old;
 }
 
 const char *NetStack::activeTcpStack() const

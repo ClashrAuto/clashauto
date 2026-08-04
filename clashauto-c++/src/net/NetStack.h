@@ -265,7 +265,8 @@ public:
     /// 传 `CoreDialerFactory` 即走**进程内出站**，连接不再经回环 SOCKS 那一跳。
     /// ★ 那一跳实测占网关软件成本的 **65%**（见 docs/gateway-bottleneck-audit.md 第十节），
     ///   所以这个 setter 是整条性能线上收益最大的一个开关。
-    /// 传 nullptr = 回到默认。工厂生命周期由调用方负责（本对象只持默认那一个）。
+    /// ★ **取得所有权**：旧工厂在内部 delete，调用方每次换出站直接 new 一个新的即可。
+    /// 传 nullptr = 回到默认。只能在拥有本对象的那个线程上调用（见文件头的线程模型）。
     void setOutboundFactory(OutboundFactory *f);
 
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。

@@ -1,5 +1,10 @@
 #pragma once
 
+#include <memory>
+
+class ProxyConfigStore;
+class RuleEngine;
+
 // 透明网关编排器 —— DevicesController 用的稳定公共 API（跨平台可编译）。
 //
 // 内部（仅 Linux 实现，其余平台为 no-op 桩，isAvailable()=false）：
@@ -69,6 +74,16 @@ public:
         quint16 redirPort = 0;  // 核心的 redir 入站端口（ConfigBuilder 发的 coast-redir）
     };
     void setDatapath(const DatapathSpec &spec);
+
+    /// 启用/停用 **CoastCore 进程内出站**（网关这条路）。
+    /// 开着时网关终结出的连接不再经回环 SOCKS 拨 mihomo，而是在进程内直接出站 ——
+    /// 那一跳实测占网关软件成本的 **65%**（docs/gateway-bottleneck-audit.md 第十节）。
+    /// · store  = 出站配置快照来源（节点表）。为空 = 等同于关。
+    /// · rules  = Rule 模式的首命中匹配引擎；可为空（那时只有 Global/Direct 判得了）。
+    /// · strict = 拒绝回退核心，让「还差多少」变成明确的失败 + GatewayDiag 的 cc= 分布。
+    /// 关掉时立刻回到「全走 mihomo」，与从未启用完全一致。可热切换。
+    void setCoastCore(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
+                      std::shared_ptr<RuleEngine> rules);
 
     // 平台是否可用（至少一张网卡的二层端点 + 协议栈就绪）。DevicesController.gatewayReady 返回它。
     bool isAvailable() const;

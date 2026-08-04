@@ -37,6 +37,11 @@
 #include "IL2Endpoint.h"
 #include "NdpSpoofer.h"
 #include "NetStack.h"
+#include "core/RuleEngine.h"
+#include "core/ProxyConfig.h"
+#include "core/CoreRouter.h"
+#include "Socks5Client.h"   // Socks5OutboundFactory：CoastCore 的回退出站
+#include "core/CoreDialerFactory.h"
 #include "PfRules.h"
 #include "TproxyRules.h" // TPROXY 数据面的内核规则（装/拆/设备集合）
 
@@ -270,6 +275,18 @@ public:
     void disableAllLocal();
     // 数据面模式。必须在 configureLocal 之前设——它按模式决定建不建 NetStack。
     void setDatapathLocal(const LanGateway::DatapathSpec &spec) { m_datapath = spec; }
+    // CoastCore 进程内出站：记下意图并（若栈已建）立刻应用。栈还没建时 configureLocal 会再调一次。
+    void setCoastCoreLocal(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
+                           std::shared_ptr<RuleEngine> rules)
+    {
+        m_coastCore = enabled;
+        m_coastStrict = strict;
+        m_pcfgStore = std::move(store);
+        m_ruleEngine = std::move(rules);
+        applyCoastCoreLocal();
+    }
+    // 依 m_coastCore 给 m_net 装/撤 CoreDialerFactory（仅在 m_net 存在时动手；必在工作线程调）。
+    void applyCoastCoreLocal();
     void recoverLocal();
     void teardownLocal(); // 还原全部 ARP + 销毁 NetStack/端点/ArpSpoofer（幂等）。退出/析构走它。
 
@@ -310,6 +327,12 @@ private:
     void syncPfDevices(); // 把被接管设备的 IPv4 推进 pf table（macOS）
     QHash<QString, GwNic *> m_nics;          // ifname → 套件
     quint16 m_socksPort = 0;
+    // ———— CoastCore 进程内出站（意图 + 依赖）————
+    // 意图单独记：setCoastCore 可能早于 configure（栈还没建），那时只能先存着。
+    bool m_coastCore = false;
+    bool m_coastStrict = false;
+    std::shared_ptr<ProxyConfigStore> m_pcfgStore;
+    std::shared_ptr<RuleEngine> m_ruleEngine;
     QHash<quint64, QString> m_victimByMac;   // src MAC 打包键 → ip（帧过滤 + 记账）
     // 被隔离（policy=reject）设备的 MAC 打包键。它们去局域网的流量按方向过滤，见 forwardIsolatedLan。
     QSet<quint64> m_isolatedMacs;
@@ -959,6 +982,8 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             m_net = nullptr;
             return;
         }
+        // 栈刚建好 —— 把之前记下的 CoastCore 意图应用上去（setCoastCore 可能早于 configure）。
+        applyCoastCoreLocal();
     }
 
     QSet<QString> seen;
@@ -1763,6 +1788,44 @@ void LanGateway::setDatapath(const DatapathSpec &spec)
     QMetaObject::invokeMethod(
         d->worker, [w = d->worker, spec] { w->setDatapathLocal(spec); },
         Qt::BlockingQueuedConnection);
+}
+
+// ———————————————— CoastCore 进程内出站接线 ————————————————
+// 全在工作线程执行（NetStack::setOutboundFactory 硬性要求本线程调用，见 NetStack.h）。
+void GatewayWorker::applyCoastCoreLocal()
+{
+    if (!m_net)
+        return; // 栈还没建（首轮 configure 前）：意图已记在成员里，建栈后会再调一次
+    if (m_coastCore && m_pcfgStore) {
+        // 回退工厂 = 照旧拨每设备 SOCKS → mihomo 靠 IN-USER 分流。CoreDialerFactory 取得其所有权。
+        auto *factory = new CoreDialerFactory(m_pcfgStore.get(),
+                                              new Socks5OutboundFactory(m_socksPort));
+        factory->setStrict(m_coastStrict); // 严格模式：拒绝回退，让差距暴露出来
+        factory->setInboundTag(QStringLiteral("Coast-Gateway"));
+        // 分流判定用 core/CoreRouter 的**同一份**实现（本机入站将来也用它 ——
+        // 复制一份就会开始漂移，「本机走 A 节点、设备走 B 节点」这类问题极难查）。
+        factory->setRouter(coastcore::makeRouter(m_pcfgStore, m_ruleEngine, false));
+        m_net->setOutboundFactory(factory); // 取得所有权：内部 delete 掉旧工厂
+        qInfo() << "网关: CoastCore 进程内出站已启用（回退端口" << m_socksPort << "）";
+    } else {
+        // 撤回默认（全走 mihomo）——与「从未启用」完全一致。
+        m_net->setOutboundFactory(new Socks5OutboundFactory(m_socksPort));
+        qInfo() << "网关: CoastCore 进程内出站已停用（恢复默认 SOCKS 全走核心）";
+    }
+}
+
+void LanGateway::setCoastCore(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
+                              std::shared_ptr<RuleEngine> rules)
+{
+    if (!d->workerReady())
+        return;
+    // 队列投递即可：出站是**每条新连接**建立时才查工厂的，不需要与调用方同步。
+    QMetaObject::invokeMethod(
+        d->worker,
+        [w = d->worker, enabled, strict, store = std::move(store), rules = std::move(rules)] {
+            w->setCoastCoreLocal(enabled, strict, store, rules);
+        },
+        Qt::QueuedConnection);
 }
 
 void LanGateway::configure(const QVector<NicSpec> &nics, quint16 socksPort)
