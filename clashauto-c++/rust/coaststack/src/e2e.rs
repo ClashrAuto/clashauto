@@ -393,3 +393,283 @@ fn measure_realistic_upstream_ceiling() {
     );
     assert!(delivered > 0, "一个字节都没送达");
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 第三版测量：**带窗口缩放选项**，并补上从没测过的下行。
+//
+// 前两版都错了，而且方向相反：
+//   · measure_bytes_per_poll_cycle       —— 灌出窗数据，量的是收缓冲容量(128 KiB)，偏乐观
+//   · measure_realistic_upstream_ceiling —— 合成 SYN **不带 WS 选项**，等于把窗口缩放关掉，
+//                                           通告窗口被 RFC 封在 65535，偏悲观
+// smoltcp 0.12 是支持 WS 的（socket/tcp.rs 里的 remote_win_scale / remote_win_shift，
+// SYN-ACK 会回选项），而真实设备的 SYN 一定带 WS —— 所以正确的测法必须把选项带上。
+
+/// 带 TCP 选项的帧（opts 长度必须是 4 的倍数）。
+fn tcp_frame_opt(
+    sport: u16,
+    dport: u16,
+    flags: u8,
+    seq: u32,
+    ack: u32,
+    payload: &[u8],
+    opts: &[u8],
+) -> Vec<u8> {
+    assert!(opts.len() % 4 == 0);
+    let hdr_len = 20 + opts.len();
+    let tcp_len = hdr_len + payload.len();
+    let ip_len = 20 + tcp_len;
+    let mut f = vec![0u8; 14 + ip_len];
+    f[0..6].copy_from_slice(&OUR_MAC);
+    f[6..12].copy_from_slice(&DEV_MAC);
+    f[12] = 0x08;
+    f[13] = 0x00;
+    f[14] = 0x45;
+    f[16..18].copy_from_slice(&(ip_len as u16).to_be_bytes());
+    f[22] = 64;
+    f[23] = 6;
+    f[26..30].copy_from_slice(&DEV_IP);
+    f[30..34].copy_from_slice(&DST_IP);
+    let ipc = fold(ones_sum(&f[14..34], 0));
+    f[24..26].copy_from_slice(&ipc.to_be_bytes());
+
+    let t = 34usize;
+    f[t..t + 2].copy_from_slice(&sport.to_be_bytes());
+    f[t + 2..t + 4].copy_from_slice(&dport.to_be_bytes());
+    f[t + 4..t + 8].copy_from_slice(&seq.to_be_bytes());
+    f[t + 8..t + 12].copy_from_slice(&ack.to_be_bytes());
+    f[t + 12] = ((hdr_len / 4) as u8) << 4;
+    f[t + 13] = flags;
+    // 设备侧通告 65535，配合 SYN 里的 shift=7 → 有效约 8 MiB，
+    // 故意让**设备窗口不成为下行的限制**，这样量到的就是泵周期本身。
+    f[t + 14..t + 16].copy_from_slice(&65535u16.to_be_bytes());
+    if !opts.is_empty() {
+        f[t + 20..t + 20 + opts.len()].copy_from_slice(opts);
+    }
+    if !payload.is_empty() {
+        f[t + hdr_len..t + hdr_len + payload.len()].copy_from_slice(payload);
+    }
+    let mut ph = 0u32;
+    ph = ones_sum(&DEV_IP, ph);
+    ph = ones_sum(&DST_IP, ph);
+    ph += 6;
+    ph += tcp_len as u32;
+    let c = fold(ones_sum(&f[t..t + tcp_len], ph));
+    f[t + 16..t + 18].copy_from_slice(&c.to_be_bytes());
+    f
+}
+
+/// 从出方向帧里解析 TCP 选项，取窗口缩放的 shift。
+fn parse_ws_shift(frame: &[u8]) -> Option<u8> {
+    if frame.len() < 54 {
+        return None;
+    }
+    let t = 34usize;
+    let hdr_len = ((frame[t + 12] >> 4) as usize) * 4;
+    if hdr_len <= 20 || t + hdr_len > frame.len() {
+        return None;
+    }
+    let mut i = t + 20;
+    let end = t + hdr_len;
+    while i < end {
+        match frame[i] {
+            0 => return None,
+            1 => i += 1,
+            3 => {
+                return if i + 2 < end { Some(frame[i + 2]) } else { None };
+            }
+            _ => {
+                if i + 1 >= end {
+                    return None;
+                }
+                let l = frame[i + 1] as usize;
+                if l < 2 {
+                    return None;
+                }
+                i += l;
+            }
+        }
+    }
+    None
+}
+
+/// 带 WS 的三次握手。返回 (连接 id, SYN-ACK 的 seq, 我方通告的 shift, 我方通告窗口原值)
+fn establish_ws(e: &mut Engine, sport: u16, dport: u16, seq: u32) -> (ConnId, u32, u8, u16) {
+    let opts = [3u8, 3, 7, 0]; // WS shift=7，Windows/Linux 的常见量级
+    let mut evs = Vec::new();
+    e.input(1, &tcp_frame_opt(sport, dport, 0x02, seq, 0, b"", &opts));
+    e.poll_collect(10, &mut evs);
+
+    let (mut synack_seq, mut shift, mut wnd) = (0u32, 0u8, 0u16);
+    for ev in &evs {
+        if let Event::OutFrame { data, .. } = ev {
+            if data.len() >= 54 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 6 {
+                let t = 34usize;
+                if data[t + 13] & 0x12 == 0x12 {
+                    synack_seq =
+                        u32::from_be_bytes([data[t + 4], data[t + 5], data[t + 6], data[t + 7]]);
+                    wnd = u16::from_be_bytes([data[t + 14], data[t + 15]]);
+                    shift = parse_ws_shift(data).unwrap_or(0);
+                }
+            }
+        }
+    }
+    assert_ne!(synack_seq, 0, "带 WS 的 SYN 没拿到 SYN-ACK");
+    evs.clear();
+    e.input(
+        1,
+        &tcp_frame_opt(sport, dport, 0x10, seq + 1, synack_seq.wrapping_add(1), b"", &[]),
+    );
+    e.poll_collect(20, &mut evs);
+    let id = conn_new_of(&evs).expect("握手完成后应有 ConnNew").0;
+    (id, synack_seq, shift, wnd)
+}
+
+/// 出方向数据字节数（跳过纯 ACK）。
+fn payload_bytes(evs: &[Event]) -> usize {
+    let mut n = 0usize;
+    for ev in evs {
+        if let Event::OutFrame { data, .. } = ev {
+            if data.len() > 54 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 6 {
+                let t = 34usize;
+                let hl = ((data[t + 12] >> 4) as usize) * 4;
+                if data.len() > 14 + 20 + hl {
+                    n += data.len() - 14 - 20 - hl;
+                }
+            }
+        }
+    }
+    n
+}
+
+#[test]
+fn measure_ceilings_with_window_scaling() {
+    // ───────────────── 上行：设备 → 我们 ─────────────────
+    let mut e = mk_engine();
+    let (id, synack_seq, shift, syn_wnd) = establish_ws(&mut e, 51030, 443, 3000);
+    std::eprintln!(
+        "[WS  ] SYN-ACK window={} shift={} → 我方有效接收窗口 {} B",
+        syn_wnd,
+        shift,
+        (syn_wnd as u64) << shift
+    );
+
+    let ackno = synack_seq.wrapping_add(1);
+    let payload = [0x5Au8; 1460];
+    let mut seq: u32 = 3001;
+    let mut peer_ack: u32 = 3001;
+    // ★ RFC 7323：**SYN 段里的窗口字段不缩放**（缩放只对后续段生效）。
+    //   第一版这里错误地对 SYN-ACK 的 window 应用了 shift，把 65535 当成 262140，
+    //   于是灌了超出真实窗口一倍的数据 → 被判出窗丢弃 → 假设备不重传 → 整条流停摆，
+    //   量出来一个看着像"0.8 Mb/s"的假数。
+    let mut wnd: u64 = syn_wnd as u64;
+    let mut wnd_max = wnd;
+
+    const TARGET: usize = 4 * 1024 * 1024;
+    let (mut delivered, mut cycles, mut now, mut idle) = (0usize, 0u32, 1000u64, 0u32);
+    while delivered < TARGET && cycles < 5000 {
+        let mut sent = 0usize;
+        loop {
+            let inflight = seq.wrapping_sub(peer_ack) as u64;
+            if inflight + 1460 > wnd {
+                break;
+            }
+            e.input(1, &tcp_frame_opt(51030, 443, 0x18, seq, ackno, &payload, &[]));
+            seq = seq.wrapping_add(1460);
+            sent += 1460;
+        }
+        let mut evs = Vec::new();
+        now += 25;
+        e.poll_collect(now, &mut evs);
+        cycles += 1;
+
+        let mut got = 0usize;
+        for ev in &evs {
+            if let Event::ConnData { id: i, data } = ev {
+                if *i == id {
+                    got += data.len();
+                }
+            }
+        }
+        if got > 0 {
+            let _ = e.recved(id, got as u32);
+            delivered += got;
+        }
+        for (flags, _sq, a, w) in tcp_out_ex(&evs) {
+            if flags & 0x10 != 0 {
+                peer_ack = a;
+                wnd = (w as u64) << shift;
+                if wnd > wnd_max {
+                    wnd_max = wnd;
+                }
+            }
+        }
+        if sent == 0 && got == 0 {
+            idle += 1;
+            if idle > 50 {
+                break;
+            }
+        } else {
+            idle = 0;
+        }
+    }
+    let up = (delivered as f64) * 8.0 / (cycles as f64 * 0.025) / 1e6;
+    std::eprintln!(
+        "[UP  ] {} B / {} 拍 → {:.1} Mb/s/连接（最大有效窗口 {} B）",
+        delivered,
+        cycles,
+        up,
+        wnd_max
+    );
+
+    // ───────────────── 下行：我们 → 设备 ─────────────────
+    // 设备通告 65535<<7 ≈ 8 MiB，故意不让设备窗口成为限制。
+    let mut e2 = mk_engine();
+    let (id2, sa2, _s2, _w2) = establish_ws(&mut e2, 51031, 8080, 4000);
+    let ack_base = sa2.wrapping_add(1);
+    let chunk = vec![0xA5u8; 128 * 1024];
+
+    let (mut pushed, mut on_wire, mut cyc) = (0usize, 0usize, 0u32);
+    let mut now2 = 2000u64;
+    while cyc < 300 {
+        loop {
+            let room = e2.sndbuf(id2).unwrap_or(0);
+            if room == 0 {
+                break;
+            }
+            let n = room.min(chunk.len());
+            match e2.send(id2, &chunk[..n]) {
+                Ok(w) if w > 0 => pushed += w,
+                _ => break,
+            }
+        }
+        let mut evs = Vec::new();
+        now2 += 25;
+        e2.poll_collect(now2, &mut evs);
+        cyc += 1;
+        on_wire += payload_bytes(&evs);
+        // 设备把收到的全部 ACK 掉（累计确认）
+        e2.input(
+            1,
+            &tcp_frame_opt(
+                51031,
+                8080,
+                0x10,
+                4001,
+                ack_base.wrapping_add(on_wire as u32),
+                b"",
+                &[],
+            ),
+        );
+    }
+    let down = (on_wire as f64) * 8.0 / (cyc as f64 * 0.025) / 1e6;
+    std::eprintln!(
+        "[DOWN] 上线 {} B / {} 拍 → {:.1} Mb/s/连接（已灌进栈 {} B）",
+        on_wire,
+        cyc,
+        down,
+        pushed
+    );
+
+    assert!(delivered > 0, "上行一个字节都没走通");
+    assert!(on_wire > 0, "下行一个字节都没上线");
+}
