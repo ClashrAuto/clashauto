@@ -46,15 +46,20 @@ struct HistoryRobustnessTests {
         #expect(t.store.recordCount() == Int64(names.count))
     }
 
-    @Test("upload/download 是字符串或缺失 —— 不崩,按 0/上次值处理")
+    @Test("upload/download 是字符串或缺失 —— 不崩,按 0 处理(于是被零字节过滤挡掉)")
     func wrongTypeByteCounts() {
         let t = TempHistory()
         t.store.observe([conn(id: "s", host: "x.com", up: "not-a-number", down: "999")])
         var missing = conn(id: "m", host: "y.com"); (missing["metadata"] as? NSDictionary); missing["download"] = nil
         t.store.observe([missing])
+        // 同批喂一条**字节数正常**的:证明畸形项没有把整批带崩,后面的还照常入库。
+        t.store.observe([conn(id: "ok", host: "z.com", down: 123)])
         t.store.observe([]); t.store.flush()
-        // 两条都落了库,没崩(错类型被 as? NSNumber 挡成 nil → 0/保留)
-        #expect(t.store.recordCount() == 2)
+        // 错类型被 `as? NSNumber` 挡成 nil → 0 字节；而**零字节连接不记账**
+        //（与 Qt 线一致，见 HistoryStore 里那道 guard 的说明），所以这两条不落库。
+        // 本测试要证的是「不崩、畸形按 0 处理」，这一点由「正常那条仍然入库」来兜底 ——
+        // 原来断言 `== 2` 是在零字节过滤存在之前写的。
+        #expect(t.store.recordCount() == 1)
     }
 
     @Test("id 缺失/为空的连接直接跳过,不崩")
@@ -78,7 +83,9 @@ struct HistoryRobustnessTests {
     @Test("大量连接一次喂入不崩(健壮性/性能 sanity)")
     func manyConnections() {
         let t = TempHistory()
-        let many = (0..<3000).map { conn(id: "c\($0)", host: "h\($0 % 50).com", down: Int64($0)) }
+        // `down` 从 1 起：0 字节的连接不记账（见 HistoryStore 的零字节过滤），
+        // 用 `$0` 的话 c0 恰好是 0 字节，会让这条「3000 条不崩」的测试变成 2999。
+        let many = (0..<3000).map { conn(id: "c\($0)", host: "h\($0 % 50).com", down: Int64($0 + 1)) }
         t.store.observe(many)
         t.store.observe([]); t.store.flush()
         #expect(t.store.recordCount() == 3000)
