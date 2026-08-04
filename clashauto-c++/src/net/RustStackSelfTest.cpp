@@ -903,14 +903,18 @@ int runGatewayThroughputBench()
         const double dcpu0 = cpuSeconds();
         int idle = 0;
         quint32 devAck = 0;
+        qint64 dspins = 0, dspinsProd = 0; // 同上行：区分"真干活"与"空转"
 
         while (ep.dataBytes < dtarget && dwall.elapsed() < 20000) {
             // 假 SOCKS 侧尽量灌（写缓冲有上限时 Qt 自己会攒着）
             while (socks.tunnel->bytesToWrite() < 4 * 1024 * 1024)
                 socks.tunnel->write(blob);
 
+            ++dspins;
             const qint64 before = ep.dataBytes;
             QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
+            if (ep.dataBytes != before)
+                ++dspinsProd;
 
             // 设备回 ACK：确认 FakeEp 已经收到的全部载荷，否则窗口很快关死
             if (ep.sawData) {
@@ -943,6 +947,10 @@ int runGatewayThroughputBench()
                      dcpu, dcore,
                      (dframes > 0 ? dcpu * 1e6 / dframes : 0.0),
                      (ep.dataBytes > 0 ? dcpu * 1e9 / double(ep.dataBytes) : 0.0));
+        std::fprintf(stderr,
+                     "[gwbench][下行]   主循环 %lld 轮，其中有进展的 %lld 轮（%.1f%%）\n",
+                     static_cast<long long>(dspins), static_cast<long long>(dspinsProd),
+                     (dspins > 0 ? 100.0 * double(dspinsProd) / double(dspins) : 0.0));
         if (ep.dataBytes < dtarget / 16) {
             std::fprintf(stderr, "[gwbench][下行] FAIL: 只搬了 %lld B —— 路径有阻塞\n",
                          static_cast<long long>(ep.dataBytes));
@@ -1090,6 +1098,11 @@ int runGatewayThroughputBench()
                           ? qEnvironmentVariableIntValue("COAST_GW_BENCH_STAGE")
                           : 0;
     qint64 fedBytes = 0;
+    // ★ 主循环自旋次数。processEvents(AllEvents, 3) 在事件队列空时**立刻返回**，
+    //   所以这个 while 是忙等 —— 它自己烧的 CPU 会被算进下面报的每一个数字里。
+    //   报出来才知道污染有多大（空转占比高 = 污染严重）。
+    qint64 spins = 0;
+    qint64 spinsFed = 0;
     if (stage >= 3) {
         // 同理：STAGE>=3 每帧只有 1~2 us，按 target 只够跑 0.02 s = 一两个 tick。
         // 放大 20 倍，让总 CPU 落在几百毫秒量级才量得准。
@@ -1105,6 +1118,7 @@ int runGatewayThroughputBench()
     } else {
         // ★ STAGE=1 时 SOCKS 侧收不到任何东西，socks.rxBytes 恒 0 —— 用它当条件会空跑到超时。
         while ((stage >= 1 ? fedBytes : socks.rxBytes) < target && wall.elapsed() < 20000) {
+            ++spins;
             bool fed = false;
             for (;;) {
                 const quint32 inflight = seq - ep.lastAck;
@@ -1118,6 +1132,8 @@ int runGatewayThroughputBench()
             }
             const qint64 before = socks.rxBytes;
             QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
+            if (fed)
+                ++spinsFed;
             if (!fed && socks.rxBytes == before) {
                 if (++stalls > 400)
                     break;
@@ -1144,6 +1160,11 @@ int runGatewayThroughputBench()
                  "[gwbench] 载荷=%d 送达 %lld B / %.2fs → %.0f Mb/s；CPU %.2fs "
                  "(%.3f 核/Gbps, %.2f us/帧)\n", kPayload,
                  static_cast<long long>(accounted), secs, mbps, cpu, corePerGbps, usPerFrame);
+    std::fprintf(stderr,
+                 "[gwbench]   主循环自旋 %lld 次，其中真正喂了帧的 %lld 次（%.1f%%）"
+                 " —— 空转占比越高，下面的 CPU 数被夹具污染得越厉害\n",
+                 static_cast<long long>(spins), static_cast<long long>(spinsFed),
+                 (spins > 0 ? 100.0 * double(spinsFed) / double(spins) : 0.0));
     std::fprintf(stderr,
                  "[gwbench]   背压：上行节流 %lld 次，下行暂停 %lld 次"
                  "（各级都应接近 0，否则流态不可比、归因不成立）\n",
