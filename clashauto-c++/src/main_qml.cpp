@@ -408,6 +408,41 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // 订阅节点启停的写入自检（COAST_SUBS_SELFTEST=1）：让 `subscribe.yaml` 的**写路径**
+    // 能从外部驱动。理由与设置自检同 —— 这份文件两条产品线共用，一条线写完另一条读不读得懂，
+    // 只有真写一次才答得上来。`device` 表就是在这个问题上出的事（两条线用了不同的列、
+    // 不同的时间戳格式），所以剩下的每一处共享状态都值得照同一把尺子过一遍。
+    // 只翻第 0 个订阅的第 0 个节点的启停位，不联网、不拉取。
+    if (qEnvironmentVariableIsSet("COAST_SUBS_SELFTEST")) {
+        AppConfig cfg = AppConfigLoader::load();
+        SubscriptionStore store(cfg, &app);
+        const QVector<SubscriptionSummary> subs = store.load();
+        if (subs.isEmpty()) {
+            std::printf("[subs] SKIP 没有订阅\n");
+            std::fflush(stdout);
+            return 0;
+        }
+        const QVector<SubscriptionNodeSummary> nodes = store.nodes(0);
+        if (nodes.isEmpty()) {
+            std::printf("[subs] SKIP 第 0 个订阅没有节点\n");
+            std::fflush(stdout);
+            return 0;
+        }
+        const bool before = nodes.first().use;
+        store.setNodeEnabled(0, 0, !before);
+        const QVector<SubscriptionNodeSummary> after = store.nodes(0);
+        const bool now = !after.isEmpty() && after.first().use;
+        std::printf("[subs] 订阅0/节点0 「%s」: %s -> 写入 %s -> 读回 %s\n",
+                    nodes.first().name.toUtf8().constData(),
+                    before ? "true" : "false", !before ? "true" : "false",
+                    now ? "true" : "false");
+        std::printf("[subs] 启用节点数: %d / %d\n",
+                    store.load().isEmpty() ? -1 : store.load().first().enabledNodeCount, nodes.size());
+        std::printf("[subs] %s\n", now == !before ? "OK" : "FAIL 写进去又读不回来");
+        std::fflush(stdout);
+        return now == !before ? 0 : 1;
+    }
+
     // 设置写入自检（COAST_SETTINGS_SELFTEST=1）：把「保存一个设置」这条路径变成
     // **可以从外部驱动**的，然后读回来看写没写进去、别的键有没有被带走。
     //

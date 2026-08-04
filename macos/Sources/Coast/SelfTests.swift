@@ -25,6 +25,31 @@ enum SelfTests {
         if environment["COAST_LOOKUP_SELFTEST"] == "1" { lookupSelfTest() }
         if environment["COAST_CONNSTATS_SELFTEST"] == "1" { connStatsSelfTest() }
         if environment["COAST_SETTINGS_SELFTEST"] == "1" { settingsSelfTest() }
+        if environment["COAST_SUBS_SELFTEST"] == "1" { subsSelfTest() }
+    }
+
+    /// 订阅节点启停的写入自检 —— 让 `subscribe.yaml` 的**写路径**能从外部驱动。
+    ///
+    /// 存在的理由与设置自检同：这份文件两条产品线共用，一条线写完另一条读不读得懂，
+    /// 只有真写一次才答得上来。`device` 表就是在这个问题上出的事（两条线用了不同的列、
+    /// 不同的时间戳格式），所以剩下的每一处共享状态都值得照同一把尺子过一遍。
+    ///
+    /// 只翻**第 0 个订阅的第 0 个节点**的启停位，翻完打印前后值 —— 不联网、不拉取。
+    private static func subsSelfTest() {
+        print("=== 订阅节点启停自检 ===")
+        guard let config = try? AppConfigLoader.load() else { print("[subs] FAIL 读不到配置"); exit(1) }
+        let store = SubscriptionStore(config: config)
+        let subs = store.load()
+        guard !subs.isEmpty else { print("[subs] SKIP 没有订阅"); exit(0) }
+        let nodes = store.nodes(at: 0)
+        guard let first = nodes.first else { print("[subs] SKIP 第 0 个订阅没有节点"); exit(0) }
+        let before = first.use
+        _ = store.setNodeEnabled(subscription: 0, node: 0, !before)
+        let after = store.nodes(at: 0).first?.use
+        print("[subs] 订阅0/节点0 「\(first.name)」: \(before) -> 写入 \(!before) -> 读回 \(after.map(String.init) ?? "nil")")
+        print("[subs] 启用节点数: \(store.load().first?.enabledNodeCount ?? -1) / \(nodes.count)")
+        print(after == !before ? "[subs] OK" : "[subs] FAIL 写进去又读不回来")
+        exit(after == !before ? 0 : 1)
     }
 
     /// 设置写入自检 —— 把「保存一个设置」这条路径变成**可以从外部驱动**的。
