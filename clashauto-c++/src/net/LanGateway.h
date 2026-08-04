@@ -4,6 +4,7 @@
 
 class ProxyConfigStore;
 class RuleEngine;
+class DnsResolver;
 
 // 透明网关编排器 —— DevicesController 用的稳定公共 API（跨平台可编译）。
 //
@@ -82,8 +83,10 @@ public:
     /// · rules  = Rule 模式的首命中匹配引擎；可为空（那时只有 Global/Direct 判得了）。
     /// · strict = 拒绝回退核心，让「还差多少」变成明确的失败 + GatewayDiag 的 cc= 分布。
     /// 关掉时立刻回到「全走 mihomo」，与从未启用完全一致。可热切换。
+    /// · dns    = DNS 旁听器：把核心分配的 fake-ip 反查成域名再拨。**不给它，域名类流量
+    ///            就只能拿着假 IP 出站、必然路由不到**，进程内出站等于只对 IP 直连类生效。
     void setCoastCore(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
-                      std::shared_ptr<RuleEngine> rules);
+                      std::shared_ptr<RuleEngine> rules, std::shared_ptr<DnsResolver> dns);
 
     // 平台是否可用（至少一张网卡的二层端点 + 协议栈就绪）。DevicesController.gatewayReady 返回它。
     bool isAvailable() const;

@@ -207,12 +207,15 @@
 //        继续优化 lwIP/数据面的常数因子已经不是主要矛盾了。
 //     ★ 这个数是**不含加密**的下限：目标是局域网地址、路由判到 DIRECT，没有 TLS/传输层加密。
 //       走真实节点时还要叠上加解密，别把 0.38 当成有节点场景的预算。
+#include <memory>
+
 #include <QByteArray>
 #include <QObject>
 #include <QString>
 
 class IL2Endpoint;
 class OutboundFactory;
+class DnsResolver;
 class QHostAddress;
 
 /// 归因用的分级短路开关（详见 NetStack.cpp 里 g_benchStage 的说明）。
@@ -268,6 +271,12 @@ public:
     /// ★ **取得所有权**：旧工厂在内部 delete，调用方每次换出站直接 new 一个新的即可。
     /// 传 nullptr = 回到默认。只能在拥有本对象的那个线程上调用（见文件头的线程模型）。
     void setOutboundFactory(OutboundFactory *f);
+
+    /// 装 DNS 旁听器：让 accept 把**核心分配的 fake-ip** 目的地反查成域名再拨。
+    /// 没有它，域名类流量拿着假 IP 出站必然路由不到（节点侧 i/o timeout）——
+    /// 也就是说进程内出站只对「IP 直连类」流量有效，域名类全得回退核心。
+    /// 传 nullptr 撤掉。与 setOutboundFactory 同一线程要求。
+    void setDnsLearner(std::shared_ptr<DnsResolver> learner);
 
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。
     // from = 收到该帧的二层端点，用来定位喂给哪张卡（也决定 UDP 回程从哪张卡发出）。

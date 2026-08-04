@@ -1,6 +1,7 @@
 #include "NetStack.h"
 #include "IL2Endpoint.h"
 #include "IOutbound.h"
+#include "core/DnsResolver.h"
 #include "Socks5Client.h"
 
 #include <QDebug>
@@ -258,6 +259,9 @@ struct NetStack::Impl {
     // 出站工厂。默认拨 mihomo 的 SOCKS5（= 接线前的行为，零变化）；
     // 上层可用 setOutboundFactory() 换成 CoreDialerFactory 走进程内出站。
     OutboundFactory *outFactory = nullptr;
+    // DNS 旁听器（可空）：把核心分配的 fake-ip 反查回域名，供 accept 改写拨号目标。
+    // 见 setDnsLearner —— 没有它，域名类流量只能拿着假 IP 去拨，进程内出站必然路由不到。
+    std::shared_ptr<DnsResolver> dnsLearner;
     Socks5OutboundFactory *ownedDefault = nullptr; // 默认工厂，由本对象持有
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的上下文
     QHash<QString, DeviceInfo> devices;      // 设备 IP（v4 或 v6 串）→ {mac,user}
@@ -929,7 +933,26 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
         smolPumpToStack(c);
     });
 
-    c->socks->connectTo(serverIp, dport, socksUser);
+    // ★ fake-ip → 域名改写。设备连的是核心分配的**假 IP**，出站若原样拨它必然路由不到
+    //   （节点侧 i/o timeout）。旁听 DNS 应答学到的映射能把它还原成域名：进程内出站按域名
+    //   拨得通；即便回退核心，给域名也比给假 IP 更利于规则匹配。
+    //   学不到（映射过期/被清/根本不是 fake-ip）就照原样用 IP —— 与没有这段时完全一致。
+    QString dialHost = serverIp;
+    if (d->dnsLearner) {
+        const QHostAddress dstAddr(serverIp);
+        if (!dstAddr.isNull() && DnsResolver::isFakeIp(dstAddr)) {
+            // 两张不同的表都要问：domainForFake 是我们自己分配的（进程内 DNS 模式），
+            // domainForLearnedIp 是从核心的应答里旁听学来的。同时开着时两者都可能命中。
+            QString learned = d->dnsLearner->domainForFake(dstAddr);
+            if (learned.isEmpty())
+                learned = d->dnsLearner->domainForLearnedIp(dstAddr);
+            if (!learned.isEmpty()) {
+                dialHost = learned;
+                ++GatewayDiag::c.dnsFakeIpResolved;
+            }
+        }
+    }
+    c->socks->connectTo(dialHost, dport, socksUser);
     return true;
 }
 
@@ -1027,6 +1050,11 @@ NetStack::~NetStack()
         delete d->outFactory;
     delete d->ownedDefault;
     delete d;
+}
+
+void NetStack::setDnsLearner(std::shared_ptr<DnsResolver> learner)
+{
+    d->dnsLearner = std::move(learner);
 }
 
 void coastSetBenchStage(int stage)

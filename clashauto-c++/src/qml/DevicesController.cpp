@@ -1,6 +1,7 @@
 #include "DevicesController.h"
 #include <QDir>
 #include "../net/core/RuleEngine.h"
+#include "../net/core/DnsResolver.h"
 #include "../net/core/ProxyConfigBuilder.h"
 #include "../net/core/ProxyConfig.h"
 #include "../ClashService.h"
@@ -1009,17 +1010,20 @@ void DevicesController::setCoastCore(bool enabled, bool strict, const QString &c
         // 但显式清掉更干净 —— 免得下次打开时先用到一份过期的节点表。
         m_pcfgStore.reset();
         m_ruleEngine.reset();
+        m_dnsResolver.reset();
         if (m_gateway)
-            m_gateway->setCoastCore(false, false, nullptr, nullptr);
+            m_gateway->setCoastCore(false, false, nullptr, nullptr, nullptr);
         return;
     }
     if (!m_pcfgStore)
         m_pcfgStore = std::make_shared<ProxyConfigStore>();
     if (!m_ruleEngine)
         m_ruleEngine = std::make_shared<RuleEngine>();
+    if (!m_dnsResolver)
+        m_dnsResolver = std::make_shared<DnsResolver>();
     rebuildCoastCoreConfig();
     if (m_gateway)
-        m_gateway->setCoastCore(true, m_coastStrict, m_pcfgStore, m_ruleEngine);
+        m_gateway->setCoastCore(true, m_coastStrict, m_pcfgStore, m_ruleEngine, m_dnsResolver);
 }
 
 void DevicesController::rebuildCoastCoreConfig()

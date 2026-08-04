@@ -38,6 +38,7 @@
 #include "NdpSpoofer.h"
 #include "NetStack.h"
 #include "core/RuleEngine.h"
+#include "core/DnsResolver.h"
 #include "core/ProxyConfig.h"
 #include "core/CoreRouter.h"
 #include "Socks5Client.h"   // Socks5OutboundFactory：CoastCore 的回退出站
@@ -277,12 +278,13 @@ public:
     void setDatapathLocal(const LanGateway::DatapathSpec &spec) { m_datapath = spec; }
     // CoastCore 进程内出站：记下意图并（若栈已建）立刻应用。栈还没建时 configureLocal 会再调一次。
     void setCoastCoreLocal(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
-                           std::shared_ptr<RuleEngine> rules)
+                           std::shared_ptr<RuleEngine> rules, std::shared_ptr<DnsResolver> dns)
     {
         m_coastCore = enabled;
         m_coastStrict = strict;
         m_pcfgStore = std::move(store);
         m_ruleEngine = std::move(rules);
+        m_dnsResolver = std::move(dns);
         applyCoastCoreLocal();
     }
     // 依 m_coastCore 给 m_net 装/撤 CoreDialerFactory（仅在 m_net 存在时动手；必在工作线程调）。
@@ -333,6 +335,7 @@ private:
     bool m_coastStrict = false;
     std::shared_ptr<ProxyConfigStore> m_pcfgStore;
     std::shared_ptr<RuleEngine> m_ruleEngine;
+    std::shared_ptr<DnsResolver> m_dnsResolver;
     QHash<quint64, QString> m_victimByMac;   // src MAC 打包键 → ip（帧过滤 + 记账）
     // 被隔离（policy=reject）设备的 MAC 打包键。它们去局域网的流量按方向过滤，见 forwardIsolatedLan。
     QSet<quint64> m_isolatedMacs;
@@ -1806,25 +1809,29 @@ void GatewayWorker::applyCoastCoreLocal()
         // 复制一份就会开始漂移，「本机走 A 节点、设备走 B 节点」这类问题极难查）。
         factory->setRouter(coastcore::makeRouter(m_pcfgStore, m_ruleEngine, false));
         m_net->setOutboundFactory(factory); // 取得所有权：内部 delete 掉旧工厂
-        qInfo() << "网关: CoastCore 进程内出站已启用（回退端口" << m_socksPort << "）";
+        // 装 DNS 旁听器：让 accept 把核心分配的 fake-ip 目的地改写成域名。
+        // 少了它，域名类流量拿着假 IP 出站必然超时 —— 进程内出站只对 IP 直连类有效。
+        m_net->setDnsLearner(m_dnsResolver);
+        qInfo() << "网关: CoastCore 进程内出站已启用（回退端口" << m_socksPort
+                << "，fake-ip 反查" << (m_dnsResolver ? "已接" : "**未接：域名类将回退核心**") << "）";
     } else {
         // 撤回默认（全走 mihomo）——与「从未启用」完全一致。
         m_net->setOutboundFactory(new Socks5OutboundFactory(m_socksPort));
+        m_net->setDnsLearner(nullptr); // 连 fake-ip 改写也一并撤掉，与从未启用完全一致
         qInfo() << "网关: CoastCore 进程内出站已停用（恢复默认 SOCKS 全走核心）";
     }
 }
 
 void LanGateway::setCoastCore(bool enabled, bool strict, std::shared_ptr<ProxyConfigStore> store,
-                              std::shared_ptr<RuleEngine> rules)
+                              std::shared_ptr<RuleEngine> rules, std::shared_ptr<DnsResolver> dns)
 {
     if (!d->workerReady())
         return;
     // 队列投递即可：出站是**每条新连接**建立时才查工厂的，不需要与调用方同步。
     QMetaObject::invokeMethod(
         d->worker,
-        [w = d->worker, enabled, strict, store = std::move(store), rules = std::move(rules)] {
-            w->setCoastCoreLocal(enabled, strict, store, rules);
-        },
+        [w = d->worker, enabled, strict, store = std::move(store), rules = std::move(rules),
+         dns = std::move(dns)] { w->setCoastCoreLocal(enabled, strict, store, rules, dns); },
         Qt::QueuedConnection);
 }
 

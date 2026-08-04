@@ -28,6 +28,7 @@ class CoreController;
 class LanGateway;
 class ProxyConfigStore;
 class RuleEngine;
+class DnsResolver;
 class HistoryStore;
 class QTimer;
 
@@ -144,6 +145,8 @@ private:
     QString m_ccConfigDir;
     std::shared_ptr<ProxyConfigStore> m_pcfgStore;
     std::shared_ptr<RuleEngine> m_ruleEngine;
+    // fake-ip 反查表：旁听 DNS 应答学 假IP→域名，供网关 accept 改写拨号目标。
+    std::shared_ptr<DnsResolver> m_dnsResolver;
     // 从 full.yaml + 当前模式/选中节点重建出站快照，并推给网关。
     // 换节点/换模式/改订阅之后都要调 —— 快照是不可变的，换掉它即刻对**新连接**生效。
     void rebuildCoastCoreConfig();
