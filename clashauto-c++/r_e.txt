@@ -4,7 +4,7 @@
     ip route add 203.0.113.0/24 via 192.168.20.51
     ip neigh replace 192.168.20.51 lladdr bc:24:11:8f:4d:f1 dev <if>
     curl -m 5 http://203.0.113.5/
-  等待 30000 ms ...
+  等待 25000 ms ...
 [realnic] FAIL: 没等到 SOCKS CONNECT（从靶机喂入 0 帧）
   fed=0 → 抓包没收到靶机的帧（网卡选错 / 靶机没发 / 过滤挡住）
   fed>0 → 帧进来了但栈没终结连接（这才是栈本身的问题）

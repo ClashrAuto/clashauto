@@ -718,6 +718,13 @@ int runSmolGatewayRealNicSelfTest()
         net.setOutboundFactory(ccF);
         std::fprintf(stderr, "[realnic] CoastCore 进程内出站：已启用（DIRECT）\n");
     }
+    // ★ 必须把靶机 MAC 登记进端点的抓包过滤器。端点装的 BPF 是
+    //   `(ether src <在册 MAC>) or arp` —— **不登记就在内核那层被丢掉**，
+    //   现象是"网关 0 帧，而靶机 curl 照常通"（那是 Windows 三层转发干的，与数据面无关）。
+    //   生产路径由 LanGateway 的 pushMacFilter 负责，本自测绕开了 LanGateway，所以要自己调。
+    if (!ep->setSourceMacFilter({victimMac}))
+        std::fprintf(stderr, "[realnic] 警告：MAC 过滤登记失败，可能收不到帧\n");
+
     net.addDevice(victimIp, victimMac, kUser);
 
     // 只把**来自靶机**的帧喂进栈（等价于 LanGateway 的 victim 过滤，其余逻辑不需要）
