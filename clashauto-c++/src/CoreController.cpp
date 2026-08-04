@@ -873,6 +873,15 @@ void CoreController::toggleTun()
 void CoreController::rebuildConfig()
 {
     m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled, m_ipv6Enabled);
+    // ★ 失败时不能照打「Config generated:」—— `ensureFullConfig` 失败返回空串，
+    //   原来那行会输出 `Config generated: `（路径是空的），读起来像成功，
+    //   而实际结果是核心继续按**旧配置**跑：用户改的设置/规则/订阅一条都没生效，
+    //   界面上却看不出任何异常。启动那条路径是会报的（实测日志页有
+    //   `config not found: …/full.yaml`），漏的是这条重建路径。
+    if (m_fullConfigPath.isEmpty()) {
+        emit logUpdated(tr("生成 full.yaml 失败，本次修改未生效"));
+        return; // 别拿旧配置去热重载,那会让「失败」看起来像「成功但没变化」
+    }
     emit logUpdated(QString("Config generated: %1").arg(m_fullConfigPath));
     reloadConfig();
 }
