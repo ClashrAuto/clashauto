@@ -139,7 +139,7 @@ public:
     }
 
     // 发一帧。fd 是**非阻塞**的，bpf 的写缓冲/网卡发送队列一满就返回 ENOBUFS/EAGAIN ——
-    // 老写法在这里直接 return false 把帧丢掉，而上层（NetStack 的 lwipLinkOutput）忽略返回值、
+    // 老写法在这里直接 return false 把帧丢掉，而上层（NetStack 的出帧路径）忽略返回值、
     // 恒回 ERR_OK，于是变成「本机→设备方向的静默丢包」，只能等 lwIP 几百毫秒后重传。
     // 与 Linux 端同治：满了就排队等可写，队列顶满才丢并计数。详细论证见 L2Endpoint_linux.cpp
     // 文件头「发方」一节（那边还多一层 SO_SNDBUF 抬高，bpf 没有对应的旋钮）。

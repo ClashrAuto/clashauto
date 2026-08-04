@@ -40,7 +40,7 @@
 // ——————————————————— 发方：加大 SO_SNDBUF + 积压队列（别再静默丢帧）———————————————————
 //
 // 收方做到了零拷贝批处理，发方却长期是「一次 ::sendto，失败就 return false」——而这个 false
-// 一路无人理会：NetStack 的 lwipLinkOutput 忽略返回值、恒回 ERR_OK，于是 lwIP 认为帧已发出。
+// 一路无人理会：NetStack 的出帧路径忽略 send() 的返回值，于是栈认为帧已发出。
 // 结果是**本机→设备方向的静默丢包**，而且完全不可见（LINK_STATS 也是关的）。
 //
 // sendto 什么时候会失败：AF_PACKET 的发方走 sock_alloc_send_skb，按 SO_SNDBUF 记账，且记的是
@@ -218,7 +218,8 @@ constexpr unsigned kRingFramesPerBlock = kRingBlockSize / kRingFrameSize; // = 3
 // —— 发方参数（理由见文件头「发方」一节）——
 //
 // ★ 定容量的判据是「盖住突发」，**不是**「越大越好」。这两个数就是排队时延的上限，而排队时延
-//   必须明显小于 lwIP 的重传下限（lwipopts.h 里算过：TCP_TMR_INTERVAL=100ms 时 rto_min ≈ 0.6s）。
+//   必须明显小于栈的重传下限（lwIP 时代算过：TCP_TMR_INTERVAL=100ms 时 rto_min ≈ 0.6s；
+//   smoltcp 的 RTO 下限同量级）。
 //   排得比 0.6s 还久，对端已经重传过一轮了我们才把陈旧帧发出去 —— 那是拿丢包换缓冲膨胀，白折腾。
 //   ★ 注意内核会把 SO_SNDBUF **翻倍**记账（sock_setsockopt: sk_sndbuf = val * 2），算账时别忘。
 //   按「网卡把队列排空的速率」折算，下面这组取值的实际缓冲是 内核 2 MiB + 用户态 1 MiB = 3 MiB：
@@ -448,7 +449,7 @@ public:
 
     // 发一帧。**先进本轮暂存批，由 flushTx() 用一次 sendmmsg 打包发走**；缓冲满时排队重试
     // 而不是丢（理由见文件头「发方」一节）。
-    // 返回 false 只在「参数非法 / 端点没开 / 队列也满了」——调用方（lwipLinkOutput）历来忽略它，
+    // 返回 false 只在「参数非法 / 端点没开 / 队列也满了」——调用方（栈的出帧回调）历来忽略它，
     // 这里也不指望它去处理；真正的可观测性在 m_txDropped 的节流日志上。
     // 注意：进了暂存批的帧返回 true 只表示「已受理」，真正的发送结果在 flushTx 里体现（丢帧照常计数）。
     bool send(const QByteArray &frame) override
@@ -696,7 +697,7 @@ private:
         ++GatewayDiag::c.txDeferred; // 还没丢，但内核已经喂不进去了——拥塞的**早期**信号
         // ★ 这里存的是 QByteArray 的**隐式共享副本**，不是深拷贝——对 fromRawData 造出来的视图
         //   等于存了个裸指针。所以 send() 的入参契约是「必须是自有内存的 QByteArray」。
-        //   现状成立：唯一的调用方 lwipLinkOutput 传的是 pbufToBytes() 新分配的缓冲；
+        //   现状成立：唯一的调用方是栈的出帧回调，传的是当场新建的 QByteArray；
         //   ArpSpoofer/NdpSpoofer 传的也是自己拼出来的。将来若有人想把收环里的帧直接回注，
         //   必须在这之前 deep-copy（QByteArray(f.constData(), f.size())）。
         m_txQueue.push_back(frame);

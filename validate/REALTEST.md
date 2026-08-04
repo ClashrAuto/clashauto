@@ -89,8 +89,10 @@ COAST_GATEWAY_DEBUG=1 sudo -E ./coast 2> coast.log
 # 看：NETSTACK IN（设备帧进栈）/ OUT（回包）/ ACCEPT（握手完成+拨 mihomo，带 user）
 ```
 
-想让 lwIP 自己打丢包原因：改 `src/net/lwip_port/lwipopts.h` 里 `LWIP_DEBUG 1` +
-`IP_DEBUG/TCP_INPUT_DEBUG/ETHARP_DEBUG = LWIP_DBG_ON` 重编（联调套路见 git log）。
+想让栈自己打丢包原因：Windows 的数据面是 Rust 的 smoltcp（`rust/coaststack`），
+给 `Cargo.toml` 的 smoltcp 依赖加上 `"log"` + `"verbose"` feature 重编即可拿到逐包 trace
+（v6 那个"回包只发 NS"的根因就是靠它一次定位的，之前靠猜试了四轮全白费）。
+Linux/macOS 没有用户态栈可调试 —— 那两个平台走 TPROXY/pf，用 `nft monitor` / `pfctl -s state`。
 
 **常见现象 → 方向：**
 

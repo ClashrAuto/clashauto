@@ -1,26 +1,34 @@
 #pragma once
 
-// 用户态 TCP/IP 栈（基于 vendored lwIP，PIMPL 把 lwIP 头藏进 .cpp）。
+// 用户态 TCP/IP 栈（TCP 由 Rust 的 smoltcp 实现，见 rust/coaststack + src/net/coaststack.h；
+// PIMPL 把实现细节藏进 .cpp）。
 //
-// 职责：被劫持设备的以太帧经 LanGateway 过滤后送入 inputFrame()：
-//   · IP/TCP 帧 → 交 lwIP(ethernet_input→ip4_input，accept-all 补丁使其终结发往任意公网 IP 的连接)
+// ★ **只有 Windows 编 NetStack.cpp**：Linux 走 TPROXY、macOS 走 pf rdr，内核就把流量接管了，
+//   不需要用户态栈。非 Windows 链接的是 NetStack_stub.cpp —— init() 直接返回失败，**不降级**。
+//   （2026-08 之前这里是 vendored lwIP、三端共用；移除的全过程见 docs/lwip-alternatives.md。）
+//
+// 职责：被劫持设备的以太帧经 LanGateway 过滤后送入 inputFrame()，按协议**三分**：
+//   · IP/TCP 帧 → 喂给 smoltcp（catch-all：终结发往任意公网 IP:port 的连接）
 //     → 每条 TCP 连接经 Socks5Tcp 拨 mihomo 网关口(带每设备用户名) → 双向桥接字节。
-//   · IP/UDP 帧 → 不进 lwIP，直接解析，经 Socks5Udp 转发（含 DNS）；回程手工封包发回设备。
-//   · lwIP 出网(linkoutput) → 序列化成以太帧(dst=设备MAC，已由静态 ARP 表解析) → IL2Endpoint::send。
+//   · IP/UDP 帧 → **不进栈**，直接解析，经 Socks5Udp 转发（含 DNS 劫持）；回程手工封包发回设备。
+//     这套手工 NAT 从来就没走过任何用户态 TCP 栈，换栈/删 lwIP 时一行都没动。
+//   · 其余（ICMP 等）→ 丢弃。栈只实现 TCP，喂别的进去只会让它 rx_dropped++。
+//     代价是被劫持设备 ping 不通公网（那本来也只是我们代答，并不真探测远端可达性）。
+//   · 栈的出帧回调 → 按 nic id 找到二层端点 → IL2Endpoint::send（回程 dst MAC 由引擎从设备
+//     实帧自学，不需要外部注入静态 ARP/邻居）。
 //
-// **一个栈、多张网卡**：lwIP 只能有一个实例（lwip_init 全局、ARP 表全局、PCB 链全局），但一个实例
-// 可以挂多个 netif。所以「同时代理有线 A 路由 + WiFi B 路由」的做法是 addNic() 一张卡一个 netif，
-// 而不是开多个 NetStack。每个 netif 用**本机在该网卡上的真实 IP + 真实掩码**：
-//   · 出方向 ip4_route(目的=设备IP) 靠子网匹配挑中正确的 netif（若像早期那样给 0.0.0.0/0 占位掩码，
-//     两张卡都「匹配一切」，ip4_route 永远返回链表里第一张 → B 网段设备的回包会从 A 网卡发出去）；
-//   · etharp_add_static_entry 内部也走 ip4_route，静态 ARP 因此自动落到正确的 netif 上。
-// 每 netif 的二层端点/本机 MAC 放在 netif->state 里，C 回调从那里取上下文（不再用全局单例）。
+// **一个 NetStack、多张网卡**：addNic() 一张卡一份上下文，Rust 侧每张卡一个独立的 smoltcp
+// Interface 实例。所以「同时代理有线 A 路由 + WiFi B 路由」是多次 addNic，而不是开多个 NetStack。
+// 每张卡要给**本机在该网卡上的真实 IP + 真实掩码**：栈据它判断哪些目的是本网段的，
+// 掩码给错会让 B 网段设备的回包从 A 网卡发出去。
+//   （lwIP 时代这件事更脆：所有 netif 挂在一条全局链上，靠 ip4_route 按子网挑，
+//     给 0.0.0.0 占位掩码就会让第一张卡「匹配一切」。独立实例天然没有这个坑。）
 //
-// 线程：NetStack 自身不做线程化——它假定「由**单一**线程拥有并调用」（NO_SYS 单线程 lwIP：
-// lwip_init/ARP 表/PCB 链全局，g_impl / ConnWatch 等哨兵也都依赖单线程前提）。全进程只有一个
+// 线程：NetStack 自身不做线程化——它假定「由**单一**线程拥有并调用」。这也是 coaststack 的硬
+// 要求（见 coaststack.h「线程模型」：所有 coast_* 调用与回调都在同一线程）。全进程只有一个
 // NetStack 实例，那个实例始终在某一个线程上：在正式 App 里是 LanGateway 的专用工作线程
 // （见 LanGateway_linux.cpp 的线程模型），在 headless 自测里是主线程。两者从不并存 → 单线程前提恒成立。
-// init() 创建的 QTimer 挂在**调用 init 的那个线程**的事件循环上周期 sys_check_timeouts()。
+// init() 创建的 QTimer 挂在**调用 init 的那个线程**的事件循环上周期 coast_stack_poll()。
 // 所有公开方法（init/addNic/removeNic/addDevice/removeDevice/inputFrame）都只能在这同一个线程上调用。
 //
 // ── 单线程会不会饿死其他设备？实测：不会（但尾延迟有毛刺）──────────────────────
@@ -217,7 +225,7 @@ public:
     bool init(QString *err);
 
     // 挂一张网卡：ep 为其二层端点，localMac6/localIp/netmask 为本机在这张卡上的信息。
-    // localIp/netmask 必须有效——它们决定出方向选哪个 netif（见文件头说明）。
+    // localIp/netmask 必须有效——栈据它们判断本网段（见文件头说明）。
     bool addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QString &localIp,
                 const QString &netmask, QString *err);
     // 摘掉一张网卡（网卡消失/重配时）。其上的设备静态 ARP 由 removeDevice 各自清理。
@@ -230,21 +238,23 @@ public:
     void removeDevice(const QString &ip);
 
     // IPv6 版：登记设备的某个 v6 地址（从它发出的实帧里学到的，一台设备可能有多个：链路本地 +
-    // 一或多个全局/隐私地址，每个都调一次）。装一条 nd6 **静态邻居**项（v6↔mac，回程二层寻址靠它，
-    // 见 nd6.c 的 Coast 补丁）+ 记录 mihomo 身份。from = 学到该帧的网卡端点（决定装到哪个 netif）。
+    // 一或多个全局/隐私地址，每个都调一次）。现在只做一件事：**记录 mihomo 身份**。
+    // 回程的二层寻址（邻居 + 每设备一条 /128 直连路由）由引擎从设备实帧自学，不再需要外部注入
+    // ——lwIP 时代这里要装一条 nd6 静态邻居项。`from` 因此已无用，保留是为了不动调用方。
     // 幂等：同址重复调用只刷新。
     void addDeviceV6(IL2Endpoint *from, const QString &ip6, const QByteArray &mac6,
                      const QString &socksUser, bool reject = false);
     void removeDeviceV6(const QString &ip6);
 
-    // 当前**实际生效**的 TCP 数据面："lwip" 或 "smoltcp"（由 COAST_STACK 决定，init 后才确定）。
-    // ★ 存在的理由是测试可证伪性，不是好看：lwIP 的 accept-all 与 smoltcp 的 catch-all 对外
-    //   行为一致，同一个自测在两条路上都会 PASS —— 没有这个标识就无法证明测的是哪一条。
-    //   诊断日志也该记它，否则线上出问题时分不清用户跑的是哪个栈。
+    // 当前**实际生效**的 TCP 数据面："smoltcp"，或 "none"（init 失败 / 本平台是桩）。
+    // ★ 存在的理由是测试可证伪性，不是好看：catch-all 的对外行为对任何实现都一样，
+    //   同一个自测在哪条路上都会 PASS —— 没有这个标识就无法证明测的是哪一条。
+    //   它曾经用于 smoltcp↔lwIP 的 A/B 断言（那个 A/B 抓到过真缺陷，见 R24）；lwIP 移除后
+    //   只剩一个值，但**不删** —— 桩平台会诚实地报 "none"，诊断日志也该记它。
     const char *activeTcpStack() const;
 
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。
-    // from = 收到该帧的二层端点，用来定位注入哪个 netif（也决定 UDP 回程从哪张卡发出）。
+    // from = 收到该帧的二层端点，用来定位喂给哪张卡（也决定 UDP 回程从哪张卡发出）。
     void inputFrame(IL2Endpoint *from, const QByteArray &frame);
 
     // 前置声明公开（定义仍在 .cpp）：让 .cpp 内的自由函数/lwIP C 回调（在匿名命名空间里）

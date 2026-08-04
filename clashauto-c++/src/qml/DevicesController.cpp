@@ -394,7 +394,7 @@ void DevicesController::onSecurityAlert(int kind, const QString &offenderMac,
         //   树莓派、无人值守）下完全不可见，事后也无从复查「到底报没报过」。
         //   真机验证 ArpWatch 时就卡在这里 —— 注入了伪造 ARP，却分不清是「没检测到」
         //   还是「检测到了但没有输出口」。这类不可观测本身就是缺陷（同类的还有
-        //   coast_lwip_diag 那组只写不读的计数器）。
+        //   当年 coast_lwip_diag 那组只写不读的计数器）。
         //   用 qWarning 而不是 COAST_GATEWAY_DEBUG 门控：ARP 欺骗告警本就罕见且重要，
         //   不该只在开了调试开关时才留下记录。
         qWarning("[SECURITY] kind=%d offender=%s subjectIp=%s subjectMac=%s", kind,
