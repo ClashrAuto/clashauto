@@ -160,6 +160,24 @@ void GatewayDiag::sample(const QString &extra)
                 .arg(d(c.dnsHijacked, g_prev.dnsHijacked))
                 .arg(d(c.dnsNoReply, g_prev.dnsNoReply))
                 .arg(d(c.dnsNoId, g_prev.dnsNoId));
+    // ★ 进程内出站的记账（CoastCore）。**只在有活动时才打**，免得把行撑爆：
+    //   阶段 1 只是把引擎编进来、没有构造点，这些恒为 0，整段自动省略。
+    //   cc=<进程内>/<无路由>/<节点缺>/<协议缺>/<UDP不支持>/<严格拒绝>
+    {
+        const qint64 cc = d(c.ccInProcess, g_prev.ccInProcess);
+        const qint64 f1 = d(c.fbNoRoute, g_prev.fbNoRoute);
+        const qint64 f2 = d(c.fbNodeMissing, g_prev.fbNodeMissing);
+        const qint64 f3 = d(c.fbProtoMissing, g_prev.fbProtoMissing);
+        const qint64 f4 = d(c.fbUdpUnsupported, g_prev.fbUdpUnsupported);
+        const qint64 f5 = d(c.ccStrictRefused, g_prev.ccStrictRefused);
+        const qint64 fr = d(c.dnsFakeIpResolved, g_prev.dnsFakeIpResolved);
+        const qint64 lf = d(c.dnsLocalFake, g_prev.dnsLocalFake);
+        const qint64 lw = d(c.dnsLocalForward, g_prev.dnsLocalForward);
+        if (cc || f1 || f2 || f3 || f4 || f5 || fr || lf || lw) {
+            line += QStringLiteral(" cc=%1/%2/%3/%4/%5/%6 fakeipResolved=%7 dnsLocal=%8/%9")
+                        .arg(cc).arg(f1).arg(f2).arg(f3).arg(f4).arg(f5).arg(fr).arg(lf).arg(lw);
+        }
+    }
     line += QStringLiteral(" pump=%1 late=%2 maxLagMs=%3")
                 .arg(d(c.pumpTicks, g_prev.pumpTicks))
                 .arg(d(c.pumpLateTicks, g_prev.pumpLateTicks))

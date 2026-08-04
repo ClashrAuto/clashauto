@@ -12,7 +12,8 @@
 #include "HistoryStore.h" // 上网历史库（SQLite）
 #include "LanScanner.h"   // COAST_SCAN_SELFTEST 的扫描耗时自检
 #include "net/TproxyRules.h" // COAST_TPROXY_SELFTEST 的规则层自测
-#include "net/PfRules.h"      // COAST_PF_SELFTEST 的 pf 规则层自测（macOS）
+#include "net/PfRules.h"
+#include "net/core/SelfRouteGuard.h" // COAST_SELFROUTE_SELFTEST      // COAST_PF_SELFTEST 的 pf 规则层自测（macOS）
 #include "LatencyProbe.h" // 状态页延迟卡：直连/路由/DNS/代理四个数
 #include "SingleInstance.h" // 单实例守卫：两个实例并存会互相清掉网关的 nft/pf 规则
 #include "SubscriptionStore.h"
@@ -162,6 +163,15 @@ int main(int argc, char *argv[])
     // 于是"断言坏了"也照样绿（这个坑本仓库踩过）。
     if (qEnvironmentVariableIsSet("COAST_GW_THROUGHPUT"))
         return runGatewayThroughputBench();
+    // 自身流量排除的自测（随 CoastCore 引擎一起移植进来）。
+    // ★ 必须在这里注册：不注册的话设了这个 env 只是把 GUI 正常启动，进程不退出 ——
+    //   自测"挂住"而不是"失败"，比失败更难查。
+    if (qEnvironmentVariableIsSet("COAST_SELFROUTE_SELFTEST")) {
+        QString report;
+        const bool ok = SelfRouteGuard::selfTest(&report);
+        std::fprintf(stderr, "%s\n", qUtf8Printable(report));
+        return ok ? 0 : 1;
+    }
     // 真网卡版：真 Npcap + 真机帧（需管理员）。不投毒，靠靶机静态路由导流。
     if (qEnvironmentVariableIsSet("COAST_SMOLGW_REALNIC_SELFTEST"))
         return runSmolGatewayRealNicSelfTest();

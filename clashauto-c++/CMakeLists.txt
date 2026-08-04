@@ -84,6 +84,38 @@ set(BACKEND_SOURCES
     # 被动 ARP/NDP 冲突监视（检测「本机被劫持 / 被劫持设备被他人争抢」）——纯解析，跨平台可编译
     src/net/ArpWatch.cpp     src/net/ArpWatch.h
     src/net/Socks5Client.cpp src/net/Socks5Client.h
+    # ———— CoastCore：进程内出站引擎（从 feat/coastcore-outbound 移植，阶段 1）————
+    # 出站抽象：把「连接接到哪个出站」与「出站是谁」解耦
+    #（Socks5* = 拨 mihomo；core/ 下的 = 进程内协议）。
+    # ★ 阶段 1 **只搬不接线**：下面这些文件没有任何构造点，编进来是零行为变化。
+    #   接线在阶段 2（NetStack 的 SmolConn 改用 IOutboundTcp），见 docs/coastcore-merge-plan.md。
+    # ★ 这里只列**纯 Qt 依赖**的那一批。需要 OpenSSL 裸 AEAD/X25519 的（ss/vmess/reality/utls）
+    #   与需要 msquic 的（hysteria2/tuic）暂不编入 —— OutboundRegistry.cpp 有 #ifdef 守卫，
+    #   缺了它们只是那些协议未注册、回退 mihomo，不影响编译。
+    src/net/IOutbound.h
+    # 进程内出站的轻量埋点（core/ 各处都在用）
+    src/net/InprocTelemetry.cpp src/net/InprocTelemetry.h
+    src/net/core/ProxyConfig.cpp        src/net/core/ProxyConfig.h
+    src/net/core/ProxyConfigBuilder.cpp src/net/core/ProxyConfigBuilder.h
+    src/net/core/DirectOutbound.cpp     src/net/core/DirectOutbound.h
+    src/net/core/CoreDialerFactory.cpp  src/net/core/CoreDialerFactory.h
+    # 分流判定的**唯一**实现：局域网网关与本机入站共用（复制一份就会开始漂移）
+    src/net/core/CoreRouter.cpp         src/net/core/CoreRouter.h
+    # 自身流量排除（接进程内 TUN 的前置条件）。自检钩子 COAST_SELFROUTE_SELFTEST=1。
+    src/net/core/SelfRouteGuard.cpp     src/net/core/SelfRouteGuard.h
+    # Kdf 是纯 Qt（QCryptographicHash/QMessageAuthenticationCode），不依赖 OpenSSL，恒编入。
+    src/net/core/crypto/Kdf.cpp             src/net/core/crypto/Kdf.h
+    src/net/core/transport/TlsClient.cpp    src/net/core/transport/TlsClient.h
+    src/net/core/transport/WsClient.cpp     src/net/core/transport/WsClient.h
+    src/net/core/proto/OutboundRegistry.cpp src/net/core/proto/OutboundRegistry.h
+    # 只用 QSslSocket + Qt 哈希的两个协议，恒编入
+    src/net/core/proto/TrojanOutbound.cpp   src/net/core/proto/TrojanOutbound.h
+    src/net/core/proto/VlessOutbound.cpp    src/net/core/proto/VlessOutbound.h
+    # 分流规则引擎（mihomo 风格首命中 + 只读 mmdb GEOIP）+ DNS 解析器（A/AAAA 缓存 + fake-ip 池）
+    src/net/core/RuleEngine.cpp   src/net/core/RuleEngine.h
+    src/net/core/DnsResolver.cpp  src/net/core/DnsResolver.h
+    # DNS 报文层（解析设备查询 / 合成 fake-ip 应答）
+    src/net/core/DnsMessage.cpp   src/net/core/DnsMessage.h
     src/net/LanGateway.h
     # 数据面诊断日志（<userDir>/logs/gateway-diag.log）。跨平台编译：main_qml.cpp 要调 setLogDir，
     # 而计数器只有 POSIX 上的网关才真的往里写。

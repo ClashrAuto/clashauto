@@ -281,14 +281,17 @@ public:
     }
 };
 
-Socks5Tcp::Socks5Tcp(QObject *parent) : QObject(parent), d(new Priv(this)) {}
+Socks5Tcp::Socks5Tcp(quint16 socksPort, QObject *parent)
+    : IOutboundTcp(parent), m_socksPort(socksPort), d(new Priv(this))
+{
+}
 
 Socks5Tcp::~Socks5Tcp()
 {
     delete d;
 }
 
-void Socks5Tcp::connectTo(quint16 socksPort, const QString &dstHost, quint16 dstPort, const QString &user)
+void Socks5Tcp::connectTo(const QString &dstHost, quint16 dstPort, const QString &user)
 {
     d->user = user.toUtf8();
     d->dstHost = dstHost;
@@ -297,7 +300,9 @@ void Socks5Tcp::connectTo(quint16 socksPort, const QString &dstHost, quint16 dst
     d->closedEmitted = false;
     d->readPaused = false;
     d->inbuf.clear();
-    d->pending.clear();
+    // ★ **不要**清 pending：NetStack 把拨号推迟了一拍，设备的首个数据段完全可能在 connectTo
+    //   之前就 write() 进来了（同一批收包里 ACK+首段一起处理）。清掉 = 静默吞掉 HTTP 请求 /
+    //   TLS ClientHello，隧道白建。契约见 IOutbound.h 的 connectTo 注释。
 
     d->sock = new QTcpSocket(this);
     // 读缓冲设上限（默认是 0 = 无上限，Qt 会一直往上读，暂停也就无从谈起）。
@@ -333,7 +338,7 @@ void Socks5Tcp::connectTo(quint16 socksPort, const QString &dstHost, quint16 dst
     connect(d->sock, &QTcpSocket::disconnected, this, [this] { d->emitClosed(); });
 
     d->phase = Priv::Phase::Idle;
-    d->sock->connectToHost(QHostAddress(QHostAddress::LocalHost), socksPort);
+    d->sock->connectToHost(QHostAddress(QHostAddress::LocalHost), m_socksPort);
 }
 
 void Socks5Tcp::write(const QByteArray &data)
@@ -621,14 +626,17 @@ public:
     }
 };
 
-Socks5Udp::Socks5Udp(QObject *parent) : QObject(parent), d(new Priv(this)) {}
+Socks5Udp::Socks5Udp(quint16 socksPort, QObject *parent)
+    : IOutboundUdp(parent), m_socksPort(socksPort), d(new Priv(this))
+{
+}
 
 Socks5Udp::~Socks5Udp()
 {
     delete d;
 }
 
-void Socks5Udp::associate(quint16 socksPort, const QString &user)
+void Socks5Udp::associate(const QString &user)
 {
     d->user = user.toUtf8();
     d->ready = false;
@@ -649,7 +657,7 @@ void Socks5Udp::associate(quint16 socksPort, const QString &user)
     connect(d->ctrl, &QTcpSocket::disconnected, this, [this] { d->emitClosed(); });
 
     d->phase = Priv::Phase::Idle;
-    d->ctrl->connectToHost(QHostAddress(QHostAddress::LocalHost), socksPort);
+    d->ctrl->connectToHost(QHostAddress(QHostAddress::LocalHost), m_socksPort);
 }
 
 void Socks5Udp::sendTo(const QHostAddress &dstIp, quint16 dstPort, const QByteArray &payload)

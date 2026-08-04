@@ -99,6 +99,21 @@ public:
         // 该去查核心；dnsNoId 高是「我们自己的在途表满了」，该去调容量/超时。混在一栏里
         // （最初就是这么写的）等于把两个方向的结论搅在一起，真出问题时读不出该往哪查。
         qint64 dnsNoId;
+        // —— 进程内出站 vs 回退核心（CoastCore，阶段 1 移植）——
+        // **「离完全替换 mihomo 还差多少」的唯一凭据**：ccInProcess 之外那几栏全为 0，
+        // 才说明这条数据面已经不需要核心了。分原因记账是因为「回退」这一个数说明不了任何问题：
+        // 缺协议、规则判不了、fake-ip 没反查到，对策完全不同。
+        qint64 ccInProcess;      // 走进程内出站的连接数（TCP+UDP）
+        qint64 fbNoRoute;        // router 没给节点：fake-ip 没反查到 / 无配置快照 / 规则需先解析 IP
+        qint64 fbNodeMissing;    // 给了节点名，但当前快照里查不到它
+        qint64 fbProtoMissing;   // 协议没注册（缺 OpenSSL/msquic，或该 type 尚未实现）
+        qint64 fbUdpUnsupported; // 节点协议没有 UDP 出站实现
+        qint64 ccStrictRefused;  // 严格模式下**拒绝回退**而直接失败的连接数
+        // 由旁听到的 DNS 映射把 fake-ip 目的地成功改写成域名的连接数。
+        // >0 才说明「域名类流量真的能进进程内出站」；恒 0 = 改写没生效，域名类还在回退核心。
+        qint64 dnsFakeIpResolved;
+        qint64 dnsLocalFake;     // 本地当场合成 fake-ip 应答的查询数（含给 AAAA 回 NODATA）
+        qint64 dnsLocalForward;  // 本地看不懂/不该 fake → 转发给上游的查询数
         // —— 定时器泵健康度（**单线程饱和度**的直接指标）——
         // 泵是 25ms 一拍的固定周期。它迟到就说明工作线程上一拍还没跑完——数据面被自己堵住了。
         // 这是回答「到底是链路丢包还是本机算不过来」的关键一栏，其它计数都替代不了。

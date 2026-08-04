@@ -1,0 +1,7 @@
+物理出口：以太网 2 (ifIndex=5)
+✓ IP_UNICAST_IF 读回一致：5（写入时为网络序 83886080）
+✓ 钉住网卡后仍连得通 223.5.5.5:80（本地 192.168.20.51）
+✓ 反向对照：钉到回环口(ifIndex=1)如期连不通（Network unreachable）
+✓ prepareSocket 后连得通（本地 ::ffff:192.168.20.51）
+✓ prepareSocket 反向对照：钉到回环口如期连不通（Network unreachable）
+=== SelfRouteGuard 自检 PASS ===

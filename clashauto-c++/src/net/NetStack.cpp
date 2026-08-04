@@ -893,7 +893,9 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
     auto *c = new SmolConn;
     c->impl = d;
     c->id = id;
-    c->socks = new Socks5Tcp(d->owner);
+    // ★ 新的出站 API（IOutbound）：SOCKS 端口在**构造时**给，connectTo 只管目的地。
+    //   这一步是阶段 2「改用 IOutboundTcp」的前置形状 —— 现在仍然写死 Socks5Tcp，行为不变。
+    c->socks = new Socks5Tcp(d->socksPort, d->owner);
     d->smolConns.insert(id, c);
     ++GatewayDiag::c.tcpAccepted;
 
@@ -916,7 +918,7 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
         smolPumpToStack(c);
     });
 
-    c->socks->connectTo(d->socksPort, serverIp, dport, socksUser);
+    c->socks->connectTo(serverIp, dport, socksUser);
     return true;
 }
 
@@ -1453,7 +1455,7 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         flow->sess = s;
         flow->vport = sport;
         flow->idleMs = isShortLivedUdpPort(dport) ? kUdpDnsIdleMs : kUdpIdleMs;
-        flow->socks = new Socks5Udp(this);
+        flow->socks = new Socks5Udp(d->socksPort, this);
         s->flows.insert(sport, flow);
         d->udpFlowCount++;
 
@@ -1479,7 +1481,7 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         });
         connect(nf->socks, &Socks5Udp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
 
-        nf->socks->associate(d->socksPort, dev.socksUser);
+        nf->socks->associate(dev.socksUser);
     }
 
     // 续命 + 换档：同一个源端口只要打过一次非 DNS 目的，就永久升到长档（降回去会把一条正在用的
@@ -1579,7 +1581,7 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
         // v6 的来源校验：peers 用的是 QSet<quint32>（v4 地址），装不下 v6。直接退化成全锥
         //（不校验来源），记录在案的取舍——v6 UDP（QUIC/DNS64 等）以此为代价换实现简单。
         flow->coneOpen = true;
-        flow->socks = new Socks5Udp(this);
+        flow->socks = new Socks5Udp(d->socksPort, this);
         s->flows.insert(sport, flow);
         d->udpFlowCount++;
 
@@ -1603,7 +1605,7 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
         });
         connect(nf->socks, &Socks5Udp::closed, this, [this, nf]() { destroyUdpFlow(d, nf); });
 
-        nf->socks->associate(d->socksPort, dev.socksUser);
+        nf->socks->associate(dev.socksUser);
     }
 
     if (!isShortLivedUdpPort(dport))
