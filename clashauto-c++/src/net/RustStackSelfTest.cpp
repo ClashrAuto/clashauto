@@ -22,6 +22,7 @@ struct Ctx {
     // 出方向看到的 TCP 帧：(flags, sport, dport)
     int synAckCount = 0;
     uint16_t synAckSport = 0;
+    uint32_t synAckSeq = 0;
 };
 
 void cbOutFrame(void *u, CoastNicId, const uint8_t *f, size_t len)
@@ -33,6 +34,8 @@ void cbOutFrame(void *u, CoastNicId, const uint8_t *f, size_t len)
     if (len >= 54 && f[12] == 0x08 && f[13] == 0x00 && f[23] == 6 && (f[47] & 0x12) == 0x12) {
         c->synAckCount++;
         c->synAckSport = static_cast<uint16_t>((f[34] << 8) | f[35]);
+        c->synAckSeq = (uint32_t(f[38]) << 24) | (uint32_t(f[39]) << 16)
+            | (uint32_t(f[40]) << 8) | uint32_t(f[41]);
     }
 }
 bool cbConnNew(void *u, CoastConnId id, CoastNicId, const CoastAddr *, uint16_t,
@@ -188,12 +191,23 @@ int runRustStackSelfTest()
     //      · 吐出 SYN-ACK，且源端口**还原成 443**（否则设备直接 RST = catch-all 改写没闭环）
     //      · conn_new 报出原始目的端口 443（C++ 侧据此拨 SOCKS）
     CHECK(coast_stack_add_nic(s, 7, mac, &ip, 24) == COAST_OK, "为数据面测试加网卡");
-    uint8_t syn[54];
-    buildSyn(syn, 51000, 443);
-    CHECK(coast_stack_input(s, 7, syn, sizeof(syn)) == COAST_OK, "喂 SYN 应成功");
+    uint8_t pkt[54];
+    buildTcp(pkt, 51000, 443, 0x02 /*SYN*/, 1000, 0);
+    CHECK(coast_stack_input(s, 7, pkt, sizeof(pkt)) == COAST_OK, "喂 SYN 应成功");
     coast_stack_poll(s, 10);
 
-    CHECK(ctx.connNew == 1, "应恰好触发一次 conn_new");
+    // ★ SYN 之后**还不该**有 conn_new —— 引擎刻意等三次握手完成才 promote，
+    //   与 lwIP 的 accept 时机一致；在 SynReceived 就拨上游 = SYN 洪水每个 SYN 一条上游连接。
+    //   （这个时机差异是 A/B 网关自测在 lwip 侧跑不过才发现的。）
+    CHECK(ctx.connNew == 0, "SynReceived 阶段不该触发 conn_new");
+    CHECK(ctx.synAckCount >= 1, "此时应已吐出 SYN-ACK");
+
+    // 补第三次握手
+    buildTcp(pkt, 51000, 443, 0x10 /*ACK*/, 1001, ctx.synAckSeq + 1);
+    CHECK(coast_stack_input(s, 7, pkt, sizeof(pkt)) == COAST_OK, "喂 ACK 应成功");
+    coast_stack_poll(s, 20);
+
+    CHECK(ctx.connNew == 1, "握手完成后应恰好触发一次 conn_new");
     CHECK(ctx.lastDport == 443, "conn_new 应报原始目的端口 443（不是内部 FIXED_PORT）");
     CHECK(ctx.lastId != 0, "conn id 不能为 0");
     CHECK(ctx.synAckCount >= 1, "应吐出 SYN-ACK（否则协议栈没在终结连接）");

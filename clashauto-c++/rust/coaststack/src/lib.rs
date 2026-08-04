@@ -16,4 +16,6 @@ mod engine;
 
 #[cfg(test)]
 mod e2e;
+#[cfg(test)]
+mod e2e6;
 pub use ffi::*;

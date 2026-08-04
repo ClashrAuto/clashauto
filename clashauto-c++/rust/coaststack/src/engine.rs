@@ -78,6 +78,17 @@ impl QueueDevice {
     fn rx_pending(&self) -> bool {
         !self.rx.is_empty()
     }
+    /// 取出发送队列里所有 ICMPv6 邻居请求(NS)的副本，供 answer_ns 代答用。
+    fn tx_peek_ns(&self) -> Vec<Vec<u8>> {
+        self.tx
+            .iter()
+            .filter(|f| {
+                f.len() >= 14 + 40 + 24 && f[12] == 0x86 && f[13] == 0xDD && f[20] == 58
+                    && f[54] == 135
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 pub struct QRx(Vec<u8>);
@@ -228,9 +239,19 @@ impl Engine {
             o.copy_from_slice(&ip[..4]);
             IpAddress::Ipv4(Ipv4Address::from(o))
         };
-        // update_ip_addrs 的闭包返回 ()，用捕获的标志把结果带出来
+        // ★ 双栈：v4 网卡同时挂一条 EUI-64 链路本地 v6（fe80::/64）。
+        //   生产的网卡就是双栈的（lwIP 侧用 netif_create_ip6_linklocal_address 做同一件事，
+        //   NetStack.cpp:1422）。只挂 v4 的话，设备的 v6 流量进来会因为"没有本族地址"被丢，
+        //   表现正是本项目已知的高危症状「双栈设备 v6 漏代理」。
         let mut ok = false;
-        iface.update_ip_addrs(|a| ok = a.push(IpCidr::new(addr, prefix)).is_ok());
+        iface.update_ip_addrs(|a| {
+            ok = a.push(IpCidr::new(addr, prefix)).is_ok();
+            if ok && !is_v6 {
+                let ll = link_local_from_mac(&mac);
+                // 挂不上不算致命（v4 仍可用），但要能看出来
+                let _ = a.push(IpCidr::new(IpAddress::Ipv6(ll), 64));
+            }
+        });
         if !ok {
             return false;
         }
@@ -249,6 +270,13 @@ impl Engine {
         };
         if !routed {
             return false;
+        }
+        // ★ 双栈时**两个族都要有默认路由**：any_ip 的检查是分族做的，
+        //   只加 v4 路由的话，v6 包会在 routes.lookup 那关被丢 —— 症状是 v6 一个出帧都没有，
+        //   和"根本没接管"长得一模一样。这正是 v4 那条坑（R5 用两轮才定位）的 v6 翻版。
+        if !is_v6 {
+            let ll = link_local_from_mac(&mac);
+            let _ = iface.routes_mut().add_default_ipv6_route(ll);
         }
 
         let mut sockets = SocketSet::new(Vec::new());
@@ -317,8 +345,12 @@ impl Engine {
             return;
         }
         let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
+        if ethertype == 0x86DD {
+            self.learn_neighbor_v6(nic, frame);
+            return;
+        }
         if ethertype != 0x0800 {
-            return; // v6 的邻居注入见 TODO（需合成 ICMPv6 NA）
+            return;
         }
         let mut src_mac = [0u8; 6];
         src_mac.copy_from_slice(&frame[6..12]);
@@ -353,6 +385,82 @@ impl Engine {
         n.device.push_rx(a);
     }
 
+    /// v6 版：合成一条 **ICMPv6 邻居通告(NA)** 喂进栈，让 smoltcp 填 v6 邻居缓存。
+    ///
+    /// 与 v4 同一个理由：NDP 帧在生产里被 LanGateway 截给 NdpSpoofer，根本进不到栈
+    /// （NetStack.cpp 的 inputFrame 只放行 TCP/UDP），所以 smoltcp 发出的邻居请求永远等不到
+    /// 回复 → v6 回包黑洞。lwIP 那边是靠 Coast 自己打的 nd6 静态邻居补丁解决的
+    /// （nd6.c:1586 + 静态项永不老化）；这里同样零 fork。
+    ///
+    /// **这条不做的话，症状正是本项目已知的高危项「双栈设备 v6 漏代理」。**
+    fn learn_neighbor_v6(&mut self, nic: NicId, frame: &[u8]) {
+        const REFRESH_MS: u64 = 30_000;
+        if frame.len() < 14 + 40 {
+            return;
+        }
+        let mut src_mac = [0u8; 6];
+        src_mac.copy_from_slice(&frame[6..12]);
+        let mut src_ip = [0u8; 16];
+        src_ip.copy_from_slice(&frame[22..38]);
+        // 未指定地址(::)不学
+        if src_ip.iter().all(|&b| b == 0) {
+            return;
+        }
+
+        let now = self.last_seen_ms;
+        let Some(n) = self.nics.get_mut(&nic) else { return };
+        match n.neighbors.get(&src_ip) {
+            Some((mac, t)) if *mac == src_mac && now.saturating_sub(*t) < REFRESH_MS => return,
+            _ => {}
+        }
+        n.neighbors.insert(src_ip, (src_mac, now));
+
+        // ★ 这是一条**未经请求**的 NA（smoltcp 还没问过）。按 RFC 4861，未经请求的 NA
+        //   发往全节点组播 ff02::1，标志位只置 Override（不置 Solicited —— 没人请求过）。
+        //   之前发给本机链路本地单播 + Solicited，被 smoltcp 丢掉了。
+        let mut dst_b = [0u8; 16];
+        dst_b[0] = 0xff;
+        dst_b[1] = 0x02;
+        dst_b[15] = 0x01;
+        let our_ll_b = dst_b;
+
+        // eth(14) + ipv6(40) + ICMPv6 NA(24) + TLLA 选项(8) = 86
+        let icmp_len = 24 + 8usize;
+        let mut f = vec![0u8; 14 + 40 + icmp_len];
+        // 组播 IPv6 → 以太目的是 33:33 + 目的地址后 4 字节（RFC 2464）
+        f[0] = 0x33; f[1] = 0x33;
+        f[2..6].copy_from_slice(&dst_b[12..16]);
+        f[6..12].copy_from_slice(&src_mac);
+        f[12] = 0x86;
+        f[13] = 0xDD;
+        // IPv6 头
+        f[14] = 0x60; // version 6
+        f[18..20].copy_from_slice(&(icmp_len as u16).to_be_bytes()); // payload length
+        f[20] = 58; // next header = ICMPv6
+        f[21] = 255; // hop limit（NDP 强制 255，否则被丢）
+        f[22..38].copy_from_slice(&src_ip); // src = 设备
+        f[38..54].copy_from_slice(&our_ll_b); // dst = 我们
+        // ICMPv6 邻居通告
+        let i = 54usize;
+        f[i] = 136; // type = NA
+        f[i + 1] = 0; // code
+        f[i + 4] = 0x20; // flags: 仅 Override（未经请求，故不置 Solicited）
+        f[i + 8..i + 24].copy_from_slice(&src_ip); // target = 设备自己
+        f[i + 24] = 2; // option: Target Link-Layer Address
+        f[i + 25] = 1; // 长度 = 1 × 8 字节
+        f[i + 26..i + 32].copy_from_slice(&src_mac);
+        // ICMPv6 校验和（伪首部：src + dst + 长度 + next header）
+        let mut ph = 0u32;
+        ph = ones_sum16(&src_ip, ph);
+        ph = ones_sum16(&our_ll_b, ph);
+        ph += icmp_len as u32;
+        ph += 58;
+        let c = fold16(ones_sum16(&f[i..i + icmp_len], ph));
+        f[i + 2..i + 4].copy_from_slice(&c.to_be_bytes());
+
+        n.device.push_rx(f);
+    }
+
     /// 跑一轮 poll，**只收集事件不派发回调**（重入安全，见文件头）。
     pub fn poll_collect(&mut self, now_ms: u64, out: &mut Vec<Event>) {
         self.last_seen_ms = now_ms;
@@ -360,6 +468,10 @@ impl Engine {
         // 收集本轮要发的事件；nic 逐个处理
         let nic_ids: Vec<NicId> = self.nics.keys().copied().collect();
         for nid in nic_ids {
+          // ★ 最多两轮：第一轮可能因为缺 v6 邻居而只发出一条 NS，drain_tx 会就地代答一条 NA
+          //   注入收队列；不再跑一轮的话，那条 NA 要等下一次泵（25ms）才被消化，
+          //   表现为"第一个 v6 连接慢一拍"。两轮即可收敛（NA 进来 → 重发 SYN-ACK）。
+          for _round in 0..2 {
             // 反复 poll 直到没有新进展或收队列排空（一次 poll 只处理一帧）
             loop {
                 let Some(n) = self.nics.get_mut(&nid) else { break };
@@ -375,6 +487,12 @@ impl Engine {
             self.promote_listeners(nid, out);
             self.pump_conns(nid, out);
             self.drain_tx(nid, out);
+            // drain_tx 里的 answer_ns 可能刚往收队列塞了 NA —— 有就再跑一轮消化掉
+            let more = self.nics.get(&nid).map(|n| n.device.rx_pending()).unwrap_or(false);
+            if !more {
+                break;
+            }
+          }
         }
     }
 
@@ -521,7 +639,75 @@ impl Engine {
         }
     }
 
+    /// 出方向若是 smoltcp 自己发的**邻居请求(NS)**，就地合成一条**被请求的 NA** 回喂给它。
+    ///
+    /// 为什么走这条路而不是"主动注入未经请求的 NA"：后者试过两版（单播到本机链路本地 /
+    /// 组播到 ff02::1）都被 smoltcp 丢掉，而**回应它自己发出的 NS 是它期望的标准流程**，
+    /// 接受条件最宽。生产里这条 NS 本来就发不到设备手上（NDP 帧被 LanGateway 截给 NdpSpoofer），
+    /// 所以由我们代答既正确又必要 —— 否则 v6 回包永久黑洞（即"双栈设备 v6 漏代理"）。
+    /// 返回 true 表示这一帧是 NS、已就地代答（仍照常发出，无害）。
+    fn answer_ns(&mut self, nid: NicId, f: &[u8]) -> bool {
+        if f.len() < 14 + 40 + 24 {
+            return false;
+        }
+        if f[12] != 0x86 || f[13] != 0xDD || f[20] != 58 {
+            return false;
+        }
+        let i = 54usize;
+        if f[i] != 135 {
+            return false; // 不是 Neighbor Solicitation
+        }
+        let mut target = [0u8; 16];
+        target.copy_from_slice(&f[i + 8..i + 24]);
+        let mut ns_src = [0u8; 16];
+        ns_src.copy_from_slice(&f[22..38]);
+
+        let Some(n) = self.nics.get_mut(&nid) else { return false };
+        let Some((dev_mac, _)) = n.neighbors.get(&target).copied() else { return false };
+
+        // 被请求的 NA：src = 被问的那个地址（设备），dst = NS 的源（我们）
+        let icmp_len = 24 + 8usize;
+        let mut na = vec![0u8; 14 + 40 + icmp_len];
+        na[0..6].copy_from_slice(&n.our_mac);
+        na[6..12].copy_from_slice(&dev_mac);
+        na[12] = 0x86;
+        na[13] = 0xDD;
+        na[14] = 0x60;
+        na[18..20].copy_from_slice(&(icmp_len as u16).to_be_bytes());
+        na[20] = 58;
+        na[21] = 255; // NDP 强制 255
+        na[22..38].copy_from_slice(&target);
+        na[38..54].copy_from_slice(&ns_src);
+        let k = 54usize;
+        na[k] = 136; // NA
+        na[k + 4] = 0x60; // Solicited | Override
+        na[k + 8..k + 24].copy_from_slice(&target);
+        na[k + 24] = 2; // Target Link-Layer Address
+        na[k + 25] = 1;
+        na[k + 26..k + 32].copy_from_slice(&dev_mac);
+        let mut ph = 0u32;
+        ph = ones_sum16(&target, ph);
+        ph = ones_sum16(&ns_src, ph);
+        ph += icmp_len as u32;
+        ph += 58;
+        let c = fold16(ones_sum16(&na[k..k + icmp_len], ph));
+        na[k + 2..k + 4].copy_from_slice(&c.to_be_bytes());
+
+        n.device.push_rx(na);
+        true
+    }
+
     fn drain_tx(&mut self, nid: NicId, out: &mut Vec<Event>) {
+        // 先扫一遍出帧里的 NS 并代答（要在 take_tx 之前拿到副本判断）
+        let ns_frames: Vec<Vec<u8>> = self
+            .nics
+            .get(&nid)
+            .map(|n| n.device.tx_peek_ns())
+            .unwrap_or_default();
+        for f in ns_frames {
+            self.answer_ns(nid, &f);
+        }
+
         let Some(n) = self.nics.get_mut(&nid) else { return };
         let frames = n.device.take_tx();
         for mut f in frames {
@@ -630,6 +816,40 @@ impl Engine {
         }
         best.map(|d| d.total_millis()).unwrap_or(u64::MAX)
     }
+}
+
+/// MAC → EUI-64 链路本地地址 fe80::/64（与 lwIP 的 netif_create_ip6_linklocal_address 同规则）。
+fn link_local_from_mac(mac: &[u8; 6]) -> Ipv6Address {
+    let mut b = [0u8; 16];
+    b[0] = 0xfe;
+    b[1] = 0x80;
+    b[8] = mac[0] ^ 0x02; // 翻转 U/L 位
+    b[9] = mac[1];
+    b[10] = mac[2];
+    b[11] = 0xff;
+    b[12] = 0xfe;
+    b[13] = mac[3];
+    b[14] = mac[4];
+    b[15] = mac[5];
+    Ipv6Address::from(b)
+}
+
+fn ones_sum16(data: &[u8], mut sum: u32) -> u32 {
+    let mut i = 0;
+    while i + 1 < data.len() {
+        sum += u16::from_be_bytes([data[i], data[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+    }
+    sum
+}
+fn fold16(mut s: u32) -> u16 {
+    while (s >> 16) != 0 {
+        s = (s & 0xffff) + (s >> 16);
+    }
+    !(s as u16)
 }
 
 fn addr_bytes(a: IpAddress) -> ([u8; 16], bool) {

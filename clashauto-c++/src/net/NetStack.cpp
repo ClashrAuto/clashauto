@@ -1939,8 +1939,14 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
             handleUdpFrame6(nic, frame);
             return;
         }
-#ifdef COAST_HAVE_RUST_STACK
-        // TCP 交给 smoltcp（开关打开时）。ICMPv6-echo 之类仍走 lwIP —— 那不是数据面。
+        // ★ v6 TCP **仍然走 lwIP**，即使开了 COAST_STACK=smoltcp。
+        //   原因：smoltcp 侧的 v6 邻居注入尚未跑通（engine.rs 试过四种做法：单播 NA、
+        //   组播 NA、关校验和验证、代答它自己发的 NS，v6 SYN 至今只能换来一条邻居请求、
+        //   拿不到 SYN-ACK）。而 v6 的失败是**静默**的 —— 设备流量会绕过代理直接出去，
+        //   正是本项目已知的高危项「双栈设备 v6 漏代理」。
+        //   所以在跑通之前，宁可让 v6 继续走已验证的 lwIP，也不能让开关一开 v6 就瘸。
+        //   跑通后把下面这段解注释即可（Rust 侧的 e2e6 测试已写好，现为 #[ignore]）。
+#if 0 // 待 v6 邻居注入跑通后启用
         if (d->useSmol && d->smol && nexthdr == 6) {
             const quint32 nid = d->nicIds.value(from, 0);
             if (nid)
