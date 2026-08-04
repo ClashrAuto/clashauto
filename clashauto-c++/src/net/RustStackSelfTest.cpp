@@ -702,6 +702,22 @@ int runSmolGatewayRealNicSelfTest()
         std::fprintf(stderr, "[realnic] FAIL: addNic: %s\n", err.toLatin1().constData());
         return 1;
     }
+    // ★ COAST_GW_COASTCORE=1：装进程内出站（DIRECT），把这条真机自测变成
+    //   **coastcore 的真机验证** —— 连接不再拨回环 SOCKS，而是由 DirectOutbound
+    //   从本机直接出去。判据在结尾：ccInProcess 必须涨、SOCKS 必须零连接。
+    std::shared_ptr<ProxyConfigStore> ccStore;
+    if (qEnvironmentVariableIsSet("COAST_GW_COASTCORE")) {
+        ccStore = std::make_shared<ProxyConfigStore>();
+        QVector<ProxyNode> nodes;
+        nodes.append(ProxyNode::direct());
+        ccStore->reload(std::make_shared<const ProxyConfig>(
+            nodes, QStringLiteral("DIRECT"), ProxyConfig::Mode::Global));
+        auto *ccF = new CoreDialerFactory(ccStore.get(), new Socks5OutboundFactory(kSocksPort));
+        ccF->setRouter([](const QString &, const QString &) { return QStringLiteral("DIRECT"); });
+        ccF->setInboundTag(QStringLiteral("Coast-Gateway"));
+        net.setOutboundFactory(ccF);
+        std::fprintf(stderr, "[realnic] CoastCore 进程内出站：已启用（DIRECT）\n");
+    }
     net.addDevice(victimIp, victimMac, kUser);
 
     // 只把**来自靶机**的帧喂进栈（等价于 LanGateway 的 victim 过滤，其余逻辑不需要）
