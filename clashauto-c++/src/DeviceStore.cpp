@@ -176,7 +176,15 @@ void DeviceStore::ensureSchema()
                           "auto_type TEXT NOT NULL DEFAULT '',"
                           "is_self INTEGER NOT NULL DEFAULT 0,"
                           "is_gateway INTEGER NOT NULL DEFAULT 0,"
-                          "last_seen TEXT NOT NULL DEFAULT '')"));
+                          "last_seen TEXT NOT NULL DEFAULT '',"
+                          // ★ `last_ip` 是**对面那条线**（Swift）存地址用的列，这边存在 `ip`。
+                          //   两边现在读时二选一、写时两列都写（见 load()/save()），
+                          //   所以这一列在**纯本线的新库里也必须存在** —— 否则
+                          //   `SELECT … last_ip` 与 `INSERT … last_ip` 双双报
+                          //   「no such column」，台账整个读写不能。
+                          //   真实机器上不显形，因为那份库早被对面建过这一列；
+                          //   全新安装（以及所有 Windows/Linux 用户）才会撞上。
+                          "last_ip TEXT NOT NULL DEFAULT '')"));
     // —— 老库/异构库补列 ——
     //
     // ★ `CREATE TABLE IF NOT EXISTS` 对**已存在但列不全**的表**什么都不做**，
@@ -209,7 +217,8 @@ void DeviceStore::ensureSchema()
                                "auto_type TEXT NOT NULL DEFAULT ''",
                                "is_self INTEGER NOT NULL DEFAULT 0",
                                "is_gateway INTEGER NOT NULL DEFAULT 0",
-                               "last_seen TEXT NOT NULL DEFAULT ''"}) {
+                               "last_seen TEXT NOT NULL DEFAULT ''",
+                               "last_ip TEXT NOT NULL DEFAULT ''"}) {
         q.exec(QStringLiteral("ALTER TABLE device ADD COLUMN %1").arg(QLatin1String(column)));
     }
 
