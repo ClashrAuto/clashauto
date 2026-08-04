@@ -726,3 +726,48 @@ fn rx_queue_is_bounded_and_counted() {
     e.poll_collect(10, &mut evs);
 }
 
+/// 证明 `set_skip_rx_checksum` 真的生效 —— 否则"关掉校验和没差别"这个测量结论是假的。
+///
+/// 判据：喂一个**校验和故意写错**的 SYN。
+///   · 默认（验校验和）→ 被丢弃，没有 SYN-ACK
+///   · 关掉验证         → 被接受，有 SYN-ACK
+/// 两条都成立，才说明那个开关确实作用在收包路径上。
+#[test]
+fn skip_rx_checksum_knob_actually_works() {
+    let mut e = mk_engine();
+
+    // 校验和错的 SYN
+    let mut bad = tcp_frame(51040, 443, 0x02, 7000, 0, b"");
+    bad[34 + 16] ^= 0xFF; // 翻掉校验和高字节
+    bad[34 + 17] ^= 0xFF;
+
+    let mut evs = Vec::new();
+    e.input(1, &bad);
+    e.poll_collect(10, &mut evs);
+    let synacks = tcp_out(&evs).into_iter().filter(|(fl, _, _, _)| fl & 0x12 == 0x12).count();
+    assert_eq!(
+        synacks, 0,
+        "默认应当校验并丢弃坏帧，却回了 {} 个 SYN-ACK —— 那么「关掉校验和」的对照实验没有意义",
+        synacks
+    );
+
+    // 关掉验证后同一个坏帧应当被接受。
+    // ★ 必须**重建引擎**：开关要在 add_nic 之前生效（smoltcp 缓存 capabilities）。
+    let mut e = Engine::new();
+    e.set_skip_rx_checksum(true);
+    let mut ip = [0u8; 16];
+    ip[..4].copy_from_slice(&OUR_IP);
+    assert!(e.add_nic(1, OUR_MAC, ip, false, 24, 0));
+    let mut bad2 = tcp_frame(51041, 443, 0x02, 7100, 0, b"");
+    bad2[34 + 16] ^= 0xFF;
+    bad2[34 + 17] ^= 0xFF;
+    let mut evs2 = Vec::new();
+    e.input(1, &bad2);
+    e.poll_collect(20, &mut evs2);
+    let synacks2 = tcp_out(&evs2).into_iter().filter(|(fl, _, _, _)| fl & 0x12 == 0x12).count();
+    assert!(
+        synacks2 > 0,
+        "关掉校验和之后坏帧仍被丢弃 —— 开关没生效，据它得出的「校验和不要钱」是假结论"
+    );
+}
+

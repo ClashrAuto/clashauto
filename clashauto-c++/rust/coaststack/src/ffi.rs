@@ -213,6 +213,17 @@ pub unsafe extern "C" fn coast_stack_remove_nic(s: *mut CoastStack, nic: CoastNi
     if st.engine.remove_nic(nic) { COAST_OK } else { COAST_ERR_NONIC }
 }
 
+/// **仅供归因测量**：关掉收包方向的 TCP/IPv4 校验和验证（发送仍生成）。
+///
+/// ⚠️ 生产绝不能开。理由见 engine.rs 里 `skip_rx_checksum` 字段的说明：
+///    我们是中间盒，收包不验等于把损坏数据洗成一条校验和有效的新连接。
+#[no_mangle]
+pub unsafe extern "C" fn coast_stack_debug_skip_rx_checksum(s: *mut CoastStack, on: bool) -> i32 {
+    let Some(st) = stack_mut(s) else { return COAST_ERR_BADARG };
+    st.engine.set_skip_rx_checksum(on);
+    COAST_OK
+}
+
 // ———————————————————————— 数据面 ————————————————————————
 
 #[no_mangle]

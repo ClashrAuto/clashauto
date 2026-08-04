@@ -112,6 +112,12 @@ int32_t coast_stack_add_nic(CoastStack *s, CoastNicId nic, const uint8_t mac6[6]
                             const CoastAddr *ip, uint8_t prefix_len);
 int32_t coast_stack_remove_nic(CoastStack *s, CoastNicId nic);
 
+// **仅供归因测量**：关掉收包方向的 TCP/IPv4 校验和验证（发送仍然生成）。
+// ⚠️ 生产绝不能开：我们是中间盒，终结设备的 TCP 后再以新连接转发，转发时会算一个
+//    **有效**的校验和。收包不验 = 把损坏数据洗成"看起来正确"的新连接，端到端校验失效。
+//    以太网 FCS 逐跳重算，救不了这个。它只用来回答"校验和占协议栈那段的多少"。
+int32_t coast_stack_debug_skip_rx_checksum(CoastStack *s, bool on);
+
 // ———————————————————————— 数据面 ————————————————————————
 
 // 喂入一个完整以太帧（含 14 字节以太头）。只应传 IPv4/IPv6 的 TCP 帧 ——

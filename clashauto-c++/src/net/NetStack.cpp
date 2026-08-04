@@ -1038,6 +1038,14 @@ bool NetStack::init(QString *err)
         return false;
     }
     d->smolClock.start();
+    // ★ 归因用的关校验和开关**必须在这里**（coast_stack_new 之后、addNic 之前）：
+    //   smoltcp 的 Interface::new 会把 device capabilities 拷进 InterfaceInner 缓存，
+    //   建完网卡再改是无效的。第一版放在 addNic 之后，于是开关看着开了、实际没生效，
+    //   据此量出的「校验和不要钱」是假结论 —— 靠 Rust 侧那条证伪测试才发现。
+    if (qEnvironmentVariableIsSet("COAST_GW_BENCH_NOCKSUM")) {
+        coast_stack_debug_skip_rx_checksum(d->smol, true);
+        qWarning("[NetStack] ★ 收包校验和验证已关闭 —— 仅供测量，绝不可用于生产");
+    }
     qInfo("[NetStack] TCP 数据面 = smoltcp (%s)", coast_stack_version());
 
     // 栈的定时器泵（TCP 重传/延迟 ACK/TIME_WAIT 回收）+ 收帧排空兜底 + UDP 流老化。

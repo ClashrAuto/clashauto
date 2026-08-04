@@ -25,7 +25,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
-use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::phy::{Checksum, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{
@@ -68,6 +68,14 @@ pub struct QueueDevice {
     rx: VecDeque<Vec<u8>>,
     tx: Vec<Vec<u8>>,
     mtu: usize,
+    /// **仅供归因测量**：true = 收包不验 TCP 校验和（发送仍然生成）。
+    ///
+    /// ⚠️ 生产恒为 false，而且**不该**改成 true：我们是中间盒，终结设备的 TCP 之后
+    ///    再以新连接转发出去，转发时会算一个**有效**的校验和。收包不验 = 把损坏的数据
+    ///    洗成"看起来正确"的新连接，端到端校验就此失效。以太网 FCS 逐跳重算，救不了这个。
+    ///    所以它只用来回答"校验和占那 33% 的多少"，不是可选的优化项。
+    skip_rx_checksum: bool,
+
     /// 本次 `iface.poll()` 还允许交出多少帧；`usize::MAX` = 不限。
     ///
     /// 为什么需要它：smoltcp 的 `Interface::poll()` **内部会一直 receive() 到设备说没有为止**，
@@ -91,7 +99,7 @@ impl QueueDevice {
     const RX_QUEUE_MAX: usize = 16384;
 
     fn new(mtu: usize) -> Self {
-        Self { rx: VecDeque::new(), tx: Vec::new(), mtu, rx_budget: usize::MAX }
+        Self { rx: VecDeque::new(), tx: Vec::new(), mtu, skip_rx_checksum: false, rx_budget: usize::MAX }
     }
     /// 返回 false = 队列已满，这一帧被丢（调用方据此记 rx_dropped）。
     fn push_rx(&mut self, frame: Vec<u8>) -> bool {
@@ -159,6 +167,11 @@ impl Device for QueueDevice {
         let mut c = DeviceCapabilities::default();
         c.medium = Medium::Ethernet;
         c.max_transmission_unit = self.mtu;
+        if self.skip_rx_checksum {
+            // Tx = 只在发送时生成，收包不验（见字段上的警告，仅供测量）
+            c.checksum.tcp = Checksum::Tx;
+            c.checksum.ipv4 = Checksum::Tx;
+        }
         c
     }
 }
@@ -232,6 +245,8 @@ pub struct Engine {
     pub conns_refused: u64,
     /// pump_conns 复用的连接 id 暂存表（避免每轮 poll 一次分配，见该函数）。
     pump_scratch: Vec<ConnId>,
+    /// 仅供归因测量，见 set_skip_rx_checksum。新建网卡时套用到它的 device 上。
+    skip_rx_checksum: bool,
     /// 收队列满而丢掉的帧数。非 0 = 工作线程跟不上（不是链路丢包），
     /// 与 txdrop/rxdrop 分属不同环节，别混。
     pub rx_overflow: u64,
@@ -250,6 +265,7 @@ impl Engine {
             conns_aborted: 0,
             conns_refused: 0,
             pump_scratch: Vec::new(),
+            skip_rx_checksum: false,
             rx_overflow: 0,
             tx_frames: 0,
         }
@@ -267,6 +283,8 @@ impl Engine {
             return false;
         }
         let mut device = QueueDevice::new(1514);
+        // ★ 必须在 Interface::new 之前设：smoltcp 会把 capabilities 拷进 InterfaceInner 缓存。
+        device.skip_rx_checksum = self.skip_rx_checksum;
         let mut cfg = Config::new(HardwareAddress::Ethernet(EthernetAddress(mac)));
         // 固定种子：本模块单线程、且 ISN 随机性不是我们的安全边界（连接是我们自己终结的）。
         cfg.random_seed = 0x5b5b_5b5b_5b5b_5b5b;
@@ -355,6 +373,19 @@ impl Engine {
         // 该卡上的连接一并作废（socket 随 SocketSet 一起没了）
         self.conns.retain(|_, c| c.nic != nic);
         true
+    }
+
+    /// 仅供归因测量：关掉收包方向的校验和验证（见 `QueueDevice::skip_rx_checksum`）。
+    ///
+    /// ★ **必须在 `add_nic` 之前调**。smoltcp 的 `Interface::new()` 会把 device 的
+    ///   capabilities **拷进 InterfaceInner 缓存起来**，建好之后再改设备是没有效果的。
+    ///   第一版就是建完网卡再改，于是坏帧照样被丢 —— 而据此得出的「校验和不要钱」
+    ///   是个假结论。是 `skip_rx_checksum_knob_actually_works` 那条证伪测试拦下来的。
+    pub fn set_skip_rx_checksum(&mut self, on: bool) {
+        self.skip_rx_checksum = on;
+        for n in self.nics.values_mut() {
+            n.device.skip_rx_checksum = on;
+        }
     }
 
     /// 喂帧：改写目的端口 → 推进收队列。帧内容会被拷贝（调用方的缓冲只在调用内有效）。

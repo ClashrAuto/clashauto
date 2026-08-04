@@ -220,6 +220,7 @@ class QHostAddress;
 ///   而三次握手本身就要 poll，开在前面等于连连接都建不起来（第一版就是这么废掉的）。
 void coastSetBenchStage(int stage);
 
+
 class NetStack final : public QObject
 {
     Q_OBJECT
