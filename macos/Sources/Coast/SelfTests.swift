@@ -98,6 +98,26 @@ enum SelfTests {
                      + "→ 预建索引 %.2f ms（%.0f%%），快 %.1f 倍",
                      macs.count, connCount, nowCost, nowCost / 16.7 * 100,
                      fixCost, fixCost / 16.7 * 100, nowCost / max(fixCost, 0.0001)))
+
+        // 状态页 CompositionCard：`topHosts` 是 computed property，ForEach 的 5 次迭代里
+        // 各引用 2 次（.count 与 [index]）= **每次渲染 10 遍**，而它每遍都 filter + 全量排序
+        // 512 条 hostBytes。状态页每秒随 pollTick 重绘。
+        var composition = TrafficComposition()
+        var synthetic: [[String: Any]] = []
+        for i in 0..<TrafficComposition.maxHostStatsForTests {
+            synthetic.append(["id": "c\(i)", "chains": ["🚀 节点选择"],
+                              "upload": NSNumber(value: i * 7 + 1),
+                              "download": NSNumber(value: i * 13 + 1),
+                              "metadata": ["host": "h\(i).example.com", "sourceIP": "192.168.20.9"]])
+        }
+        composition.observe(synthetic)
+        let hostsBegan = Date()
+        for _ in 0..<100 { _ = composition.topHosts(limit: 5) }
+        let hostsPer = Date().timeIntervalSince(hostsBegan) / 100 * 1000
+        print(String(format: "\ntopHosts 单次 %.3f ms（%d 条）；状态页每帧调 10 遍 = %.2f ms"
+                     + "（16.7 ms 预算的 %.0f%%）",
+                     hostsPer, TrafficComposition.maxHostStatsForTests,
+                     hostsPer * 10, hostsPer * 10 / 16.7 * 100))
         exit(0)
     }
 

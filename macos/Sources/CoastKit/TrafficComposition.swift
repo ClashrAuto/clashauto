@@ -31,6 +31,8 @@ public struct TrafficComposition: Sendable, Equatable {
     /// host 表只增不减，给它一个上限：满了就只留用量最大的一半（被裁掉的都是零头）。
     /// 与 Qt 的 `kMaxHostStats` 同值。
     static let maxHostStats = 512
+    /// 给自检用的只读别名（`maxHostStats` 是 internal，跨模块取不到）。
+    public static var maxHostStatsForTests: Int { maxHostStats }
 
     public init() {}
 
