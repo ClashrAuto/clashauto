@@ -159,6 +159,9 @@ int main(int argc, char *argv[])
     // NetStack 级：整条 smoltcp 路径（要建 NetStack + 假 SOCKS，仍不碰真网卡/不需要 root）
     if (qEnvironmentVariableIsSet("COAST_SMOLGW_SELFTEST"))
         return runSmolGatewaySelfTest();
+    // 真网卡版：真 Npcap + 真机帧（需管理员）。不投毒，靠靶机静态路由导流。
+    if (qEnvironmentVariableIsSet("COAST_SMOLGW_REALNIC_SELFTEST"))
+        return runSmolGatewayRealNicSelfTest();
 #endif
 
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
