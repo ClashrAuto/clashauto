@@ -212,6 +212,7 @@
 #include <QString>
 
 class IL2Endpoint;
+class OutboundFactory;
 class QHostAddress;
 
 /// 归因用的分级短路开关（详见 NetStack.cpp 里 g_benchStage 的说明）。
@@ -259,6 +260,13 @@ public:
     //   它曾经用于 smoltcp↔lwIP 的 A/B 断言（那个 A/B 抓到过真缺陷，见 R24）；lwIP 移除后
     //   只剩一个值，但**不删** —— 桩平台会诚实地报 "none"，诊断日志也该记它。
     const char *activeTcpStack() const;
+
+    /// 换出站实现。默认是拨 mihomo 的 SOCKS5（`Socks5OutboundFactory`）；
+    /// 传 `CoreDialerFactory` 即走**进程内出站**，连接不再经回环 SOCKS 那一跳。
+    /// ★ 那一跳实测占网关软件成本的 **65%**（见 docs/gateway-bottleneck-audit.md 第十节），
+    ///   所以这个 setter 是整条性能线上收益最大的一个开关。
+    /// 传 nullptr = 回到默认。工厂生命周期由调用方负责（本对象只持默认那一个）。
+    void setOutboundFactory(OutboundFactory *f);
 
     // 送入一个「已确认属于某被劫持设备」的以太帧（含 14 字节以太头）。
     // from = 收到该帧的二层端点，用来定位喂给哪张卡（也决定 UDP 回程从哪张卡发出）。

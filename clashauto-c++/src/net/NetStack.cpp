@@ -1,5 +1,6 @@
 #include "NetStack.h"
 #include "IL2Endpoint.h"
+#include "IOutbound.h"
 #include "Socks5Client.h"
 
 #include <QDebug>
@@ -59,7 +60,9 @@ struct DeviceInfo {
 struct SmolConn {
     NetStack::Impl *impl = nullptr;
     quint64 id = 0;              // coaststack 的连接 id（0 恒无效）
-    Socks5Tcp *socks = nullptr;
+    // ★ 出站是**接口**，不是具体实现：Socks5Tcp（拨 mihomo）与进程内协议出站都实现它。
+    //   由 Impl::outFactory 创建 —— 换出站不需要动桥接这一侧的任何一行。
+    IOutboundTcp *socks = nullptr;
     // 下行待写队列。★ 消费端用**偏移游标** `toStackOff`，不用 `remove(0,n)` ——
     //   remove 每次都要 memmove 剩余部分，而拥塞时（设备窗口小 → coast_conn_sndbuf 只给一点
     //   → 反复部分写）它退化成 O(n²)。实测（COAST_GW_BENCH_DIR=down + DEVWND）：
@@ -252,6 +255,10 @@ void lruTouch(UdpFlow *f)
 struct NetStack::Impl {
     quint16 socksPort = 0;
     NetStack *owner = nullptr;
+    // 出站工厂。默认拨 mihomo 的 SOCKS5（= 接线前的行为，零变化）；
+    // 上层可用 setOutboundFactory() 换成 CoreDialerFactory 走进程内出站。
+    OutboundFactory *outFactory = nullptr;
+    Socks5OutboundFactory *ownedDefault = nullptr; // 默认工厂，由本对象持有
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的上下文
     QHash<QString, DeviceInfo> devices;      // 设备 IP（v4 或 v6 串）→ {mac,user}
     QHash<QString, UdpSess *> udp;           // 设备 IP（v4 或 v6 串）→ UDP 会话
@@ -893,27 +900,31 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
     auto *c = new SmolConn;
     c->impl = d;
     c->id = id;
-    // ★ 新的出站 API（IOutbound）：SOCKS 端口在**构造时**给，connectTo 只管目的地。
-    //   这一步是阶段 2「改用 IOutboundTcp」的前置形状 —— 现在仍然写死 Socks5Tcp，行为不变。
-    c->socks = new Socks5Tcp(d->socksPort, d->owner);
+    // ★ 经工厂创建：默认工厂返回 Socks5Tcp（拨 mihomo），换成 CoreDialerFactory 就走进程内出站。
+    c->socks = d->outFactory ? d->outFactory->createTcp(d->owner) : nullptr;
+    if (!c->socks) {
+        d->smolConns.remove(id);
+        delete c;
+        return false;
+    }
     d->smolConns.insert(id, c);
     ++GatewayDiag::c.tcpAccepted;
 
-    QObject::connect(c->socks, &Socks5Tcp::established, d->owner, [c]() {
+    QObject::connect(c->socks, &IOutboundTcp::established, d->owner, [c]() {
         c->established = true;
         smolFlushRecvWindow(c);
     });
-    QObject::connect(c->socks, &Socks5Tcp::upstreamBytesWritten, d->owner,
+    QObject::connect(c->socks, &IOutboundTcp::upstreamBytesWritten, d->owner,
                      [c]() { smolFlushRecvWindow(c); });
-    QObject::connect(c->socks, &Socks5Tcp::dataReceived, d->owner, [c](const QByteArray &b) {
+    QObject::connect(c->socks, &IOutboundTcp::dataReceived, d->owner, [c](const QByteArray &b) {
         c->toStack.append(b);
         smolPumpToStack(c);
     });
-    QObject::connect(c->socks, &Socks5Tcp::failed, d->owner, [c](const QString &) {
+    QObject::connect(c->socks, &IOutboundTcp::failed, d->owner, [c](const QString &) {
         ++GatewayDiag::c.socksFailed;
         smolDestroyConn(c, true);
     });
-    QObject::connect(c->socks, &Socks5Tcp::closed, d->owner, [c]() {
+    QObject::connect(c->socks, &IOutboundTcp::closed, d->owner, [c]() {
         c->socksClosed = true;
         smolPumpToStack(c);
     });
@@ -974,6 +985,10 @@ NetStack::NetStack(quint16 socksPort, QObject *parent)
 {
     d->socksPort = socksPort;
     d->owner = this;
+    // 默认出站 = 拨 mihomo 的 SOCKS5。**必须在这里就位**：init() 之前 addDevice/inputFrame
+    // 理论上进不来，但留一个空工厂等于把"没设工厂"变成运行期空指针，不如默认就是对的。
+    d->ownedDefault = new Socks5OutboundFactory(socksPort);
+    d->outFactory = d->ownedDefault;
 }
 
 NetStack::~NetStack()
@@ -1008,6 +1023,7 @@ NetStack::~NetStack()
         delete n;
     if (g_impl == d)
         g_impl = nullptr;
+    delete d->ownedDefault;
     delete d;
 }
 
@@ -1016,6 +1032,13 @@ void coastSetBenchStage(int stage)
     g_benchStage = stage;
     if (stage > 0)
         qWarning("[NetStack] ★ 归因短路已开启 STAGE=%d —— 这不是正常模式", stage);
+}
+
+void NetStack::setOutboundFactory(OutboundFactory *f)
+{
+    // 传 nullptr = 回到默认的 SOCKS5 出站（拨 mihomo）。工厂的生命周期由**调用方**负责，
+    // 本对象只持默认那一个 —— 这样"换出站"与"谁拥有出站配置"这两件事不会缠在一起。
+    d->outFactory = f ? f : static_cast<OutboundFactory *>(d->ownedDefault);
 }
 
 const char *NetStack::activeTcpStack() const
