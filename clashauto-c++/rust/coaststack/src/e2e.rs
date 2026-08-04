@@ -275,12 +275,14 @@ fn measure_bytes_per_poll_cycle() {
         .sum();
 
     // 25 ms 一拍 → 折算单连接上行天花板
-    let mbps = (delivered as f64) * 8.0 / 0.025 / 1e6;
+    // ⚠️ 这里**故意不折算 Mb/s**。本测量灌的是**出窗**数据，量到的是"收缓冲一个周期能吸收
+    //    多少"，不是"真实设备被允许发多少"——后者受通告窗口(65535)约束，见
+    //    measure_realistic_upstream_ceiling。早先拿这个数折算出的 41.9 Mb/s 偏乐观 2 倍。
     std::eprintln!(
-        "[QUANT] 灌入 {} B，单个 poll 周期交出 {} B → 按生产 25ms 泵折算 {:.1} Mb/s/连接",
+        "[QUANT] 灌入 {} B（含出窗），单个 poll 周期收缓冲吸收 {} B —— 上限是 RX_BUF，
+         [QUANT] **别拿它折算吞吐**，真实天花板见 measure_realistic_upstream_ceiling",
         200 * 1460,
-        delivered,
-        mbps
+        delivered
     );
     assert!(delivered > 0, "一个周期一个字节都没交出来");
     // 守住这条测量的语义：交出的量受接收窗口封顶，不会随灌入量线性增长。
@@ -288,4 +290,106 @@ fn measure_bytes_per_poll_cycle() {
         delivered < 200 * 1460,
         "居然全吃下了 —— 说明窗口/量化模型和我理解的不一样，结论要重算"
     );
+}
+
+/// 出方向 TCP 帧的完整字段：(flags, seq, ack, window)。
+/// 比 tcp_out 多取 ack 与**通告窗口** —— 上一条测量缺的正是窗口，导致灌了出窗数据。
+fn tcp_out_ex(events: &[Event]) -> Vec<(u8, u32, u32, u16)> {
+    let mut v = Vec::new();
+    for ev in events {
+        if let Event::OutFrame { data, .. } = ev {
+            if data.len() >= 54 && data[12] == 0x08 && data[13] == 0x00 && data[23] == 6 {
+                let t = 34usize;
+                v.push((
+                    data[t + 13],
+                    u32::from_be_bytes([data[t + 4], data[t + 5], data[t + 6], data[t + 7]]),
+                    u32::from_be_bytes([data[t + 8], data[t + 9], data[t + 10], data[t + 11]]),
+                    u16::from_be_bytes([data[t + 14], data[t + 15]]),
+                ));
+            }
+        }
+    }
+    v
+}
+
+/// 严谨版上行天花板测量：**设备严格遵守通告窗口**，只发 (ack + wnd - seq) 允许的量。
+/// 这才是真实设备的行为；上一条 measure_bytes_per_poll_cycle 灌了出窗数据，量到的是
+/// "缓冲区能装多少"而不是"设备被允许发多少"，偏乐观。
+#[test]
+fn measure_realistic_upstream_ceiling() {
+    let mut e = mk_engine();
+    let (id, synack_seq) = establish(&mut e, 51020, 443, 2000);
+    let ackno_to_peer = synack_seq.wrapping_add(1);
+    let payload = [0x5Au8; 1460];
+
+    let mut seq: u32 = 2001;      // 设备下一个要发的序号
+    let mut peer_ack: u32 = 2001; // 我方已确认到哪
+    let mut wnd: u32 = 65535;     // 我方通告窗口（下面会被真值覆盖）
+    let mut wnd_seen_max: u32 = 0;
+
+    const TARGET: usize = 1024 * 1024;
+    let mut delivered = 0usize;
+    let mut cycles = 0u32;
+    let mut now = 1000u64;
+    let mut idle = 0u32;
+
+    while delivered < TARGET && cycles < 20000 {
+        // 设备在窗口内尽量发
+        let mut sent_this_cycle = 0usize;
+        loop {
+            let inflight = seq.wrapping_sub(peer_ack);
+            if inflight as u64 + 1460 > wnd as u64 {
+                break;
+            }
+            e.input(1, &tcp_frame(51020, 443, 0x18, seq, ackno_to_peer, &payload));
+            seq = seq.wrapping_add(1460);
+            sent_this_cycle += 1460;
+        }
+
+        let mut evs = Vec::new();
+        now += 25; // 生产泵周期
+        e.poll_collect(now, &mut evs);
+        cycles += 1;
+
+        // C++ 侧最理想情况：收到就写 SOCKS 并**立刻**还窗口（无背压）
+        let mut got = 0usize;
+        for ev in &evs {
+            if let Event::ConnData { id: i, data } = ev {
+                if *i == id {
+                    got += data.len();
+                }
+            }
+        }
+        if got > 0 {
+            let _ = e.recved(id, got as u32);
+            delivered += got;
+        }
+
+        for (flags, _sq, ackno, w) in tcp_out_ex(&evs) {
+            if flags & 0x10 != 0 {
+                peer_ack = ackno;
+                wnd = w as u32;
+                if wnd > wnd_seen_max {
+                    wnd_seen_max = wnd;
+                }
+            }
+        }
+
+        if sent_this_cycle == 0 && got == 0 {
+            idle += 1;
+            if idle > 50 {
+                break; // 卡死了，也是结论
+            }
+        } else {
+            idle = 0;
+        }
+    }
+
+    let secs = cycles as f64 * 0.025;
+    let mbps = (delivered as f64) * 8.0 / secs / 1e6;
+    std::eprintln!(
+        "[REAL] 送达 {} B / {} 拍（{:.2}s @25ms）→ {:.1} Mb/s/连接；最大通告窗口 {} B",
+        delivered, cycles, secs, mbps, wnd_seen_max
+    );
+    assert!(delivered > 0, "一个字节都没送达");
 }
