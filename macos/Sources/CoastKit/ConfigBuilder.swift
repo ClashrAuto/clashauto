@@ -84,6 +84,8 @@ public final class ConfigBuilder: @unchecked Sendable {
         yaml = YAMLSurgery.setScalar(yaml, key: "ipv6", value: "true")
         yaml = YAMLSurgery.setNestedScalar(yaml, section: "tun", key: "enable",
                                            value: tunEnabled ? "true" : "false")
+        // 必须排在 ensureProxyServerNameserver **之前**：剔完才知道还剩几条（与 Qt 同序）。
+        yaml = Self.pruneUnreachableDns(yaml)
         yaml = Self.ensureProxyServerNameserver(yaml)
         yaml = Self.normalizeEmptyProxies(yaml)
         yaml = applySubscriptions(yaml, subscriptions: readSubscriptions())
@@ -141,6 +143,83 @@ public final class ConfigBuilder: @unchecked Sendable {
                                        with: "    proxies:\n      - DIRECT",
                                        options: .regularExpression)
         return out
+    }
+
+    /// 剔掉订阅 dns 段里**实测确认不可达**的 DoH —— 与 Qt 的 `pruneUnreachableDns` 同一份名单、
+    /// 同一套规则。这条线一直没有这一步，于是订阅带来的那几条一直留在配置里。
+    ///
+    /// 后果比「少一个解析器」严重得多：核心按列表顺序挨个试，每撞一条不可达的就等一次连接
+    /// 超时，而这发生在**每条新连接**的名字解析上。
+    ///
+    /// 本机实测（2026-08-04，同一份核心、同一份配置，只换 DNS 列表，用 `/dns/query`
+    /// 隔离掉节点质量，各两轮）：**中位 0.19s → 0.03~0.04s，约 5 倍**。
+    /// Qt 注释里 Windows 上记的是 32 倍 —— 差别在于本机默认路由挂在别的代理的 TUN 上，
+    /// `1.0.0.1` / `public.dns.iij.jp` 借到了路，只有 rubyfish / twnic 真的在超时。
+    /// 换句话说 5 倍是**这台机器的下限**，裸网络只会更糟。
+    ///
+    /// 只剔固定名单，不做运行时探测：探测本身要花时间、还会因网络抖动误杀，
+    /// 而这几条是长期失效。名单之外一概不动，保持「订阅说什么就是什么」。
+    static func pruneUnreachableDns(_ yaml: String) -> String {
+        // ★ `default-nameserver` 里的 1.0.0.1 是**明文 UDP**（不是 DoH），墙内可达，
+        //   不能按同一把尺子砍 —— 故只在这三张表里剔。
+        let unreachable = ["dns.rubyfish.cn", "1.0.0.1", "dns.twnic.tw", "public.dns.iij.jp"]
+        let targetLists: Set<String> = ["nameserver", "fallback", "proxy-server-nameserver"]
+
+        var out: [String] = []
+        var inDns = false
+        var currentList = ""
+        var removed = 0
+        for line in yaml.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            if !line.hasPrefix(" ") && !line.hasPrefix("\t") {
+                inDns = line.hasPrefix("dns:")      // 顶格键 → 进/出 dns 块
+                currentList = ""
+            } else if inDns, let name = Self.listKey(line) {
+                currentList = name
+            }
+            if inDns, targetLists.contains(currentList),
+               line.trimmingCharacters(in: .whitespaces).hasPrefix("-"),
+               unreachable.contains(where: { line.contains($0) }) {
+                removed += 1
+                continue
+            }
+            out.append(line)
+        }
+        guard removed > 0 else { return yaml }
+        // 剔空的列表补回可用项：空列表在 mihomo 里等于「没有解析器」，比留着慢的还糟。
+        return Self.refillEmptyDnsLists(out.joined(separator: "\n"))
+    }
+
+    /// `  nameserver:` 这种「两空格 + 键 + 冒号 + 行尾」的子列表头，返回键名。
+    private static func listKey(_ line: String) -> String? {
+        guard line.hasPrefix("  "), !line.hasPrefix("   ") else { return nil }
+        let body = line.dropFirst(2)
+        guard body.hasSuffix(":") || body.trimmingCharacters(in: .whitespaces).hasSuffix(":")
+        else { return nil }
+        let name = body.prefix(while: { $0 != ":" })
+        guard !name.isEmpty, name.allSatisfy({ $0.isLowercase || $0 == "-" }) else { return nil }
+        return String(name)
+    }
+
+    /// 把被剔空的 nameserver / fallback 补回两条实测可用的。
+    private static func refillEmptyDnsLists(_ yaml: String) -> String {
+        let good = ["    - https://223.5.5.5/dns-query", "    - https://dns.pub/dns-query"]
+        var lines = yaml.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var inDns = false
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            if !line.hasPrefix(" ") && !line.hasPrefix("\t") { inDns = line.hasPrefix("dns:") }
+            if inDns, let name = Self.listKey(line), name == "nameserver" || name == "fallback" {
+                // 下一行不是本列表的条目 → 这张表空了
+                let next = index + 1 < lines.count ? lines[index + 1] : ""
+                if !next.trimmingCharacters(in: .whitespaces).hasPrefix("-") {
+                    lines.insert(contentsOf: good, at: index + 1)
+                    index += good.count
+                }
+            }
+            index += 1
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// 注入 `dns.proxy-server-nameserver`（境内明文 DNS）。
