@@ -29,3 +29,7 @@ int runRustStackSelfTest();
 // NetStack 级：整条 smoltcp 路径（COAST_SMOLGW_SELFTEST=1）。合成 SYN → 桥接 → 真 SOCKS
 // CONNECT + 每设备身份。0=通过。见 RustStackSelfTest.cpp 末尾。
 int runSmolGatewaySelfTest();
+
+// 真网卡版（COAST_SMOLGW_REALNIC_SELFTEST=1，需管理员 + Npcap）：真 Npcap 端点 + 真机
+// 发来的真帧。**不做 ARP 投毒**，导流靠靶机自己的静态路由，因而不可能让任何设备断网。
+int runSmolGatewayRealNicSelfTest();

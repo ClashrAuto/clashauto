@@ -474,3 +474,180 @@ int runSmolGatewaySelfTest()
                  socks.dport);
     return 0;
 }
+
+// ═══ 真网卡自证（COAST_SMOLGW_REALNIC_SELFTEST=1）═══════════════════════════
+//
+// 上面那个用假二层端点，证明的是协议逻辑；这个用**真 Npcap 端点 + 真机发来的真帧**，
+// 证明的是「在真实收发路径上也能用」—— 合成帧永远替代不了的一环。
+//
+// ★ 关键：**不做 ARP 投毒**。导流靠靶机自己的静态路由：
+//     ip route add 203.0.113.0/24 via <win-ip>
+//     ip neigh replace <win-ip> lladdr <win-mac> dev <if>
+//   所以本测试**不可能让任何设备断网**（只影响 203.0.113.0/24 这个不存在的网段），
+//   两条命令即可完全还原。ArpSpoofer 归 LanGateway 管，这里根本不建 LanGateway。
+//
+// 需要管理员权限（Npcap 抓包）。环境变量：
+//   COAST_GW_VICTIM_IP   靶机 IP（必填）
+//   COAST_GW_VICTIM_MAC  靶机 MAC，如 bc:24:11:ad:4a:06（必填）
+//   COAST_GW_WAIT_MS     等待靶机发起连接的时间，默认 20000
+#include <QNetworkInterface>
+
+namespace {
+
+QByteArray parseMacStr(const QString &s)
+{
+    QByteArray out;
+    const QString norm = QString(s).replace(QLatin1Char('-'), QLatin1Char(':'));
+    for (const QString &p : norm.split(QLatin1Char(':'), Qt::SkipEmptyParts))
+        out.append(char(p.toUInt(nullptr, 16)));
+    return out;
+}
+
+} // namespace
+
+int runSmolGatewayRealNicSelfTest()
+{
+    const QString victimIp = qEnvironmentVariable("COAST_GW_VICTIM_IP");
+    const QByteArray victimMac = parseMacStr(qEnvironmentVariable("COAST_GW_VICTIM_MAC"));
+    if (victimIp.isEmpty() || victimMac.size() != 6) {
+        std::fprintf(stderr, "[realnic] FAIL: 需要 COAST_GW_VICTIM_IP 与 COAST_GW_VICTIM_MAC\n");
+        return 3;
+    }
+    const int waitMs = qEnvironmentVariableIsSet("COAST_GW_WAIT_MS")
+        ? qEnvironmentVariable("COAST_GW_WAIT_MS").toInt()
+        : 20000;
+
+    // 找出与靶机同网段的本机网卡
+    QString ifname, localIp, netmask;
+    QByteArray localMac;
+    const QHostAddress vaddr(victimIp);
+    for (const QNetworkInterface &nif : QNetworkInterface::allInterfaces()) {
+        if (!(nif.flags() & QNetworkInterface::IsUp)
+            || (nif.flags() & QNetworkInterface::IsLoopBack))
+            continue;
+        for (const QNetworkAddressEntry &e : nif.addressEntries()) {
+            if (e.ip().protocol() != QAbstractSocket::IPv4Protocol)
+                continue;
+            if (vaddr.isInSubnet(e.ip(), e.prefixLength())) {
+                ifname = nif.name();
+                localIp = e.ip().toString();
+                netmask = e.netmask().toString();
+                localMac = parseMacStr(nif.hardwareAddress().toLower());
+                break;
+            }
+        }
+        if (!ifname.isEmpty())
+            break;
+    }
+    if (ifname.isEmpty() || localMac.size() != 6) {
+        std::fprintf(stderr, "[realnic] FAIL: 找不到与 %s 同网段的本机网卡\n",
+                     victimIp.toLatin1().constData());
+        return 3;
+    }
+    std::fprintf(stderr, "[realnic] 网卡=%s 本机=%s/%s mac=%s 靶机=%s\n",
+                 ifname.toLatin1().constData(), localIp.toLatin1().constData(),
+                 netmask.toLatin1().constData(), localMac.toHex(':').constData(),
+                 victimIp.toLatin1().constData());
+
+    const quint16 kSocksPort = 47898;
+    const QString kUser = QStringLiteral("realnic-user");
+    MiniSocks socks(kSocksPort);
+    if (!socks.ok) {
+        std::fprintf(stderr, "[realnic] FAIL: 假 SOCKS 监听失败\n");
+        return 3;
+    }
+
+    QByteArray want = qgetenv("COAST_STACK").trimmed().toLower();
+    if (want.isEmpty()) {
+        want = "smoltcp";
+        qputenv("COAST_STACK", want);
+    }
+
+    NetStack net(kSocksPort);
+    QString err;
+    if (!net.init(&err)) {
+        std::fprintf(stderr, "[realnic] FAIL: NetStack::init: %s\n", err.toLatin1().constData());
+        return 1;
+    }
+    if (want != QByteArray(net.activeTcpStack())) {
+        std::fprintf(stderr, "[realnic] FAIL: 期望跑在 %s 上，实际=%s\n", want.constData(),
+                     net.activeTcpStack());
+        return 3;
+    }
+
+    // 真二层端点（Npcap）。**只收发，不投毒**。
+    IL2Endpoint *ep = createL2Endpoint(nullptr);
+    if (!ep || !ep->open(ifname, &err)) {
+        std::fprintf(stderr, "[realnic] FAIL: 打开网卡失败（需管理员 + 已装 Npcap）：%s\n",
+                     err.toLatin1().constData());
+        return 3;
+    }
+    if (!net.addNic(ep, localMac, localIp, netmask, &err)) {
+        std::fprintf(stderr, "[realnic] FAIL: addNic: %s\n", err.toLatin1().constData());
+        return 1;
+    }
+    net.addDevice(victimIp, victimMac, kUser);
+
+    // 只把**来自靶机**的帧喂进栈（等价于 LanGateway 的 victim 过滤，其余逻辑不需要）
+    int fedCount = 0;
+    QObject::connect(ep, &IL2Endpoint::frameReceived, &net, [&](const QByteArray &f) {
+        if (f.size() < 14 + 20)
+            return;
+        if (memcmp(f.constData() + 6, victimMac.constData(), 6) != 0)
+            return; // 源 MAC 不是靶机
+        const uchar *p = reinterpret_cast<const uchar *>(f.constData());
+        if (p[12] != 0x08 || p[13] != 0x00)
+            return; // 只测 IPv4
+        // ★★ 只喂**发往测试网段 203.0.113.0/24** 的帧。
+        //   只判源 MAC 是不够的：靶机发给本机的正常流量（SSH！）源 MAC 也是它，
+        //   喂进栈后 smoltcp 会当成"要代理的连接"去终结、回 RST —— 第一次跑就是这样
+        //   把我自己的 SSH 会话打断的。生产的 LanGateway 正是靠 bypLan/bypBcast 这组
+        //   旁路判据避免这件事（LanGateway_linux.cpp 的过滤链），这里做等价的最小版本。
+        if (!(p[30] == 203 && p[31] == 0 && p[32] == 113))
+            return;
+        ++fedCount;
+        // 深拷贝：收环里的帧是 fromRawData 视图，槽返回即失效（IL2Endpoint.h 的硬约束）
+        net.inputFrame(ep, QByteArray(f.constData(), f.size()));
+    });
+
+    std::fprintf(stderr,
+                 "[realnic] 已就绪（栈=%s）。靶机上执行：\n"
+                 "    ip route add 203.0.113.0/24 via %s\n"
+                 "    ip neigh replace %s lladdr %s dev <if>\n"
+                 "    curl -m 5 http://203.0.113.5/\n"
+                 "  等待 %d ms ...\n",
+                 net.activeTcpStack(), localIp.toLatin1().constData(),
+                 localIp.toLatin1().constData(), localMac.toHex(':').constData(), waitMs);
+
+    QEventLoop loop;
+    QTimer deadline;
+    deadline.setSingleShot(true);
+    QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QTimer tick;
+    QObject::connect(&tick, &QTimer::timeout, &loop, [&] {
+        if (socks.gotConnect)
+            loop.quit();
+    });
+    tick.start(50);
+    deadline.start(waitMs);
+    loop.exec();
+
+    if (!socks.gotConnect) {
+        std::fprintf(stderr,
+                     "[realnic] FAIL: 没等到 SOCKS CONNECT（从靶机喂入 %d 帧）\n"
+                     "  fed=0 → 抓包没收到靶机的帧（网卡选错 / 靶机没发 / 过滤挡住）\n"
+                     "  fed>0 → 帧进来了但栈没终结连接（这才是栈本身的问题）\n",
+                     fedCount);
+        return 1;
+    }
+    if (socks.user != kUser) {
+        std::fprintf(stderr, "[realnic] FAIL: 每设备身份错：期望 %s 实得 %s\n",
+                     kUser.toLatin1().constData(), socks.user.toLatin1().constData());
+        return 2;
+    }
+    std::fprintf(stderr,
+                 "[realnic] PASS(%s) —— 真 Npcap + 真机帧：喂入 %d 帧 → "
+                 "SOCKS CONNECT(user=%s, dport=%u)\n",
+                 net.activeTcpStack(), fedCount, socks.user.toLatin1().constData(), socks.dport);
+    return 0;
+}

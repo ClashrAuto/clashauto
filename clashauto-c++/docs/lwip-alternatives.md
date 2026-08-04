@@ -1365,3 +1365,55 @@ ARP/NDP 投毒仍归 Arp/NdpSpoofer；SOCKS 拨号与每设备身份仍在 C++ �
 5. **开量前必须确认接管生效**（`L2Endpoint_win.cpp:740` 的教训）
 
 **在这一步做完之前，不要把默认值从 lwip 改掉。**
+
+---
+
+### R23 · 2026-08-04 · **真机验证通过** —— 真 Npcap + 真机帧，smoltcp 与 lwIP 双 PASS
+
+R22 的所有验证都是合成帧 + 假二层端点 + 假 SOCKS。这一轮补上最后一环：
+**真 Npcap 端点 + 另一台真机发来的真以太帧**。
+
+**做法（`COAST_SMOLGW_REALNIC_SELFTEST`）**：真 `createL2Endpoint()` 打开网卡收帧 →
+只喂发往测试网段的帧 → NetStack → 桥接 → 真的拨出 SOCKS CONNECT。
+**不做 ARP 投毒**：导流靠靶机自己的两条命令
+（`ip route add 203.0.113.0/24 via <win-ip>` + `ip neigh replace`），
+所以只影响 `203.0.113.0/24` 这个不存在的网段，**不可能让任何设备断网**，两条命令即可还原。
+
+| 栈 | 结果 |
+|---|---|
+| smoltcp | **PASS** —— 喂入 3 帧 → SOCKS CONNECT(user=realnic-user, dport=80) |
+| lwip | **PASS** —— 同上（同一套断言） |
+
+靶机侧收尾核对：路由/邻居已清、`ping` 网关正常、`curl baidu = 200`。
+
+#### 第一次跑就抓到一个真 bug：**过滤器只判源 MAC 会打断设备的正常连接**
+
+首次运行 `fed=4` 但没等到 CONNECT，同时**我自己的 SSH 会话被打断**（`Software caused
+connection abort`）。原因：我的过滤器只判「源 MAC == 靶机」，于是靶机发给**本机**的
+SSH 帧也被喂进了栈，smoltcp 当成"要代理的连接"去终结、回了 RST。
+
+生产的 LanGateway 正是靠 `bypLan` / `bypBcast` 这组旁路判据避免这件事
+（同网段直连、发往本机其它网段地址的流量一律不喂栈，见其过滤链）。
+自测里补了等价的最小版本（只喂发往 `203.0.113.0/24` 的帧）后即通过。
+
+★ 这条验证了 `bypLan` 那套判据**不是可有可无的优化，是正确性必需**——
+少了它，被代理设备与网关本机之间的一切正常通信都会被栈掐断。
+（也说明这个最小自测**不能**当成 LanGateway 过滤链的替代品。）
+
+#### 现在的验证覆盖
+
+| 层次 | 手段 | 状态 |
+|---|---|---|
+| 协议逻辑 | Rust 单测（v4/v6/portmap/FFI） | 19 passed / 0 ignored |
+| C ABI | `COAST_RUSTSTACK_SELFTEST` | PASS |
+| NetStack 集成 | `COAST_SMOLGW_SELFTEST` A/B | smoltcp + lwip 双 PASS |
+| **真实收发** | `COAST_SMOLGW_REALNIC_SELFTEST` A/B | **smoltcp + lwip 双 PASS** |
+
+#### 仍未覆盖（如实标注）
+
+- **真 mihomo 出站**：SOCKS 侧用的是假服务端，只验到 CONNECT 请求。真节点的数据往返没测。
+- **吞吐/CPU 的真机 A/B**：没在真流量下量过 `gateway-diag` 的 `usPerTx`/`pump`/`late`。
+  收益预期仍按 R19–R21 的「总 CPU 降约 1/3」，**不是 4.2×**。
+- **多设备并发**、**长时间稳定性**、**ARM64 运行时**（矩阵里没有 ARM64 runner）。
+
+**默认仍是 lwip。** 改默认值之前至少还需要上面第一、二项。
