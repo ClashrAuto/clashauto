@@ -4766,3 +4766,54 @@ public func device(mac: String) -> Device? { all().first { $0.mac == mac } }
 
 （跑 `COAST_DEVICES_SELFTEST` 会真的动台账：它调 `recordSeen` + `purgeStale`，
 这轮清掉 1 条过期记录，24 → 23 台。这是自检本身的设计，不是本次改动的副作用。）
+
+---
+
+## 2026-08-04（三）　照同一把尺子扫下去：设备页每帧还有两处 per-row 重算
+
+上一轮的教训是「聚合指标会稀释单点问题，得往下钻一层看具体函数」。这轮拿它当尺子
+把设备页每帧路径全扫了一遍，又抓到两处 —— 都是**跟行无关的东西写在了 per-row 位置**。
+
+### 1　`localLANAddress()` 没有缓存，每行一次系统调用
+
+`lastHost(for:)` 里每行问一次本机地址，而这函数走 `getifaddrs` + 逐网卡 `getnameinfo`。
+**旁边的 `localMachineIPs()` 注释白纸黑字写着「每条连接都要问一次，缓存 30 秒」——
+同一个坑认出来过一次，这个函数漏了。** 照同样的做法补上 30 秒缓存：
+
+| localLANAddress | 修复前 | 修复后 |
+|---|---|---|
+| 单次 | 0.017 ms | ~0 ms |
+| 100 行一帧 | 1.70 ms＝**10%** 帧预算 | 0 ms |
+
+### 2　`lastHost` / `contendedIPs` 都是 computed property，写在 `ForEach` 里＝每行重算
+
+- `lastHost(for:)` 每行全量 `filter` 一遍 `state.connections` 再 `max` → 页面整体
+  **O(设备数 × 连接数)**，还每行新分配一个数组。
+- `contendedIPs` 更直接：每行引用一次就**重建一个 Set**。
+
+改法是在 `list` 里先绑成 `let`（`hostIndex` 归一次索引、`contendedIPs` 算一次），
+每行只剩查表：
+
+| lastHost（100 台 × 500 连接） | 现状 | 预建索引 |
+|---|---|---|
+| 每帧 | 1.23 ms＝7% 预算 | 0.15 ms＝1%（快 8.1 倍） |
+
+两处合计：100 台规模下从 **约 2.9 ms/帧（17% 预算）降到约 0.15 ms**。
+
+### 证据的取舍
+
+- 本机 Surge 才是主代理、Coast 连接数只有个位数，**实测量不出网关规模**，
+  所以 `lastHost` 那张表是**建模**（行数据用本地同形结构，但归属判定调真的
+  `DeviceStore.connectionBelongs`）。是模型不是实测负载，这点必须说清。
+- 但**语义正确性是实机验的**：让核心真跑两条连接，设备页上本机那一行
+  （`192.168.20.14`，标 This PC）显示出 `→ api.github.com`。这条正是重写里最难的分支
+  —— 连接源地址是 `127.0.0.1`，跟它在列表里的局域网 IP 对不上，
+  要靠「局域网 IP 与回环/TUN 两边取更晚的一条」才认得出来。全程只用 `curl -x` 直连
+  核心端口，没动系统代理，Surge 未受影响。
+
+### 模式
+
+三轮下来同一个形状抓到三次：**「跟当前这一行无关的计算，被放在了每行都会执行的位置」。**
+`device(mac:)` 是全表扫描、`localLANAddress()` 是系统调用、`contendedIPs` 是重建 Set ——
+在 SwiftUI 里 computed property 每次引用都重算，写进 `ForEach` 就等于乘以行数。
+下次审这类页面，直接照「ForEach 体内引用了哪些 computed property」去看。

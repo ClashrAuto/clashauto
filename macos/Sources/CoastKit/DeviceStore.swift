@@ -450,7 +450,26 @@ public final class DeviceStore: @unchecked Sendable {
 
     /// 本机在局域网上的 IPv4 地址（给用户填到设备里的那个）。
     /// 取第一个非回环、非链路本地的 IPv4。
+    ///
+    /// **缓存 30 秒**，与上面的 `localMachineIPs` 同期、同理由：设备页
+    /// `lastHost(for:)` 是 per-row 调的，这函数却要 `getifaddrs` + 逐网卡
+    /// `getnameinfo`。实测单次 0.017 ms —— 100 行一帧就是 1.7 ms，占满
+    /// 16.7 ms 预算的 10%，而网卡地址根本不会秒级变化。
+    /// 回归可跑 `COAST_LOOKUP_SELFTEST=1`。
     public static func localLANAddress() -> String? {
+        if let cached = lanAddressCache, Date().timeIntervalSince(lanAddressCacheAt) < 30 {
+            return cached.isEmpty ? nil : cached
+        }
+        let fresh = computeLANAddress()
+        lanAddressCache = fresh ?? ""   // 空串 = 「查过，没有」，免得没网时每次都重查
+        lanAddressCacheAt = Date()
+        return fresh
+    }
+
+    private nonisolated(unsafe) static var lanAddressCache: String?
+    private nonisolated(unsafe) static var lanAddressCacheAt = Date.distantPast
+
+    private static func computeLANAddress() -> String? {
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0, let first = head else { return nil }
         defer { freeifaddrs(head) }

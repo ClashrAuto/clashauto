@@ -50,6 +50,54 @@ enum SelfTests {
         // 详情页一次 body 大约十几次查询，按 14 次估一帧的台账开销。
         print(String(format: "按详情页每帧约 14 次算：%.2f ms/帧（16.7 ms 预算的 %.0f%%）",
                      per * 14, per * 14 / 16.7 * 100))
+
+        // 设备页 `lastHost(for:)` 是 per-row 调的，里面每行问一次本机地址，
+        // 而这函数走 getifaddrs + getnameinfo（系统调用 + 枚举全部网卡）。
+        // 旁边的 localMachineIPs 已经因为「每条连接都要问一次」加了 30 秒缓存，这个漏了。
+        for _ in 0..<20 { _ = DeviceStore.localLANAddress() }
+        let addrBegan = Date()
+        for _ in 0..<200 { _ = DeviceStore.localLANAddress() }
+        let addrPer = Date().timeIntervalSince(addrBegan) / 200 * 1000
+        print(String(format: "\nlocalLANAddress 单次 %.3f ms；设备页每行调一次，"
+                     + "%d 台一帧 %.2f ms（16.7 ms 预算的 %.0f%%）",
+                     addrPer, macs.count, addrPer * Double(macs.count),
+                     addrPer * Double(macs.count) / 16.7 * 100))
+
+        // 设备页 `lastHost(for:)` 每行都全量扫一遍 connections，页面整体是 设备数 × 连接数。
+        // 本机 Surge 才是主代理、Coast 连接数很少，实测量不出网关规模，
+        // 所以这里**建模**：行数据用本地同形结构，归属判定调真的 connectionBelongs。
+        struct Conn { let host: String; let sourceIP: String; let start: Date }
+        let connCount = 500
+        let now = Date()
+        let conns = (0..<connCount).map {
+            Conn(host: "h\($0).example.com",
+                 sourceIP: "192.168.20.\($0 % 254 + 1)",
+                 start: now.addingTimeInterval(Double($0)))
+        }
+        let ips = (0..<macs.count).map { "192.168.20.\($0 % 254 + 1)" }
+
+        let nowBegan = Date()
+        for ip in ips {                       // 现状：每行一次全量 filter + max
+            _ = conns.filter { !$0.host.isEmpty
+                    && DeviceStore.connectionBelongs(sourceIP: $0.sourceIP,
+                                                     deviceIP: ip, isLocalMachine: false) }
+                .max { $0.start < $1.start }?.host ?? ""
+        }
+        let nowCost = Date().timeIntervalSince(nowBegan) * 1000
+
+        let fixBegan = Date()               // 提议：整页先归一次索引，每行 O(1)
+        var latest: [String: Conn] = [:]
+        for c in conns where !c.host.isEmpty {
+            if let had = latest[c.sourceIP], had.start >= c.start { continue }
+            latest[c.sourceIP] = c
+        }
+        for ip in ips { _ = latest[ip]?.host ?? "" }
+        let fixCost = Date().timeIntervalSince(fixBegan) * 1000
+
+        print(String(format: "\nlastHost 建模（%d 台 × %d 连接）：现状 %.2f ms/帧（预算 %.0f%%）"
+                     + "→ 预建索引 %.2f ms（%.0f%%），快 %.1f 倍",
+                     macs.count, connCount, nowCost, nowCost / 16.7 * 100,
+                     fixCost, fixCost / 16.7 * 100, nowCost / max(fixCost, 0.0001)))
         exit(0)
     }
 
