@@ -6036,3 +6036,51 @@ CI 跑的 `python3 macos/scripts/i18n_check.py` 本机就能跑（跟 `swift tes
 两个都在 CI 里跑、都能本机跑、都能在我写下那行代码的当时就报警。
 **下次进一个不熟的仓库，先把 CI 配置从头读一遍、把它调用的每个脚本在本机跑一遍**
 —— 比事后从 API 翻日志便宜得多。
+
+---
+
+## 2026-08-15（十六）　照着上一轮的教训做：把 CI 从头读一遍 —— 又挖出一条命令
+
+上一轮写下「下次进不熟的仓库，先把 CI 配置从头读一遍、把它调用的每个脚本本机跑一遍」。
+这轮直接照做，不再一轮一轮撞门。
+
+### `macos-swift` 这个 job 一共 11 步
+
+`Checkout → Select Xcode → Resolve build version → Build → **Test** → **Check i18n coverage**
+→ Import Developer ID cert → Package Coast.app → Verify bundle → 公证 → Upload artifact`
+
+我是**一步一步撞过去**才知道有几道门的：先卡 Test（零字节过滤撞挂两条历史库测试），
+修完卡 i18n（新加 3 条文案没翻译）。要是一开始就读这 11 步，两轮 CI 都省了。
+
+### 读 `Verify bundle` 那步的注释，又挖出一条命令
+
+它写着「★ 不在 CI 跑 `scripts/regression.sh`：**它是本地开发工具**」——
+于是发现 `macos/scripts/` 下一直有：
+
+| 脚本 | 作用 |
+|---|---|
+| **`regression.sh`** | **一条命令跑完全套**：单测 → 设置落盘检查 → i18n → 打包 → 对**打包产物**跑 paths/topo/helper/sysproxy 自检 |
+| `i18n_check.py` | 翻译覆盖（退出码即结论） |
+| `settings_persist_check.py` | 静态查「只写内存不落盘」的设置项 |
+| `make_app.sh` | 打包 |
+
+跑一遍：**7 PASS · 0 FAIL · 1 SKIP**（SKIP 是 sysproxy 需正式签名的 helper，
+开发机本就验不了 —— 脚本自己把 PASS/FAIL/**SKIP** 分开，不把环境限制当失败）。
+
+### 我自造的那四个自检，冗余了多少
+
+- `COAST_SETTINGS_SELFTEST` / `COAST_SUBS_SELFTEST` —— **不冗余**：
+  `settings_persist_check.py` 查的是**静态**判据（每个 `applyConfig` 块必须配 `persist`），
+  我那两个验的是**运行时写入真的落盘了**（且能跨线交叉验），两者互补。
+- `COAST_CONNSTATS_SELFTEST` —— 与 `ConnectionLedgerTests` 等有重叠，
+  但它的价值在于**两条线同一份 fixture 对拍**，Swift 单测覆盖不到 Qt。
+- `COAST_LOOKUP_SELFTEST` —— 性能计时，别处没有。
+
+**结论是「不后悔造，但后悔没先找」**：造之前跑一遍 `regression.sh`，
+我会知道哪些已有、哪些真缺，然后只造真缺的那部分。
+
+### 记一笔
+
+这是同一个教训的第三次现身：`swift test` → `i18n_check.py` → `regression.sh`。
+**每一次都是「工具早就在，我不知道」。** 前两次是被 CI 逼出来的，
+这一次是主动读配置读出来的 —— 主动那次的成本低得多。
