@@ -14,6 +14,7 @@
 #include "net/TproxyRules.h" // COAST_TPROXY_SELFTEST 的规则层自测
 #include "net/PfRules.h"
 #include "net/core/SelfRouteGuard.h" // COAST_SELFROUTE_SELFTEST
+#include "net/LocalTunService.h"      // COAST_TUNSERVICE_SELFTEST / COAST_OUTBOUND_PROBE
 #include "net/core/RuleEngine.h"          // COAST_RULE_SELFTEST
 #include "net/core/ProxyConfigBuilder.h"  // COAST_PROXYCFG_SELFTEST
 #ifdef COAST_HAVE_OPENSSL
@@ -185,6 +186,16 @@ int main(int argc, char *argv[])
     // proxies YAML → ProxyNode 解析自测
     if (qEnvironmentVariableIsSet("COAST_PROXYCFG_SELFTEST"))
         return coastcore::proxyConfigSelfTest() ? 0 : 1;
+
+    // 进程内 TUN 的两个钩子。★ 注册它们不代表默认启用 —— TUN 只有点「增强」/自测才会跑，
+    //   而 selfTest 会**真的接管默认路由**，只能在容器/虚机那种可牺牲网络的地方跑，且要 root。
+    //   （不注册的话设了 env 只是把 GUI 启动、进程不退出 —— 本轮已经栽过三次，不再犯。）
+    if (qEnvironmentVariableIsSet("COAST_TUNSERVICE_SELFTEST"))
+        return LocalTunService::selfTest();
+    // 出站探针：**不碰 TUN**，只验「这个节点经进程内出站通不通」。
+    // 把前提和组合分开测 —— 两者混在一起时一个 000 读不出任何结论。
+    if (qEnvironmentVariableIsSet("COAST_OUTBOUND_PROBE"))
+        return LocalTunService::outboundProbe();
 
     if (qEnvironmentVariableIsSet("COAST_SELFROUTE_SELFTEST")) {
         QString report;

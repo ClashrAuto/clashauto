@@ -173,6 +173,17 @@ set(BACKEND_SOURCES
     src/net/core/DnsResolver.cpp  src/net/core/DnsResolver.h
     # DNS 报文层（解析设备查询 / 合成 fake-ip 应答）
     src/net/core/DnsMessage.cpp   src/net/core/DnsMessage.h
+    # ———— 进程内 TUN（「增强」按钮那条路）：搬进来但**默认不启用** ————
+    # 与阶段 1 同一个纪律：编进来不等于跑起来。它会真的接管默认路由，
+    # 需要一台可牺牲网络的机器验证 —— 本机是 QEMU 虚机且网络在用，只保证编得过。
+    # 会话层：把设备层 + 激活层 + NetStack + 出站串成一个可开关的整体。
+    # 本机混合入站（HTTP + SOCKS5）——CoastCore 的第二个入口，只依赖 Qt Network。
+    # LocalTunService 用它做本机流量入口；同样默认不启用。
+    src/net/inbound/MixedInbound.cpp src/net/inbound/MixedInbound.h
+    src/net/LocalTunService.cpp src/net/LocalTunService.h
+    # 激活层（跨平台）：配地址 / 接管默认路由 / Linux 策略路由，以及**原样还原**。
+    # 与设备层分开是有意的：设备层失败只是 TUN 起不来，这一层失败会改变整机路由。
+    src/net/TunSession.cpp      src/net/TunSession.h
     src/net/LanGateway.h
     # 数据面诊断日志（<userDir>/logs/gateway-diag.log）。跨平台编译：main_qml.cpp 要调 setLogDir，
     # 而计数器只有 POSIX 上的网关才真的往里写。
@@ -279,6 +290,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
     # 所以没装 Npcap 的机器上 Coast 照常启动（只是网关不可用）。原先靠 MSVC 的 /DELAYLOAD 做到
     # 这一点，但那条件只覆盖 MSVC：MinGW 构建把 wpcap.dll 写进导入表，无 Npcap 的机器上进程
     # 直接 0xC0000135 起不来。改成运行时绑定后两种工具链行为一致，也不再需要 delayimp。
+    # TUN 设备层：各平台一个实现（Windows=wintun 运行期加载 / Linux=/dev/net/tun / mac=utun）
+    if(WIN32)
+        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_win.cpp src/net/TunEndpoint.h)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_linux.cpp src/net/TunEndpoint.h)
+    elseif(APPLE)
+        target_sources(clashauto-qml PRIVATE src/net/TunEndpoint_mac.cpp src/net/TunEndpoint.h)
+    endif()
+
     if(WIN32)
         set(NPCAP_SDK "$ENV{NPCAP_SDK}")
         target_include_directories(clashauto-qml PRIVATE "${NPCAP_SDK}/Include")

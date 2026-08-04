@@ -35,6 +35,10 @@ public:
     virtual QByteArray localMac() const = 0;         // 6 字节
     virtual int ifIndex() const = 0;
     virtual int mtu() const = 0;                      // 接口 MTU（不含以太头），失败回 1500
+    /// 接口名。**只有 TUN 端点需要**：它的网卡是 open() 时才建出来的，名字要回读
+    /// （Windows 上 wintun 可能给出与请求不同的名字）。物理二层端点的名字调用方本来就知道，
+    /// 所以默认返回空串，不强制各实现都写一遍。
+    virtual QString ifname() const { return QString(); }
 
     // 设置「感兴趣的源 MAC 集合」——内核态源 MAC 过滤，纯属**收方**优化，不影响 send()。
     //
