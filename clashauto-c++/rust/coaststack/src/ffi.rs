@@ -11,6 +11,8 @@
 
 use core::ffi::{c_char, c_void};
 
+use crate::engine::{Engine, Event};
+
 // ———————————————————————— 与头文件对齐的类型 ————————————————————————
 
 pub const COAST_OK: i32 = 0;
@@ -72,15 +74,67 @@ pub struct CoastStack {
     cb: CoastCallbacks,
     user: *mut c_void,
     stats: CoastStats,
-    nics: alloc::vec::Vec<CoastNicId>,
+    engine: Engine,
     last_poll_ms: u64,
 }
 
-extern crate alloc;
-
 impl CoastStack {
     fn new(cb: CoastCallbacks, user: *mut c_void) -> Self {
-        Self { cb, user, stats: CoastStats::default(), nics: alloc::vec::Vec::new(), last_poll_ms: 0 }
+        Self { cb, user, stats: CoastStats::default(), engine: Engine::new(), last_poll_ms: 0 }
+    }
+}
+
+// ———————————————————————— 事件派发（重入安全）————————————————————————
+//
+// ★ 关键约束：派发回调时**绝不能**持有 &mut CoastStack。
+//   回调里允许再调 coast_*（典型：conn_new 里当场 conn_close），那会重新 &mut 同一个对象；
+//   若外层还握着借用就是别名 UB。所以每个事件都「短借用取出所需 → 放掉 → 调回调」。
+//   lwIP 那边为同一问题养了 ConnWatch/g_destroyedConn 一整套（NetStack.cpp:532-587），
+//   这里靠结构消除。
+unsafe fn dispatch(s: *mut CoastStack, events: alloc::vec::Vec<Event>) {
+    for ev in events {
+        let (cb, user) = {
+            let st = &*s;
+            (st.cb, st.user)
+        };
+        match ev {
+            Event::OutFrame { nic, data } => {
+                if let Some(f) = cb.out_frame {
+                    f(user, nic, data.as_ptr(), data.len());
+                }
+                let st = &mut *s;
+                st.stats.tx_frames += 1;
+            }
+            Event::ConnNew { id, nic, src, is_v6, sport, dst, dport } => {
+                let sa = CoastAddr { is_v6, bytes: src };
+                let da = CoastAddr { is_v6, bytes: dst };
+                let accepted = match cb.conn_new {
+                    Some(f) => f(user, id, nic, &sa, sport, &da, dport),
+                    None => false,
+                };
+                if !accepted {
+                    // C++ 侧拒收（拨 SOCKS 失败/设备被禁）→ 立刻 RST，别让半开连接挂着
+                    let st = &mut *s;
+                    let _ = st.engine.abort(id);
+                    st.stats.conns_refused += 1;
+                }
+            }
+            Event::ConnData { id, data } => {
+                if let Some(f) = cb.conn_data {
+                    f(user, id, data.as_ptr(), data.len());
+                }
+            }
+            Event::ConnSent { id, n } => {
+                if let Some(f) = cb.conn_sent {
+                    f(user, id, n);
+                }
+            }
+            Event::ConnClosed { id, is_abort } => {
+                if let Some(f) = cb.conn_closed {
+                    f(user, id, is_abort);
+                }
+            }
+        }
     }
 }
 
@@ -139,23 +193,22 @@ pub unsafe extern "C" fn coast_stack_add_nic(
     if prefix_len > maxbits {
         return COAST_ERR_BADARG;
     }
-    if st.nics.contains(&nic) {
+    if st.engine.has_nic(nic) {
         return COAST_ERR_BADARG; // 重复注册：调用方状态机有问题，显式报错而不是静默覆盖
     }
-    st.nics.push(nic);
-    COAST_OK
+    let mut mac = [0u8; 6];
+    core::ptr::copy_nonoverlapping(mac6, mac.as_mut_ptr(), 6);
+    if st.engine.add_nic(nic, mac, addr.bytes, addr.is_v6, prefix_len, st.last_poll_ms) {
+        COAST_OK
+    } else {
+        COAST_ERR_NOMEM
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn coast_stack_remove_nic(s: *mut CoastStack, nic: CoastNicId) -> i32 {
     let Some(st) = stack_mut(s) else { return COAST_ERR_BADARG };
-    match st.nics.iter().position(|&n| n == nic) {
-        Some(i) => {
-            st.nics.remove(i);
-            COAST_OK
-        }
-        None => COAST_ERR_NONIC,
-    }
+    if st.engine.remove_nic(nic) { COAST_OK } else { COAST_ERR_NONIC }
 }
 
 // ———————————————————————— 数据面 ————————————————————————
@@ -174,28 +227,36 @@ pub unsafe extern "C" fn coast_stack_input(
         }
         return COAST_ERR_BADARG;
     }
-    if !st.nics.contains(&nic) {
+    let bytes = core::slice::from_raw_parts(frame, len);
+    if !st.engine.input(nic, bytes) {
         st.stats.rx_dropped += 1;
         return COAST_ERR_NONIC;
     }
     st.stats.rx_frames += 1;
-    // Phase 2：喂进 smoltcp 的 Interface，并在 phy 层做 catch-all 端口改写。
     COAST_OK
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn coast_stack_poll(s: *mut CoastStack, now_ms: u64) -> u64 {
-    let Some(st) = stack_mut(s) else { return u64::MAX };
-    // 泵的最坏间隔 —— 对应 lwIP 的 fastGapMax。平均值会把毛刺抹平，最坏间隔才决定性。
-    if st.last_poll_ms != 0 && now_ms > st.last_poll_ms {
-        let gap = (now_ms - st.last_poll_ms) as u32;
-        if gap > st.stats.poll_max_gap_ms {
-            st.stats.poll_max_gap_ms = gap;
-        }
+    if s.is_null() {
+        return u64::MAX;
     }
-    st.last_poll_ms = now_ms;
-    // Phase 2：iface.poll(...) 并返回 poll_delay。
-    u64::MAX
+    let mut events = alloc::vec::Vec::new();
+    {
+        let st = &mut *s;
+        // 泵的最坏间隔 —— 对应 lwIP 的 fastGapMax。平均值会把毛刺抹平，最坏间隔才决定性。
+        if st.last_poll_ms != 0 && now_ms > st.last_poll_ms {
+            let gap = (now_ms - st.last_poll_ms) as u32;
+            if gap > st.stats.poll_max_gap_ms {
+                st.stats.poll_max_gap_ms = gap;
+            }
+        }
+        st.last_poll_ms = now_ms;
+        st.engine.poll_collect(now_ms, &mut events);
+    } // ← 借用在此结束，回调里才能安全地重入 coast_*
+    dispatch(s, events);
+    let st = &mut *s;
+    st.engine.next_poll_ms(now_ms)
 }
 
 // ———————————————————————— 连接操作 ————————————————————————
@@ -213,8 +274,12 @@ pub unsafe extern "C" fn coast_conn_send(
     if id == 0 {
         return COAST_ERR_NOCONN;
     }
-    let _ = len;
-    COAST_ERR_NOCONN // Phase 1 无连接表
+    let st = &mut *s;
+    let bytes = core::slice::from_raw_parts(data, len);
+    match st.engine.send(id, bytes) {
+        Ok(n) => n as i32,
+        Err(e) => e,
+    }
 }
 
 #[no_mangle]
@@ -225,7 +290,11 @@ pub unsafe extern "C" fn coast_conn_sndbuf(s: *mut CoastStack, id: CoastConnId) 
     if id == 0 {
         return COAST_ERR_NOCONN;
     }
-    COAST_ERR_NOCONN
+    let st = &mut *s;
+    match st.engine.sndbuf(id) {
+        Ok(n) => n as i32,
+        Err(e) => e,
+    }
 }
 
 #[no_mangle]
@@ -236,8 +305,11 @@ pub unsafe extern "C" fn coast_conn_recved(s: *mut CoastStack, id: CoastConnId, 
     if id == 0 {
         return COAST_ERR_NOCONN;
     }
-    let _ = n;
-    COAST_ERR_NOCONN
+    let st = &mut *s;
+    match st.engine.recved(id, n) {
+        Ok(()) => COAST_OK,
+        Err(e) => e,
+    }
 }
 
 #[no_mangle]
@@ -248,10 +320,13 @@ pub unsafe extern "C" fn coast_conn_close(s: *mut CoastStack, id: CoastConnId) -
     if id == 0 {
         return COAST_ERR_NOCONN;
     }
-    // Phase 2：窗口未还满时返回 COAST_ERR_STATE —— 把 lwIP 那个"没还满就发 RST"的
-    // 静默劣化变成显式失败（见 coaststack.h 里 coast_conn_close 的注释）。
-    let _ = COAST_ERR_STATE;
-    COAST_ERR_NOCONN
+    // 窗口未还满时返回 COAST_ERR_STATE —— 把 lwIP 那个"没还满就发 RST"的静默劣化
+    // 变成显式失败（见 coaststack.h 里 coast_conn_close 的注释）。
+    let st = &mut *s;
+    match st.engine.close(id) {
+        Ok(()) => COAST_OK,
+        Err(e) => e,
+    }
 }
 
 #[no_mangle]
@@ -262,7 +337,11 @@ pub unsafe extern "C" fn coast_conn_abort(s: *mut CoastStack, id: CoastConnId) -
     if id == 0 {
         return COAST_ERR_NOCONN;
     }
-    COAST_ERR_NOCONN
+    let st = &mut *s;
+    match st.engine.abort(id) {
+        Ok(()) => COAST_OK,
+        Err(e) => e,
+    }
 }
 
 #[no_mangle]
@@ -273,7 +352,8 @@ pub unsafe extern "C" fn coast_stack_close_device_conns(
     if stack_mut(s).is_none() || device.is_null() {
         return COAST_ERR_BADARG;
     }
-    0 // Phase 1：还没有连接表，关掉 0 条
+    let st = &mut *s;
+    st.engine.close_device_conns(&(*device).bytes)
 }
 
 // ———————————————————————— 诊断 ————————————————————————
@@ -287,13 +367,18 @@ pub unsafe extern "C" fn coast_stack_stats(s: *mut CoastStack, out: *mut CoastSt
         *out = CoastStats::default();
         return;
     };
-    st.stats.conns_active = 0;
+    st.stats.conns_active = st.engine.conn_count() as u32;
+    st.stats.conns_accepted = st.engine.conns_accepted;
+    st.stats.conns_closed = st.engine.conns_closed;
+    st.stats.conns_aborted = st.engine.conns_aborted;
+    st.stats.conns_refused += st.engine.conns_refused;
+    st.engine.conns_refused = 0;
     *out = st.stats;
     st.stats.poll_max_gap_ms = 0; // 瞬时量，读完清零
 }
 
 // 版本串：C 侧可打进 banner/诊断，确认链进来的库与头文件同版。
-static VERSION: &[u8] = b"coaststack 0.1.0 (phase1-skeleton)\0";
+static VERSION: &[u8] = b"coaststack 0.1.0 (smoltcp engine)\0";
 
 #[no_mangle]
 pub extern "C" fn coast_stack_version() -> *const c_char {

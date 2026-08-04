@@ -8,5 +8,12 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+extern crate alloc;
+
 mod ffi;
+mod portmap;
+mod engine;
+
+#[cfg(test)]
+mod e2e;
 pub use ffi::*;
