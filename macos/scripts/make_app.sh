@@ -77,6 +77,18 @@ mkdir -p "$APP/Contents/MacOS" \
 cp "$BIN_DIR/Coast" "$APP/Contents/MacOS/Coast"
 cp "$BIN_DIR/com.yuehongsun.coast.helper" "$APP/Contents/MacOS/com.yuehongsun.coast.helper"
 
+# 去掉局部符号表。`swift build -c release` 产出的 Coast 里 __LINKEDIT（符号表）有 4.4 MB，
+# 而 __TEXT 才 2.3 MB —— 胖包翻倍就是白搭 8 MB。符号化不受影响：调试符号在旁边的
+# `.build/**/Coast.dSYM` 里单独留着，二进制里本来就没有 __DWARF。
+#
+# 两个讲究：
+#   • 必须在 codesign **之前** —— strip 会改文件，签完再动当场破坏签名（strip 自己会警告）；
+#   • 用 `-x`（只去局部符号）而不是裸 `strip`（去全部）：后者只多省 0.15 MB，
+#     却把崩溃日志里的全局符号名一并抹掉，不划算。
+for bin in "$APP/Contents/MacOS/Coast" "$APP/Contents/MacOS/com.yuehongsun.coast.helper"; do
+    strip -x "$bin"
+done
+
 # Info.plist：把版本号替换进去
 sed -e "s|<string>1.0</string>|<string>$VERSION</string>|g" \
     "$ROOT/Resources/Info.plist" > "$APP/Contents/Info.plist"
@@ -86,11 +98,36 @@ sed -e "s|<string>1.0</string>|<string>$VERSION</string>|g" \
 cp "$ROOT/Resources/com.yuehongsun.coast.helper.plist" \
    "$APP/Contents/Library/LaunchDaemons/com.yuehongsun.coast.helper.plist"
 
-# 种子资源：仓库里只有一份，在 clashauto-c++/assets。这里整份拷进 Contents/Resources，
+# 种子资源：仓库里只有一份，在 clashauto-c++/assets。这里拷进 Contents/Resources，
 # Resources.swift 的第一条查找路径正是它。
+#
+# ★ 那个目录是**三平台共用**的资源池，不能整份倒进 mac 包。下面每条 exclude 都是
+#   Swift 线一个字节都读不到的东西（原始 / 进 DMG 压缩后）：
+#     • fonts/          15.3 MB / 10.3 MB —— MiSans。Swift 线**刻意不捆**，用系统字体 +
+#                       SF Symbols（见 README「系统字体」一节、PLAN 阶段 5）；真正注册的
+#                       只有 iconfont.ttf + remixicon.ttf，见 Sources/Coast/IconFont.swift。
+#                       Qt 线仍然要它，所以是这里排除、不是从 assets 里删。
+#     • bundle/wintun/   1.4 MB / 0.72 MB —— 四个 arch 的 wintun.dll，Windows TUN 专用。
+#     • icon.ico         0.34 MB          —— Windows 图标资源。
+#     • icon.icns        0.18 MB          —— 下面会从 $ASSETS 直接拷成 AppIcon.icns，
+#                                            再留一份同名的就是白占一倍。
+#     • app.rc.in / chevron-*.svg         —— 分别是 Windows 资源脚本模板和 Qt 下拉框箭头。
+#   合计砍掉约 12 MB 压缩体积（DMG ~50 MB → ~37 MB）。
+#   remixicon-LICENSE.txt **不能排除**：remixicon.ttf 是 Apache-2.0，随包分发就得带许可证。
+#
+#   新增资源时的判断标准很简单：Swift 侧有没有一处 Resources.asset()/seed() 会读它。
+#   没有就该在这个列表里 —— 漏了只是包变胖，而误排除会被下面的清单校验当场拦住。
 if [[ -d "$ASSETS" ]]; then
     echo "==> 拷贝资源 $ASSETS"
-    rsync -a --exclude '.DS_Store' "$ASSETS/" "$APP/Contents/Resources/"
+    rsync -a \
+        --exclude '.DS_Store' \
+        --exclude 'fonts/' \
+        --exclude 'bundle/wintun/' \
+        --exclude 'icon.ico' \
+        --exclude 'icon.icns' \
+        --exclude 'app.rc.in' \
+        --exclude 'chevron-*.svg' \
+        "$ASSETS/" "$APP/Contents/Resources/"
 else
     echo "!! 找不到 $ASSETS —— 打出来的包缺种子配置，首次运行会没有 config.yaml" >&2
 fi
@@ -98,6 +135,21 @@ fi
 if [[ -f "$ASSETS/icon.icns" ]]; then
     cp "$ASSETS/icon.icns" "$APP/Contents/Resources/AppIcon.icns"
     /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$APP/Contents/Info.plist" 2>/dev/null || true
+fi
+
+# 上面是黑名单，删错了不会编译报错、只会在用户机器上静默变成 nil（缺字体图标、
+# 缺翻译、缺 OUI 表）。所以这里把 Swift 侧**真正会读的**那几项逐个点名 ——
+# 清单来自全仓 Resources.asset()/seed() 的调用点，多一条 exclude 就当场断在打包这步。
+# （种子 yaml 与 Country.mmdb 走 bundle/config/，CI 的 Verify bundle 另有独立检查。）
+if [[ -d "$ASSETS" ]]; then
+    for must in iconfont.ttf remixicon.ttf remixicon-LICENSE.txt oui.txt \
+                i18n/en-US.json i18n/zh-TW.json \
+                bundle/config/config.yaml bundle/config/Country.mmdb; do
+        [[ -e "$APP/Contents/Resources/$must" ]] || {
+            echo "!! 资源清单缺 $must —— 多半是上面的 rsync exclude 写宽了" >&2
+            exit 1
+        }
+    done
 fi
 
 # 内核：默认集成最新**正式版**（fork ClashrAuto/clash 的 coast-darwin-* 产物）。

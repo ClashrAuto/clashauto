@@ -13,7 +13,11 @@ public enum Resources {
         locate("bundle/config/\(name)")
     }
 
-    /// `assets/<relativePath>`：i18n/*.json、fonts/*.ttf、oui.txt、icon.icns 等
+    /// `assets/<relativePath>`：i18n/*.json、iconfont.ttf / remixicon.ttf、oui.txt、core。
+    ///
+    /// 注意 `assets/` 是三平台共用的池子，**mac 包里只有一个子集** ——
+    /// `make_app.sh` 的 rsync 排掉了 MiSans、wintun.dll、Windows 图标等 Swift 线读不到的东西。
+    /// 想读新资源，先确认它没被排除（那份 exclude 列表旁边有配套的清单校验）。
     public static func asset(_ relativePath: String) -> URL? {
         locate(relativePath)
     }
