@@ -13,7 +13,7 @@ struct CoastApp: App {
         //   自己的核心绑不上端口也不报错。
         if !SingleInstance.acquire() {
             FileHandle.standardError.write(
-                "Coast 已经在运行（单实例守卫），本次启动退出\n".data(using: .utf8)!)
+                "Coast 已经在运行（单实例守卫），本次启动退出\n".data(using: .utf8)!)  // i18n-ignore: 写给 stderr 的启动期诊断,此刻 UI 与语言表都还没建起来
             exit(0)
         }
         IconFont.registerAll()

@@ -463,5 +463,8 @@
   "结束下载": "İndirmeyi durdur",
   "退出 Coast？": "Coast kapatılsın mı?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Çıkışta çekirdek durdurulur ve sistem proxy'si geri alınır; proxy üzerinden giden bağlantılar kesilir.",
-  "退出": "Çık"
+  "退出": "Çık",
+  "订阅启停失败，配置未能写入": "Abonelik açılıp kapatılamadı — ayarlar kaydedilmedi",
+  "节点启停失败，配置未能写入": "Düğüm açılıp kapatılamadı — ayarlar kaydedilmedi",
+  "批量启停失败，配置未能写入": "Toplu açma/kapatma başarısız — ayarlar kaydedilmedi"
 }

@@ -463,5 +463,8 @@
   "结束下载": "Parar download",
   "退出 Coast？": "Sair do Coast?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Ao sair, o núcleo é encerrado e o proxy do sistema é restaurado; as conexões via proxy serão perdidas.",
-  "退出": "Sair"
+  "退出": "Sair",
+  "订阅启停失败，配置未能写入": "Não foi possível ativar/desativar a assinatura — configurações não salvas",
+  "节点启停失败，配置未能写入": "Não foi possível ativar/desativar o nó — configurações não salvas",
+  "批量启停失败，配置未能写入": "Falha ao ativar/desativar em lote — configurações não salvas"
 }

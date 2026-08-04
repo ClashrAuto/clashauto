@@ -464,5 +464,8 @@
   "结束下载": "Stop download",
   "退出 Coast？": "Quit Coast?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Quitting stops the core and restores the system proxy; proxied connections will drop.",
-  "退出": "Quit"
+  "退出": "Quit",
+  "订阅启停失败，配置未能写入": "Couldn't enable/disable subscription — settings not saved",
+  "节点启停失败，配置未能写入": "Couldn't enable/disable node — settings not saved",
+  "批量启停失败，配置未能写入": "Couldn't enable/disable all nodes — settings not saved"
 }

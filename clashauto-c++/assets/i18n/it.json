@@ -463,5 +463,8 @@
   "结束下载": "Interrompi download",
   "退出 Coast？": "Uscire da Coast?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Uscendo si arresta il core e si ripristina il proxy di sistema; le connessioni via proxy verranno interrotte.",
-  "退出": "Esci"
+  "退出": "Esci",
+  "订阅启停失败，配置未能写入": "Impossibile attivare/disattivare l'abbonamento — impostazioni non salvate",
+  "节点启停失败，配置未能写入": "Impossibile attivare/disattivare il nodo — impostazioni non salvate",
+  "批量启停失败，配置未能写入": "Attivazione/disattivazione in blocco non riuscita — impostazioni non salvate"
 }

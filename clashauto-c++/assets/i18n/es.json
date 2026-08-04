@@ -463,5 +463,8 @@
   "结束下载": "Detener descarga",
   "退出 Coast？": "¿Salir de Coast?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Al salir se detiene el núcleo y se restaura el proxy del sistema; las conexiones por proxy se cortarán.",
-  "退出": "Salir"
+  "退出": "Salir",
+  "订阅启停失败，配置未能写入": "No se pudo activar/desactivar la suscripción: ajustes no guardados",
+  "节点启停失败，配置未能写入": "No se pudo activar/desactivar el nodo: ajustes no guardados",
+  "批量启停失败，配置未能写入": "Error al activar/desactivar en lote: ajustes no guardados"
 }

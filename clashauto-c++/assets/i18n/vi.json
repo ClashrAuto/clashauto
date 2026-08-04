@@ -463,5 +463,8 @@
   "结束下载": "Dừng tải xuống",
   "退出 Coast？": "Thoát Coast?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Thoát sẽ dừng lõi và khôi phục proxy hệ thống; các kết nối qua proxy sẽ bị ngắt.",
-  "退出": "Thoát"
+  "退出": "Thoát",
+  "订阅启停失败，配置未能写入": "Không thể bật/tắt thuê bao — chưa lưu được cấu hình",
+  "节点启停失败，配置未能写入": "Không thể bật/tắt nút — chưa lưu được cấu hình",
+  "批量启停失败，配置未能写入": "Bật/tắt hàng loạt thất bại — chưa lưu được cấu hình"
 }
