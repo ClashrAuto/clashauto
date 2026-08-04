@@ -89,6 +89,40 @@ ApplicationWindow {
         onActivated: Qt.quit()
     }
 
+    // ⌘W 收窗口到托盘。**Qt 没有给这个 QML 窗口装 mac 的「Window → Close」菜单项**，
+    // 于是 ⌘W 在这条线上按下去什么也不发生 —— 而 macOS 上每个窗口都该响应 ⌘W，
+    // Swift 线（系统菜单里就有 Close / Close All）一直是对的。
+    //
+    // 走 `window.close()` 而不是直接 `window.hide()`：前者会经过上面的 `onClosing`，
+    // 与点 ✕ 完全同一条路（托盘不可用时真退出，可用时收进托盘）。绕过它就会出现
+    // 「✕ 收托盘、⌘W 却把没有托盘的 Linux 用户永久藏掉」这种两条路不一致的坑。
+    //
+    // 这个缺口还坑过测试脚手架本身：用 ⌘W 当「收到托盘」的动作量了两轮托盘态 CPU，
+    // 窗口其实一直开着，量出来的全是窗口开着的数（见 PLAN 2026-08-04（十一））。
+    Shortcut {
+        enabled: isMac
+        sequences: [StandardKey.Close]
+        onActivated: window.close()
+    }
+
+    // ⌘1..⌘7（Win/Linux 上是 Ctrl+1..7）切页 —— 与侧栏顺序、StackLayout 索引 1:1 对齐。
+    // 原来**一个切页快捷键都没有**，只能鼠标点侧栏；macOS 上这属于基本预期
+    // （Finder/Xcode/浏览器都有），Win/Linux 同理。Swift 线已补 ⌘1..⌘7，这里对齐。
+    //
+    // ★ **必须一条条写死，不能用 `Repeater` 生成**：`Repeater` 的 delegate 必须是 `Item`，
+    //   而 `Shortcut` 不是 —— 那样写编译能过、进程也不崩，但运行时只在日志里留一行
+    //   `QML Component: Delegate must be of Item type`，**快捷键静默不生效**。
+    //   我就是这么踩的：先看到"编译通过 + 按键后进程还在"就差点当成功了。
+    //
+    // Qt 在 mac 上把 "Ctrl+N" 自动映射成 ⌘N，所以两边写法相同，不需要 isMac 分支。
+    Shortcut { sequences: ["Ctrl+1"]; onActivated: window.currentPage = 0 }
+    Shortcut { sequences: ["Ctrl+2"]; onActivated: window.currentPage = 1 }
+    Shortcut { sequences: ["Ctrl+3"]; onActivated: window.currentPage = 2 }
+    Shortcut { sequences: ["Ctrl+4"]; onActivated: window.currentPage = 3 }
+    Shortcut { sequences: ["Ctrl+5"]; onActivated: window.currentPage = 4 }
+    Shortcut { sequences: ["Ctrl+6"]; onActivated: window.currentPage = 5 }
+    Shortcut { sequences: ["Ctrl+7"]; onActivated: window.currentPage = 6 }
+
     // 所有平台都用系统原生窗（带标题栏）。mac 由 applyMacGlass 把标题栏变透明+整窗毛玻璃；
     // Windows 由 applyWindowsTitleBar 用 DWM 把标题栏背景染成窗口壳色；Linux 保持系统原生标题栏
     // （颜色由 WM 决定，应用无法强制）。不再对 Win/Linux 用无边框。

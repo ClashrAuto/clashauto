@@ -147,7 +147,6 @@
   "未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1": "Không phát hiện lõi mihomo — tải trong Cài đặt → Hệ thống: %1",
   "找不到 Clash 配置: %1": "Không tìm thấy cấu hình Clash: %1",
   "Country.mmdb 已就位: %1": "Country.mmdb đã sẵn sàng: %1",
-  "wintun.dll 已部署: %1": "wintun.dll đã được triển khai: %1",
   "核心已由特权 helper 以 root 启动（支持 TUN）": "Lõi đã được khởi động dưới quyền root qua helper đặc quyền (hỗ trợ TUN)",
   "经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效": "Khởi động lõi dưới quyền root qua helper đặc quyền thất bại: %1; quay lại khởi động không phải root, TUN sẽ không hoạt động",
   "启动 Clash 核心失败: %1": "Khởi động lõi Clash thất bại: %1",
@@ -463,5 +462,8 @@
   "结束下载": "Dừng tải xuống",
   "退出 Coast？": "Thoát Coast?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Thoát sẽ dừng lõi và khôi phục proxy hệ thống; các kết nối qua proxy sẽ bị ngắt.",
-  "退出": "Thoát"
+  "退出": "Thoát",
+  "订阅启停失败，配置未能写入": "Không thể bật/tắt thuê bao — chưa lưu được cấu hình",
+  "节点启停失败，配置未能写入": "Không thể bật/tắt nút — chưa lưu được cấu hình",
+  "批量启停失败，配置未能写入": "Bật/tắt hàng loạt thất bại — chưa lưu được cấu hình"
 }

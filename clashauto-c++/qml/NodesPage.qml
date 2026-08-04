@@ -12,6 +12,11 @@ Item {
     // 节点搜索框是否展开（对齐旧项目 searchBox.show：默认收起，点放大镜展开）
     property bool searchShown: false
 
+    // 页面显隐驱动 /proxies 的轮询频率（节点页 1s，其他页 5s）——
+    // 与 StatusPage 里 setStatusActive 同一模式。理由见 ClashService::setNodesVisible。
+    onVisibleChanged: bridge.setNodesActive(page.visible)
+    Component.onCompleted: bridge.setNodesActive(page.visible)
+
     ColumnLayout {
         anchors.fill: parent
         anchors.margins: 10 // 与状态页同内距（StackLayout 为 0，各页自管）

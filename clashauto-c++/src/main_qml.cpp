@@ -491,6 +491,68 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    // 订阅节点启停的写入自检（COAST_SUBS_SELFTEST=1）：让 `subscribe.yaml` 的**写路径**
+    // 能从外部驱动。理由与设置自检同 —— 这份文件两条产品线共用，一条线写完另一条读不读得懂，
+    // 只有真写一次才答得上来。`device` 表就是在这个问题上出的事（两条线用了不同的列、
+    // 不同的时间戳格式），所以剩下的每一处共享状态都值得照同一把尺子过一遍。
+    // 只翻第 0 个订阅的第 0 个节点的启停位，不联网、不拉取。
+    if (qEnvironmentVariableIsSet("COAST_SUBS_SELFTEST")) {
+        AppConfig cfg = AppConfigLoader::load();
+        SubscriptionStore store(cfg, &app);
+        const QVector<SubscriptionSummary> subs = store.load();
+        if (subs.isEmpty()) {
+            std::printf("[subs] SKIP 没有订阅\n");
+            std::fflush(stdout);
+            return 0;
+        }
+        const QVector<SubscriptionNodeSummary> nodes = store.nodes(0);
+        if (nodes.isEmpty()) {
+            std::printf("[subs] SKIP 第 0 个订阅没有节点\n");
+            std::fflush(stdout);
+            return 0;
+        }
+        const bool before = nodes.first().use;
+        store.setNodeEnabled(0, 0, !before);
+        const QVector<SubscriptionNodeSummary> after = store.nodes(0);
+        const bool now = !after.isEmpty() && after.first().use;
+        std::printf("[subs] 订阅0/节点0 「%s」: %s -> 写入 %s -> 读回 %s\n",
+                    nodes.first().name.toUtf8().constData(),
+                    before ? "true" : "false", !before ? "true" : "false",
+                    now ? "true" : "false");
+        std::printf("[subs] 启用节点数: %d / %d\n",
+                    store.load().isEmpty() ? -1 : store.load().first().enabledNodeCount, nodes.size());
+        std::printf("[subs] %s\n", now == !before ? "OK" : "FAIL 写进去又读不回来");
+        std::fflush(stdout);
+        return now == !before ? 0 : 1;
+    }
+
+    // 设置写入自检（COAST_SETTINGS_SELFTEST=1）：把「保存一个设置」这条路径变成
+    // **可以从外部驱动**的，然后读回来看写没写进去、别的键有没有被带走。
+    //
+    // 存在的理由：`config.yaml` 是两条产品线共用的，一条线保存设置时**会不会把另一条线
+    // 认识、自己不认识的键抹掉**，是个只有真写一次才答得上来的问题。而在 GUI 里它只能
+    // 靠点开关触发 —— 实测 `System Events click at` 与 `cliclick` 合成的点击都驱动不了
+    // QML 控件，于是这条路径在自动化里根本走不到。
+    //
+    // 走 `setClearConnections` 这个**已有的公开入口**（Q_INVOKABLE），不为测试放宽封装；
+    // 它只影响「切节点时断不断旧连接」，不动网络、不动系统代理。
+    if (qEnvironmentVariableIsSet("COAST_SETTINGS_SELFTEST")) {
+        AppConfig cfg = AppConfigLoader::load();
+        auto *core = new CoreController(cfg, &app);
+        auto *clash = new ClashService(&app);
+        SettingsController settings(core, clash, &app);
+        const bool before = cfg.clearConnections;
+        settings.setClearConnections(!before);
+        const AppConfig reread = AppConfigLoader::load();
+        std::printf("[settings] configDir=%s\n", cfg.configDir.toUtf8().constData());
+        std::printf("[settings] clearConnections: %s -> 写入 %s -> 读回 %s\n",
+                    before ? "true" : "false", !before ? "true" : "false",
+                    reread.clearConnections ? "true" : "false");
+        std::printf("[settings] %s\n", reread.clearConnections == !before ? "OK" : "FAIL 写进去又读不回来");
+        std::fflush(stdout);
+        return reread.clearConnections == !before ? 0 : 1;
+    }
+
     // 状态页「流量构成 / 连接速览」自检（COAST_CONNSTATS_SELFTEST=1）：喂两拍伪造的 /connections
     // 快照给 QmlBridge::observeConnections，把四个输出打到 stdout 再退出，不建 GUI、不发网络请求。
     // 这块是纯算术（逐连接取增量 + 直连/代理分桶 + 两种排序），没有 UI 能验，只能这么跑一遍：

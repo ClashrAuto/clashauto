@@ -286,10 +286,21 @@ void QmlBridge::persistConfigBool(const QString &key, bool value)
         yaml += line + '\n';
     }
     QFile out(path);
-    if (out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
-        out.write(yaml.toUtf8());
-        out.close();
+    // ★ 写失败必须喊 —— 原来这里 `if (open) { … }`，失败就**什么都不做**：
+    //   用户点了开关、界面也翻过去了，设置却一个字都没落盘，重启回到旧值，
+    //   而全程没有任何提示。实测把 config.yaml chmod 444 就能复现
+    //   （见 PLAN 2026-08-15（六））。判据只能靠 `COAST_SETTINGS_SELFTEST` 写完读回来对，
+    //   那说明这条路在产品里根本没有失败通道。
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        qWarning("设置保存失败（打不开 %s）: %s",
+                 path.toUtf8().constData(), out.errorString().toUtf8().constData());
+        return;
     }
+    if (out.write(yaml.toUtf8()) < 0) {
+        qWarning("设置保存失败（写入 %s）: %s",
+                 path.toUtf8().constData(), out.errorString().toUtf8().constData());
+    }
+    out.close();
 }
 
 bool QmlBridge::systemDark() const
@@ -607,6 +618,20 @@ QString QmlBridge::deviceNameFor(const QString &sourceIp, const QString &inbound
 
 void QmlBridge::observeConnections(const QJsonArray &conns)
 {
+    // ★ **纯界面加工，窗口收起来时整段跳过。**
+    //   历史库不受影响 —— 它挂的是同一个 `connectionsSnapshot` 信号的**另一条**连接
+    //   （见 main_qml.cpp 里 `clash -> history`），那条任何时候都要落：
+    //   「昨天访问过什么」只有它记，托盘态那段空了就再也补不回来。
+    //   而这里算的最近连接列表、设备归属、流量构成**只喂界面**：没人看的时候
+    //   既白算一遍（每 2 秒遍历全部连接 + 若干 QSet/QHash 构建），
+    //   算完赋值还会把隐藏着的整棵视图树重排一遍。
+    //   代价说清楚：`m_composition` / 设备流量是**会话累计**，隐藏期间不再累加，
+    //   所以它们统计的是「界面开着的这段时间」；真正的用量账在历史库里，不受影响。
+    //   Swift 线的 `AppState.onConnectionsSnapshot` 早就是这个形状（历史先落、
+    //   `guard uiVisible` 之后才做界面加工），这里对齐。
+    if (!m_uiVisible)
+        return;
+
     struct Recent {
         QString start, host, chain, device;
         qint64 bytes = 0;
@@ -794,6 +819,15 @@ bool QmlBridge::trayAvailable() const
     return QSystemTrayIcon::isSystemTrayAvailable();
 }
 
+void QmlBridge::setNodesActive(bool active)
+{
+    m_nodesActive = active;
+    // 与 setStatusActive 同一条判据：页面「可见」不等于窗口看得见 ——
+    // 托盘态下 QML 的 Item.visible 仍是 true，两个条件都要满足才算「用户在看」。
+    if (m_clash)
+        m_clash->setNodesVisible(active && m_uiVisible);
+}
+
 void QmlBridge::setStatusActive(bool active)
 {
     m_statusActive = active;
@@ -831,6 +865,7 @@ void QmlBridge::syncUiVisible()
     m_uiVisible = visible;
     // 状态页那张今日流量卡跟着窗口停/起（重新可见时 setStatusActive 会立刻补一次）
     setStatusActive(m_statusActive);
+    setNodesActive(m_nodesActive); // 窗口显隐同样影响「用户在不在看节点页」
     emit uiVisibleChanged(visible);
 }
 

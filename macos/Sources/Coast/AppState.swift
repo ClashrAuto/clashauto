@@ -289,11 +289,22 @@ public final class AppState {
     /// 用计数器而不是让视图自己比对数组：数组到了上限之后长度不再变，`onChange(of:count)`
     /// 从此再也不触发；而末位的值经常连着好几拍都是 0，比值也认不出「来了新的一拍」。
     public private(set) var pollTick: UInt64 = 0
+    /// 上一拍是否停在状态页。用于「切回状态页立刻补一次今日流量」，
+    /// 非 @Observable 语义的内部状态，写它不该触发重排。
+    private var lastOnStatus = false
 
     /// 带宽图的采样序列。长度与图上的点数一致（`BandwidthChart.pointCount` = 42，
     /// 即 40 个可见 + 2 个富余）—— **横轴就是「最近 40 秒」，与 Qt 相同**。
     /// 原来留 60 拍，同样的宽度里塞 60 秒，一次尖峰看起来比 Qt 窄一截。
-    public private(set) var bandwidthSamples: [(up: Double, down: Double)] = []
+    /// 上/下行采样窗口，**拆成两个数组分别存**，不是一个元组数组。
+    ///
+    /// 原来是 `[(up:,down:)]`，状态页两张 `TrafficCard` 各自在 body 里
+    /// `bandwidthSamples.map(\.up)` / `map(\.down)` —— 每一次重排都要把整个采样窗口
+    /// 全量映射两遍。拆开存之后视图直接取数组，零映射。
+    /// （注：单独做这一项**并没有**降低开窗 CPU，见 PLAN.md 的排除表；保留是因为
+    ///   它逻辑上就该这样，且是"缩小重排波及面"这条路的必要一步。）
+    public private(set) var bandwidthUp: [Double] = []
+    public private(set) var bandwidthDown: [Double] = []
     private static let bandwidthWindow = BandwidthChart.pointCount
 
     public init() {
@@ -379,15 +390,37 @@ public final class AppState {
 
     /// 每拍同步一次可见性，并处理两个方向的边沿。
     private func syncUIVisibility() {
-        let visible = WindowRestore.anyWindowVisible
+        // 顺带把「是不是正看着节点页」同步给 ClashService —— 它据此决定 /proxies 的
+        // 轮询频率（见 `ClashService.nodesVisible`）。搭在这条 1Hz 循环上，
+        // 与可见性同源，省掉一套页面切换的通知订阅。
+        let visibleNow = WindowRestore.anyWindowVisible
+        let onNodes = visibleNow && currentPage == .nodes
+        if clash.nodesVisible != onNodes { clash.nodesVisible = onNodes }
+        // 状态页专属的两件周期活：今日流量重算（几条 GROUP BY）与延迟探测。
+        // 判据都是「窗口看得见 **且** 正停在状态页」——只判窗口开着不够，
+        // 人在节点页/日志页时这两样照跑就是白烧（Qt 线的 StatusPage.qml 里
+        // `bridge.setStatusActive(page.visible)` / `latency.setActive(page.visible)`
+        // 判的就是页面显隐，这里对齐）。
+        let onStatus = visibleNow && currentPage == .status
+        if onStatus != lastOnStatus {
+            lastOnStatus = onStatus
+            if onStatus {
+                refreshTodayTraffic()   // 切回来立刻补一拍，别让用户对着 10 秒前的旧数字
+                latency.start()
+            } else {
+                latency.stop()
+            }
+        }
+        let visible = visibleNow
         guard visible != uiVisible else { return }
         uiVisible = visible
         clash.uiActive = visible
         if visible {
             // 转为可见：把停掉的那几路立刻催一次，别让用户对着上一次的旧数据发呆。
             clash.refreshNodes()
-            refreshTodayTraffic()
-            latency.start()
+            // 今日流量与延迟探测**不在这里恢复** —— 它们是状态页专属的，
+            // 由上面那段「在不在状态页」的判断统一负责（窗口刚可见时
+            // lastOnStatus 仍是 false，那段会立刻把它们拉起来）。
         } else {
             latency.stop()
         }
@@ -400,6 +433,7 @@ public final class AppState {
     public func start() {
         clash.start()
         startBandwidthSampling()
+        startHistoryFlush()
         startTodayTrafficRefresh()
         applySystemAppearanceIfNeeded()   // 启动时若跟随系统,先对齐一次
         startSystemAppearanceObserver()   // 之后系统外观变了也跟上
@@ -758,13 +792,41 @@ public final class AppState {
 
     /// 今日流量卡的刷新。**不跟着每秒轮询走** —— 那是几条 GROUP BY 聚合查询，
     /// 每秒跑一次纯属浪费；这张卡的数字慢几秒没有任何影响。
+    /// 历史库的**周期性落盘**（5s，与 Qt 线的 `HistoryStore::m_flushTimer` 同周期）。
+    ///
+    /// ★ 没有这条，历史记录会**整批丢失**：`HistoryStore` 原本只有两个落盘时机 ——
+    ///   ① 待写缓冲攒够 `flushThreshold`（64 条）；② `AppState.shutdown()` 里那次
+    ///   `flush(includingLive: true)`。而 ② 只在**优雅退出**时走到：崩溃、被 SIGKILL、
+    ///   强制退出都不会执行。于是"这一轮攒了不到 64 条就异常退出"= 那批浏览史**永久丢失**。
+    ///   而历史库正是「昨天访问过什么」的**唯一**来源（界面上那些会话累计在窗口隐藏时
+    ///   就停了，只有它是完整的账），丢了补不回来。
+    ///
+    ///   真机实测暴露的过程：造真实流量后历史库**新增 0 条**，一度怀疑是刚加的
+    ///   「0 字节不入库」过滤误伤；做了对照实验（临时回退过滤、同样流程）——
+    ///   **同样是 0 条**，才排除过滤、定位到"根本没 flush 过"。
+    ///   Qt 线一直有 5s 定时 flush，这是第十一处镜像差异。
+    private func startHistoryFlush() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard let self else { return }
+                // 只落已断开的那批（includingLive: false）—— 在途连接留到退出时再落，
+                // 否则一条长连接会被反复写成多条残缺记录。
+                self.history.flush()
+            }
+        }
+    }
+
     private func startTodayTrafficRefresh() {
         Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                // 几条 GROUP BY 聚合，只给状态页那张卡看。窗口收起来时不跑，
-                // 重新可见的那一刻 `syncUIVisibility` 会立刻补一次。
-                if self.uiVisible { self.refreshTodayTraffic() }
+                // 几条 GROUP BY 聚合，**只给状态页那张卡看**。所以两个条件都要满足：
+                // 窗口看得见、且用户正停在状态页。少判后一个的话，人在节点页/日志页时
+                // 这几条聚合照跑不误，纯属白烧 —— Qt 线的 `setStatusActive` 判的就是
+                // `m_statusActive && m_uiVisible` 两条，这里对齐。
+                // 重新可见/切回状态页的那一刻 `syncUIVisibility` 会立刻补一次。
+                if self.uiVisible && self.currentPage == .status { self.refreshTodayTraffic() }
                 try? await Task.sleep(for: .seconds(10))
             }
         }
@@ -797,39 +859,35 @@ public final class AppState {
                     try? await Task.sleep(for: .seconds(1))
                     continue
                 }
-                // ★ **完全静止时这一拍必须整拍跳过。**
-                //   pollTick / bandwidthSamples / displayedUp / displayedDown 都是 @Observable
-                //   的公开属性，**写一次就让 SwiftUI 把整棵视图树重排一遍**。原先它们是
-                //   1Hz **无条件**写的，于是核心没跑、速率恒 0、连接恒空的空载状态下，
-                //   界面明明一个像素都不会变，却仍在每秒重排一次整树。
-                //   真机实测（macOS 26.5.2 / arm64，COAST_NO_AUTOSTART=1 只跑 UI）：
-                //     空载 CPU 稳态 1.3~2.2%，`sample` 的热点 100% 落在 SwiftUI 布局引擎上
-                //     （LayoutEngineBox.sizeThatFits / StackLayout.placeChildren /
-                //       ViewLayoutEngine.sizeThatFits），即"纯重排、没有别的活"。
-                //   判据与 Qt 端页脚那颗呼吸圆点那次完全相同：**可见运动要值得它的代价**，
-                //   而"放着不管"才是这个窗口的常态。速率没变、也没有新连接快照要落，
-                //   这一拍就没有任何东西可显示，写它纯属自费。
-                //   注意 pollTick 也要一起跳过 —— 它本身就是给视图当"该刷新了"的信号用的，
-                //   照写等于把刚省下的重排又请回来。
+                // ★ **窗口开着时这一拍无条件走完，不做任何"静止就跳过"的省电判断。**
+                //   曾经加过一版"上下行为 0 就跳过整拍"，实测界面**一卡一卡**：省下的那点
+                //   CPU 远不值这个观感代价。分档的正确位置是**窗口可见性**，而不是流量高低——
+                //   上面 `guard self.uiVisible` 已经做了：收进托盘/最小化时整拍跳过（那时没人看，
+                //   省电优先）；窗口开着就老老实实每秒刷一次（有人在看，流畅优先）。
+                //   要在"窗口开着"这一档继续降 CPU，方向是让**单次刷新更便宜**
+                //   （少写被观察属性、缩小重排范围），不是降低刷新频率。
                 let up = self.clash.up
                 let down = self.clash.down
-                let idle = up == 0 && down == 0
-                    && self.displayedUp == 0 && self.displayedDown == 0
-                    && self.pendingSnapshot == nil
-                    && self.bandwidthSamples.last.map { $0.up == 0 && $0.down == 0 } == true
-                if idle {
-                    try? await Task.sleep(for: .seconds(1))
-                    continue
-                }
+                // ★ **降开窗 CPU 的正确姿势：不降频率，只是别写"没变的值"。**
+                //   这几个都是 @Observable 属性，**赋一次值就通知一次**，SwiftUI 不比较新旧 ——
+                //   把同样的 0 再写一遍，读它的视图连同父链照样整体重排一次。
+                //   采样窗口已拆成 bandwidthUp/bandwidthDown（见其声明），视图直接取、
+                //   不再每次重排都 map。`pollTick` 被状态页、设备页、
+                //   设备详情同时读，+1 一次波及面最大。
+                //   曲线本身要求"没数据也得往前走"，所以 samples/pollTick 仍每拍推进；
+                //   但**速率文字**没变就不写 —— 空载时它恒为 0，写它纯属自费。
+                //   与本文件 `coreReachable` 那处"变了才写"是同一手法，理由也相同。
                 self.pollTick &+= 1
-                self.bandwidthSamples.append((Double(up), Double(down)))
-                if self.bandwidthSamples.count > Self.bandwidthWindow {
-                    self.bandwidthSamples.removeFirst(self.bandwidthSamples.count - Self.bandwidthWindow)
+                self.bandwidthUp.append(Double(up))
+                self.bandwidthDown.append(Double(down))
+                if self.bandwidthUp.count > Self.bandwidthWindow {
+                    self.bandwidthUp.removeFirst(self.bandwidthUp.count - Self.bandwidthWindow)
+                    self.bandwidthDown.removeFirst(self.bandwidthDown.count - Self.bandwidthWindow)
                 }
                 // 界面显示的速率与连接快照都在**这一拍、这一个 turn** 里落 ——
                 // 一秒只让 SwiftUI 重排一次（理由见 `upText` 上的注释）。
-                self.displayedUp = up
-                self.displayedDown = down
+                if self.displayedUp != up { self.displayedUp = up }
+                if self.displayedDown != down { self.displayedDown = down }
                 self.applyPendingSnapshot()
                 try? await Task.sleep(for: .seconds(1))
             }

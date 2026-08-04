@@ -213,6 +213,7 @@ private:
     bool m_firstScanDone = false;
     // 上一次已提示过的网关错误（LanGateway::deviceError）——每轮扫描都会重试 open，用它去重。
     QString m_lastGatewayErr;
+    QString m_lastStoreErr; // 上一次已提示过的台账错误（同 m_lastGatewayErr）
     // mac → 当前劫持所用的 IP。用来发现「设备换了 IP」（旧劫持已失效，需重上）。
     QHash<QString, QString> m_armedIp;
     // 是否处于「已挂起」状态：handleSleep 置位、handleWake 清位。

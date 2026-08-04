@@ -21,6 +21,221 @@ enum SelfTests {
         if environment["COAST_TOPO_SELFTEST"] == "1" { topoSelfTest() }
         if environment["COAST_LATENCY_SELFTEST"] == "1" { latencySelfTest() }
         if environment["COAST_DEVICES_SELFTEST"] == "1" { devicesSelfTest() }
+        if environment["COAST_HISTORY_SELFTEST"] == "1" { historySelfTest() }
+        if environment["COAST_LOOKUP_SELFTEST"] == "1" { lookupSelfTest() }
+        if environment["COAST_CONNSTATS_SELFTEST"] == "1" { connStatsSelfTest() }
+        if environment["COAST_SETTINGS_SELFTEST"] == "1" { settingsSelfTest() }
+        if environment["COAST_SUBS_SELFTEST"] == "1" { subsSelfTest() }
+    }
+
+    /// 订阅节点启停的写入自检 —— 让 `subscribe.yaml` 的**写路径**能从外部驱动。
+    ///
+    /// 存在的理由与设置自检同：这份文件两条产品线共用，一条线写完另一条读不读得懂，
+    /// 只有真写一次才答得上来。`device` 表就是在这个问题上出的事（两条线用了不同的列、
+    /// 不同的时间戳格式），所以剩下的每一处共享状态都值得照同一把尺子过一遍。
+    ///
+    /// 只翻**第 0 个订阅的第 0 个节点**的启停位，翻完打印前后值 —— 不联网、不拉取。
+    private static func subsSelfTest() {
+        print("=== 订阅节点启停自检 ===")
+        guard let config = try? AppConfigLoader.load() else { print("[subs] FAIL 读不到配置"); exit(1) }
+        let store = SubscriptionStore(config: config)
+        let subs = store.load()
+        guard !subs.isEmpty else { print("[subs] SKIP 没有订阅"); exit(0) }
+        let nodes = store.nodes(at: 0)
+        guard let first = nodes.first else { print("[subs] SKIP 第 0 个订阅没有节点"); exit(0) }
+        let before = first.use
+        _ = store.setNodeEnabled(subscription: 0, node: 0, !before)
+        let after = store.nodes(at: 0).first?.use
+        print("[subs] 订阅0/节点0 「\(first.name)」: \(before) -> 写入 \(!before) -> 读回 \(after.map(String.init) ?? "nil")")
+        print("[subs] 启用节点数: \(store.load().first?.enabledNodeCount ?? -1) / \(nodes.count)")
+        print(after == !before ? "[subs] OK" : "[subs] FAIL 写进去又读不回来")
+        exit(after == !before ? 0 : 1)
+    }
+
+    /// 设置写入自检 —— 把「保存一个设置」这条路径变成**可以从外部驱动**的。
+    ///
+    /// 存在的理由：`config.yaml` 是两条产品线共用的，一条线保存设置时**会不会把另一条线
+    /// 认识、自己不认识的键抹掉**，是个只有真写一次才答得上来的问题。而在 GUI 里它只能
+    /// 靠点开关触发 —— 实测 `System Events click at` 与 `cliclick` 合成的点击都驱动不了
+    /// QML 控件，于是这条路径在自动化里**根本走不到**。给它一个入口，一秒钟就能验完。
+    ///
+    /// 只翻 `clearConnections` 这个无副作用的开关（不动网络、不动系统代理），翻完打印前后值。
+    private static func settingsSelfTest() {
+        print("=== 设置写入自检 ===")
+        print("configDir: \(AppPaths.configDir.path)")
+        guard let before = try? AppConfigLoader.load() else {
+            print("[settings] FAIL 读不到 config.yaml"); exit(1)
+        }
+        let flipped = !before.clearConnections
+        AppConfigLoader.persist(key: "clearConnections", bool: flipped)
+        guard let after = try? AppConfigLoader.load() else {
+            print("[settings] FAIL 写完读不回来"); exit(1)
+        }
+        print("clearConnections: \(before.clearConnections) -> 写入 \(flipped) -> 读回 \(after.clearConnections)")
+        print(after.clearConnections == flipped ? "[settings] OK" : "[settings] FAIL 写进去又读不回来")
+        exit(after.clearConnections == flipped ? 0 : 1)
+    }
+
+    /// 流量构成自检 —— 与 Qt 的 `COAST_CONNSTATS_SELFTEST` **同一份 fixture、同一组期望**。
+    ///
+    /// 这块是纯算术（逐连接取增量 + 直连/代理分桶 + 按 host 累计排序），没有 UI 能验。
+    /// 两条线各自实现了一遍，用同一份输入跑出不同的数，就是其中一条错了 ——
+    /// 这正是单看一条线永远发现不了的那类 bug。
+    /// 关键点：第二拍只能计**增量**，否则同一份流量每拍重复累加，总量随挂机时间线性虚涨。
+    private static func connStatsSelfTest() {
+        print("=== 流量构成自检（fixture 与 Qt 对齐） ===")
+        func snapshot(_ json: String) -> [[String: Any]] {
+            let data = Data(json.utf8)
+            return (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []
+        }
+        // 第一拍：代理 2 条（一条来自局域网设备）、直连 1 条、REJECT 1 条（两桶都不该记）
+        let tick0 = snapshot("""
+            [{"id":"a","start":"2026-07-28T10:00:01+08:00","chains":["HK-01","节点选择"],
+              "download":1000,"upload":100,
+              "metadata":{"host":"youtube.com","sourceIP":"192.168.20.140"}},
+             {"id":"b","start":"2026-07-28T10:00:02+08:00","chains":["DIRECT"],
+              "download":2000,"upload":200,
+              "metadata":{"host":"mirrors.aliyun.com","sourceIP":"127.0.0.1"}},
+             {"id":"c","start":"2026-07-28T10:00:03+08:00","chains":["JP-03"],
+              "download":50,"upload":5,
+              "metadata":{"host":"api.github.com","sourceIP":"127.0.0.1"}},
+             {"id":"d","start":"2026-07-28T10:00:04+08:00","chains":["REJECT"],
+              "download":9999,"upload":9999,
+              "metadata":{"host":"ads.example.com","sourceIP":"127.0.0.1"}}]
+            """)
+        // 第二拍：a/b 累计值变大（只该记增量）、c 断开消失、e 新建
+        let tick1 = snapshot("""
+            [{"id":"a","start":"2026-07-28T10:00:01+08:00","chains":["HK-01","节点选择"],
+              "download":1500,"upload":150,
+              "metadata":{"host":"youtube.com","sourceIP":"192.168.20.140"}},
+             {"id":"b","start":"2026-07-28T10:00:02+08:00","chains":["DIRECT"],
+              "download":2200,"upload":220,
+              "metadata":{"host":"mirrors.aliyun.com","sourceIP":"127.0.0.1"}},
+             {"id":"d","start":"2026-07-28T10:00:04+08:00","chains":["REJECT"],
+              "download":9999,"upload":9999,
+              "metadata":{"host":"ads.example.com","sourceIP":"127.0.0.1"}},
+             {"id":"e","start":"2026-07-28T10:00:09+08:00","chains":["SG-02"],
+              "download":300,"upload":30,
+              "metadata":{"host":"cdn.jsdelivr.net","sourceIP":"192.168.20.140"}}]
+            """)
+
+        var composition = TrafficComposition()
+        // 「sourceIP → 设备名」这段：台账里那台设备叫 Xiaomi-Phone，本机连接显示「本机」。
+        let naming: (String, String) -> String = { sourceIP, _ in
+            if sourceIP == "192.168.20.140" { return "Xiaomi-Phone" }
+            return DeviceStore.isLocalMachineIP(sourceIP) ? "本机" : sourceIP
+        }
+        func dump(_ tag: String) {
+            print(String(format: "[connstats] %@ direct=%.0f proxy=%.0f total=%@", tag,
+                         Double(composition.directBytes), Double(composition.proxyBytes),
+                         Formatting.bytes(composition.totalBytes)))
+            for item in composition.topHosts(limit: 5) {
+                print(String(format: "[connstats]   top    %-20@ dev=%-14@ bytes=%.0f",
+                             item.host as NSString, item.stat.device as NSString,
+                             Double(item.stat.bytes)))
+            }
+        }
+        composition.observe(tick0, deviceName: naming)
+        dump("tick1")   // 期望 direct=2200 proxy=1155（REJECT 的 9999+9999 不计）
+        composition.observe(tick1, deviceName: naming)
+        dump("tick2")   // 期望 direct=2420 proxy=2035（只加增量；c 断开不回退）
+        exit(0)
+    }
+
+    /// 单台设备查询的耗时自检。
+    ///
+    /// 存在的理由：`DeviceDetailView` 里 `record` 是 computed property，body 每求值一次
+    /// 就查一次台账，而 body 上引用它（含 `proxyEnabled`/`canToggle` 这些派生量）有十几处。
+    /// 于是「打开一台设备的详情」这个动作的开销，直接由单台查询的耗时 × 十几倍决定。
+    /// 这里把它单独拎出来计时，好让「改成主键查找」这类优化有个可复现的前后对照。
+    private static func lookupSelfTest() {
+        print("=== 单台查询耗时自检 ===")
+        let store = DeviceStore()
+        guard store.isOpen else { print("台账打不开"); exit(1) }
+        let macs = store.all().map(\.mac)
+        guard let target = macs.last else { print("台账是空的，测不了"); exit(1) }
+        print("台账 \(macs.count) 台，取末尾一台作目标（线性扫描的最坏情况）：\(target)")
+
+        let rounds = 500
+        // 先热身，把 SQLite 的页缓存与首次语句准备的开销排掉，免得算进结果。
+        for _ in 0..<50 { _ = store.device(mac: target) }
+        let began = Date()
+        for _ in 0..<rounds { _ = store.device(mac: target) }
+        let elapsed = Date().timeIntervalSince(began)
+        let per = elapsed / Double(rounds) * 1000
+        print(String(format: "%d 次查询共 %.3f s，单次 %.3f ms", rounds, elapsed, per))
+        // 详情页一次 body 大约十几次查询，按 14 次估一帧的台账开销。
+        print(String(format: "按详情页每帧约 14 次算：%.2f ms/帧（16.7 ms 预算的 %.0f%%）",
+                     per * 14, per * 14 / 16.7 * 100))
+
+        // 设备页 `lastHost(for:)` 是 per-row 调的，里面每行问一次本机地址，
+        // 而这函数走 getifaddrs + getnameinfo（系统调用 + 枚举全部网卡）。
+        // 旁边的 localMachineIPs 已经因为「每条连接都要问一次」加了 30 秒缓存，这个漏了。
+        for _ in 0..<20 { _ = DeviceStore.localLANAddress() }
+        let addrBegan = Date()
+        for _ in 0..<200 { _ = DeviceStore.localLANAddress() }
+        let addrPer = Date().timeIntervalSince(addrBegan) / 200 * 1000
+        print(String(format: "\nlocalLANAddress 单次 %.3f ms；设备页每行调一次，"
+                     + "%d 台一帧 %.2f ms（16.7 ms 预算的 %.0f%%）",
+                     addrPer, macs.count, addrPer * Double(macs.count),
+                     addrPer * Double(macs.count) / 16.7 * 100))
+
+        // 设备页 `lastHost(for:)` 每行都全量扫一遍 connections，页面整体是 设备数 × 连接数。
+        // 本机 Surge 才是主代理、Coast 连接数很少，实测量不出网关规模，
+        // 所以这里**建模**：行数据用本地同形结构，归属判定调真的 connectionBelongs。
+        struct Conn { let host: String; let sourceIP: String; let start: Date }
+        let connCount = 500
+        let now = Date()
+        let conns = (0..<connCount).map {
+            Conn(host: "h\($0).example.com",
+                 sourceIP: "192.168.20.\($0 % 254 + 1)",
+                 start: now.addingTimeInterval(Double($0)))
+        }
+        let ips = (0..<macs.count).map { "192.168.20.\($0 % 254 + 1)" }
+
+        let nowBegan = Date()
+        for ip in ips {                       // 现状：每行一次全量 filter + max
+            _ = conns.filter { !$0.host.isEmpty
+                    && DeviceStore.connectionBelongs(sourceIP: $0.sourceIP,
+                                                     deviceIP: ip, isLocalMachine: false) }
+                .max { $0.start < $1.start }?.host ?? ""
+        }
+        let nowCost = Date().timeIntervalSince(nowBegan) * 1000
+
+        let fixBegan = Date()               // 提议：整页先归一次索引，每行 O(1)
+        var latest: [String: Conn] = [:]
+        for c in conns where !c.host.isEmpty {
+            if let had = latest[c.sourceIP], had.start >= c.start { continue }
+            latest[c.sourceIP] = c
+        }
+        for ip in ips { _ = latest[ip]?.host ?? "" }
+        let fixCost = Date().timeIntervalSince(fixBegan) * 1000
+
+        print(String(format: "\nlastHost 建模（%d 台 × %d 连接）：现状 %.2f ms/帧（预算 %.0f%%）"
+                     + "→ 预建索引 %.2f ms（%.0f%%），快 %.1f 倍",
+                     macs.count, connCount, nowCost, nowCost / 16.7 * 100,
+                     fixCost, fixCost / 16.7 * 100, nowCost / max(fixCost, 0.0001)))
+
+        // 状态页 CompositionCard：`topHosts` 是 computed property，ForEach 的 5 次迭代里
+        // 各引用 2 次（.count 与 [index]）= **每次渲染 10 遍**，而它每遍都 filter + 全量排序
+        // 512 条 hostBytes。状态页每秒随 pollTick 重绘。
+        var composition = TrafficComposition()
+        var synthetic: [[String: Any]] = []
+        for i in 0..<TrafficComposition.maxHostStatsForTests {
+            synthetic.append(["id": "c\(i)", "chains": ["🚀 节点选择"],
+                              "upload": NSNumber(value: i * 7 + 1),
+                              "download": NSNumber(value: i * 13 + 1),
+                              "metadata": ["host": "h\(i).example.com", "sourceIP": "192.168.20.9"]])
+        }
+        composition.observe(synthetic)
+        let hostsBegan = Date()
+        for _ in 0..<100 { _ = composition.topHosts(limit: 5) }
+        let hostsPer = Date().timeIntervalSince(hostsBegan) / 100 * 1000
+        print(String(format: "\ntopHosts 单次 %.3f ms（%d 条）；状态页每帧调 10 遍 = %.2f ms"
+                     + "（16.7 ms 预算的 %.0f%%）",
+                     hostsPer, TrafficComposition.maxHostStatsForTests,
+                     hostsPer * 10, hostsPer * 10 / 16.7 * 100))
+        exit(0)
     }
 
     /// 设备台账 / 设备列表自检（对应 Qt 的 `COAST_DEVICEDB_SELFTEST`）。
@@ -247,6 +462,66 @@ enum SelfTests {
 
     /// 路径与种子资源自检：确认打包后能从 `Contents/Resources` 找到种子，
     /// 而不是悄悄回退到开发期那条仓库相对路径（那条在用户机器上根本不存在）。
+    /// 历史库自检。对齐 Qt 线的 `COAST_HISTORY_SELFTEST`（`main_qml.cpp`）。
+    ///
+    /// 历史库是「昨天访问过什么」的**唯一**来源 —— 界面上那些会话累计（设备流量、
+    /// 流量构成）在窗口隐藏时会停止累加，只有它是完整的账。所以它的入库规则
+    /// 和聚合口径最值得单独验一遍。
+    ///
+    /// 用**临时目录**建库，不碰用户真实的 `coast.db`。
+    private static func historySelfTest() {
+        print("=== 历史库自检 ===")
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("coast-history-selftest")
+        try? FileManager.default.removeItem(at: tmp)
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        print("db: \(tmp.appendingPathComponent("coast.db").path)")
+
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+        func conn(_ id: String, _ host: String, _ up: Int64, _ down: Int64) -> [String: Any] {
+            ["id": id,
+             "upload": up, "download": down,
+             "start": ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: Double(now) / 1000)),
+             "chains": ["DIRECT"],
+             "metadata": ["host": host, "destinationIP": "1.2.3.4",
+                          "network": "tcp", "sourceIP": "127.0.0.1",
+                          "processPath": "/usr/bin/curl"]]
+        }
+        // 三条：两条有流量、一条 0 字节。**0 字节的不该入库**（与 Qt 线同一规则）。
+        let snapshot: [[String: Any]] = [
+            conn("a", "example.com", 50, 1000),
+            conn("b", "example.com", 30, 500),
+            conn("c", "zero.example", 0, 0),
+        ]
+        // `HistoryStore` 是 @MainActor 隔离的。
+        // ★ **不能**用 `runBlocking { @MainActor in ... }` —— 那会死锁：
+        //   `runBlocking` 内部是 `Task { } + semaphore.wait()`，而带 `@MainActor` 的闭包
+        //   必须排到主线程上执行，主线程此刻正卡在 `wait()` 里，任务体永远开始不了。
+        //   （本文件 `xpcSelfTest` 上方那段注释警告的就是这个形状，我照样踩了一次。）
+        //   自检钩子由 `CoastApp.init()` 调用，**本来就在主线程**，
+        //   用 `MainActor.assumeIsolated` 同步进去即可，不需要任何异步。
+        let (n, total, tops) = MainActor.assumeIsolated { () -> (Int64, Int64, [(String, Int64)]) in
+            let store = HistoryStore(configDir: tmp)
+            store.observe(snapshot)
+            store.observe([])          // 全部消失 = 全部断开 → 落库
+            store.flush(includingLive: true)
+            return (store.recordCount(),
+                    store.todayTotal(scope: .all),
+                    store.todayTop(dimension: .host, scope: .all, limit: 5).map { ($0.key, $0.bytes) })
+        }
+        print("records=\(n) (expect 2: 0 字节的连接不入库)")
+        for t in tops { print("  top \(t.0) = \(t.1) bytes") }
+        print("todayTotal=\(total) (expect 1580 = 50+1000+30+500)")
+
+        // 期望 2 条：0 字节的那条不入库（失败的连接尝试/探测，没有浏览史意义）。
+        // 两条线现已对齐 —— 这个差异正是本自检补上后第一次跑验出来的，
+        // 判定与修复过程见 HistoryStore.swift 里那段注释。
+        let ok = (n == 2) && (total == 1580)
+        print(ok ? "历史库自检 PASS" : "历史库自检 **FAIL**")
+        try? FileManager.default.removeItem(at: tmp)
+        exit(ok ? 0 : 1)
+    }
+
     private static func pathsSelfTest() {
         print("=== 路径 / 资源自检 ===")
         print("userDir:   \(AppPaths.userDir.path)")

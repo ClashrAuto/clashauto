@@ -1,5 +1,6 @@
 #include "CoreController.h"
 #include <QTcpSocket>
+#include <QNetworkProxy>
 #include <QHostAddress>
 #include <cstring>
 
@@ -16,7 +17,6 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSettings>
-#include <QSysInfo>
 #include <QDateTime>
 #include <QThread>
 #include <QTimer>
@@ -231,8 +231,16 @@ CoreController::CoreController(AppConfig config, QObject *parent)
         a->flags |= kCreateNoWindow;
     });
 #endif
-    // ★ 先擦上一世的残留系统代理（详见 clearStaleSystemProxy）。必须在**任何**启动动作之前：
-    //   我们自己接下来若要开代理，会把它重新设成正确值；若不开，用户至少能正常上网。
+    // ★ 启动期自愈的**顺序不能反**：先收孤儿核心，再擦残留系统代理。
+    //
+    //   `clearStaleSystemProxy()` 的判据之一是「我们的 mixedPort **无人监听**」
+    //   （有人在听就说明不是残留、一律不动，防误删用户自配的公司代理）。
+    //   而上一世遗留的孤儿核心**正占着那个端口** —— 于是先清代理的话，
+    //   那步必然读到"有人在听"直接跳过，**两项自愈单独都对、凑在一起互相抵消**。
+    //   Swift 线真机实测过这个组合场景：2 个孤儿占着 7890/9191 时残留代理擦不掉，
+    //   这里是同一个缺陷（本文件原先也是构造函数里清代理、startCore() 里才收孤儿）。
+    //   reapOrphanCore() 自己解析核心路径、不依赖 startCore 的局部状态，可直接前置。
+    reapOrphanCore();
     clearStaleSystemProxy();
     // mihomo 的 stdout/stderr 是 UTF-8：必须用 fromUtf8，否则中文 Windows 会按 GBK 解码成乱码
     connect(&m_core, &QProcess::readyReadStandardOutput, this, [this] {
@@ -496,19 +504,14 @@ void CoreController::startCore()
         QSettings().remove(QStringLiteral("geoip/lastPublished"));
     }
 
-#if defined(Q_OS_WIN)
-    // TUN 依赖 wintun.dll：从 bundle 按架构复制到核心 exe 同目录（DLL 搜索首选路径）
-    const QString wintunTo = QDir(QFileInfo(exe).absolutePath()).filePath("wintun.dll");
-    if (!QFileInfo::exists(wintunTo)) {
-        const QString cpu = QSysInfo::currentCpuArchitecture();
-        const QString archDir = cpu.contains("arm") ? (cpu.contains("64") ? "arm64" : "arm")
-                                                    : (cpu.contains("64") ? "x64" : "x86");
-        const QString wintunFrom = QStringLiteral(":/assets/bundle/wintun/%1/wintun.dll").arg(archDir);
-        if (QFileInfo::exists(wintunFrom) && QFile::copy(wintunFrom, wintunTo)) {
-            emit logUpdated(tr("wintun.dll 已部署: %1").arg(wintunTo));
-        }
-    }
-#endif
+    // Windows TUN 不需要我们往核心旁边释放 wintun.dll —— **核心自带一份**：sing-tun 的
+    // internal/wintun 用 `//go:embed <arch>/wintun.dll` 把驱动编进二进制，再由 memmod
+    // 从内存映射展开，整个包里没有任何从磁盘 LoadLibrary/NewLazyDLL 的分支。实测 v1.10.4392 的
+    // coast-windows-amd64-compatible.exe，我们原来内嵌那份 x64 wintun.dll 的 427552 字节全文
+    // 在核心里原样命中（偏移 0x2b890a0）—— 同一个文件，发两遍。
+    // 所以这里原先那段按架构释放的代码、resources_win.qrc 和 assets/bundle/wintun/ 一并删了。
+    // 那批 DLL 是 f97e0ab「app 自包含」时从 Electron 时代的资源包整体搬过来的，从来没有哪个
+    // 核心版本要求过。已装机器上那个释放出来的 wintun.dll 会原地留着，是个无害的孤儿文件。
 
     // ★ 收孤儿必须在**两条启动路径之前**。原先这行在下面 m_core.start() 边上，而 macOS 走
     //   helper(root) 那条分支会提前 return —— 于是 macOS 上它从来没跑过，孤儿只增不减。
@@ -865,6 +868,15 @@ void CoreController::toggleTun()
 void CoreController::rebuildConfig()
 {
     m_fullConfigPath = m_configBuilder.ensureFullConfig(m_tunEnabled, m_ipv6Enabled);
+    // ★ 失败时不能照打「Config generated:」—— `ensureFullConfig` 失败返回空串，
+    //   原来那行会输出 `Config generated: `（路径是空的），读起来像成功，
+    //   而实际结果是核心继续按**旧配置**跑：用户改的设置/规则/订阅一条都没生效，
+    //   界面上却看不出任何异常。启动那条路径是会报的（实测日志页有
+    //   `config not found: …/full.yaml`），漏的是这条重建路径。
+    if (m_fullConfigPath.isEmpty()) {
+        emit logUpdated(tr("生成 full.yaml 失败，本次修改未生效"));
+        return; // 别拿旧配置去热重载,那会让「失败」看起来像「成功但没变化」
+    }
     emit logUpdated(QString("Config generated: %1").arg(m_fullConfigPath));
     reloadConfig();
 }
@@ -950,6 +962,11 @@ void CoreController::clearStaleSystemProxy()
     // 条件②：能连上就说明有人在听（可能是用户手动起的核心），一律不动。
     {
         QTcpSocket probe;
+        // ★ 这一探的结论会决定「要不要清掉陈旧的系统代理」，所以**不能经过代理**：
+        //   系统代理此刻很可能正指向我们自己的核心，让它去中转一次到 127.0.0.1 的连接，
+        //   得到的是代理的可达性、不是「本机这个端口有没有人在听」——答案反了，
+        //   后果是把用户手动起的核心当成残留、或把真残留当成有人在用。
+        probe.setProxy(QNetworkProxy::NoProxy);
         probe.connectToHost(QHostAddress::LocalHost, port);
         if (probe.waitForConnected(150)) {
             probe.abort();

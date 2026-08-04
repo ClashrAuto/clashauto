@@ -147,7 +147,6 @@
   "未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1": "No se detectó el Core de mihomo: descárgalo en Ajustes → Sistema: %1",
   "找不到 Clash 配置: %1": "No se encontró la configuración de Clash: %1",
   "Country.mmdb 已就位: %1": "Country.mmdb listo: %1",
-  "wintun.dll 已部署: %1": "wintun.dll desplegado: %1",
   "核心已由特权 helper 以 root 启动（支持 TUN）": "El Core se inició como root mediante el helper con privilegios (TUN compatible)",
   "经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效": "Error al iniciar el Core como root mediante el helper con privilegios: %1; se recurre a inicio sin root, TUN no funcionará",
   "启动 Clash 核心失败: %1": "Error al iniciar el Core de Clash: %1",
@@ -463,5 +462,8 @@
   "结束下载": "Detener descarga",
   "退出 Coast？": "¿Salir de Coast?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Al salir se detiene el núcleo y se restaura el proxy del sistema; las conexiones por proxy se cortarán.",
-  "退出": "Salir"
+  "退出": "Salir",
+  "订阅启停失败，配置未能写入": "No se pudo activar/desactivar la suscripción: ajustes no guardados",
+  "节点启停失败，配置未能写入": "No se pudo activar/desactivar el nodo: ajustes no guardados",
+  "批量启停失败，配置未能写入": "Error al activar/desactivar en lote: ajustes no guardados"
 }

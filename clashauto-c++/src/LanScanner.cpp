@@ -785,6 +785,10 @@ void LanScanner::runProbes(QVector<QPair<quint32, quint16>> jobs, std::function<
             ++(*inFlight);
             ++made;
             auto *sock = new QTcpSocket(this);
+            // 与 refreshLiveness 那处同一个理由，且这里量大得多（整段网段 × 端口）：
+            // 局域网探测问的是「这个地址有没有人应答」，经代理出去问的是
+            // 「代理服务器能不能连上它」—— 答案无关，还会把整段内网地址送给代理。
+            sock->setProxy(QNetworkProxy::NoProxy);
             auto *timer = new QTimer(sock);
             timer->setSingleShot(true);
             timer->setInterval(kProbeTimeoutMs);
@@ -1434,6 +1438,14 @@ void LanScanner::refreshLiveness(const QStringList &knownIps)
     ensureTopology(false); // 5s 一次的热更新走缓存：网卡/路由几乎不变，没必要每次重算
     for (const QString &ip : knownIps) {
         auto *sock = new QTcpSocket(this);
+        // ★ 存活探测**必须直连**：目标是「这台局域网设备在不在」，经代理出去问的是
+        //   代理服务器能不能连上它 —— 答案与我们要的问题无关，开着系统代理时还会把
+        //   一整批内网地址送给代理。Qt 默认对每个 socket 查一次
+        //   `QNetworkProxyFactory::systemProxyForQuery`，macOS 上那是读 SCDynamicStore，
+        //   设备一多就是每 5 秒 N 次系统查询（103 台的 Time Profiler 采样里
+        //   systemProxyForQuery/resolveProxy 各占 15 个样本，紧跟在 refreshLiveness 之后）。
+        //   显式设 NoProxy 既修正了语义，也把这批查询整个省掉。
+        sock->setProxy(QNetworkProxy::NoProxy);
         connect(sock, &QTcpSocket::connected, sock, &QTcpSocket::deleteLater);
         connect(sock, &QTcpSocket::errorOccurred, sock,
                 [sock](QAbstractSocket::SocketError) { sock->deleteLater(); });

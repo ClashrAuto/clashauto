@@ -98,6 +98,17 @@ struct DeviceRecord {
     {
         return typeOverride != DeviceType::Unknown ? typeOverride : autoType;
     }
+
+    // 用户是不是**动过**这台设备。
+    //
+    // 这是「该不该一直留着它」的判据：动过的设备离线也必须看得见（否则用户撤销不了
+    // 自己开的代理），没动过的只是路过一次的邻居表条目，过期就该消失。
+    // 与 Swift 端 `DeviceStore.Device.hasUserIntent` 逐项对齐。
+    bool hasUserIntent() const
+    {
+        return proxyEnabled || !alias.isEmpty() || policyMode != DevicePolicyMode::Follow
+            || !policyTarget.isEmpty() || typeOverride != DeviceType::Unknown;
+    }
 };
 
 class DeviceStore final : public QObject
@@ -109,6 +120,41 @@ public:
 
     // 全量当前设备（发现列表 + 台账合并后的视图；运行时字段来自最近扫描/聚合）。
     const QVector<DeviceRecord> &devices() const { return m_devices; }
+
+    // 一台**当前没扫到**的设备，还该不该在列表里留一行灰的。
+    //
+    // 不设这道闸的后果（Swift 端修过、这条线一直带着）：台账里的每一条都会变成一行，
+    // 包括「开过一次代理又关掉」「只是被扫到过」这些没有任何用户配置的残留 ——
+    // 换个网络就是一列当前网络上根本不存在的灰设备。实测同一份台账（25 条）
+    // Qt 全显 25 行、Swift 显 23 行，被丢的正是「3 天前在别的网段见过一次」那种。
+    //
+    // 判据与 Swift `DeviceStore.keepsOfflineRow` 逐条对齐：
+    //   ① 用户动过 → 永远留（否则他撤销不了自己开的代理）；
+    //   ② 超过 24 小时没见过 → 丢；
+    //   ③ 拿不到本机网段前缀时不敢删（宁可多显示一行，也别把在线设备误删）；
+    //   ④ 否则只留**本网段**的。
+    static constexpr qint64 kOfflineRowWindowSecs = 24 * 3600;
+    static bool keepsOfflineRow(const DeviceRecord &d, const QString &localPrefix,
+                                const QDateTime &now = QDateTime::currentDateTime())
+    {
+        if (d.hasUserIntent())
+            return true;
+        if (!d.lastSeen.isValid() || d.lastSeen.secsTo(now) >= kOfflineRowWindowSecs)
+            return false;
+        if (localPrefix.isEmpty())
+            return true;
+        return d.ip.startsWith(localPrefix);
+    }
+
+    // `192.168.20.7` → `192.168.20.`（含末尾的点）。与 Swift `subnetPrefix` 同语义：
+    // 真实掩码可能不是 /24，但这里只用于**显示**取舍，判错只多/少一行灰设备。
+    static QString subnetPrefix(const QString &ip)
+    {
+        const QStringList parts = ip.split(QLatin1Char('.'));
+        if (parts.size() != 4)
+            return QString();
+        return parts.mid(0, 3).join(QLatin1Char('.')) + QLatin1Char('.');
+    }
     // 按 MAC 取（找不到返回 nullptr）。
     DeviceRecord *find(const QString &mac);
     const DeviceRecord *find(const QString &mac) const;
@@ -198,6 +244,24 @@ public:
 signals:
     void changed();          // 任一展示字段变化（控制器据此刷新模型）
     void deviceAdded(QString mac); // 新设备首次出现（供托盘「蹭网」通知）
+    /// 台账**读不出来**（表结构不符/库损坏等）。
+    ///
+    /// ★ 这个信号存在的理由：读失败时原来只 `qWarning` 一句就 `return`，
+    ///   界面上就是一个**空设备列表** —— 用户看到的是"还没扫到设备"，
+    ///   而真相是"台账在这儿但读不了"。两者的处置完全不同（等一等 vs 去查库），
+    ///   把人引向错误的方向比不提示更糟。
+    ///   真机遇到过：两条产品线的 device 表列集合不同，Qt 读 Swift 建的表
+    ///   报 `no such column: total_up`，界面却一声不吭。
+    void storeError(QString message);
+
+public:
+    /// 台账读取失败的原因（空 = 没失败）。
+    ///
+    /// ★ 光有 `storeError` 信号**不够**：`load()` 是在 `DeviceStore` **构造函数里**调的，
+    ///   那一刻 `DevicesController` 还没建出来、信号无人接听，发了等于没发。
+    ///   （第一版就是这么写的，跑起来界面依旧一声不吭。）
+    ///   所以把原因**存下来**，让后建的消费者能主动问一次。
+    QString loadError() const { return m_loadError; }
 
 private:
     void load();
@@ -211,6 +275,7 @@ private:
     QString m_connName;
     QSqlDatabase m_db;
     bool m_ok = false;       // 库打不开（缺 QSQLITE 驱动等）时只在内存里跑，程序照常用
+    QString m_loadError; // 见 loadError()
     QVector<DeviceRecord> m_devices;
     QHash<QString, int> m_index; // mac → m_devices 下标
     bool m_dirty = false;

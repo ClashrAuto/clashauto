@@ -168,6 +168,21 @@ public final class HistoryStore: @unchecked Sendable {
             var record = entry.record
             record.endedAt = now
             if record.host.isEmpty { record.host = record.destIP }
+            // ★ 一个字节都没传的连接（失败的连接尝试/探测）**不入库**。
+            //   与 Qt 线 `HistoryStore::observe()` 里的同一条规则对齐 —— 此前 Swift 端
+            //   没有这道过滤，同样喂 3 条（含 1 条 0 字节）Qt 入库 2 条、Swift 入库 3 条，
+            //   是 `COAST_HISTORY_SELFTEST` 补上后第一次跑就验出来的差异。
+            //
+            //   为什么按 Qt 那边对齐：本机（非网关）实测 0 字节记录只占 0.1%
+            //   （58231 条里 43 条），**Qt 注释里"数量巨大"那个前提在这台机器上并不成立**；
+            //   但也拿不到反证 —— Pi 那台跑的是 Qt 线、过滤本来就生效，0 字节恒为 0，
+            //   两边数据不可比，**网关场景下会不会暴涨无从验证**。
+            //   证据不足时对齐到更保守的一侧：过滤是有明确设计意图、且已在生产网关
+            //   跑了很久的行为，而"多留 0.1% 没有信息量的行"换不来任何东西。
+            guard record.up > 0 || record.down > 0 else {
+                live.removeValue(forKey: id)
+                continue
+            }
             pending.append(record)
             live.removeValue(forKey: id)
         }

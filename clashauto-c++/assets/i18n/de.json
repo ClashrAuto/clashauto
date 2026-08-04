@@ -147,7 +147,6 @@
   "未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1": "Kein mihomo Core erkannt — unter Einstellungen → System herunterladen: %1",
   "找不到 Clash 配置: %1": "Clash-Konfiguration nicht gefunden: %1",
   "Country.mmdb 已就位: %1": "Country.mmdb bereit: %1",
-  "wintun.dll 已部署: %1": "wintun.dll bereitgestellt: %1",
   "核心已由特权 helper 以 root 启动（支持 TUN）": "Core über privilegierten helper als root gestartet (TUN unterstützt)",
   "经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效": "Core konnte nicht als root über privilegierten helper gestartet werden: %1; Rückfall auf Start ohne root, TUN funktioniert nicht",
   "启动 Clash 核心失败: %1": "Clash Core konnte nicht gestartet werden: %1",
@@ -463,5 +462,8 @@
   "结束下载": "Download stoppen",
   "退出 Coast？": "Coast beenden?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Beim Beenden wird der Kern gestoppt und der System-Proxy zurückgesetzt; Proxy-Verbindungen brechen ab.",
-  "退出": "Beenden"
+  "退出": "Beenden",
+  "订阅启停失败，配置未能写入": "Abonnement konnte nicht aktiviert/deaktiviert werden — Einstellungen nicht gespeichert",
+  "节点启停失败，配置未能写入": "Knoten konnte nicht aktiviert/deaktiviert werden — Einstellungen nicht gespeichert",
+  "批量启停失败，配置未能写入": "Massenaktivierung/-deaktivierung fehlgeschlagen — Einstellungen nicht gespeichert"
 }

@@ -47,7 +47,7 @@ void AppConfig::makeWritable(const QString &path)
 AppConfig AppConfigLoader::load()
 {
     AppConfig config;
-    // 资源已内嵌(qrc :/assets/bundle/*)：config 种子从 qrc 落地，核心/wintun/mmdb 运行时写到 userDir。
+    // 资源已内嵌(qrc :/assets/bundle/*)：config 种子从 qrc 落地，核心/mmdb 运行时写到 userDir。
     // 不再探测同级 Clashr-Auto 目录 —— app 完全自包含。
     const QString appData = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     // 数据根 userDir = <AppData 根>/Coast（Win: %AppData%\Coast）：核心家目录(-d)，放 logs\、Country.mmdb、cache。

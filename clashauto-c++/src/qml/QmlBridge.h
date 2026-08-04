@@ -153,6 +153,11 @@ public:
     Q_INVOKABLE void closeConnectionById(const QString &id); // 断开单个连接，随后刷新列表
     // 状态页显隐：只有它可见时才每 10s 重算今日流量（那是几条 GROUP BY，没人看时白烧 CPU）。
     Q_INVOKABLE void setStatusActive(bool active);
+    /// 节点页显隐 → `/proxies` 的轮询频率分档（节点页 1s，其他页 5s）。
+    /// 与 setStatusActive 同一模式：页面自己在 onVisibleChanged 里报告。
+    /// 理由见 ClashService::setNodesVisible —— /proxies 本机实测 51 KB，
+    /// 恒 1s 拉是纯浪费，而这份数据只有节点页在看。
+    Q_INVOKABLE void setNodesActive(bool active);
 
     /// 系统托盘此刻可不可用。
     ///
@@ -318,6 +323,7 @@ private:
     QTimer *m_visibilityTimer = nullptr;
     bool m_uiVisible = true;
     bool m_statusActive = false;   // 状态页自己报的可见性（与窗口那层取「与」）
+    bool m_nodesActive = false;  // 见 setNodesActive
     QVariantList m_todayHourly;
     QVariantList m_todayTop;
     qint64 m_todayTotal = 0;

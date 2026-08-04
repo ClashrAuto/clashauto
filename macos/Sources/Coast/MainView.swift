@@ -83,6 +83,13 @@ struct MainView: View {
         if #available(macOS 26.0, *) { 6 } else { 16 }
     }
 
+    /// `Page` → ⌘数字。顺序与侧栏一致（`Page.allCases`）。
+    private func shortcutKey(for page: AppState.Page) -> KeyEquivalent {
+        let digits: [KeyEquivalent] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+        let idx = AppState.Page.allCases.firstIndex(of: page) ?? 0
+        return idx < digits.count ? digits[idx] : "0"
+    }
+
     private var sidebar: some View {
         VStack(spacing: 0) {
             logo
@@ -94,6 +101,12 @@ struct MainView: View {
                           isCurrent: state.currentPage == page) {
                     state.currentPage = page
                 }
+                // ⌘1..⌘7 切页。两条线原本**都没有**切页快捷键 —— macOS 上这属于基本预期
+                // （Finder/Xcode/浏览器都有），补上。顺带也让「当前在哪一页」可自动化验证：
+                // `ClashService.nodesVisible` 那套按页分档的轮询频率，此前只验得了非节点页那一侧 ——
+                // SwiftUI 的侧栏不暴露成可访问按钮（`every button of window 1` 只拿得到三个无名的
+                // 窗口控制按钮），没有快捷键就没法在脚本里切页。
+                .keyboardShortcut(shortcutKey(for: page), modifiers: .command)
                 .padding(.leading, 20)
                 // 26：右侧留和左侧一样的 20 —— 高亮是四角全圆的独立胶囊（见
                 // NavButton），两侧等距才像悬浮的一颗；26 以下右缘要贴内容卡，不留。

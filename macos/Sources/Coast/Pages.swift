@@ -10,8 +10,6 @@ struct StatusPage: View {
     /// 是下限不是定值 —— 理由见 `body` 里那段注释。
     private static let cardRowHeight: CGFloat = 268
 
-    /// 最近建立的 5 条。
-    private var recentRows: [ConnectionRow] { ConnectionRow.recent(state.connections, limit: 5) }
     /// 发起方的设备名。判定逻辑在 `ConnectionRow.deviceLabel` —— 状态页两张卡共用一份。
     private func deviceName(for row: ConnectionRow) -> String {
         ConnectionRow.deviceLabel(for: row, proxied: state.proxiedDeviceLabels)
@@ -50,20 +48,16 @@ struct StatusPage: View {
                     //   `speedText(up)`（带 `/s`）。原来写的是 `Formatting.bytes(...)`，
                     //   于是把「1.2 MB/s」显示成了「1.2 MB」—— 一个把速率读成总量的错。
                     TrafficCard(glyph: "\u{F24A}", title: "上传".t, // upload-2-line
-                                value: state.upText,
                                 accent: theme.uploadAccent,
                                 lineColor: theme.uploadLine,
-                                samples: state.bandwidthSamples.map(\.up),
-                                tick: state.pollTick)
+                                isUp: true)
                     TrafficCard(glyph: "\u{EC54}", title: "下载".t, // download-2-line
-                                value: state.downText,
                                 accent: theme.downloadAccent,
                                 lineColor: theme.downloadLine,
-                                samples: state.bandwidthSamples.map(\.down),
-                                tick: state.pollTick)
+                                isUp: false)
                 }
                 HStack(alignment: .top, spacing: 10) {
-                    ConnectionsCard(recent: recentRows,
+                    ConnectionsCard(
                                     onOpenAll: { openWindow(id: ConnectionsWindowID.value) },
                                     onClearAll: { state.closeAllConnections() },
                                     deviceName: deviceName(for:))

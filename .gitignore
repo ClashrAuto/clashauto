@@ -1,10 +1,9 @@
-clashauto-c++/build-ninja/
+# 构建目录一律走通配。以前是 build-ninja/build-qml/build-release/build-mac 四条硬编码，
+# 于是随手开的 build-local/ 不在列表里 —— 一次 `git add -A` 差点把三千多个构建产物提交上去。
+# 仓库里没有任何被跟踪的 build-* 路径，通配是安全的。
+build-*/
 screenshots/
 *.png
-clashauto-c++/build-qml/
-clashauto-c++/build-release/
-# 本机 macOS 上用 Homebrew Qt 编 Qt 版时的构建目录（这条产品线要在 mac 上验证）
-clashauto-c++/build-mac/
 schat.build/
 clashauto-c++/tools/
 .DS_Store

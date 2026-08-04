@@ -147,7 +147,6 @@
   "未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1": "mihomo çekirdeği algılanmadı — Ayarlar → Sistem'den indirin: %1",
   "找不到 Clash 配置: %1": "Clash yapılandırması bulunamadı: %1",
   "Country.mmdb 已就位: %1": "Country.mmdb hazır: %1",
-  "wintun.dll 已部署: %1": "wintun.dll dağıtıldı: %1",
   "核心已由特权 helper 以 root 启动（支持 TUN）": "Çekirdek ayrıcalıklı helper aracılığıyla root olarak başlatıldı (TUN destekleniyor)",
   "经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效": "Çekirdek ayrıcalıklı helper aracılığıyla root olarak başlatılamadı: %1; root olmayan başlatmaya geri dönülüyor, TUN çalışmayacak",
   "启动 Clash 核心失败: %1": "Clash çekirdeği başlatılamadı: %1",
@@ -463,5 +462,8 @@
   "结束下载": "İndirmeyi durdur",
   "退出 Coast？": "Coast kapatılsın mı?",
   "退出后会停掉内核并还原系统代理，走代理的连接会断开。": "Çıkışta çekirdek durdurulur ve sistem proxy'si geri alınır; proxy üzerinden giden bağlantılar kesilir.",
-  "退出": "Çık"
+  "退出": "Çık",
+  "订阅启停失败，配置未能写入": "Abonelik açılıp kapatılamadı — ayarlar kaydedilmedi",
+  "节点启停失败，配置未能写入": "Düğüm açılıp kapatılamadı — ayarlar kaydedilmedi",
+  "批量启停失败，配置未能写入": "Toplu açma/kapatma başarısız — ayarlar kaydedilmedi"
 }

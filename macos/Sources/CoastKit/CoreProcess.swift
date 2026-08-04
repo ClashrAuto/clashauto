@@ -141,6 +141,11 @@ public final class CoreProcess {
         seedGeoIP()
         refreshGeoIP()
 
+        // ★ 先收掉上一世遗留的孤儿核心 —— 必须在**两条启动路径之前**
+        //   （helper root 那条会提前 return，放在 launchPlain 里 macOS 上就永远走不到，
+        //    Qt 线正是这么踩过的）。
+        reapOrphanCores(executable: exe)
+
         // 有 helper 就以 root 起（TUN/增强才能建 utun、改路由）。失败**不静默回退** ——
         // 把原因讲清楚再降级，否则「装了 helper、开了增强、核心却不是 root」无从排查。
         if let launcher = privilegedLauncher, await launcher.isEnabled {
@@ -160,6 +165,63 @@ public final class CoreProcess {
         }
 
         return launchPlain(executable: exe, config: fullConfigPath)
+    }
+
+
+    /// 收掉上一次会话遗留的孤儿核心。
+    ///
+    /// app 被 SIGKILL（崩溃、强杀、OOM）时来不及停核心，核心作为子进程被 init 收养、
+    /// **继续活着**。下次启动时新核心绑不上端口 —— mihomo 绑不上时**并不退出**，
+    /// 只记一条 "address already in use" 然后照常运行，于是"进程在跑但一个端口都没监听"，
+    /// 表现为代理完全不通且毫无提示。而且每崩一次就多留一批：
+    /// 本机实测开会话时清出过 **9 个**孤儿（ppid 全是 1、共占 326 MB、0 个网络 fd）。
+    ///
+    /// 判据从严，宁可漏杀不可误杀：只收
+    ///   ① 命令行里出现我们这份核心可执行文件的**绝对路径**，且
+    ///   ② **ppid == 1**（已被 init 收养 = 父进程确实没了 = 是孤儿）
+    /// 的进程。还有活父进程的实例（用户手动跑的、另一个正常实例）ppid 不是 1，不会被碰。
+    /// 与 Qt 线的 `CoreController::reapOrphanCore()` 同一设计。
+    /// 供**启动早期**调用的入口：自己解析核心路径，不需要调用方先算好。
+    ///
+    /// ★ 为什么要在 `CoreProcess.start()` 之外再暴露一个入口：
+    ///   `CoastController.clearStaleSystemProxy()` 的判据之一是「我们的 mixedPort
+    ///   **无人监听**」，而上一世遗留的孤儿核心**正占着那个端口**。
+    ///   若先清代理、后收孤儿，清代理那步会因为"有人在听"直接跳过 ——
+    ///   两项自愈单独都对，**凑在一起就互相抵消**。真机实测过这个组合场景：
+    ///   2 个孤儿占着 7890/9191，此时残留的系统代理擦不掉。
+    ///   所以启动序列必须是 **先收孤儿、再清代理**。
+    public func reapOrphansAtStartup() {
+        let exe = AppPaths.coreExecutable
+        guard FileManager.default.fileExists(atPath: exe.path) else { return }
+        reapOrphanCores(executable: exe)
+    }
+
+    private func reapOrphanCores(executable: URL) {
+        let exePath = executable.resolvingSymlinksInPath().path
+        guard !exePath.isEmpty else { return }
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-axo", "pid=,ppid=,command="]
+        let pipe = Pipe()
+        ps.standardOutput = pipe
+        do { try ps.run() } catch { return }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        ps.waitUntilExit()
+        guard let out = String(data: data, encoding: .utf8) else { return }
+        var reaped = 0
+        for line in out.split(separator: "\n") {
+            guard line.contains(exePath) else { continue }
+            let f = line.split(separator: " ", omittingEmptySubsequences: true)
+            guard f.count >= 3, let cpid = Int32(f[0]), let cppid = Int32(f[1]) else { continue }
+            guard cppid == 1 else { continue }              // 还有活父进程 → 不是孤儿
+            guard cpid != ProcessInfo.processInfo.processIdentifier else { continue }  // 自保
+            kill(cpid, SIGKILL)
+            reaped += 1
+        }
+        if reaped > 0 {
+            log("已收掉 \(reaped) 个上次异常退出遗留的内核进程")
+            Thread.sleep(forTimeInterval: 1.0)   // 等它们真的消失，否则新核心照样绑不上端口
+        }
     }
 
     private func launchPlain(executable: URL, config configPath: URL) -> Result<Void, StartFailure> {

@@ -131,7 +131,7 @@ public enum AppConfigLoader {
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let updated = YAMLText.setNestedValue(existing, section: section, key: key, value: value)
         AppPaths.makeWritable(url)
-        try? updated.write(to: url, atomically: true, encoding: .utf8)
+        writeConfig(updated, to: url)
     }
 
     public static func persist(section: String, key: String, bool value: Bool) {
@@ -143,7 +143,23 @@ public enum AppConfigLoader {
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
         let updated = YAMLText.setValue(existing, key: key, value: value)
         AppPaths.makeWritable(url)
-        try? updated.write(to: url, atomically: true, encoding: .utf8)
+        writeConfig(updated, to: url)
+    }
+
+    /// 落盘并**在失败时喊一声**。
+    ///
+    /// ★ 原来这两处都是 `try? updated.write(…)` —— 异常直接丢掉：用户点了开关、
+    ///   界面也翻过去了，设置却一个字都没落盘，重启回到旧值，全程没有任何提示。
+    ///   实测把 `config/` 目录 chmod 555 就能复现（文件本身只读反而写得进去 ——
+    ///   `atomically: true` 是写临时文件再改名，只看目录权限；顺带会把
+    ///   444 的文件换成 644）。见 PLAN 2026-08-15（六）。
+    private static func writeConfig(_ text: String, to url: URL) {
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            FileHandle.standardError.write(
+                Data("[config] 设置保存失败 \(url.path): \(error.localizedDescription)\n".utf8))
+        }
     }
 
     /// 32 位十六进制。用 `SystemRandomNumberGenerator`（底层 arc4random）而不是 `Int.random`

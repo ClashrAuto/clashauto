@@ -144,7 +144,12 @@ bool SubscriptionsController::remove(int index)
 bool SubscriptionsController::setEnabled(int index, bool enabled)
 {
     if (!m_store || !m_store->setSubscriptionEnabled(index, enabled))
+    {
+        // 写 subscribe.yaml 失败时必须出声：原来直接 return false,而 QML 三处调用
+        // 全都把返回值丢掉了 —— 用户拨了开关、界面弹回原状、没有任何解释,只会反复点。
+        emit logMessage(tr("订阅启停失败，配置未能写入"));
         return false;
+    }
     reload();
     triggerRebuild();
     return true;
@@ -195,7 +200,12 @@ QVariantList SubscriptionsController::nodesOf(int index)
 bool SubscriptionsController::setNodeEnabled(int index, int nodeIndex, bool enabled)
 {
     if (!m_store || !m_store->setNodeEnabled(index, nodeIndex, enabled))
+    {
+        // 写 subscribe.yaml 失败时必须出声：原来直接 return false,而 QML 三处调用
+        // 全都把返回值丢掉了 —— 用户拨了开关、界面弹回原状、没有任何解释,只会反复点。
+        emit logMessage(tr("节点启停失败，配置未能写入"));
         return false;
+    }
     reload();
     triggerRebuild();
     return true;
@@ -204,7 +214,12 @@ bool SubscriptionsController::setNodeEnabled(int index, int nodeIndex, bool enab
 bool SubscriptionsController::setAllNodesEnabled(int index, bool enabled)
 {
     if (!m_store || !m_store->setAllNodesEnabled(index, enabled))
+    {
+        // 写 subscribe.yaml 失败时必须出声：原来直接 return false,而 QML 三处调用
+        // 全都把返回值丢掉了 —— 用户拨了开关、界面弹回原状、没有任何解释,只会反复点。
+        emit logMessage(tr("批量启停失败，配置未能写入"));
         return false;
+    }
     reload();
     triggerRebuild();
     return true;
