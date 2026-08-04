@@ -188,6 +188,32 @@ Item {
             }
         }
 
+        // 订阅操作的反馈行（「正在更新…」「启停失败」等）。
+        //
+        // ★ `SubscriptionsController::logMessage` 这个信号一直存在，注释也写着
+        //   「供页面显示反馈」—— 但**没有任何 QML 接过它**，于是这条线上的订阅页
+        //   连正常反馈都不显示，启停失败更是一声不吭（Swift 端同一处一直有 `message` 行）。
+        //   接上它，顺带让失败也有话说。
+        Text {
+            id: subsNotice
+            Layout.fillWidth: true
+            Layout.leftMargin: 10
+            Layout.rightMargin: 10
+            Layout.topMargin: 6
+            visible: text.length > 0
+            text: ""
+            font.pixelSize: 11
+            color: Theme.textMuted
+            elide: Text.ElideRight
+            maximumLineCount: 2
+            wrapMode: Text.WordWrap
+        }
+
+        Connections {
+            target: subs
+            function onLogMessage(line) { subsNotice.text = line; }
+        }
+
         // —————————— 订阅卡列表：列表全宽（滚动条贴页面右缘），项自身左右内缩 10，末项距底 10 ——————————
         ListView {
             id: cardList

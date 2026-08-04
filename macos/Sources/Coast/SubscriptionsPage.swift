@@ -162,7 +162,11 @@ struct SubscriptionsPage: View {
 
             HStack(spacing: 4) {
                 CircleBtn(symbol: "checkmark", help: "启用/停用".t, on: summary.use) {
-                    _ = state.subscriptions.setSubscriptionEnabled(at: index, !summary.use)
+                    // 失败要出声:下面的 reload() 会把开关弹回原状,不解释一句的话
+                    // 用户只会以为没点到、反复点(Qt 端同一处也是这么漏的)。
+                    if !state.subscriptions.setSubscriptionEnabled(at: index, !summary.use) {
+                        message = "订阅启停失败，配置未能写入".t
+                    }
                     reload()
                     Task { await state.controller.rebuildConfig() }
                 }
@@ -493,6 +497,9 @@ private struct SubscriptionNodesSheet: View {
 
     let index: Int
     @State private var nodes: [SubscriptionNodeSummary] = []
+    /// 启停失败时的一行说明。没有它的话失败只表现为「开关弹回原状」，
+    /// 用户会以为没点到、反复点（页面主体那一层早就有同名的 `message`，这一层漏了）。
+    @State private var message = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -503,6 +510,12 @@ private struct SubscriptionNodesSheet: View {
                 Spacer(minLength: 0)
             }
             .padding(.top, 12)
+
+            if !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 11)).foregroundStyle(theme.textMuted)
+                    .lineLimit(2)
+            }
 
             if nodes.isEmpty {
                 Text("暂无节点，请先点击「更新」".t)
@@ -550,8 +563,10 @@ private struct SubscriptionNodesSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             ToggleNodeButton(title: node.use ? "停用".t : "使用".t) {
-                _ = state.subscriptions.setNodeEnabled(subscription: index,
-                                                       node: position, !node.use)
+                if !state.subscriptions.setNodeEnabled(subscription: index,
+                                                       node: position, !node.use) {
+                    message = "节点启停失败，配置未能写入".t
+                }
                 reload()
                 Task { await state.controller.rebuildConfig() }
             }
@@ -566,7 +581,9 @@ private struct SubscriptionNodesSheet: View {
     private func reload() { nodes = state.subscriptions.nodes(at: index) }
 
     private func setAll(_ enabled: Bool) {
-        _ = state.subscriptions.setAllNodesEnabled(subscription: index, enabled)
+        if !state.subscriptions.setAllNodesEnabled(subscription: index, enabled) {
+            message = "批量启停失败，配置未能写入".t
+        }
         reload()
         Task { await state.controller.rebuildConfig() }
     }
