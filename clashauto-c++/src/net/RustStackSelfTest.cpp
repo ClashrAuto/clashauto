@@ -476,6 +476,22 @@ int runSmolGatewaySelfTest()
         return 3;
     }
 
+    // ★ **第二个实例必须也能建起来。** lwIP 时代这里会被判重拒掉（lwip_init 全局、
+    //   整个进程只有一份栈），真实后果是用户在网关开着时点「增强」永远打不开，报
+    //   「已有一个网关协议栈实例在运行」。smoltcp 每实例独立，那条约束已随 lwIP 删除 ——
+    //   这条断言就是它的护栏：谁要是把单例判重加回来，这里立刻红。
+    {
+        NetStack second(kSocksPort + 1);
+        QString err2;
+        if (!second.init(&err2)) {
+            std::fprintf(stderr,
+                         "[smolgw] FAIL: 第二个 NetStack 建不起来（%s）—— 单例约束回来了，"
+                         "网关开着时「增强」会打不开\n",
+                         err2.toLatin1().constData());
+            return 4;
+        }
+    }
+
     FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
     if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
                     QStringLiteral("255.255.255.0"), &err)) {

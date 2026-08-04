@@ -192,7 +192,7 @@ constexpr int kHousekeepEveryTicks = 8;
 // ★ 换栈顺带补上了一件 lwIP 做不到的事：**真正的重传计数**。lwIP 的 struct stats_proto
 //   根本没有这个字段（tcp_out.c 那三个重传入口一个计数都不加），当年只能拿 xmit 总数
 //   当近似；现在 retransmits 是引擎自己数的实数。
-QString smolStatsLine();
+QString smolStatsLine(NetStack::Impl *d);
 
 // 容量兜底：句柄和 mihomo 侧的关联数都是有限资源。BT/DHT 这类应用通常共用一个源端口广撒（对本
 // 方案友好），但「源端口也乱换」的极端情况必须挡住，不能让一台设备把整个进程的 fd 吃光。
@@ -429,14 +429,12 @@ void destroyUdpSess(NetStack::Impl *d, UdpSess *s)
 // ———————————————————————————— 前置：C 回调 ————————————————————————————
 namespace {
 
-// 「栈」是单例：g_impl 给与网卡无关的全局上下文取用（设备表、socks 端口、smol 句柄）。
-// 与网卡相关的东西（二层端点、本机 MAC）一律按 nic id 从 nicById 反查，不走这里——多网卡的关键。
+// 线程前提：数据面只跑在一个线程上。全进程可以有多个 NetStack 实例（网关一个、进程内 TUN
+// 一个……），但**每个实例都必须由单一线程拥有并调用** —— coaststack.h 的单线程契约是按实例的。
+// 在 App 里那个线程是 LanGateway 的工作线程，自测里是主线程，二者从不并存。
 //
-// 线程前提：g_impl 是进程级全局，只在「数据面只跑在一个线程」这个前提下成立。这个前提仍然
-// 成立——全进程只有一个 NetStack 实例（init() 里用 g_impl 判重），而它始终被单一线程拥有
-// （App 里是 LanGateway 的工作线程，自测里是主线程，二者从不并存）。coaststack 自身也要求
-// 单线程（coaststack.h「线程模型」一节），两边前提一致。
-NetStack::Impl *g_impl = nullptr;
+// ★ 这里曾经有一个进程级的 g_impl 单例。它是 lwIP 的遗产（lwip_init 全局、ARP 表全局、
+//   PCB 链全局），随 lwIP 一起删掉了 —— 顺带消掉了「网关占着栈时点『增强』被拒」那个真实故障。
 bool g_debug = false;             // COAST_GATEWAY_DEBUG=1 时打诊断日志（自测/联调用）
 
 // ———————————— 归因用的分级短路（COAST_GW_BENCH_STAGE）————————————
@@ -523,19 +521,19 @@ constexpr int kToLwipLowWater = 16 * 1024;
 //     等的就是下一拍，**最坏间隔才决定性**。瞬时量，读完清零（引擎侧清）。
 // ★ rexmit 是 lwIP 从来给不出的（struct stats_proto 根本没有重传字段，tcp_out.c 那三个
 //   重传入口一个计数都不加），当年只能拿 xmit 总数当近似 —— 换栈顺手补上了真数。
-QString smolStatsLine()
+QString smolStatsLine(NetStack::Impl *d)
 {
-    if (!g_impl || !g_impl->smol)
+    if (!d || !d->smol)
         return QString();
     CoastStats s {};
-    coast_stack_stats(g_impl->smol, &s);
+    coast_stack_stats(d->smol, &s);
 
     // 累计量报**窗口增量**（与 GatewayDiag 其余字段一致），瞬时量原样报。
     static CoastStats prev {};
     // polls= 是「提频到底生效没有」的唯一证据：只挂定时器时它恒等于窗口内的拍数
     // （10s 窗口 = 400）；接上 schedulePoll 之后应随流量显著高于它。
-    const quint64 polls = g_impl->pollCount;
-    g_impl->pollCount = 0;
+    const quint64 polls = d->pollCount;
+    d->pollCount = 0;
     QString out = QStringLiteral("polls=%8 stackRx=%1 stackTx=%2 stackDrop=%3 rexmit=%4 refuse=%5"
                                  " conns=%6 pollGapMax=%7ms rxOvf=%9")
                       .arg(s.rx_frames - prev.rx_frames)
@@ -1031,7 +1029,7 @@ NetStack::~NetStack()
     // 注意：进程被直接杀掉时（见 main_qml.cpp 里关于 aboutToQuit 跑不到的说明）这里不会执行，
     // 最多丢最后一个未满 10s 的窗口 —— 可以接受，不为它加复杂度。
     if (d->inited)
-        GatewayDiag::flush(smolStatsLine(), "stop");
+        GatewayDiag::flush(smolStatsLine(d), "stop");
 
     for (UdpSess *s : std::as_const(d->udp))
         destroyUdpSess(d, s);
@@ -1052,8 +1050,6 @@ NetStack::~NetStack()
     }
     for (Nic *n : d->nics)
         delete n;
-    if (g_impl == d)
-        g_impl = nullptr;
     if (d->outFactory && d->outFactory != d->ownedDefault)
         delete d->outFactory;
     delete d->ownedDefault;
@@ -1096,12 +1092,14 @@ bool NetStack::init(QString *err)
 {
     if (d->inited)
         return true;
-    if (g_impl && g_impl != d) {
-        if (err)
-            *err = QStringLiteral("已有一个网关协议栈实例在运行");
-        return false;
-    }
-    g_impl = d;
+    // ★ 这里曾经有一条「全进程只能有一个 NetStack」的判重。**随 lwIP 一起作废了。**
+    //   当年它不是防御性代码而是硬约束：lwip_init() 是全局的，NO_SYS 下整个进程只有一份
+    //   协议栈、ARP 表与 PCB 链，两个 NetStack 从构造上不可能共存。
+    //   代价是真实用户故障：局域网网关占着栈时点「增强」（进程内 TUN）必然被拒
+    //   —— 报的就是那句"已有一个网关协议栈实例在运行"。
+    //   smoltcp 每个实例自带独立的 Interface/SocketSet（coast_stack_new），没有任何全局状态，
+    //   所以这条约束**不再需要**。诊断行也已改成按实例取（smolStatsLine(d)），不再走全局。
+    //   ⇒ 换栈顺带把那个故障的根因消掉了。
     g_debug = qEnvironmentVariableIsSet("COAST_GATEWAY_DEBUG");
 
 
@@ -1118,7 +1116,6 @@ bool NetStack::init(QString *err)
     cb.conn_closed = smolConnClosed;
     d->smol = coast_stack_new(&cb, d);
     if (!d->smol) {
-        g_impl = nullptr;
         if (err)
             *err = QStringLiteral("coaststack 初始化失败");
         return false;
@@ -1202,7 +1199,7 @@ bool NetStack::init(QString *err)
             const qint64 now = QDateTime::currentMSecsSinceEpoch();
             if (now - d->lastDiagMs >= GatewayDiag::sampleIntervalMs()) {
                 d->lastDiagMs = now;
-                GatewayDiag::sample(smolStatsLine());
+                GatewayDiag::sample(smolStatsLine(d));
             }
         }
     });
