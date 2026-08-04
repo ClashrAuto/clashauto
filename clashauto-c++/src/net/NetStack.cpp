@@ -277,6 +277,11 @@ struct NetStack::Impl {
     QHash<quint32, Nic *> nicById;             // 反查（出帧回调要据 nic id 找端点）
     quint32 nextNicId = 1;
     QElapsedTimer smolClock;                   // 给 coast_stack_poll 的单调毫秒
+    // ———— 合并式 poll（见 schedulePoll）————
+    // pollScheduled：本轮事件循环已经排过一次 poll，别重复排。
+    // pollCount：诊断用，进 smolStatsLine 的 polls= 一栏 —— 它是"提频到底生效没有"的唯一证据。
+    bool pollScheduled = false;
+    quint64 pollCount = 0;
     QTimer *timer = nullptr;
     int pumpTick = 0;        // 泵的拍数计数器，给「老化 + 池诊断」分频用（见 init() 里的说明）
     QElapsedTimer pumpClock; // 量每一拍的真实间隔 → 迟到量 = 工作线程饱和度
@@ -483,7 +488,11 @@ QString smolStatsLine()
 
     // 累计量报**窗口增量**（与 GatewayDiag 其余字段一致），瞬时量原样报。
     static CoastStats prev {};
-    QString out = QStringLiteral("stackRx=%1 stackTx=%2 stackDrop=%3 rexmit=%4 refuse=%5"
+    // polls= 是「提频到底生效没有」的唯一证据：只挂定时器时它恒等于窗口内的拍数
+    // （10s 窗口 = 400）；接上 schedulePoll 之后应随流量显著高于它。
+    const quint64 polls = g_impl->pollCount;
+    g_impl->pollCount = 0;
+    QString out = QStringLiteral("polls=%8 stackRx=%1 stackTx=%2 stackDrop=%3 rexmit=%4 refuse=%5"
                                  " conns=%6 pollGapMax=%7ms")
                       .arg(s.rx_frames - prev.rx_frames)
                       .arg(s.tx_frames - prev.tx_frames)
@@ -491,7 +500,8 @@ QString smolStatsLine()
                       .arg(s.retransmits - prev.retransmits)
                       .arg(s.conns_refused - prev.conns_refused)
                       .arg(s.conns_active)
-                      .arg(s.poll_max_gap_ms);
+                      .arg(s.poll_max_gap_ms)
+                      .arg(polls);
     prev = s;
     return out;
 }
@@ -646,6 +656,49 @@ namespace {
 
 void smolDestroyConn(SmolConn *c, bool abortIt);
 
+// ———————————————————— 推进协议栈 + 收口出帧 ————————————————————
+void pollStack(NetStack::Impl *d)
+{
+    if (!d || !d->smol)
+        return;
+    ++d->pollCount;
+    coast_stack_poll(d->smol, static_cast<quint64>(d->smolClock.elapsed()));
+    flushNicTx(d);
+}
+
+// 排一次「本轮事件循环结束时」的 poll。
+//
+// ★ 这是整条数据面上最要紧的一处。coast_stack_input() / coast_conn_send() / coast_conn_recved()
+//   **都只动缓冲、不推进协议栈** —— 真正解析、生成 ACK、吐出帧的只有 coast_stack_poll()。
+//   而它原来只挂在 25 ms 的定时器上，于是整条数据面被量化到 40 Hz：
+//     · 每个 RTT 平白多 ~25 ms（TLS 握手要过好几个来回）
+//     · 单连接吞吐 = 窗口 ÷ 25 ms ≈ **21 Mb/s**，上下行都是（实测三种模型收敛，
+//       见 docs/gateway-bottleneck-audit.md）
+//   这不是 lwIP 时代就有的毛病：lwIP 的 netif->input() 是**同步**的，喂一帧当场走完
+//   ip_input → tcp_input → 回调，没有任何量化。换栈时把同步模型换成 poll 模型，
+//   却把 poll 留在了定时器上 —— 这是换栈引入的回归。
+//
+// 为什么不在 inputFrame 里直接 poll：一次 poll 要遍历全部连接（pump_conns/drain_tx），
+// 逐帧调在 65k pps 下就是每秒几万次全表扫描。排一个 queued 调用，可以把**本轮事件循环里
+// 到达的所有帧、所有 socket 回调**合并成一次 poll —— 既拿到亚毫秒延迟，又保持每轮一次的成本。
+//
+// 生命周期：queued 调用投给 d->owner（NetStack 本身）。QObject 析构时 Qt 会把投给它的
+// 未决事件一并移除；而 ~NetStack 里 `delete d` 与 ~QObject 之间不会回事件循环，
+// 所以不存在「d 已删但回调还在路上」的窗口。
+void schedulePoll(NetStack::Impl *d)
+{
+    if (!d || !d->smol || d->pollScheduled)
+        return;
+    d->pollScheduled = true;
+    QMetaObject::invokeMethod(
+        d->owner,
+        [d] {
+            d->pollScheduled = false;
+            pollStack(d);
+        },
+        Qt::QueuedConnection);
+}
+
 // 上行背压：与 lwIP 侧同一套高低水位迟滞（kUpQueueHighWater/kUpQueueLowWater），
 // 保证换栈前后设备侧观感一致。
 void smolFlushRecvWindow(SmolConn *c)
@@ -666,6 +719,9 @@ void smolFlushRecvWindow(SmolConn *c)
     const quint32 give = c->pendingRecved;
     c->pendingRecved = 0;
     coast_conn_recved(c->impl->smol, c->id, give);
+    // 还窗口只是改了缓冲状态；**窗口更新 ACK 要等 poll 才发得出去**，
+    // 而它正是设备上行能不能继续发的唯一许可 —— 不排这一次就要等定时器那一拍。
+    schedulePoll(c->impl);
 }
 
 // 下行：把 socks 来的字节写进栈（受发送缓冲余量限流），并按水位暂停/恢复读取。
@@ -674,6 +730,7 @@ bool smolPumpToStack(SmolConn *c)
 {
     if (!c || !c->impl || !c->impl->smol)
         return false;
+    bool wroteAny = false;
     while (!c->toStack.isEmpty()) {
         const int room = coast_conn_sndbuf(c->impl->smol, c->id);
         if (room < 0) {
@@ -694,7 +751,12 @@ bool smolPumpToStack(SmolConn *c)
         if (wrote == 0)
             break;
         c->toStack.remove(0, wrote);
+        wroteAny = true;
     }
+    // coast_conn_send 只是把字节塞进发送缓冲，**成帧要等 poll**。
+    // 不排这一次，下行数据最多躺 25 ms 才上线。
+    if (wroteAny)
+        schedulePoll(c->impl);
 
     // 下行水位：顶到高水位让 socks 停读，回落到低水位再放开（与 lwIP 侧同参数）
     if (c->socks) {
@@ -1000,15 +1062,12 @@ bool NetStack::init(QString *err)
             }
         }
 
-        // 栈的定时器（重传/延迟 ACK/TIME_WAIT 回收）。回调在这里同步发出：
-        // 出帧 → ep->send()，随后由下面那次 flushNicTx 统一收口。
-        if (d->smol)
-            coast_stack_poll(d->smol, static_cast<quint64>(d->smolClock.elapsed()));
-        // ★ flushTx 的第三个调用点，同时是**兜底**：重传、延迟 ACK、ARP/NDP 周期投毒这些帧
-        //   既不在收帧排空里、也不在 smolPumpToStack 里，只有这里能收口。它也保证了「任何漏掉
-        //   flush 的出帧路径最迟 25 ms 也会被发出去」——加新的出帧路径时这条兜底是安全网，
-        //   但别拿它当主路（25 ms 的延迟对 TCP 自时钟是致命的）。
-        flushNicTx(d);
+        // ★ 这里是**定时器兜底**，不再是主路。
+        //   主路是 schedulePoll()：喂帧 / 写下行 / 还窗口都会排一次「本轮事件循环末尾」的
+        //   poll，延迟亚毫秒。本拍只负责**没有外部事件驱动**的活：重传、延迟 ACK、
+        //   TIME_WAIT 回收、ARP/NDP 周期投毒 —— 它们只能靠时间推进。
+        //   同时它是安全网：任何漏排 schedulePoll 的新路径，最迟 25 ms 也会被这里收掉。
+        pollStack(d);
         if (++d->pumpTick >= kHousekeepEveryTicks) {
             d->pumpTick = 0;
             reapUdpFlows(d);
@@ -1254,9 +1313,13 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
 
     // 到这里必定是 v4 或 v6 的 TCP 帧 —— 交给栈。
     const quint32 nid = d->nicIds.value(from, 0);
-    if (nid)
+    if (nid) {
         coast_stack_input(d->smol, nid, reinterpret_cast<const uint8_t *>(frame.constData()),
                           static_cast<size_t>(frame.size()));
+        // ★ 喂帧只是**入队**，解析与回 ACK 都要等 poll。排一次「本轮事件循环末尾」的 poll，
+        //   把这一批帧合并成一次处理 —— 延迟从最坏 25 ms 降到亚毫秒，成本仍是每轮一次。
+        schedulePoll(d);
+    }
 }
 
 // ———————————————————————————— UDP 拦截 ————————————————————————————

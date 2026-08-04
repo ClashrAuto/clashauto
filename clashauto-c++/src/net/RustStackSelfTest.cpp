@@ -242,6 +242,7 @@ int runRustStackSelfTest()
 #include "IL2Endpoint.h"
 #include "NetStack.h"
 
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -263,6 +264,11 @@ public:
         if (f.size() >= 54 && quint8(f[12]) == 0x08 && quint8(f[13]) == 0x00
             && quint8(f[23]) == 6 && (quint8(f[47]) & 0x12) == 0x12) {
             ++synAck;
+            // ★ 记下第一条 SYN-ACK 的到达时刻。这是「poll 提频到底生效没有」的唯一判据：
+            //   poll 只挂 25ms 定时器时它必须等下一拍（0~25ms，均值约 12ms）；
+            //   接上 schedulePoll 之后应在**本轮事件循环末尾**就发出，亚毫秒级。
+            if (clock && synAckUs < 0)
+                synAckUs = clock->nsecsElapsed() / 1000;
             synAckSport = quint16((quint8(f[34]) << 8) | quint8(f[35]));
             synAckSeq = (quint32(quint8(f[38])) << 24) | (quint32(quint8(f[39])) << 16)
                 | (quint32(quint8(f[40])) << 8) | quint32(quint8(f[41]));
@@ -275,6 +281,8 @@ public:
 
     int sent = 0;
     int synAck = 0;
+    QElapsedTimer *clock = nullptr; // 由自测在喂 SYN 前挂上
+    qint64 synAckUs = -1;           // 喂 SYN → 吐 SYN-ACK 的微秒数
     quint16 synAckSport = 0;
     quint32 synAckSeq = 0;
 
@@ -402,6 +410,9 @@ int runSmolGatewaySelfTest()
     //     那等于 SYN 洪水每个 SYN 都拨一条上游。已修，见 engine.rs 的 pending 一段。）
     uint8_t f[54];
     buildTcp(f, 51000, 443, 0x02 /*SYN*/, 1000, 0);
+    QElapsedTimer synClock;
+    synClock.start();
+    ep.clock = &synClock;
     net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), sizeof(f)));
 
     // 等 SYN-ACK（lwIP 侧要等泵跑一拍）
@@ -423,6 +434,19 @@ int runSmolGatewaySelfTest()
         std::fprintf(stderr, "[smolgw] FAIL: 没收到 SYN-ACK（出帧=%d）\n", ep.sent);
         return 1;
     }
+    // ★ 时延断言 —— **可证伪**：把 schedulePoll 全去掉（只留 25ms 定时器兜底）这里必然超阈值。
+    //   没有它，「poll 提频了」和「代码编过了」在绿灯里分不清。
+    //   阈值 5000us：定时器那条路最坏 25000us、均值约 12000us，留够 CI 抖动也不会误判。
+    constexpr qint64 kSynAckBudgetUs = 5000;
+    if (ep.synAckUs < 0 || ep.synAckUs > kSynAckBudgetUs) {
+        std::fprintf(stderr,
+                     "[smolgw] FAIL: SYN-ACK 用了 %lld us（预算 %lld us）—— "
+                     "说明它仍在等 25ms 定时器那一拍，schedulePoll 没生效\n",
+                     static_cast<long long>(ep.synAckUs),
+                     static_cast<long long>(kSynAckBudgetUs));
+        return 3;
+    }
+
     buildTcp(f, 51000, 443, 0x10 /*ACK*/, 1001, ep.synAckSeq + 1);
     net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), sizeof(f)));
 
@@ -467,6 +491,9 @@ int runSmolGatewaySelfTest()
                  "SOCKS CONNECT(user=%s, dport=%u)\n",
                  net.activeTcpStack(), ep.synAckSport, socks.user.toLatin1().constData(),
                  socks.dport);
+    std::fprintf(stderr, "[smolgw]   SYN-ACK 时延 %lld us（预算 %lld us）\n",
+                 static_cast<long long>(ep.synAckUs),
+                 static_cast<long long>(kSynAckBudgetUs));
     return 0;
 }
 
