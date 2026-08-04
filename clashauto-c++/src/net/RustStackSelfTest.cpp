@@ -240,6 +240,7 @@ int runRustStackSelfTest()
 //   devices 表、**不走** TCP 那条 userForIp 管线 —— 于是「每设备身份」这条断言曾在
 //   TCP 路径彻底断掉的情况下照样 PASS。这里只喂 TCP 帧、且显式判 cmd，双保险。
 #include "IL2Endpoint.h"
+#include "GatewayDiag.h"
 #include "NetStack.h"
 
 #ifdef Q_OS_WIN
@@ -872,14 +873,14 @@ int runGatewayThroughputBench()
     const double cpu0 = cpuSeconds();
     int stalls = 0;
 
-    // ★ STAGE>=2 时没有任何东西在消费，窗口反馈不存在 —— 改成灌固定帧数，
+    // ★ STAGE>=3 时没有任何东西在消费，窗口反馈不存在 —— 改成灌固定帧数，
     //   判据从"送达多少"换成"喂了多少"。两种模式量的都是 CPU，可直接相减做归因。
     const int stage = qEnvironmentVariableIsSet("COAST_GW_BENCH_STAGE")
                           ? qEnvironmentVariableIntValue("COAST_GW_BENCH_STAGE")
                           : 0;
     qint64 fedBytes = 0;
-    if (stage >= 2) {
-        // 同理：STAGE>=2 每帧只有 1~2 us，按 target 只够跑 0.02 s = 一两个 tick。
+    if (stage >= 3) {
+        // 同理：STAGE>=3 每帧只有 1~2 us，按 target 只够跑 0.02 s = 一两个 tick。
         // 放大 20 倍，让总 CPU 落在几百毫秒量级才量得准。
         const qint64 nFrames = target * 20 / kPayload;
         for (qint64 i = 0; i < nFrames; ++i) {
@@ -932,6 +933,11 @@ int runGatewayThroughputBench()
                  "[gwbench] 载荷=%d 送达 %lld B / %.2fs → %.0f Mb/s；CPU %.2fs "
                  "(%.3f 核/Gbps, %.2f us/帧)\n", kPayload,
                  static_cast<long long>(accounted), secs, mbps, cpu, corePerGbps, usPerFrame);
+    std::fprintf(stderr,
+                 "[gwbench]   背压：上行节流 %lld 次，下行暂停 %lld 次"
+                 "（各级都应接近 0，否则流态不可比、归因不成立）\n",
+                 static_cast<long long>(GatewayDiag::c.upThrottleHits),
+                 static_cast<long long>(GatewayDiag::c.downPauseHits));
     std::fprintf(stderr,
                  "[gwbench]   STAGE=%d 扣掉夹具造帧 %.2f us/帧 → **净 %.2f us/帧 "
                  "(%.2f ns/字节), %.3f 核/Gbps**\n",

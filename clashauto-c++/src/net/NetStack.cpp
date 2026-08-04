@@ -419,10 +419,14 @@ bool g_debug = false;             // COAST_GATEWAY_DEBUG=1 时打诊断日志（
 //   但那 8 项每字节的活各占多少**没人量过**（见 docs/gateway-bottleneck-audit.md 第九节）。
 //   照直觉去改是本仓库反复栽过的错法，所以先做归因：逐级砍掉一段，看 CPU 掉多少。
 //     0 = 全路径（默认，生产）
-//     1 = conn_data 不写 SOCKS（砍掉 QByteArray + 写缓冲 + 回环 + 对端读）
-//     2 = 不 poll（再砍掉校验和验证 + 收环拷贝 + peek/to_vec + 事件派发）
-//     3 = 连 coast_stack_input 都不调（再砍掉 frame.to_vec + portmap 改写）
+//     1 = 构造 QByteArray 但**不写 socket**（只砍掉 写缓冲 + 内核回环 + 对端读）
+//     2 = 连 QByteArray 都不构造（再砍掉这一次分配+拷贝）
+//     3 = 不 poll（再砍掉校验和验证 + 收环拷贝 + peek/to_vec + 事件派发）
+//     4 = 连 coast_stack_input 都不调（再砍掉 frame.to_vec + portmap 改写）
 //   相邻两级之差 = 被砍掉那一段的成本。
+//
+//   ★ 1 与 2 必须分开：第一版把它们并成一级，于是"回环那一跳"里混进了一次
+//     QByteArray 分配+拷贝，占比会被高估。分开之后 0→1 才是干净的"进程边界"成本。
 int g_benchStage = 0;
 
 // 把所有网卡攒着的出帧一次性交给驱动（契约与理由见 IL2Endpoint::flushTx）。
@@ -673,7 +677,7 @@ void smolDestroyConn(SmolConn *c, bool abortIt);
 // ———————————————————— 推进协议栈 + 收口出帧 ————————————————————
 void pollStack(NetStack::Impl *d)
 {
-    if (!d || !d->smol || g_benchStage >= 2)
+    if (!d || !d->smol || g_benchStage >= 3)
         return;
     ++d->pollCount;
     coast_stack_poll(d->smol, static_cast<quint64>(d->smolClock.elapsed()));
@@ -910,8 +914,13 @@ void smolConnData(void *user, CoastConnId id, const uint8_t *data, size_t len)
     // ★ 先记账、后落地、最后才可能归还 —— 与 lwIP 侧同一顺序。
     //   记账必须在前：write() 可能同步走到 upstreamBytesWritten → flushRecvWindow。
     c->pendingRecved += static_cast<quint32>(len);
-    if (c->socks && g_benchStage < 1)
-        c->socks->write(QByteArray(reinterpret_cast<const char *>(data), static_cast<int>(len)));
+    if (c->socks && g_benchStage < 2) {
+        // STAGE=1：仍然付这次分配+拷贝，但不交给 socket ——
+        // 这样 0→1 之差才是纯粹的"跨进程边界"成本，不含 QByteArray 那一份。
+        QByteArray b(reinterpret_cast<const char *>(data), static_cast<int>(len));
+        if (g_benchStage < 1)
+            c->socks->write(b);
+    }
     smolFlushRecvWindow(c);
 }
 
@@ -1334,7 +1343,7 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
     }
 
     // 到这里必定是 v4 或 v6 的 TCP 帧 —— 交给栈。
-    if (g_benchStage >= 3)
+    if (g_benchStage >= 4)
         return; // 归因用：连喂帧都不做，量的是夹具自身的底噪
     const quint32 nid = d->nicIds.value(from, 0);
     if (nid) {
