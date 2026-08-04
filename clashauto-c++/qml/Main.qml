@@ -89,6 +89,22 @@ ApplicationWindow {
         onActivated: Qt.quit()
     }
 
+    // ⌘W 收窗口到托盘。**Qt 没有给这个 QML 窗口装 mac 的「Window → Close」菜单项**，
+    // 于是 ⌘W 在这条线上按下去什么也不发生 —— 而 macOS 上每个窗口都该响应 ⌘W，
+    // Swift 线（系统菜单里就有 Close / Close All）一直是对的。
+    //
+    // 走 `window.close()` 而不是直接 `window.hide()`：前者会经过上面的 `onClosing`，
+    // 与点 ✕ 完全同一条路（托盘不可用时真退出，可用时收进托盘）。绕过它就会出现
+    // 「✕ 收托盘、⌘W 却把没有托盘的 Linux 用户永久藏掉」这种两条路不一致的坑。
+    //
+    // 这个缺口还坑过测试脚手架本身：用 ⌘W 当「收到托盘」的动作量了两轮托盘态 CPU，
+    // 窗口其实一直开着，量出来的全是窗口开着的数（见 PLAN 2026-08-04（十一））。
+    Shortcut {
+        enabled: isMac
+        sequences: [StandardKey.Close]
+        onActivated: window.close()
+    }
+
     // ⌘1..⌘7（Win/Linux 上是 Ctrl+1..7）切页 —— 与侧栏顺序、StackLayout 索引 1:1 对齐。
     // 原来**一个切页快捷键都没有**，只能鼠标点侧栏；macOS 上这属于基本预期
     // （Finder/Xcode/浏览器都有），Win/Linux 同理。Swift 线已补 ⌘1..⌘7，这里对齐。
