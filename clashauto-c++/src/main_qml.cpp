@@ -157,6 +157,11 @@ int main(int argc, char *argv[])
     // NetStack 级：整条 smoltcp 路径（要建 NetStack + 假 SOCKS，仍不碰真网卡/不需要 root）
     if (qEnvironmentVariableIsSet("COAST_SMOLGW_SELFTEST"))
         return runSmolGatewaySelfTest();
+    // 软件路径吞吐基准（去掉网卡，量纯软件成本）。放在单实例守卫**之前** ——
+    // 自测/基准一旦跑在守卫之后，遇到已有实例会走 notifyExistingAndQuit 返回 0，
+    // 于是"断言坏了"也照样绿（这个坑本仓库踩过）。
+    if (qEnvironmentVariableIsSet("COAST_GW_THROUGHPUT"))
+        return runGatewayThroughputBench();
     // 真网卡版：真 Npcap + 真机帧（需管理员）。不投毒，靠靶机静态路由导流。
     if (qEnvironmentVariableIsSet("COAST_SMOLGW_REALNIC_SELFTEST"))
         return runSmolGatewayRealNicSelfTest();

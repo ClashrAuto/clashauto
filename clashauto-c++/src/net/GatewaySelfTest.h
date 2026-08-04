@@ -30,6 +30,13 @@ int runRustStackSelfTest();
 // CONNECT + 每设备身份。0=通过。见 RustStackSelfTest.cpp 末尾。
 int runSmolGatewaySelfTest();
 
+/// 软件路径吞吐基准（COAST_GW_THROUGHPUT=1）。
+/// ★ 用 FakeEp **把网卡整个拿掉** —— 本仓库此前所有网关吞吐数字都在一台 QEMU 虚机上量，
+///   而那台机器上每帧 12~17 µs 里绝大部分是 e1000 模拟的开销（见
+///   docs/gateway-bottleneck-audit.md 第八节）。这条基准量的是纯软件成本，与网卡无关，
+///   因而可跨机器比较，也是 poll 提频那次改动在集成层面的回归护栏。
+int runGatewayThroughputBench();
+
 // 真网卡版（COAST_SMOLGW_REALNIC_SELFTEST=1，需管理员 + Npcap）：真 Npcap 端点 + 真机
 // 发来的真帧。**不做 ARP 投毒**，导流靠靶机自己的静态路由，因而不可能让任何设备断网。
 int runSmolGatewayRealNicSelfTest();

@@ -242,6 +242,11 @@ int runRustStackSelfTest()
 #include "IL2Endpoint.h"
 #include "NetStack.h"
 
+#ifdef Q_OS_WIN
+#  include <windows.h>
+#endif
+
+#include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QTcpServer>
@@ -260,6 +265,7 @@ public:
     bool isOpen() const override { return true; }
     bool send(const QByteArray &f) override
     {
+        noteAck(f);
         ++sent;
         if (f.size() >= 54 && quint8(f[12]) == 0x08 && quint8(f[13]) == 0x00
             && quint8(f[23]) == 6 && (quint8(f[47]) & 0x12) == 0x12) {
@@ -275,6 +281,18 @@ public:
         }
         return true;
     }
+    // 任何带 ACK 位的出帧都更新确认号/窗口（吞吐基准据此决定还能灌多少）
+    void noteAck(const QByteArray &f)
+    {
+        if (f.size() < 54 || quint8(f[12]) != 0x08 || quint8(f[13]) != 0x00
+            || quint8(f[23]) != 6)
+            return;
+        if ((quint8(f[47]) & 0x10) == 0)
+            return;
+        lastAck = (quint32(quint8(f[42])) << 24) | (quint32(quint8(f[43])) << 16)
+                | (quint32(quint8(f[44])) << 8) | quint32(quint8(f[45]));
+        lastWnd = quint32((quint8(f[48]) << 8) | quint8(f[49]));
+    }
     QByteArray localMac() const override { return m_mac; }
     int ifIndex() const override { return 1; }
     int mtu() const override { return 1500; }
@@ -283,6 +301,11 @@ public:
     int synAck = 0;
     QElapsedTimer *clock = nullptr; // 由自测在喂 SYN 前挂上
     qint64 synAckUs = -1;           // 喂 SYN → 吐 SYN-ACK 的微秒数
+    // 吞吐基准用：出方向 ACK 里的确认号与通告窗口。
+    // 设备必须遵守窗口，否则灌进去的是出窗数据、被静默丢弃 —— 量出来的就是假数
+    //（Rust 侧那三次返工全栽在这上面，别在 C++ 侧再栽一次）。
+    quint32 lastAck = 0;
+    quint32 lastWnd = 65535;
     quint16 synAckSport = 0;
     quint32 synAckSeq = 0;
 
@@ -312,6 +335,7 @@ public:
     bool gotConnect = false;
     QString user;
     quint16 dport = 0;
+    qint64 rxBytes = 0; // 隧道建立后收到的字节（吞吐基准的判据）
 
 private:
     struct St { int phase = 0; QByteArray buf; QString user; };
@@ -357,9 +381,19 @@ private:
                 gotConnect = true;
                 user = c->user;
                 dport = quint16((quint8(c->buf[need - 2]) << 8) | quint8(c->buf[need - 1]));
+                // ★ 必须回成功应答：Socks5Tcp 在 established 之前会把写入深拷贝进 pending，
+                //   不回复的话数据永远流不到 socket 上，吞吐基准会量到 0。
+                //   （对既有断言无影响 —— 它们只看 gotConnect/user/dport。）
+                const char rep[10] = {0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0};
+                s->write(rep, 10);
+                c->phase = 3; // 之后一律计入 rxBytes
             }
             c->buf.clear();
+            return;
         }
+        // phase 3：隧道已建立，之后收到的全是被代理设备的上行数据
+        rxBytes += c->buf.size();
+        c->buf.clear();
     }
     QTcpServer m_srv;
 };
@@ -666,5 +700,209 @@ int runSmolGatewayRealNicSelfTest()
                  "[realnic] PASS(%s) —— 真 Npcap + 真机帧：喂入 %d 帧 → "
                  "SOCKS CONNECT(user=%s, dport=%u)\n",
                  net.activeTcpStack(), fedCount, socks.user.toLatin1().constData(), socks.dport);
+    return 0;
+}
+
+// ————————————————————— 软件路径吞吐基准（COAST_GW_THROUGHPUT=1）—————————————————————
+//
+// ★ 存在的理由：**把网卡整个拿掉**。
+//   本仓库此前所有网关吞吐数字都在一台 QEMU 虚机上量，而 2026-08-04 的判别实验证明
+//   那台机器上「每帧 12~17 µs」里绝大部分是 e1000 模拟的开销，不是我们的代码
+//   （同一个 Npcap 换到 Hyper-V 虚拟网卡后掉到 2.9~3.8 µs，见
+//    docs/gateway-bottleneck-audit.md 第八节）。于是"网关有多快"这个问题在这台机器上
+//   一直没法回答 —— 测出来的都是台子。
+//
+//   `FakeEp` 不碰任何驱动：出帧直接落进内存。所以这条基准量的是**纯软件成本**：
+//     inputFrame → coast_stack_input → schedulePoll → poll → conn_data
+//     → Socks5Tcp::write → 回环 socket → 假 SOCKS
+//   这个数**与网卡无关，因而可跨机器比较**，也是 poll 提频那次改动在集成层面的回归护栏
+//   （Rust 侧那条 throughput_scales_with_poll_rate 只覆盖引擎，不含 C++ 桥接与 SOCKS）。
+//
+// ⚠️ 它**不是**端到端吞吐：不含 Npcap 收发、不含真实链路、不含真实 mihomo 的加解密。
+//    别拿它去承诺用户能跑多快。它回答的是"我们自己这段代码值多少 CPU"。
+namespace {
+
+/// 带载荷的数据帧。buildTcp 只造 54 字节的无载荷帧，基准要灌数据。
+/// 返回总帧长。
+int buildTcpData(uint8_t *f, uint16_t sport, uint16_t dport, uint32_t seq, uint32_t ack,
+                 const uint8_t *payload, int plen)
+{
+    const int ipLen = 20 + 20 + plen;
+    std::memset(f, 0, 14 + ipLen);
+    std::memcpy(f, kOurMac, 6);
+    std::memcpy(f + 6, kDevMac, 6);
+    f[12] = 0x08; f[13] = 0x00;
+    f[14] = 0x45;
+    f[16] = static_cast<uint8_t>(ipLen >> 8); f[17] = static_cast<uint8_t>(ipLen & 0xff);
+    f[22] = 64; f[23] = 6;
+    std::memcpy(f + 26, kDevIp, 4);
+    std::memcpy(f + 30, kDstIp, 4);
+    const uint16_t ipc = fold16(onesSum(f + 14, 20, 0));
+    f[24] = static_cast<uint8_t>(ipc >> 8); f[25] = static_cast<uint8_t>(ipc & 0xff);
+
+    uint8_t *t = f + 34;
+    t[0] = static_cast<uint8_t>(sport >> 8); t[1] = static_cast<uint8_t>(sport & 0xff);
+    t[2] = static_cast<uint8_t>(dport >> 8); t[3] = static_cast<uint8_t>(dport & 0xff);
+    t[4] = uint8_t(seq >> 24); t[5] = uint8_t(seq >> 16);
+    t[6] = uint8_t(seq >> 8);  t[7] = uint8_t(seq);
+    t[8] = uint8_t(ack >> 24); t[9] = uint8_t(ack >> 16);
+    t[10] = uint8_t(ack >> 8); t[11] = uint8_t(ack);
+    t[12] = 0x50; t[13] = 0x18; // PSH|ACK
+    t[14] = 0xFF; t[15] = 0xFF;
+    if (plen > 0)
+        std::memcpy(t + 20, payload, static_cast<size_t>(plen));
+    uint32_t ph = 0;
+    ph = onesSum(kDevIp, 4, ph);
+    ph = onesSum(kDstIp, 4, ph);
+    ph += 6;
+    ph += static_cast<uint32_t>(20 + plen);
+    const uint16_t tc = fold16(onesSum(t, 20 + plen, ph));
+    t[16] = static_cast<uint8_t>(tc >> 8); t[17] = static_cast<uint8_t>(tc & 0xff);
+    return 14 + ipLen;
+}
+
+double cpuSeconds()
+{
+#ifdef Q_OS_WIN
+    FILETIME c, e, k, u;
+    if (GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u)) {
+        const quint64 kt = (quint64(k.dwHighDateTime) << 32) | k.dwLowDateTime;
+        const quint64 ut = (quint64(u.dwHighDateTime) << 32) | u.dwLowDateTime;
+        return double(kt + ut) / 1e7;
+    }
+#endif
+    return 0.0;
+}
+
+} // namespace
+
+int runGatewayThroughputBench()
+{
+    const quint16 kSocksPort = 47901;
+    const QString kUser = QStringLiteral("dev-abc123");
+
+    MiniSocks socks(kSocksPort);
+    if (!socks.ok) {
+        std::fprintf(stderr, "[gwbench] FAIL: 假 SOCKS 监听 %u 失败\n", kSocksPort);
+        return 3;
+    }
+
+    NetStack net(kSocksPort);
+    QString err;
+    if (!net.init(&err)) {
+        std::fprintf(stderr, "[gwbench] FAIL: NetStack::init: %s\n", err.toLatin1().constData());
+        return 3;
+    }
+    FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
+    if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
+                    QStringLiteral("255.255.255.0"), &err)) {
+        std::fprintf(stderr, "[gwbench] FAIL: addNic: %s\n", err.toLatin1().constData());
+        return 3;
+    }
+    net.addDevice(QStringLiteral("10.99.0.1"),
+                  QByteArray(reinterpret_cast<const char *>(kDevMac), 6), kUser, false);
+
+    // ——— 三次握手 ———
+    uint8_t f[2048];
+    buildSyn(f, 51000, 443);
+    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), 54));
+    for (int i = 0; i < 200 && ep.synAck < 1; ++i)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    if (ep.synAck < 1) {
+        std::fprintf(stderr, "[gwbench] FAIL: 没等到 SYN-ACK\n");
+        return 1;
+    }
+    const quint32 ackToPeer = ep.synAckSeq + 1;
+    buildTcp(f, 51000, 443, 0x10, 1001, ackToPeer);
+    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), 54));
+    for (int i = 0; i < 400 && !socks.gotConnect; ++i)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    if (!socks.gotConnect) {
+        std::fprintf(stderr, "[gwbench] FAIL: 没等到 SOCKS CONNECT\n");
+        return 1;
+    }
+    // 等 SOCKS 回复被 Socks5Tcp 消化（established 之后写才会真正流向 socket）
+    for (int i = 0; i < 100; ++i)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+
+    // ——— 灌数据 ———
+    // 设备严格遵守我方通告窗口（FakeEp 从出方向 ACK 里解析 ack/window）。
+    // ★ 载荷尺寸可调（COAST_GW_BENCH_PAYLOAD）。这不是调参，是**判别器**：
+    //   · 若 us/帧 随载荷基本不变 → 成本是**每帧固定的**（事件派发、分配、系统调用次数）
+    //   · 若 us/帧 随载荷线性增长 → 成本是**每字节的**（拷贝、校验和）
+    //   两者的修法完全不同，不先分清就是瞎优化。
+    int kPayload = 1400;
+    if (qEnvironmentVariableIsSet("COAST_GW_BENCH_PAYLOAD")) {
+        const int v = qEnvironmentVariableIntValue("COAST_GW_BENCH_PAYLOAD");
+        if (v >= 64 && v <= 1400)
+            kPayload = v;
+    }
+    static uint8_t payload[1400];
+    std::memset(payload, 0x5A, sizeof payload);
+
+    // ★ 先标定「造帧」本身的开销，之后从总量里扣掉。
+    //   基准每帧都要算 1420 字节的 TCP 校验和 —— 那是**夹具**的成本，生产路径不付。
+    //   不扣掉就会把它算进"我们的代码有多贵"，得出偏高的结论。
+    constexpr int kCalib = 20000;
+    const double calib0 = cpuSeconds();
+    for (int i = 0; i < kCalib; ++i)
+        buildTcpData(f, 51000, 443, 1001 + quint32(i) * 1400, ackToPeer, payload, kPayload);
+    const double calibUsPerFrame = (cpuSeconds() - calib0) * 1e6 / kCalib;
+
+    const qint64 target = 16 * 1024 * 1024; // 16 MiB（小载荷时帧数已经很多）
+    quint32 seq = 1001;
+    QElapsedTimer wall;
+    wall.start();
+    const double cpu0 = cpuSeconds();
+    int stalls = 0;
+
+    while (socks.rxBytes < target && wall.elapsed() < 20000) {
+        bool fed = false;
+        for (;;) {
+            const quint32 inflight = seq - ep.lastAck;
+            if (inflight + kPayload > ep.lastWnd)
+                break;
+            const int len = buildTcpData(f, 51000, 443, seq, ackToPeer, payload, kPayload);
+            net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), len));
+            seq += kPayload;
+            fed = true;
+        }
+        const qint64 before = socks.rxBytes;
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 3);
+        if (!fed && socks.rxBytes == before) {
+            if (++stalls > 400)
+                break;
+        } else {
+            stalls = 0;
+        }
+    }
+
+    const double secs = double(wall.elapsed()) / 1000.0;
+    const double cpu = cpuSeconds() - cpu0;
+    const double mbps = double(socks.rxBytes) * 8.0 / secs / 1e6;
+    const double corePerGbps = (mbps > 1.0) ? (cpu / secs) / (mbps / 1000.0) : 0.0;
+    const double frames = double(socks.rxBytes) / kPayload;
+    const double usPerFrame = (socks.rxBytes > 0) ? cpu * 1e6 / frames : 0.0;
+    // 扣掉夹具造帧的那部分，才是「我们的代码」的净成本
+    const double netUsPerFrame = usPerFrame - calibUsPerFrame;
+    const double netCorePerGbps =
+        (mbps > 1.0) ? (netUsPerFrame * frames / 1e6 / secs) / (mbps / 1000.0) : 0.0;
+
+    std::fprintf(stderr,
+                 "[gwbench] 载荷=%d 送达 %lld B / %.2fs → %.0f Mb/s；CPU %.2fs "
+                 "(%.3f 核/Gbps, %.2f us/帧)\n", kPayload,
+                 static_cast<long long>(socks.rxBytes), secs, mbps, cpu, corePerGbps, usPerFrame);
+    std::fprintf(stderr,
+                 "[gwbench]   扣掉夹具造帧 %.2f us/帧 → **净 %.2f us/帧, %.3f 核/Gbps**\n",
+                 calibUsPerFrame, netUsPerFrame, netCorePerGbps);
+    std::fprintf(stderr,
+                 "[gwbench]   ★ 这是**去掉网卡之后**的纯软件成本（FakeEp 不碰驱动）；"
+                 "不含 Npcap 收发/真实链路/真实核心，别当端到端吞吐用。\n");
+
+    if (socks.rxBytes < target / 4) {
+        std::fprintf(stderr, "[gwbench] FAIL: 20s 内只搬了 %lld B，远低于目标 —— 路径有阻塞\n",
+                     static_cast<long long>(socks.rxBytes));
+        return 2;
+    }
     return 0;
 }
