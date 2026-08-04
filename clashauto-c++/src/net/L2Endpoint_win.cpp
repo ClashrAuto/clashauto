@@ -173,7 +173,10 @@ struct PacketApi
     void *(*openAdapter)(const char *) = nullptr;
     void (*closeAdapter)(void *) = nullptr;
     int (*sendPackets)(void *, void *, unsigned long, int) = nullptr;
+    // PacketSetLoopbackBehavior —— 可选（老版本 Packet.dll 可能没有），拿不到就跳过。
+    int (*setLoopback)(void *, unsigned int) = nullptr;
 };
+#define COAST_NPF_DISABLE_LOOPBACK 1u
 
 class TxWorker final : public QThread
 {
@@ -505,6 +508,9 @@ const PacketApi *packetApi()
         reinterpret_cast<decltype(api.closeAdapter)>(GetProcAddress(h, "PacketCloseAdapter"));
     api.sendPackets =
         reinterpret_cast<decltype(api.sendPackets)>(GetProcAddress(h, "PacketSendPackets"));
+    // 可选符号：拿不到不影响可用性（只是少一个优化），故不进 ok 的判据。
+    api.setLoopback =
+        reinterpret_cast<decltype(api.setLoopback)>(GetProcAddress(h, "PacketSetLoopbackBehavior"));
     ok = api.openAdapter && api.closeAdapter && api.sendPackets;
     return ok ? &api : nullptr;
 }
@@ -744,6 +750,19 @@ public:
                     m_txAdapter = pkt->openAdapter(adapter.npfName.constData());
                     if (!m_txAdapter)
                         dbg("PacketOpenAdapter 失败，退回逐帧发送");
+                    // ★ 关掉 loopback —— 实测这是发送路径上最大的一个单项优化（2.6×）。
+                    //   默认（WinPcap 兼容）行为会给每个注入帧加 NDIS_SEND_FLAGS_CHECK_FOR_LOOPBACK，
+                    //   并且**不豁免本进程自己的抓包实例**：于是每发一帧，Npcap 的 NPF_DoTap() 都要
+                    //   为该网卡上每个打开的抓包句柄跑一遍 BPF。而 ARP 网关的收帧句柄是**常开**的，
+                    //   所以这条代价在生产里一直在付。
+                    //   微基准（bench/npcap_tx3.c，抓包句柄常开、batch=64、1514B、各 3 轮取中位）：
+                    //       默认 loopback  39.45 µs CPU/帧   225 Mbps   3.26 核/Gbps
+                    //       禁用 loopback  15.23 µs CPU/帧   572 Mbps   1.26 核/Gbps
+                    //   功能验证：禁用后靶机 tcpdump 实收 40000/40000，帧照常上线。
+                    //   我们本来就不需要捕获自己注入的帧（收帧只关心被劫持设备发出的帧），
+                    //   所以这个语义变化对网关无副作用。
+                    if (m_txAdapter && pkt->setLoopback)
+                        pkt->setLoopback(m_txAdapter, COAST_NPF_DISABLE_LOOPBACK);
                 }
                 dbg("发送模式=%s（介质=%s）", m_txAdapter ? "批量(PacketSendPackets)" : "逐帧",
                     adapter.wifi ? "WiFi" : "以太网");
