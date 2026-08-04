@@ -23,6 +23,73 @@ enum SelfTests {
         if environment["COAST_DEVICES_SELFTEST"] == "1" { devicesSelfTest() }
         if environment["COAST_HISTORY_SELFTEST"] == "1" { historySelfTest() }
         if environment["COAST_LOOKUP_SELFTEST"] == "1" { lookupSelfTest() }
+        if environment["COAST_CONNSTATS_SELFTEST"] == "1" { connStatsSelfTest() }
+    }
+
+    /// 流量构成自检 —— 与 Qt 的 `COAST_CONNSTATS_SELFTEST` **同一份 fixture、同一组期望**。
+    ///
+    /// 这块是纯算术（逐连接取增量 + 直连/代理分桶 + 按 host 累计排序），没有 UI 能验。
+    /// 两条线各自实现了一遍，用同一份输入跑出不同的数，就是其中一条错了 ——
+    /// 这正是单看一条线永远发现不了的那类 bug。
+    /// 关键点：第二拍只能计**增量**，否则同一份流量每拍重复累加，总量随挂机时间线性虚涨。
+    private static func connStatsSelfTest() {
+        print("=== 流量构成自检（fixture 与 Qt 对齐） ===")
+        func snapshot(_ json: String) -> [[String: Any]] {
+            let data = Data(json.utf8)
+            return (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? []
+        }
+        // 第一拍：代理 2 条（一条来自局域网设备）、直连 1 条、REJECT 1 条（两桶都不该记）
+        let tick0 = snapshot("""
+            [{"id":"a","start":"2026-07-28T10:00:01+08:00","chains":["HK-01","节点选择"],
+              "download":1000,"upload":100,
+              "metadata":{"host":"youtube.com","sourceIP":"192.168.20.140"}},
+             {"id":"b","start":"2026-07-28T10:00:02+08:00","chains":["DIRECT"],
+              "download":2000,"upload":200,
+              "metadata":{"host":"mirrors.aliyun.com","sourceIP":"127.0.0.1"}},
+             {"id":"c","start":"2026-07-28T10:00:03+08:00","chains":["JP-03"],
+              "download":50,"upload":5,
+              "metadata":{"host":"api.github.com","sourceIP":"127.0.0.1"}},
+             {"id":"d","start":"2026-07-28T10:00:04+08:00","chains":["REJECT"],
+              "download":9999,"upload":9999,
+              "metadata":{"host":"ads.example.com","sourceIP":"127.0.0.1"}}]
+            """)
+        // 第二拍：a/b 累计值变大（只该记增量）、c 断开消失、e 新建
+        let tick1 = snapshot("""
+            [{"id":"a","start":"2026-07-28T10:00:01+08:00","chains":["HK-01","节点选择"],
+              "download":1500,"upload":150,
+              "metadata":{"host":"youtube.com","sourceIP":"192.168.20.140"}},
+             {"id":"b","start":"2026-07-28T10:00:02+08:00","chains":["DIRECT"],
+              "download":2200,"upload":220,
+              "metadata":{"host":"mirrors.aliyun.com","sourceIP":"127.0.0.1"}},
+             {"id":"d","start":"2026-07-28T10:00:04+08:00","chains":["REJECT"],
+              "download":9999,"upload":9999,
+              "metadata":{"host":"ads.example.com","sourceIP":"127.0.0.1"}},
+             {"id":"e","start":"2026-07-28T10:00:09+08:00","chains":["SG-02"],
+              "download":300,"upload":30,
+              "metadata":{"host":"cdn.jsdelivr.net","sourceIP":"192.168.20.140"}}]
+            """)
+
+        var composition = TrafficComposition()
+        // 「sourceIP → 设备名」这段：台账里那台设备叫 Xiaomi-Phone，本机连接显示「本机」。
+        let naming: (String, String) -> String = { sourceIP, _ in
+            if sourceIP == "192.168.20.140" { return "Xiaomi-Phone" }
+            return DeviceStore.isLocalMachineIP(sourceIP) ? "本机" : sourceIP
+        }
+        func dump(_ tag: String) {
+            print(String(format: "[connstats] %@ direct=%.0f proxy=%.0f total=%@", tag,
+                         Double(composition.directBytes), Double(composition.proxyBytes),
+                         Formatting.bytes(composition.totalBytes)))
+            for item in composition.topHosts(limit: 5) {
+                print(String(format: "[connstats]   top    %-20@ dev=%-14@ bytes=%.0f",
+                             item.host as NSString, item.stat.device as NSString,
+                             Double(item.stat.bytes)))
+            }
+        }
+        composition.observe(tick0, deviceName: naming)
+        dump("tick1")   // 期望 direct=2200 proxy=1155（REJECT 的 9999+9999 不计）
+        composition.observe(tick1, deviceName: naming)
+        dump("tick2")   // 期望 direct=2420 proxy=2035（只加增量；c 断开不回退）
+        exit(0)
     }
 
     /// 单台设备查询的耗时自检。
