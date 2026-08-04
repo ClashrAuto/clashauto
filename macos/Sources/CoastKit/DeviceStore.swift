@@ -152,7 +152,15 @@ public final class DeviceStore: @unchecked Sendable {
                        "vendor TEXT NOT NULL DEFAULT ''",
                        "model TEXT NOT NULL DEFAULT ''",
                        "interface TEXT NOT NULL DEFAULT ''",
-                       "last_seen INTEGER NOT NULL DEFAULT 0"] {
+                       "last_seen INTEGER NOT NULL DEFAULT 0",
+                       // ★ `ip` 是**对面那条线**（Qt）存地址用的列，这边存在 `last_ip`。
+                       //   两边现在读时二选一、写时两列都写（见 `columns` 与 `save`），
+                       //   所以这一列在**纯本线的新库里也必须存在** —— 否则
+                       //   `SELECT … ip` 与 `INSERT … ip` 都失败，而这层封装是**静默的**：
+                       //   `query` 不回调、`run` 只返回 false，没人看 —— 表现是
+                       //   台账永远 0 条、重启不记得任何设备，**一句报错都没有**。
+                       //   真实机器上不显形，因为那份库早被对面建过这一列。
+                       "ip TEXT NOT NULL DEFAULT ''"] {
             database.exec("ALTER TABLE device ADD COLUMN \(column)")
         }
         // 老记录的 `last_seen` 补成 `first_seen`：默认的 0 等于「1970 年见过」，

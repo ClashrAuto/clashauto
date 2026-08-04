@@ -105,7 +105,10 @@ public final class SQLiteDatabase: @unchecked Sendable {
         queue.sync {
             guard let handle else { return }
             var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return }
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                reportPrepareFailure(sql)
+                return
+            }
             defer { sqlite3_finalize(statement) }
             bind(parameters, to: statement)
             while sqlite3_step(statement) == SQLITE_ROW {
@@ -133,11 +136,29 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private func runLocked(_ sql: String, _ parameters: [Value]) -> Bool {
         guard let handle else { return false }
         var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return false }
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            reportPrepareFailure(sql)
+            return false
+        }
         defer { sqlite3_finalize(statement) }
         bind(parameters, to: statement)
         let code = sqlite3_step(statement)
         return code == SQLITE_DONE || code == SQLITE_ROW
+    }
+
+    /// 语句准备失败时喊一声。
+    ///
+    /// ★ 存在的理由：这层封装原本**完全静默** —— `prepare` 失败只是 `return false`/`return`，
+    ///   没人看返回值。实测后果：`device` 表少一列时，整份台账**写不进也读不出、
+    ///   一句报错都没有**，表现只是「设备列表永远空的、重启不记得任何设备」。
+    ///   一个数据层的总崩溃不该只能靠肉眼看列表为空来发现。
+    ///
+    ///   **只挂在 `prepare` 失败这一处**：`exec` 那条路不挂 —— 老库补列正是靠
+    ///   「`ALTER TABLE ADD COLUMN` 失败就忽略」工作的，在那里喊会每次启动刷屏。
+    private func reportPrepareFailure(_ sql: String) {
+        let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "?"
+        let head = sql.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120)
+        FileHandle.standardError.write(Data("[sqlite] 语句准备失败: \(message) — \(head)\n".utf8))
     }
 
     private func bind(_ parameters: [Value], to statement: OpaquePointer?) {
