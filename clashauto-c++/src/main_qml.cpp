@@ -169,6 +169,9 @@ int main(int argc, char *argv[])
     // 于是"断言坏了"也照样绿（这个坑本仓库踩过）。
     if (qEnvironmentVariableIsSet("COAST_GW_THROUGHPUT"))
         return runGatewayThroughputBench();
+    // CoastCore 进程内出站端到端自测：证明那五个移植阶段的代码真的会被执行。
+    if (qEnvironmentVariableIsSet("COAST_GW_COASTCORE_SELFTEST"))
+        return runCoastCoreOutboundSelfTest();
     // 自身流量排除的自测（随 CoastCore 引擎一起移植进来）。
     // ★ 必须在这里注册：不注册的话设了这个 env 只是把 GUI 正常启动，进程不退出 ——
     //   自测"挂住"而不是"失败"，比失败更难查。

@@ -37,6 +37,11 @@ int runSmolGatewaySelfTest();
 ///   因而可跨机器比较，也是 poll 提频那次改动在集成层面的回归护栏。
 int runGatewayThroughputBench();
 
+/// CoastCore 进程内出站端到端自测（COAST_GW_COASTCORE_SELFTEST=1）。
+/// ★ 补的是一个真空白：五个移植阶段全部落地之后，`coastcore: true` 这条路一次都没被跑过 ——
+///   所有既有自测都是在它**关着**时绿的。判据两条：ccInProcess 必须涨、假 SOCKS 必须零连接。
+int runCoastCoreOutboundSelfTest();
+
 // 真网卡版（COAST_SMOLGW_REALNIC_SELFTEST=1，需管理员 + Npcap）：真 Npcap 端点 + 真机
 // 发来的真帧。**不做 ARP 投毒**，导流靠靶机自己的静态路由，因而不可能让任何设备断网。
 int runSmolGatewayRealNicSelfTest();

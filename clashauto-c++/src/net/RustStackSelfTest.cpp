@@ -247,6 +247,9 @@ int runRustStackSelfTest()
 #include "IL2Endpoint.h"
 #include "GatewayDiag.h"
 #include "NetStack.h"
+#include "Socks5Client.h"
+#include "core/ProxyConfig.h"
+#include "core/CoreDialerFactory.h"
 
 #ifdef Q_OS_WIN
 #  include <windows.h>
@@ -1200,5 +1203,97 @@ int runGatewayThroughputBench()
                      static_cast<long long>(socks.rxBytes));
         return 2;
     }
+    return 0;
+}
+
+// ═══════ CoastCore 进程内出站端到端自测（COAST_GW_COASTCORE_SELFTEST=1）═══════
+//
+// ★ 补的是一个**真空白**：阶段 1~5 全部落地之后，`coastcore: true` 这条路
+//   一次都没被真正跑过 —— 所有既有自测都是在它**关着**的情况下绿的。
+//   也就是说那五个阶段的代码从没执行过一行；"编过了 + 别的测试没红"证明不了它能用。
+//
+// 判据两条，缺一不可：
+//   ① GatewayDiag::ccInProcess > 0 —— 拨号真的走了**进程内**出站
+//   ② 假 SOCKS 一次都没被连上   —— 没有偷偷回退核心
+// 只有 ① 成立说明进程内路径被执行了；只有 ② 成立说明它不是"看着开了、实则全回退"。
+// （目的地是否可达**不在判据里**：这里测的是选路与拨号，不是公网连通性。）
+int runCoastCoreOutboundSelfTest()
+{
+    const quint16 kSocksPort = 47903;
+    const QString kUser = QStringLiteral("dev-abc123");
+
+    // 假 SOCKS：这条自测里它**应当一次都不被用到**。留着就是为了证明这一点。
+    MiniSocks socks(kSocksPort);
+    if (!socks.ok) {
+        std::fprintf(stderr, "[cc] FAIL: 假 SOCKS 监听失败\n");
+        return 3;
+    }
+
+    NetStack net(kSocksPort);
+    QString err;
+    if (!net.init(&err)) {
+        std::fprintf(stderr, "[cc] FAIL: NetStack::init: %s\n", err.toLatin1().constData());
+        return 3;
+    }
+
+    // 装进程内出站：只含内建 DIRECT 的快照 + 恒选 DIRECT 的 router。
+    // 回退工厂仍是假 SOCKS —— 一旦 router 判不了而回退，判据②立刻红，
+    // 正好把"其实走了回退"这种假通过挡在外面。
+    auto store = std::make_shared<ProxyConfigStore>();
+    {
+        QVector<ProxyNode> nodes;
+        nodes.append(ProxyNode::direct());
+        store->reload(std::make_shared<const ProxyConfig>(
+            nodes, QStringLiteral("DIRECT"), ProxyConfig::Mode::Global));
+    }
+    auto *factory = new CoreDialerFactory(store.get(), new Socks5OutboundFactory(kSocksPort));
+    factory->setRouter([](const QString &, const QString &) { return QStringLiteral("DIRECT"); });
+    factory->setInboundTag(QStringLiteral("Coast-Gateway"));
+    net.setOutboundFactory(factory);
+
+    FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
+    if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
+                    QStringLiteral("255.255.255.0"), &err)) {
+        std::fprintf(stderr, "[cc] FAIL: addNic: %s\n", err.toLatin1().constData());
+        return 3;
+    }
+    net.addDevice(QStringLiteral("10.99.0.1"),
+                  QByteArray(reinterpret_cast<const char *>(kDevMac), 6), kUser, false);
+
+    const qint64 ccBefore = GatewayDiag::c.ccInProcess;
+
+    uint8_t f[64];
+    buildSyn(f, 51100, 443);
+    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), 54));
+    for (int i = 0; i < 200 && ep.synAck < 1; ++i)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    if (ep.synAck < 1) {
+        std::fprintf(stderr, "[cc] FAIL: 没等到 SYN-ACK\n");
+        return 1;
+    }
+    buildTcp(f, 51100, 443, 0x10, 1001, ep.synAckSeq + 1);
+    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), 54));
+    for (int i = 0; i < 300; ++i)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+
+    const qint64 ccDelta = GatewayDiag::c.ccInProcess - ccBefore;
+    if (ccDelta <= 0) {
+        std::fprintf(stderr,
+                     "[cc] FAIL: ccInProcess 没涨（Δ=%lld）—— 拨号没走进程内出站。"
+                     "五个阶段的代码等于没被执行\n",
+                     static_cast<long long>(ccDelta));
+        return 2;
+    }
+    if (socks.gotConnect) {
+        std::fprintf(stderr,
+                     "[cc] FAIL: 假 SOCKS 被连上了 —— 偷偷回退了核心，"
+                     "「绕过核心」这件事没真发生\n");
+        return 2;
+    }
+
+    std::fprintf(stderr,
+                 "[cc] PASS —— 设备 SYN → smoltcp 终结 → **进程内出站**（ccInProcess Δ=%lld，"
+                 "SOCKS 回退 0 次）\n",
+                 static_cast<long long>(ccDelta));
     return 0;
 }
