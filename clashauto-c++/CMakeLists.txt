@@ -39,6 +39,16 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sq
 #   拨号侧照旧回退 mihomo（功能不缺，只是不走进程内）；direct / trojan / vless 仍是进程内（它们只用
 #   QSslSocket + Qt 哈希）。本地 MinGW 自带（opt/include、opt/lib），可用 -DOPENSSL_ROOT_DIR 提示。
 set(COAST_HAVE_OPENSSL OFF)
+# ⚠️ **不要**在这里打开 OPENSSL_USE_STATIC_LIBS —— 试过，不行（2026-08-04 实测）：
+#   MinGW 的静态 libcrypto.a 链得上、也确实消掉了 DLL 依赖（objdump 验过零 libcrypto 导入），
+#   但 **COAST_CRYPTO_SELFTEST 会挂死**（40s 不退出，不是失败是卡住）。
+#   动态那条则相反：自测全过，但引入 libcrypto-*.dll 的运行期依赖，缺了就是 0xC0000135
+#   「进程直接起不来」（本地当场复现过；本仓库为 wpcap 也栽过同一类）。
+#   ⇒ 两条路各有一个未解决的阻塞，所以**暂不在 CI 上启用 OpenSSL**：
+#     发布包里 ss/vmess/reality 仍回退 mihomo。要推上去得先解决其中一条：
+#       · 查清静态版挂在哪（多半是初始化/熵源），或
+#       · 把 DLL 纳入 windeployqt 产物并加一条"缺 DLL 就红"的门禁。
+#   本地想用：-DOPENSSL_ROOT_DIR=<...> 即可（动态，自测全过）。
 find_package(OpenSSL QUIET)
 if(OPENSSL_FOUND)
     # ★「找到」≠「能用」：交叉编译/通用构建里 find_package 很可能给出**另一个架构**的 libcrypto
@@ -353,6 +363,11 @@ if(COAST_HAVE_OPENSSL)
         src/net/core/proto/RealityOutbound.cpp     src/net/core/proto/RealityOutbound.h)
     # 只链 libcrypto，不链 libssl（TLS 由 Qt 的 QSslSocket 负责）。
     target_link_libraries(clashauto-qml PRIVATE OpenSSL::Crypto)
+    # 静态 libcrypto 需要的系统库（动态版由 DLL 自己带，静态版必须我们链）。
+    # 多链无害：这几个 Windows 目标本来就常用到。
+    if(WIN32)
+        target_link_libraries(clashauto-qml PRIVATE crypt32 ws2_32 advapi32 user32)
+    endif()
     target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_OPENSSL)
 endif()
 
