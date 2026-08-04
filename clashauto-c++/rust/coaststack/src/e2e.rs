@@ -242,3 +242,50 @@ fn unknown_nic_is_rejected() {
     let mut e = mk_engine();
     assert!(!e.input(99, &tcp_frame(1, 2, 0x02, 1, 0, b"")), "未知网卡应被拒");
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// 泵周期量化的**代价**测量（不是功能测试，是给"网关到底堵在哪"定量）。
+//
+// 生产的调用模式是：inputFrame() 只把帧塞进收队列（engine::input 不 poll），
+// 事件与出帧**只在 coast_stack_poll 里产生**，而它唯一的调用点是 25 ms 的泵。
+// 所以单连接的上行天花板 = 「一个 poll 周期能吃下多少字节」÷ 25 ms。
+// 本测量就是把左边那个量测出来。
+#[test]
+fn measure_bytes_per_poll_cycle() {
+    let mut e = mk_engine();
+    let (id, synack_seq) = establish(&mut e, 51010, 443, 1000);
+    let ack = synack_seq.wrapping_add(1);
+    let payload = [0x5Au8; 1460];
+    let mut seq: u32 = 1001;
+
+    // 一个周期内尽力灌：200 帧 = 292 KB，远超接收窗口，多余的会被判出窗丢掉
+    // （真实设备会重传，这里只关心"一个周期最多吃进多少"）。
+    for _ in 0..200 {
+        e.input(1, &tcp_frame(51010, 443, 0x18, seq, ack, &payload));
+        seq = seq.wrapping_add(1460);
+    }
+    let mut evs = Vec::new();
+    e.poll_collect(100, &mut evs);
+    let delivered: usize = evs
+        .iter()
+        .filter_map(|ev| match ev {
+            Event::ConnData { id: i, data } if *i == id => Some(data.len()),
+            _ => None,
+        })
+        .sum();
+
+    // 25 ms 一拍 → 折算单连接上行天花板
+    let mbps = (delivered as f64) * 8.0 / 0.025 / 1e6;
+    std::eprintln!(
+        "[QUANT] 灌入 {} B，单个 poll 周期交出 {} B → 按生产 25ms 泵折算 {:.1} Mb/s/连接",
+        200 * 1460,
+        delivered,
+        mbps
+    );
+    assert!(delivered > 0, "一个周期一个字节都没交出来");
+    // 守住这条测量的语义：交出的量受接收窗口封顶，不会随灌入量线性增长。
+    assert!(
+        delivered < 200 * 1460,
+        "居然全吃下了 —— 说明窗口/量化模型和我理解的不一样，结论要重算"
+    );
+}
