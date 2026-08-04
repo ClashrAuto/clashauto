@@ -1,0 +1,12 @@
+# smoltcp 的容量是**构建期**常量（见其 build.rs 的 CONFIGS 表），默认值对透明网关太小。
+# 这里通过它支持的 SMOLTCP_* 环境变量放大；写在 .cargo/config.toml 里，
+# 本地与 CI 都会自动生效，不需要谁记得导出。
+#
+# IFACE_MAX_ROUTE_COUNT: 默认 2，只够 v4 默认路由 + v6 默认路由。
+#   但每个被劫持设备的 v6 还各需要一条 /128 直连路由（理由见 engine.rs 的 add_v6_onlink_route：
+#   设备的全局 v6 相对本机的链路本地是 off-link，不给直连路由的话回包会走默认路由、
+#   下一跳解析到本机自己的链路本地地址 → 永远发不出去）。
+# IFACE_MAX_ADDR_COUNT: 默认 2（v4 + v6 链路本地）刚好够，留点余量。
+[env]
+SMOLTCP_IFACE_MAX_ROUTE_COUNT = "34"
+SMOLTCP_IFACE_MAX_ADDR_COUNT = "4"

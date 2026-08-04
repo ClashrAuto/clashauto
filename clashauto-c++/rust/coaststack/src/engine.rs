@@ -151,6 +151,8 @@ struct Nic {
     /// 已注入邻居缓存的 (设备IP → MAC, 上次注入时刻ms)。
     /// smoltcp 的邻居项会过期，所以要按间隔刷新，不能只注入一次。
     neighbors: BTreeMap<[u8; 16], ([u8; 6], u64)>,
+    /// 已加过 /128 直连路由的设备 v6（路由槽有限，别重复 push）。
+    v6_routed: alloc::collections::BTreeSet<[u8; 16]>,
 }
 
 fn new_listener(sockets: &mut SocketSet<'static>) -> Option<SocketHandle> {
@@ -301,6 +303,7 @@ impl Engine {
                 our_ip: ip,
                 our_is_v6: is_v6,
                 neighbors: BTreeMap::new(),
+                v6_routed: alloc::collections::BTreeSet::new(),
             },
         );
         true
@@ -414,6 +417,31 @@ impl Engine {
             _ => {}
         }
         n.neighbors.insert(src_ip, (src_mac, now));
+
+        // ★★ 关键：给这个设备加一条 /128 **直连**路由（下一跳 = 它自己）。
+        //   根因（smoltcp net_trace 抓到的）：设备的全局 v6 相对本机唯一的 v6 地址
+        //   （EUI-64 链路本地 fe80::/64）是 **off-link**，回包因此走默认路由，而默认路由的
+        //   下一跳是**本机自己的链路本地地址** —— smoltcp 去邻居缓存里找它、当然找不到，
+        //   于是永远只发 Neighbor Solicitation，SYN-ACK 一次都出不去。
+        //   trace 原文：`address fe80::5bff:fe00:2 not in neighbor cache, sending NS`。
+        //   v4 没这个问题纯属巧合：设备 IP 与本机同 /24，天然 on-link、直接查邻居。
+        //   加了 /128 直连路由后，回包直接解析设备本身的 MAC（已由上面的 NA 填好）。
+        //   注意**不能**改成"把默认路由的下一跳指向设备"——那样多设备时所有回包都会发给
+        //   最后一个学到的 MAC。每设备一条 /128 才是对的，也是要把 IFACE_MAX_ROUTE_COUNT
+        //   调大的原因（见 .cargo/config.toml）。
+        // 判重靠自己的 v6_routed 集合：smoltcp 的 Routes 没有只读遍历 API，
+        // 重复 push 会白占本就有限的路由槽。
+        let dev_v6 = Ipv6Address::from(src_ip);
+        if n.v6_routed.insert(src_ip) {
+            n.iface.routes_mut().update(|list| {
+                let _ = list.push(smoltcp::iface::Route {
+                    cidr: IpCidr::new(IpAddress::Ipv6(dev_v6), 128),
+                    via_router: IpAddress::Ipv6(dev_v6),
+                    preferred_until: None,
+                    expires_at: None,
+                });
+            });
+        }
 
         // ★ 这是一条**未经请求**的 NA（smoltcp 还没问过）。按 RFC 4861，未经请求的 NA
         //   发往全节点组播 ff02::1，标志位只置 Override（不置 Solicited —— 没人请求过）。

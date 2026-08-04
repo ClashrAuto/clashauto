@@ -124,7 +124,6 @@ fn all_out(events: &[Event]) -> Vec<(u16, u8, usize)> {
 }
 
 #[test]
-#[ignore = "v6 邻居注入尚未跑通：smoltcp 只回一条 NS，拿不到 SYN-ACK。已试四种做法（单播 NA / 组播 NA / 关 ICMPv6 校验验证 / 代答它自己的 NS）均无效。生产侧 v6 TCP 暂回落 lwIP（NetStack.cpp）。"]
 fn v6_syn_gets_synack_with_original_dport() {
     let mut e = mk_engine();
     let mut evs = Vec::new();
@@ -150,7 +149,6 @@ fn v6_syn_gets_synack_with_original_dport() {
 }
 
 #[test]
-#[ignore = "同上：v6 邻居注入未跑通"]
 fn v6_full_handshake_and_data() {
     let mut e = mk_engine();
     let mut evs = Vec::new();
@@ -195,7 +193,6 @@ fn v6_full_handshake_and_data() {
 }
 
 #[test]
-#[ignore = "同上：v6 邻居注入未跑通"]
 fn v6_close_device_conns() {
     let mut e = mk_engine();
     let mut ids = Vec::new();
