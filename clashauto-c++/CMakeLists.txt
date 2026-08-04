@@ -223,8 +223,8 @@ if(WIN32)
     target_sources(clashauto-qml PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
     # Windows 原生标题栏染色（DWM）——仅 Windows 编译，链接的 dwmapi 已在下方 target_link_libraries。
     target_sources(clashauto-qml PRIVATE src/WinWindow.cpp src/WinWindow.h)
-    # wintun.dll(按架构) 仅 Windows 构建内嵌（qrc），运行时释放到核心旁供 TUN 使用；mac/Linux 不含。
-    target_sources(clashauto-qml PRIVATE resources_win.qrc)
+    # 这里曾经还有一个 resources_win.qrc，内嵌四个架构的 wintun.dll。已删 —— 核心自带，见
+    # CoreController::startCore 里那段注释。别再加回来。
 endif()
 
 target_link_libraries(clashauto-qml PRIVATE

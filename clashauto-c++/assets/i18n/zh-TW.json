@@ -147,7 +147,6 @@
   "未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1": "未偵測到 mihomo 核心，請於「設定 → 系統」中下載：%1",
   "找不到 Clash 配置: %1": "找不到 Clash 設定：%1",
   "Country.mmdb 已就位: %1": "Country.mmdb 已就緒：%1",
-  "wintun.dll 已部署: %1": "wintun.dll 已部署：%1",
   "核心已由特权 helper 以 root 启动（支持 TUN）": "核心已由特權 helper 以 root 啟動（支援 TUN）",
   "经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效": "透過特權 helper 以 root 啟動核心失敗：%1；改以非 root 啟動，TUN 將無法生效",
   "启动 Clash 核心失败: %1": "啟動 Clash 核心失敗：%1",

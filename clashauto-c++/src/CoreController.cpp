@@ -17,7 +17,6 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSettings>
-#include <QSysInfo>
 #include <QDateTime>
 #include <QThread>
 #include <QTimer>
@@ -505,19 +504,14 @@ void CoreController::startCore()
         QSettings().remove(QStringLiteral("geoip/lastPublished"));
     }
 
-#if defined(Q_OS_WIN)
-    // TUN 依赖 wintun.dll：从 bundle 按架构复制到核心 exe 同目录（DLL 搜索首选路径）
-    const QString wintunTo = QDir(QFileInfo(exe).absolutePath()).filePath("wintun.dll");
-    if (!QFileInfo::exists(wintunTo)) {
-        const QString cpu = QSysInfo::currentCpuArchitecture();
-        const QString archDir = cpu.contains("arm") ? (cpu.contains("64") ? "arm64" : "arm")
-                                                    : (cpu.contains("64") ? "x64" : "x86");
-        const QString wintunFrom = QStringLiteral(":/assets/bundle/wintun/%1/wintun.dll").arg(archDir);
-        if (QFileInfo::exists(wintunFrom) && QFile::copy(wintunFrom, wintunTo)) {
-            emit logUpdated(tr("wintun.dll 已部署: %1").arg(wintunTo));
-        }
-    }
-#endif
+    // Windows TUN 不需要我们往核心旁边释放 wintun.dll —— **核心自带一份**：sing-tun 的
+    // internal/wintun 用 `//go:embed <arch>/wintun.dll` 把驱动编进二进制，再由 memmod
+    // 从内存映射展开，整个包里没有任何从磁盘 LoadLibrary/NewLazyDLL 的分支。实测 v1.10.4392 的
+    // coast-windows-amd64-compatible.exe，我们原来内嵌那份 x64 wintun.dll 的 427552 字节全文
+    // 在核心里原样命中（偏移 0x2b890a0）—— 同一个文件，发两遍。
+    // 所以这里原先那段按架构释放的代码、resources_win.qrc 和 assets/bundle/wintun/ 一并删了。
+    // 那批 DLL 是 f97e0ab「app 自包含」时从 Electron 时代的资源包整体搬过来的，从来没有哪个
+    // 核心版本要求过。已装机器上那个释放出来的 wintun.dll 会原地留着，是个无害的孤儿文件。
 
     // ★ 收孤儿必须在**两条启动路径之前**。原先这行在下面 m_core.start() 边上，而 macOS 走
     //   helper(root) 那条分支会提前 return —— 于是 macOS 上它从来没跑过，孤儿只增不减。

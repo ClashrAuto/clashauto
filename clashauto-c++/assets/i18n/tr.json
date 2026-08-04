@@ -147,7 +147,6 @@
   "未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1": "mihomo çekirdeği algılanmadı — Ayarlar → Sistem'den indirin: %1",
   "找不到 Clash 配置: %1": "Clash yapılandırması bulunamadı: %1",
   "Country.mmdb 已就位: %1": "Country.mmdb hazır: %1",
-  "wintun.dll 已部署: %1": "wintun.dll dağıtıldı: %1",
   "核心已由特权 helper 以 root 启动（支持 TUN）": "Çekirdek ayrıcalıklı helper aracılığıyla root olarak başlatıldı (TUN destekleniyor)",
   "经特权 helper 以 root 启动核心失败：%1；回退为非 root 启动，TUN 将不生效": "Çekirdek ayrıcalıklı helper aracılığıyla root olarak başlatılamadı: %1; root olmayan başlatmaya geri dönülüyor, TUN çalışmayacak",
   "启动 Clash 核心失败: %1": "Clash çekirdeği başlatılamadı: %1",

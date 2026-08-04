@@ -107,7 +107,6 @@ cp "$ROOT/Resources/com.yuehongsun.coast.helper.plist" \
 #                       SF Symbols（见 README「系统字体」一节、PLAN 阶段 5）；真正注册的
 #                       只有 iconfont.ttf + remixicon.ttf，见 Sources/Coast/IconFont.swift。
 #                       Qt 线仍然要它，所以是这里排除、不是从 assets 里删。
-#     • bundle/wintun/   1.4 MB / 0.72 MB —— 四个 arch 的 wintun.dll，Windows TUN 专用。
 #     • icon.ico         0.34 MB          —— Windows 图标资源。
 #     • icon.icns        0.18 MB          —— 下面会从 $ASSETS 直接拷成 AppIcon.icns，
 #                                            再留一份同名的就是白占一倍。
@@ -122,7 +121,6 @@ if [[ -d "$ASSETS" ]]; then
     rsync -a \
         --exclude '.DS_Store' \
         --exclude 'fonts/' \
-        --exclude 'bundle/wintun/' \
         --exclude 'icon.ico' \
         --exclude 'icon.icns' \
         --exclude 'app.rc.in' \
