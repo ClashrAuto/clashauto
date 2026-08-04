@@ -24,6 +24,31 @@ enum SelfTests {
         if environment["COAST_HISTORY_SELFTEST"] == "1" { historySelfTest() }
         if environment["COAST_LOOKUP_SELFTEST"] == "1" { lookupSelfTest() }
         if environment["COAST_CONNSTATS_SELFTEST"] == "1" { connStatsSelfTest() }
+        if environment["COAST_SETTINGS_SELFTEST"] == "1" { settingsSelfTest() }
+    }
+
+    /// 设置写入自检 —— 把「保存一个设置」这条路径变成**可以从外部驱动**的。
+    ///
+    /// 存在的理由：`config.yaml` 是两条产品线共用的，一条线保存设置时**会不会把另一条线
+    /// 认识、自己不认识的键抹掉**，是个只有真写一次才答得上来的问题。而在 GUI 里它只能
+    /// 靠点开关触发 —— 实测 `System Events click at` 与 `cliclick` 合成的点击都驱动不了
+    /// QML 控件，于是这条路径在自动化里**根本走不到**。给它一个入口，一秒钟就能验完。
+    ///
+    /// 只翻 `clearConnections` 这个无副作用的开关（不动网络、不动系统代理），翻完打印前后值。
+    private static func settingsSelfTest() {
+        print("=== 设置写入自检 ===")
+        print("configDir: \(AppPaths.configDir.path)")
+        guard let before = try? AppConfigLoader.load() else {
+            print("[settings] FAIL 读不到 config.yaml"); exit(1)
+        }
+        let flipped = !before.clearConnections
+        AppConfigLoader.persist(key: "clearConnections", bool: flipped)
+        guard let after = try? AppConfigLoader.load() else {
+            print("[settings] FAIL 写完读不回来"); exit(1)
+        }
+        print("clearConnections: \(before.clearConnections) -> 写入 \(flipped) -> 读回 \(after.clearConnections)")
+        print(after.clearConnections == flipped ? "[settings] OK" : "[settings] FAIL 写进去又读不回来")
+        exit(after.clearConnections == flipped ? 0 : 1)
     }
 
     /// 流量构成自检 —— 与 Qt 的 `COAST_CONNSTATS_SELFTEST` **同一份 fixture、同一组期望**。
