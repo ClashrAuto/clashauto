@@ -6084,3 +6084,51 @@ CI 跑的 `python3 macos/scripts/i18n_check.py` 本机就能跑（跟 `swift tes
 这是同一个教训的第三次现身：`swift test` → `i18n_check.py` → `regression.sh`。
 **每一次都是「工具早就在，我不知道」。** 前两次是被 CI 逼出来的，
 这一次是主动读配置读出来的 —— 主动那次的成本低得多。
+
+---
+
+## 2026-08-15（十七）　把「读 CI」用到另一条线：Qt 也有一个本机能跑的关卡
+
+上一轮只读了 `macos-swift` 那个 job。这轮读 **Qt 的 `macos` job（15 步）**——
+毕竟我这几轮改了不少 Qt 代码，而 Qt 线**一个单元测试都没有**。
+
+里面有一步：
+
+```
+- name: Gateway self-test (feth)
+  run: sudo bash validate/gateway_selftest_mac.sh "$BUILD_DIR/Coast.app/Contents/MacOS/Coast"
+```
+
+### 跑之前先确认它不会碰 Surge
+
+这是本会话的硬约束，所以先读脚本再跑：
+
+- 只**新建** feth0/feth1 一对虚拟网卡（`10.9.9.x` + TEST-NET-1 `192.0.2.10`、**静态 arp**），
+  `trap cleanup EXIT` 里销毁；
+- `grep networksetup|scutil|route add default` → **0 命中**，不碰系统代理与默认路由；
+- 以 `COAST_GATEWAY_SELFTEST=1` 拉起，不起真核心。
+
+### 结果：PASS
+
+```
+SELFTEST: 收到 CONNECT，用户名='dev-666574680001'（期望一致）
+SELFTEST: PASS —— 整条链路(帧→lwIP握手→catch-all→SOCKS+身份)通
+SELFTEST-HARNESS(mac): PASS ✅ BPF 端点 + 用户态栈转发 + 每设备身份 + 双向通
+```
+
+跑完复核：**Surge 仍在、默认路由仍是 utun4、feth 残留 0**。
+
+### 这条为什么重要
+
+Qt 线覆盖最薄的恰恰是**最复杂、最危险**的那段：二层端点（BPF）、用户态 TCP/IP 栈、
+每设备 SOCKS 身份。这个自检把整条链路端到端走了一遍，而且**本机一条命令、约 10 秒**。
+
+于是两条线现在各有一条本机命令：
+
+| | 命令 | 覆盖 |
+|---|---|---|
+| Swift | `bash macos/scripts/regression.sh` | 单测 406 + 落盘 + i18n + 打包 + 产物自检 |
+| Qt | `sudo bash validate/gateway_selftest_mac.sh <Coast二进制>` | 网关数据面端到端 |
+
+**同一个教训第四次现身**，但这次是主动找的：读 job → 看到步骤 → 读脚本确认安全 → 跑。
+成本是几分钟，收益是 Qt 侧从「零自动化」变成「有一张网」。
