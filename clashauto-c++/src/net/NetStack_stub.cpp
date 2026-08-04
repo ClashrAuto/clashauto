@@ -24,6 +24,9 @@
 
 #include "NetStack.h"
 
+// setOutboundFactory 取得所有权 ⇒ 桩要 delete 它 ⇒ 需要**完整类型**（NetStack.h 里只是前向声明）。
+#include "IOutbound.h"
+
 #include <QHostAddress>
 
 // PIMPL 的完整定义：析构里 `delete d` 需要完整类型。桩不持有任何状态。
@@ -120,6 +123,39 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
 {
     Q_UNUSED(from);
     Q_UNUSED(frame);
+}
+
+// ———— CoastCore 时期新增的三个 setter ————
+//
+// ★ 它们在 NetStack.h 里是**公开**接口，而调用点（LanGateway_linux.cpp 的 applyCoastCoreLocal、
+//   LocalTunService.cpp 的 start）是**三端都编**的，所以桩必须给出定义 —— 否则非 Windows 在
+//   **链接期**炸一串 undefined reference。2026-08-04 的 CI 红灯正是这个：阶段 2a/3a/3b
+//   （83a84d9 / 637ee33 / 1daaabd）往 NetStack.h 加了 setter、只在 Windows 的 NetStack.cpp 里
+//   实现，桩没跟上，于是 Linux x64/arm64 与 macOS-Qt 三个 job 一起红，而 Windows 两个照常绿
+//   —— 开发机是 Windows，本地怎么编都发现不了，只能等 CI。
+//
+// ⚠️ 往 NetStack.h 加公开方法时，**这个文件必须同步**。这是桩这种写法的固有维护义务：
+//   它换来了「LanGateway 里二十来处 if (m_net) 一处都不用改」，代价就是这条纪律。
+void NetStack::setOutboundFactory(OutboundFactory *f)
+{
+    // ★ **必须 delete，不能只是忽略**：这个 setter 的契约是「取得所有权，旧工厂内部 delete」
+    //   （见 NetStack.h 的声明处），调用方据此**不会**再删 —— LocalTunService.cpp:655 明确写着
+    //   「这里绝不能再 delete m_factory」。桩若把参数丢掉，每次换出站就漏一个工厂对象。
+    //   直接删掉它，语义上等价于「装进来又立刻被销毁」：本平台没有栈可以驱动它，本来也用不上。
+    //   OutboundFactory 有虚析构（IOutbound.h），经基类指针删是安全的。
+    delete f;
+}
+
+void NetStack::setDnsLearner(std::shared_ptr<DnsResolver> learner)
+{
+    // 按值收下，出作用域自行释放（shared_ptr 的删除器在构造处就已类型擦除，
+    // 这里 DnsResolver 不完整也没关系）。
+    Q_UNUSED(learner);
+}
+
+void NetStack::setLocalDnsEnabled(bool on)
+{
+    Q_UNUSED(on);
 }
 
 // 私有的 UDP/DNS 那几个方法**故意不定义**：它们只被 NetStack.cpp 内部调用，
