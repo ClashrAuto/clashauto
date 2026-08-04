@@ -468,7 +468,12 @@ public final class ClashService {
                 group.addTask { [api] in _ = await api.delay(node: name) }
             }
         }
-        log("Delay test finished.", .routine)
+        // ★ 级别必须跟上面那句 `Testing N nodes...` 一致（都走页脚）。
+        //   标成 `.routine` 的话页脚只显示「开始」、不显示「结束」——
+        //   于是测完之后页脚**永远**停在「Testing 67 nodes...」，用户以为还在跑。
+        //   规则：**清除某个进行中状态的消息，可见性不能低于设置它的那条。**
+        //   Qt 端两句都是普通级别，页脚正常收尾成「Delay test finished.」。
+        log("Delay test finished.")
         await pollNodes()
         if thenSpeed { startSpeedTestForValidNodes() }
     }
