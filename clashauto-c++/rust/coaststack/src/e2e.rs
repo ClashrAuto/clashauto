@@ -673,3 +673,32 @@ fn measure_ceilings_with_window_scaling() {
     assert!(delivered > 0, "上行一个字节都没走通");
     assert!(on_wire > 0, "下行一个字节都没上线");
 }
+
+/// backlog 不该限制**一拍之内**能接受多少条新连接。
+///
+/// 旧实现里 promote_listeners 只在收包循环**之后**跑一次，于是同一个 poll 周期里
+/// 最多只有 LISTEN_BACKLOG(32) 个处于 Listen 的 socket 可用，第 33 条起的 SYN
+/// 无人应答 → 设备等约 1 秒 RTO 重传。多源页面同时开 30~100 条连接很常见。
+///
+/// 这条测试对旧实现是**会失败**的（只会数到 32 个 SYN-ACK），所以它真的在测东西。
+#[test]
+fn backlog_does_not_cap_accepts_per_poll() {
+    let mut e = mk_engine();
+    const N: u16 = 100; // 远超 LISTEN_BACKLOG
+    let mut evs = Vec::new();
+    for i in 0..N {
+        e.input(1, &tcp_frame(40000 + i, 443, 0x02, 1000 + i as u32, 0, b""));
+    }
+    e.poll_collect(10, &mut evs);
+
+    let synacks = tcp_out(&evs)
+        .into_iter()
+        .filter(|(fl, _, _, _)| fl & 0x12 == 0x12)
+        .count();
+    assert_eq!(
+        synacks, N as usize,
+        "一拍之内应对全部 {} 个 SYN 回 SYN-ACK；只回了 {} 个 = backlog 仍在封顶
+         （旧实现恒为 LISTEN_BACKLOG=32）",
+        N, synacks
+    );
+}

@@ -20,6 +20,7 @@
 // 差两个数量级。**先要正确，再谈那 1%。**
 
 use alloc::collections::BTreeMap;
+use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -42,6 +43,8 @@ const TX_BUF: usize = 128 * 1024;
 /// 监听池大小 = 「两次 poll 之间能接住几个 SYN」的突发容忍度，**不是并发上限**
 /// （R6 实测：backlog=1 时 64 路并发照样跑通，只是吞吐 -7%）。真正的上限是内存。
 const LISTEN_BACKLOG: usize = 32;
+/// 排空收队列时，每处理多少帧补一次监听 socket（见 poll_collect 里的说明）。
+const PROMOTE_EVERY: u32 = 16;
 
 pub type ConnId = u64;
 pub type NicId = u32;
@@ -60,17 +63,26 @@ pub enum Event {
 /// smoltcp 的 Device 实现：收队列由 `coast_stack_input` 填，发队列由 poll 后排空。
 /// 端口改写**不在这里**做（在 FFI 出入口做），所以这个设备只搬字节，不需要共享 PortMap。
 pub struct QueueDevice {
-    rx: Vec<Vec<u8>>,
+    /// ★ VecDeque 不是 Vec：原来是 `rx.remove(0)`，**每取一帧就 memmove 整个队列**，
+    ///   队列深时退化成 O(n²)。千兆线速下一拍能积 ~2000 帧，正好落在最坏区间。
+    rx: VecDeque<Vec<u8>>,
     tx: Vec<Vec<u8>>,
     mtu: usize,
+    /// 本次 `iface.poll()` 还允许交出多少帧；`usize::MAX` = 不限。
+    ///
+    /// 为什么需要它：smoltcp 的 `Interface::poll()` **内部会一直 receive() 到设备说没有为止**，
+    /// 不是"一次一帧"（engine 里那句老注释是错的）。于是一次 poll 就能吃光全部 32 个
+    /// 监听 socket，中途补充监听根本没机会插进去 —— 表现为一拍最多接受 32 条新连接。
+    /// 给设备加个预算，把"一次 poll"切成小块，补充逻辑才有落点。
+    rx_budget: usize,
 }
 
 impl QueueDevice {
     fn new(mtu: usize) -> Self {
-        Self { rx: Vec::new(), tx: Vec::new(), mtu }
+        Self { rx: VecDeque::new(), tx: Vec::new(), mtu, rx_budget: usize::MAX }
     }
     fn push_rx(&mut self, frame: Vec<u8>) {
-        self.rx.push(frame);
+        self.rx.push_back(frame);
     }
     fn take_tx(&mut self) -> Vec<Vec<u8>> {
         core::mem::take(&mut self.tx)
@@ -114,10 +126,11 @@ impl Device for QueueDevice {
     type TxToken<'a> = QTx<'a> where Self: 'a;
 
     fn receive(&mut self, _t: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
-        if self.rx.is_empty() {
+        if self.rx_budget == 0 || self.rx.is_empty() {
             return None;
         }
-        let frame = self.rx.remove(0);
+        self.rx_budget -= 1;
+        let frame = self.rx.pop_front()?;
         Some((QRx(frame), QTx(&mut self.tx)))
     }
     fn transmit(&mut self, _t: Instant) -> Option<Self::TxToken<'_>> {
@@ -501,14 +514,33 @@ impl Engine {
           //   表现为"第一个 v6 连接慢一拍"。两轮即可收敛（NA 进来 → 重发 SYN-ACK）。
           for _round in 0..2 {
             // 反复 poll 直到没有新进展或收队列排空（一次 poll 只处理一帧）
+            //
+            // ★ 排空**途中**必须补充监听 socket。原来 promote_listeners 只在这个循环
+            //   之后跑一次，于是「一拍之内最多接受 LISTEN_BACKLOG(32) 条新连接」：
+            //   同一个 25ms 窗口里第 33 条起的 SYN 找不到处于 Listen 的 socket，被丢/回 RST，
+            //   设备要等初始 RTO（约 1 秒）重传。而多源页面同时开 30~100 条连接很常见 ——
+            //   症状是"偶发某些资源加载特别慢"，极难归因，且这条路**没有计数器**。
+            //   修法不能是调大 LISTEN_BACKLOG：每个监听 socket 都实打实占
+            //   RX_BUF+TX_BUF = 256 KiB，32 个已经是 8 MB 常驻，再乘 8 就是 64 MB。
+            //   所以改成排空途中按帧数分摊地补 —— 池子不变，但一拍能接受的连接数不再有上限。
             loop {
-                let Some(n) = self.nics.get_mut(&nid) else { break };
-                let had_rx = n.device.rx_pending();
-                let r = n.iface.poll(now, &mut n.device, &mut n.sockets);
+                // ★ 借用必须收在这个块里：promote_listeners 要 &mut self，
+                //   而 n 借的是 self.nics —— 不放开就是 E0499。
+                let (had_rx, r, still_rx) = {
+                    let Some(n) = self.nics.get_mut(&nid) else { break };
+                    let had_rx = n.device.rx_pending();
+                    // 每次 iface.poll 只放 PROMOTE_EVERY 帧进去，好让下面的补充逻辑插得进来
+                    n.device.rx_budget = PROMOTE_EVERY as usize;
+                    let r = n.iface.poll(now, &mut n.device, &mut n.sockets);
+                    n.device.rx_budget = usize::MAX;
+                    (had_rx, r, n.device.rx_pending())
+                };
                 if !had_rx && r == PollResult::None {
                     break;
                 }
-                if !n.device.rx_pending() && r == PollResult::None {
+                // 每轮补一次监听 socket（一轮最多 PROMOTE_EVERY 帧，见上）
+                self.promote_listeners(nid, out);
+                if !still_rx && r == PollResult::None {
                     break;
                 }
             }
@@ -620,19 +652,33 @@ impl Engine {
             // ① 上行：peek 出「已到达但还没交给 C++」的部分。
             //    ★ 只 peek 不 recv —— recv 会释放 rx 缓冲、打开通告窗口，那正是我们要扣住的闸门。
             //      窗口在 C++ 调 coast_conn_recved 之后才还（见 Engine::recved）。
+            //    ★ 只取**新增的尾巴**，别每次重拷整段积压。
+            //      原实现每拍分配 avail 字节并 peek_slice 整段（最坏 RX_BUF=128 KiB），
+            //      再把前 c.peeked 字节丢掉 —— 单包到达时放大可达 40 倍以上。
+            //      25ms 一拍时这笔浪费还不显眼；把 poll 提到每轮事件循环一次之后，
+            //      它会直接变成 CPU 瓶颈，所以必须和提频同批修。
             let avail = s.recv_queue();
             if avail > c.peeked {
-                let want = avail - c.peeked;
-                let mut buf = vec![0u8; want];
-                // peek_slice 从队首开始，所以要跳过已经交出去的 c.peeked 字节
-                let mut tmp = vec![0u8; avail];
-                let got = s.peek_slice(&mut tmp).unwrap_or(0);
-                if got > c.peeked {
-                    let n_new = got - c.peeked;
-                    buf.truncate(n_new);
-                    buf.copy_from_slice(&tmp[c.peeked..got]);
-                    c.peeked += n_new;
-                    out.push(Event::ConnData { id, data: buf });
+                // 快路径：环形缓冲未绕回时 peek 一次就能给出连续的全部字节，
+                // 直接切走 [peeked..avail] —— 一次分配、一次拷贝、零浪费。
+                let mut done = false;
+                if let Ok(buf) = s.peek(avail) {
+                    if buf.len() >= avail {
+                        let data = buf[c.peeked..avail].to_vec();
+                        c.peeked = avail;
+                        out.push(Event::ConnData { id, data });
+                        done = true;
+                    }
+                }
+                if !done {
+                    // 慢路径：缓冲绕回，peek 只能给到绕回点 —— 退回整段拷贝。
+                    let mut tmp = vec![0u8; avail];
+                    let got = s.peek_slice(&mut tmp).unwrap_or(0);
+                    if got > c.peeked {
+                        let data = tmp[c.peeked..got].to_vec();
+                        c.peeked = got;
+                        out.push(Event::ConnData { id, data });
+                    }
                 }
             }
 
