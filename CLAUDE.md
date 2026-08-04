@@ -33,7 +33,7 @@ cmake --build build-ninja
 .\build-ninja\Coast.exe          # OUTPUT_NAME is "Coast" on Windows (was clashauto.exe)
 ```
 
-`find_package(Qt6 … Widgets Network Qml Quick QuickControls2)`. `AUTOMOC`/`AUTORCC`/`AUTOUIC` are on, so new `Q_OBJECT` classes and `.qrc`/`.qml` changes are picked up — but **new `.cpp` files must be added by hand** to `CMakeLists.txt` (`BACKEND_SOURCES` / `QML_GLUE_SOURCES`), and new `.qml` files to the `qt_add_qml_module(... QML_FILES ...)` list. Build dirs: only `build-ninja/`, `build-qml/`, `build-release/` are in `.gitignore` — there is **no `build-*` wildcard**, so any other build dir you create shows up as untracked.
+`find_package(Qt6 … Widgets Network Qml Quick QuickControls2)`. `AUTOMOC`/`AUTORCC`/`AUTOUIC` are on, so new `Q_OBJECT` classes and `.qrc`/`.qml` changes are picked up — but **new `.cpp` files must be added by hand** to `CMakeLists.txt` (`BACKEND_SOURCES` / `QML_GLUE_SOURCES`), and new `.qml` files to the `qt_add_qml_module(... QML_FILES ...)` list. Build dirs: `.gitignore` has a `build-*/` wildcard (it used to be four hardcoded names, and the one dir not on that list nearly got `git add -A`'d into a commit), so any `build-<whatever>/` you create is ignored at any depth.
 
 ## Verifying a release — `validate/`
 
