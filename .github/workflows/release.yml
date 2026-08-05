@@ -1451,7 +1451,7 @@ jobs:
           [ -n "$IDENTITY" ] || { echo "导入的证书里没有 Developer ID Application 身份"; exit 1; }
           echo "identity=$IDENTITY" >> "$GITHUB_OUTPUT"
 
-      - name: Package Coast.app (universal)
+      - name: Package Coast.app (arm64)
         working-directory: macos
         env:
           # make_app.sh 默认集成最新正式版内核，要打 GitHub API 挑产物；Actions 共享
@@ -1468,15 +1468,16 @@ jobs:
         run: |
           set -euo pipefail
           # 只做打包产物的**结构**校验——每项毫秒级、零挂死风险：
-          #   • universal 两架构齐全（缺一半的包在另一半机器上直接打不开）
+          #   • 确实是 arm64、且**没有**混进 x86_64（这条线只发 arm64，见上一步）
           #   • 签名封存完整（--deep --strict：浅校验在内层二进制签坏时照样报 OK）
           #   • 种子资源 / 集成内核 / helper 布局在位（缺了要等用户首启才炸，CI 就该拦住）
           # ★ 不在 CI 跑 scripts/regression.sh：它是本地开发工具。swift test 和 i18n
           #   上面已各有独立步骤，再跑一遍纯重复；其自检钩子在 runner 上不是 SKIP 就是
           #   无意义（topo 验的是 runner 的网关，helper 注册 ad-hoc 必 SKIP），sysproxy
           #   的授权弹窗还把 Verify bundle 吊死过一个多小时。
-          lipo -archs Coast.app/Contents/MacOS/Coast | grep -q x86_64
           lipo -archs Coast.app/Contents/MacOS/Coast | grep -q arm64
+          # 反向断言：混进 x86_64 说明 --universal 又被谁加回去了，包会白白大一倍。
+          ! lipo -archs Coast.app/Contents/MacOS/Coast | grep -q x86_64
           lipo -archs Coast.app/Contents/MacOS/com.yuehongsun.coast.helper | grep -q arm64
           codesign --verify --deep --strict Coast.app
           test -f Coast.app/Contents/Library/LaunchDaemons/com.yuehongsun.coast.helper.plist
@@ -1497,8 +1498,12 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          ZIP="out/Coast-${VERSION}-macos-universal.zip"
-          DMG="out/Coast-${VERSION}-macos-universal.dmg"
+          # 名字里的架构要说实话。改名是安全的：两条线的更新器都按
+          # 「含 macos + .dmg + 不含 -qt」挑资源，不认 universal 这个词
+          # （UpdateChecker.macAsset / AppUpdater.pickAsset）——老版本照样能更新到新名字。
+          # ★ 但 `-qt` 那个标记仍是硬契约，一个字都不能动，见 CLAUDE.md。
+          ZIP="out/Coast-${VERSION}-macos-arm64.zip"
+          DMG="out/Coast-${VERSION}-macos-arm64.dmg"
           # 更新用 zip 必须用 ditto：普通 zip 不保留 bundle 的符号链接与扩展属性，
           # 解出来的 .app 签名当场失效。
           ditto -c -k --keepParent Coast.app "$ZIP"
@@ -1530,7 +1535,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Coast-swift-macos-universal
+          name: Coast-swift-macos-arm64
           path: macos/out/*
           if-no-files-found: error
 

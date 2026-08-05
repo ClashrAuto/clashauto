@@ -66,8 +66,10 @@ NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-(\d+(?:\.\d+)*)-(.+)$")
 #   Qt 线 macOS 13+），认错的后果是把用户推到一个他系统起不来的包上，而一键更新会先删掉
 #   旧 .app —— 没有退路。见 CLAUDE.md 里那段「-qt 是硬契约」。
 KIND_RULES = [
-    (re.compile(r"^macos-(universal)-qt\.dmg$"), "mac", "dmg-qt"),
-    (re.compile(r"^macos-(universal)\.dmg$"), "mac", "dmg"),
+    # Qt 线始终是 universal（部署目标 13.0，要带 Intel）；Swift 线 2026-08 起只发 arm64
+    # （部署目标 macOS 26）。两条都得认，老 release 里还留着 `macos-universal.dmg`。
+    (re.compile(r"^macos-(universal|arm64|x64)-qt\.dmg$"), "mac", "dmg-qt"),
+    (re.compile(r"^macos-(universal|arm64|x64)\.dmg$"), "mac", "dmg"),
     (re.compile(r"^windows-(x64|arm64)-setup\.exe$"), "win", "setup"),
     (re.compile(r"^windows-(x64|arm64)-portable\.zip$"), "win", "portable"),
     (re.compile(r"^linux-(x64|arm64)\.deb$"), "linux", "deb"),
@@ -120,6 +122,22 @@ def classify(name):
     return version, "", "", rest
 
 
+def merge_key(entry):
+    """「同一个包的新旧两版」怎么算同一个。
+
+    一般是 (平台, 芯片, 类型) —— Windows 的 x64 与 arm64 是两个包，各自独立更新，版本
+    错开是正常的（一个 job 先完成而已），不能互相顶掉。
+
+    ★ **macOS 例外，不看芯片**：那边一条产品线只有一个包（Swift 线 arm64-only、Qt 线
+      universal），芯片写在文件名里只是描述。带上芯片的话，Swift 线从 `macos-universal.dmg`
+      改成 `macos-arm64.dmg` 的那一刻，新旧会被当成两个不同的包 —— 旧的 universal 再也不会
+      被谁顶掉，永远赖在清单里，客户端还可能挑到它。
+    """
+    if entry.get("p") == "mac":
+        return ("mac", entry.get("kind"))
+    return (entry.get("p"), entry.get("芯片"), entry.get("kind"))
+
+
 def packages_from_release(rel, channel, prev_packages):
     """本次 release 的包 + 旧清单里本次没有的那些（各带各的版本号）。"""
     checksums = {}
@@ -149,13 +167,13 @@ def packages_from_release(rel, channel, prev_packages):
         }
         if name in checksums:
             entry["sha256"] = checksums[name]
-        fresh[(p, chip, kind)] = entry
+        fresh[merge_key(entry)] = entry
 
     # 合并：本次没有的包沿用旧的；旧的比新的还新时也保留（CI 重跑老 tag 不该把新包顶回去）。
     for old in prev_packages:
         if old.get("type") != channel:
             continue
-        key = (old.get("p"), old.get("芯片"), old.get("kind"))
+        key = merge_key(old)
         cur = fresh.get(key)
         if cur is None or version_tuple(old.get("version")) > version_tuple(cur.get("version")):
             fresh[key] = old
@@ -253,6 +271,19 @@ def selftest():
     head = release_head(linux_only, merged, "prerelease")
     check(head["version"] == "1.0.878", "通道版本取所有包里最高的那个")
     check(head["notes"] == "新说明", "更新说明跟着本次 release 走")
+
+    # Swift 线从 universal 改成 arm64-only：新的必须**替换**旧的，而不是并存
+    renamed = {
+        "tag_name": "v1.0.882", "name": "Coast 1.0.882", "published_at": "T5", "body": "",
+        "assets": [asset("Coast-1.0.882-macos-arm64.dmg"),
+                   asset("Coast-1.0.882-macos-universal-qt.dmg")],
+    }
+    after = packages_from_release(renamed, "prerelease", merged)
+    macs = [e for e in after if e["p"] == "mac" and e["kind"] == "dmg"]
+    check(len(macs) == 1, "mac 换名后只剩一条 dmg（旧的 universal 不该并存）")
+    check(macs and macs[0]["芯片"] == "arm64", "留下的是新的 arm64 那条")
+    qts = [e for e in after if e["kind"] == "dmg-qt"]
+    check(len(qts) == 1 and qts[0]["version"] == "1.0.882", "Qt 线仍是 universal，各走各的")
 
     # CI 重跑一个**老** tag：不能把已经在清单里的新包顶回去
     old_rerun = {

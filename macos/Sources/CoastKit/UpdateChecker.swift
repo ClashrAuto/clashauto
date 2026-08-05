@@ -171,8 +171,9 @@ public struct UpdateChecker: Sendable {
     /// **按扩展名 + 关键词挑，绝不按文件名前缀** —— 前缀是品牌串，改过一次名（ClashAuto → Coast）
     /// 就会让所有老版本的一键更新失效。C++ 版正是靠这条才敢改资源名。
     ///
-    /// ★ 同一个 release 上有**两个** mac 包：本（Swift）版的 `…-macos-universal.dmg`
-    ///   和 Qt 版的 `…-macos-universal-qt.dmg`。后者部署目标 13.0、是给装不了 macOS 26 的
+    /// ★ 同一个 release 上有**两个** mac 包：本（Swift）版的 `…-macos-arm64.dmg`
+    ///   （2026-08 前叫 `…-macos-universal.dmg`，这条线现在只发 arm64）和 Qt 版的
+    ///   `…-macos-universal-qt.dmg`。后者部署目标 13.0、是给装不了 macOS 26 的
     ///   机器准备的另一条产品线，把它当成自己的更新包装下去 = 用户被静默换成另一个 app。
     ///   所以先把带 qt 标记的滤掉再挑。
     public static func macAsset(from assets: [(name: String, url: String)]) -> (name: String, url: String)? {
