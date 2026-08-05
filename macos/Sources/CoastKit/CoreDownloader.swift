@@ -165,22 +165,27 @@ public struct CoreDownloader: Sendable {
 
     // MARK: - 网络
 
+    /// 发布列表。**取自 CI 维护的 version.json，不打 GitHub API** —— 匿名 API 是 60 次/
+    /// 小时按出口 IP 算，机场出口后面几百人共用，限流几乎必中（见 VersionManifest）。
+    /// 清单翻译回 /releases 的形状后，下面挑产物那套规则一行都没改。
     private func fetchReleases() async throws -> [[String: Any]] {
-        let url = URL(string: Self.releasesURL)!
+        let url = URL(string: VersionManifest.url)!
         var request = URLRequest(url: url)
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.timeoutInterval = 20
         let session = URLSession(configuration: sessionConfiguration())
         defer { session.finishTasksAndInvalidate() }
         do {
             let (data, _) = try await session.data(for: request)
             let parsed = try? JSONSerialization.jsonObject(with: data)
-            guard let list = parsed as? [[String: Any]] else {
-                // 限流时 GitHub 回的是带 message 的**对象**而不是数组(匿名每小时 60 次),
-                // 把它的原话带出去,别只报一句「解析失败」。
-                let detail = (parsed as? [String: Any])?["message"] as? String ?? "返回不是发布列表"
-                throw DownloadError.releaseQueryFailed(detail)
+            guard let root = parsed as? [String: Any] else {
+                throw DownloadError.releaseQueryFailed("版本清单无法解析")
+            }
+            let list = VersionManifest.coreReleases(root)
+            guard !list.isEmpty else {
+                // 清单在、但内核那段是空的。**必须报错而不是返回空数组** —— 空数组会一路
+                // 变成「该通道没有本平台产物」，读起来像内核发布出了问题，而实际是清单没写全。
+                throw DownloadError.releaseQueryFailed("版本清单里没有内核发布信息")
             }
             return list
         } catch let error as DownloadError {

@@ -62,17 +62,28 @@ public struct UpdateChecker: Sendable {
         }
     }
 
+    /// 数据源是 CI 维护的 `version.json`，**不是 GitHub API** —— 理由见 `VersionManifest`。
+    /// 清单被翻译回 `/releases` 的形状后交给下面原样的 `parseReleases`：资源过滤、
+    /// -qt 排除、边车校验一条都没重写。
     public func latestAppRelease() async throws -> Release? {
-        let url = URL(string: "https://api.github.com/repos/\(repository)/releases?per_page=20")!
-        var request = URLRequest(url: url)
-        request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 20
-
-        let (data, response) = try await session.data(for: request)
-        return try Self.parseReleases(data: data,
-                                      status: (response as? HTTPURLResponse)?.statusCode ?? -1,
+        let root = try await VersionManifest.fetch(session: session)
+        let list = VersionManifest.appReleases(root)
+        let data = try JSONSerialization.data(withJSONObject: list)
+        return try Self.parseReleases(data: data, status: 200,
                                       includePrerelease: includePrerelease)
+    }
+
+    /// **本条产品线**在对应通道里能装到的最高版本。角标该拿它去比，而不是 release 的 tag ——
+    /// 同一个 tag 上各平台的包是陆续到的，按 tag 比会说「有新版」却下不到包。
+    public func latestAppVersionForThisLine() async throws -> String? {
+        let root = try await VersionManifest.fetch(session: session)
+        var best = VersionManifest.versionForThisLine(root, channel: "release")
+        if includePrerelease,
+           let beta = VersionManifest.versionForThisLine(root, channel: "prerelease"),
+           best == nil || Self.isNewer(remote: beta, than: best!) {
+            best = beta
+        }
+        return best
     }
 
     /// 从 `/releases` 的响应里挑出该用的那一条。单独抽出来是为了能脱离网络单测 ——
@@ -122,14 +133,9 @@ public struct UpdateChecker: Sendable {
     /// 返回的 tag 是**产物名里嵌的版本号**（beta 的 release tag 是 Prerelease-<分支>，
     /// 拿它和本地内核版本没法比）。
     public func latestCoreRelease() async throws -> (tag: String, notes: String)? {
-        let url = URL(string: CoreDownloader.releasesURL)!
-        var request = URLRequest(url: url)
-        request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.timeoutInterval = 20
-        let (data, _) = try await session.data(for: request)
-        guard let list = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let pick = CoreDownloader.pick(releases: list, wantBeta: includePrerelease)
+        let root = try await VersionManifest.fetch(session: session)
+        let list = VersionManifest.coreReleases(root)
+        guard let pick = CoreDownloader.pick(releases: list, wantBeta: includePrerelease)
         else { return nil }
         return (pick.version, pick.notes)
     }
