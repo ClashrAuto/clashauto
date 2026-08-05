@@ -1035,6 +1035,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         // 协议栈是共用的，先起来（lwIP 单实例；每张卡随后各挂一个 netif）。都在工作线程上创建。
         m_net = new NetStack(socksPort, this);
         if (!m_net->init(&err)) {
+            GatewayDiag::note("stackInit", QStringLiteral("协议栈初始化失败: ") + err);
             emit deviceError(QString(), QStringLiteral("协议栈初始化失败: ") + err);
             delete m_net;
             m_net = nullptr;
@@ -1140,8 +1141,14 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         //   线程被服务（Qt 硬性要求通知器与服务它的线程同线程）。这正是把 configure 投到工作线程的
         //   根本原因之一。
         if (!n->ep->isOpen() && !n->ep->open(spec.ifname, &err)) {
-            emit deviceError(QString(),
-                             QStringLiteral("打开网卡失败(%1): ").arg(spec.ifname) + err);
+            // ★ **必须落日志**，不能只 emit。`deviceError` 只发给 UI —— 弹一下就没了，
+            //   而这条恰恰是最常见的失败：没有管理员权限 / 没装 Npcap 时它必然发生，
+            //   表现是「程序在跑、设备开着开关、但一个包都不过」，而 gateway-diag.log 里
+            //   **一个字都没有**（空窗口连采样行都不写）。真机上为这件事查了一个小时。
+            const QString why = QStringLiteral("打开网卡失败(%1): ").arg(spec.ifname) + err;
+            GatewayDiag::note("epOpen",
+                              why + QStringLiteral("  —— 常见原因：未以管理员运行，或未安装 Npcap"));
+            emit deviceError(QString(), why);
             continue;
         }
         // ★ m_net 判空必须在**最前面**：tproxy 模式下它恒为空，而 && 是从左到右求值的。

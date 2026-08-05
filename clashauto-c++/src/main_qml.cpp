@@ -165,6 +165,10 @@ int main(int argc, char *argv[])
     // NetStack 级：整条 smoltcp 路径（要建 NetStack + 假 SOCKS，仍不碰真网卡/不需要 root）
     if (qEnvironmentVariableIsSet("COAST_SMOLGW_SELFTEST"))
         return runSmolGatewaySelfTest();
+    // 每卡入站的**接线**自测：装全局工厂 + 每卡专属口，断言拨的是后者。
+    // 见 GatewaySelfTest.h —— 两个真机 bug 都在这条路上，而当时既有自测全绿。
+    if (qEnvironmentVariableIsSet("COAST_NICWIRING_SELFTEST"))
+        return runNicWiringSelfTest();
     // 软件路径吞吐基准（去掉网卡，量纯软件成本）。放在单实例守卫**之前** ——
     // 自测/基准一旦跑在守卫之后，遇到已有实例会走 notifyExistingAndQuit 返回 0，
     // 于是"断言坏了"也照样绿（这个坑本仓库踩过）。

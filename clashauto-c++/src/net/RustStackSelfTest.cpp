@@ -449,6 +449,139 @@ private:
 
 } // namespace
 
+// ———————————————— 每卡入站接线自测（COAST_NICWIRING_SELFTEST）————————————————
+//
+// ★ **这个自测是为两个真机 bug 补的，它们都在「已有自测全绿」的情况下发生。**
+//
+//   ① `outFactoryFor()` 用**对象身份**判断「全局工厂是不是 CoastCore 的」：
+//        if (d->outFactory && d->outFactory != d->ownedDefault) return d->outFactory;
+//      而关掉 CoastCore 的分支会 `setOutboundFactory(new Socks5OutboundFactory(...))` ——
+//      新对象同样 `!= ownedDefault`，于是**每卡工厂被无条件吞掉**，所有设备一律拨基准口。
+//      副卡的设备因此一条连接都建不起来（配置里那个口没人监听 → Connection refused）。
+//      `runSmolGatewaySelfTest` 测不到：它 `addNic(..., 0, ...)` 且从不装全局工厂，
+//      **出问题的那条分支一次都没走过**。
+//
+//   ② 网卡序号变了（拔掉/禁用另一张卡）时，栈里缓存的 `socksPort` 不跟着变 —— 配置侧已经
+//      重生成成新端口，而网关还在拨旧的，每条新连接被拒。真机上禁用有线卡当场全断。
+//
+//   两条都不是"算错了一个值"，而是**接线**错了。所以这里不造合成断言，而是照生产的样子接：
+//   装全局工厂 + 给网卡一个不同的专属口，然后看 SOCKS CONNECT 落在哪个口上。
+int runNicWiringSelfTest()
+{
+    constexpr quint16 kGlobalPort = 47899; // 「基准口」——绝不该被拨到
+    constexpr quint16 kNicPort = 47900;    // 这张卡的专属口——正确答案
+    constexpr quint16 kNicPort2 = 47901;   // 序号变化后的新口
+    const QString kUser = QStringLiteral("dev-abc123");
+
+    int fails = 0;
+    auto check = [&fails](bool cond, const char *what) {
+        std::fputs(cond ? "  ok   " : "  FAIL ", stdout);
+        std::fputs(what, stdout);
+        std::fputs("\n", stdout);
+        if (!cond)
+            ++fails;
+    };
+
+    MiniSocks global(kGlobalPort), perNic(kNicPort), renumbered(kNicPort2);
+    if (!global.ok || !perNic.ok || !renumbered.ok) {
+        std::fprintf(stderr, "[nicwiring] 夹具端口被占（%u/%u/%u）——这不是被测逻辑的问题\n",
+                     kGlobalPort, kNicPort, kNicPort2);
+        return 3;
+    }
+
+    QString err;
+    NetStack net(kGlobalPort);
+    if (!net.init(&err)) {
+        std::fprintf(stderr, "[nicwiring] 本平台没有用户态栈（%s）——跳过\n",
+                     err.toLatin1().constData());
+        return 0; // Linux/mac 走 TPROXY/pf，没有用户态栈可测，不算失败
+    }
+
+    // ★ 复现生产接线：关掉 CoastCore 的那条分支曾在这里装一个**新的** Socks5 工厂。
+    //   它 != ownedDefault，正是 ① 的触发条件。
+    auto *globalFactory = new Socks5OutboundFactory(kGlobalPort);
+    net.setOutboundFactory(globalFactory);
+
+    FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
+    if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
+                    QStringLiteral("255.255.255.0"), kNicPort, &err)) {
+        std::fprintf(stderr, "[nicwiring] addNic 失败: %s\n", err.toLatin1().constData());
+        return 3;
+    }
+    net.addDevice(QStringLiteral("10.99.0.1"),
+                  QByteArray(reinterpret_cast<const char *>(kDevMac), 6), kUser);
+
+    // 跑一次完整握手 + SOCKS，返回「哪个夹具收到了 CONNECT」。
+    auto dialOnce = [&](quint16 sport) -> MiniSocks * {
+        uint8_t f[54];
+        QElapsedTimer clk;
+        clk.start();
+        ep.clock = &clk;
+        ep.synAck = 0;
+        buildTcp(f, sport, 443, 0x02 /*SYN*/, 1000, 0);
+        net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), sizeof(f)));
+        {
+            QEventLoop w;
+            QTimer t, poll;
+            t.setSingleShot(true);
+            QObject::connect(&t, &QTimer::timeout, &w, &QEventLoop::quit);
+            QObject::connect(&poll, &QTimer::timeout, &w, [&] {
+                if (ep.synAck > 0)
+                    w.quit();
+            });
+            poll.start(5);
+            t.start(2000);
+            w.exec();
+        }
+        if (ep.synAck < 1)
+            return nullptr;
+        buildTcp(f, sport, 443, 0x10 /*ACK*/, 1001, ep.synAckSeq + 1);
+        net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), sizeof(f)));
+        QEventLoop loop;
+        QTimer deadline, tick;
+        deadline.setSingleShot(true);
+        QObject::connect(&deadline, &QTimer::timeout, &loop, &QEventLoop::quit);
+        QObject::connect(&tick, &QTimer::timeout, &loop, [&] {
+            if (global.gotConnect || perNic.gotConnect || renumbered.gotConnect)
+                loop.quit();
+        });
+        tick.start(5);
+        deadline.start(3000);
+        loop.exec();
+        if (perNic.gotConnect)
+            return &perNic;
+        if (renumbered.gotConnect)
+            return &renumbered;
+        if (global.gotConnect)
+            return &global;
+        return nullptr;
+    };
+
+    // —— ① 每卡工厂不能被全局工厂吞掉 ——
+    MiniSocks *hit = dialOnce(51000);
+    check(hit != nullptr, "握手走完并拨出了上游");
+    check(hit == &perNic,
+          "★ 拨的是**这张卡的专属口**，不是基准口（全局工厂不该吞掉每卡工厂）");
+    check(hit && hit->user == kUser, "SOCKS 用户名是这台设备的（按设备分流的依据）");
+    check(!global.gotConnect, "基准口一次都没被拨到");
+
+    // —— ② 序号变了要能就地换口 ——
+    check(net.setNicSocksPort(&ep, kNicPort2), "setNicSocksPort 认得这张卡");
+    perNic.gotConnect = false;
+    MiniSocks *hit2 = dialOnce(51001);
+    check(hit2 == &renumbered,
+          "★ 换口后新连接拨的是**新口**（网卡序号变了就是这条路）");
+    check(!perNic.gotConnect, "旧口不再被拨");
+
+    // 换成一个不存在的网卡端点要老实返回 false，别假装成功。
+    FakeEp other(QByteArray(reinterpret_cast<const char *>(kDevMac), 6));
+    check(!net.setNicSocksPort(&other, kNicPort), "没登记过的网卡换口返回 false");
+
+    std::printf(fails ? "每卡入站接线自测：%d 条失败\n" : "每卡入站接线自测：全部通过\n", fails);
+    std::fflush(stdout);
+    return fails ? 1 : 0;
+}
+
 int runSmolGatewaySelfTest()
 {
     const quint16 kSocksPort = 47899;

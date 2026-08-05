@@ -30,6 +30,14 @@ int runRustStackSelfTest();
 // CONNECT + 每设备身份。0=通过。见 RustStackSelfTest.cpp 末尾。
 int runSmolGatewaySelfTest();
 
+/// 每卡入站**接线**自测（`COAST_NICWIRING_SELFTEST=1`）。exit 0 = 通过。
+///
+/// 与 `runSmolGatewaySelfTest` 的区别是它照**生产的样子接线**：装一个全局出站工厂，
+/// 再给网卡一个不同的专属口，然后看 SOCKS CONNECT 落在哪个口。两个真机 bug 都藏在这条
+/// 路上（全局工厂吞掉每卡工厂；网卡序号变了端口不跟着变），而它们发生时既有自测全绿 ——
+/// 因为那个自测 `addNic(..., 0, ...)` 且从不装全局工厂，出问题的分支一次都没走过。
+int runNicWiringSelfTest();
+
 /// 软件路径吞吐基准（COAST_GW_THROUGHPUT=1）。
 /// ★ 用 FakeEp **把网卡整个拿掉** —— 本仓库此前所有网关吞吐数字都在一台 QEMU 虚机上量，
 ///   而那台机器上每帧 12~17 µs 里绝大部分是 e1000 模拟的开销（见
