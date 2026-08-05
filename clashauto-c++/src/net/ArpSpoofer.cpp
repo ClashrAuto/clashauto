@@ -113,10 +113,6 @@ void ArpSpoofer::startSpoof(const QString &victimMac, const QString &victimIp)
 
     const Target t{vmac, vip};
     m_victims.insert(victimMac.toLower(), t);
-    // ★ 从「没握住」起步：还没收到过这台设备发给本机的帧之前，不对网关投毒。
-    //   否则就是那个真机实证过的黑洞——网关已经把回程交给我们，设备却还指着真网关。
-    //   幂等重挂时也重置：上一轮的「握住」不能替这一轮背书（设备可能刚换址/刚重连）。
-    m_hold.insert(macKey6(reinterpret_cast<const uchar *>(vmac.constData())), HoldState{});
     sendSpoof(t); // 立刻抢占一次，别等下个 tick
     if (!m_timer->isActive())
         m_timer->start();
@@ -129,7 +125,6 @@ void ArpSpoofer::stopSpoof(const QString &victimMac)
         return;
     if (configured())
         healOne(it->mac, it->ip); // 先还原再移除（healOne 的四帧已含网关那一侧）
-    m_hold.remove(macKey6(reinterpret_cast<const uchar *>(it->mac.constData())));
     m_victims.erase(it);
     if (m_victims.isEmpty()) {
         if (m_timer->isActive())
@@ -251,7 +246,6 @@ void ArpSpoofer::healAll()
             healOne(it->mac, it->ip);
     }
     m_victims.clear();
-    m_hold.clear(); // 与 m_victims 同生命周期，别留到下一轮劫持替新状态背书
     if (m_timer && m_timer->isActive())
         m_timer->stop();
     if (m_boostTimer && m_boostTimer->isActive())
@@ -335,28 +329,6 @@ void ArpSpoofer::reassertIsolation()
     m_endpoint->flushTx();
 }
 
-// 6 字节 MAC → quint64。只在本类内部用（存/取都走这一个函数），不与别处约定字节序。
-quint64 ArpSpoofer::macKey6(const uchar *mac6)
-{
-    quint64 k = 0;
-    for (int i = 0; i < 6; ++i)
-        k = (k << 8) | mac6[i];
-    return k;
-}
-
-void ArpSpoofer::noteVictimHeld(const uchar *mac6)
-{
-    if (!mac6)
-        return;
-    const quint64 key = macKey6(mac6);
-    // 只给**已在册**的 victim 记账：startSpoof 会先插一条空状态，这里 find 不到就说明调用方
-    // 传了个不该传的 MAC —— 不建新条目，免得这张表跟着链路上的噪声无界长大。
-    const auto it = m_hold.find(key);
-    if (it == m_hold.end())
-        return;
-    it->lastSeenMs = QDateTime::currentMSecsSinceEpoch();
-}
-
 void ArpSpoofer::sendSpoof(const Target &t)
 {
     if (!m_endpoint || !configured())
@@ -374,30 +346,33 @@ void ArpSpoofer::sendSpoof(const Target &t)
     m_endpoint->send(replyToVictim);
     m_endpoint->send(requestToVictim);
 
-    // (b) 发给网关的欺骗 reply：sha=本机MAC，spa=victimIP → “victim IP 在本机”，回程走我们。
+    // ★★ **不投毒网关。** 这里曾经还有第三帧 (b)：给网关发「victim IP 在本机 MAC」，
+    //    意图是把回程也引过来。2026-08-05 删除，因为它是纯粹的有害项：
     //
-    // ★ **只在「我们确实握着这台设备」时才发**（完整论证见 ArpSpoofer.h 的 noteVictimHeld）。
-    //   一句话版：(a)/(a2) 与 (b) 的生效难度极不对称 —— 路由器常醒、一两秒就吃下 (b)；手机会睡，
-    //   (a)/(a2) 可能很久不被采纳。两者之间那段窗口里，设备把包发给真网关、回包却被网关送来我们
-    //   这里，而我们没有对应连接 → 丢掉 → 设备双向断（WiFi/DHCP 全正常，就是上不去网）。
-    //   真机实证：路由器后台显示该手机的 MAC 就是本机 MAC，而手机不通。
-    const quint64 key = macKey6(reinterpret_cast<const uchar *>(t.mac.constData()));
-    HoldState &h = m_hold[key];
-    const bool held = h.lastSeenMs != 0
-            && (QDateTime::currentMSecsSinceEpoch() - h.lastSeenMs) <= kGatewayHoldTtlMs;
-    if (held) {
-        const QByteArray replyToGateway =
-            buildArpReply(m_gatewayMac, m_localMac, m_localMac, t.ip, m_gatewayMac, m_gatewayIp);
-        m_endpoint->send(replyToGateway);
-        h.gwPoisoned = true;
-    } else if (h.gwPoisoned) {
-        // 刚刚失去（设备倒回真网关，或干脆睡死了）→ 立刻把网关那一侧还原，别让回程继续黑洞。
-        // 只还网关侧：设备侧的投毒要继续，我们还在等它接受。此后设备走真网关直连 —— **能用**，
-        // 而不是黑洞。等 (a)/(a2) 生效、设备的帧重新发到本机，下一拍自然会把 (b) 重新装回去。
-        h.gwPoisoned = false;
-        for (const QByteArray &f : buildGatewayHealFrames(t.mac, t.ip))
-            m_endpoint->send(f);
-    }
+    //    · **这个架构不需要它。** 网关是**终结式**代理：设备的连接在 NetStack 里被终结，由
+    //      mihomo 从本机另开一条出去，回程落在**本机/mihomo 自己的 socket** 上，根本不经过
+    //      「路由器 → 设备」那条 LAN 路径。我们回给设备的帧是直接二层直达它的真实 MAC。
+    //      同一条论证 NdpSpoofer 早就写过（见 NdpSpoofer.h 顶部：v6 侧从一开始就只投毒设备），
+    //      macOS 的 Swift 实现也是这么做的（macos/Sources/CoastHelper/Redirector.swift 的
+    //      sendSpoof：每台设备**只发一帧**，只骗设备）。三处独立证据同向。
+    //
+    //    · **而它会造成黑洞。** (a)/(a2) 与 (b) 的生效难度极不对称：路由器常醒、ARP 表刷得勤，
+    //      一两秒就吃下 (b)；手机会睡、处在 802.11 省电、邻居表项还是 REACHABLE，(a)/(a2) 可能
+    //      很久都不被采纳。这段窗口里设备按旧缓存把包发给**真网关** → 真网关正常转发出网 →
+    //      回包回到网关 → 网关查表「这台设备在本机 MAC」→ 送给我们 → 而我们从没见过这条连接
+    //      的 SYN、栈里没有对应项 → **丢掉**。设备双向断，而 WiFi/DHCP 一切正常。
+    //      真机实证（2026-08-05，小米路由器 + 米系手机）：不通的时候路由器后台显示这台手机的
+    //      MAC 就是本机 MAC。用户的观察是「刚开代理能上，一会就不能了，只有这台手机这样」——
+    //      常醒的设备一两秒就吃下 (a)/(a2)，窗口短到看不见。
+    //
+    //    · **为什么 macOS 同一部手机、同一个 WiFi 就没事**：它压根不投毒网关（上面那条），
+    //      而且 Redirector.swift 还会开 `net.inet.ip.forwarding=1` —— 就算有包被错误地送到
+    //      本机，内核也会照常转发出去，不存在黑洞。Windows 这边两样都没有（我们从不碰
+    //      IPEnableRouter），所以同一个缺陷在 Windows 上是致命的、在 macOS 上根本不出现。
+    //
+    //    还原路径**保留**网关那一侧的无偿 ARP（buildGatewayHealFrames，healOne 在用）：
+    //    那几帧发的是**真相**（victim IP is-at victim 真实 MAC），既能纠正历史版本留下的毒化，
+    //    也能纠正别人的毒化，没有副作用。
     // 收口：本函数由 1s 周期 tick 和 50ms boost 两个定时器回调驱动，都不在收帧排空路径上。
     // boost 存在的意义是「设备邻居缓存刚老化、正在重新解析时抢在真网关前面」——再压 25ms
     // 就正好错过那个窗口。

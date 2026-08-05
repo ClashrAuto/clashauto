@@ -210,9 +210,6 @@ struct GwNic {
     ArpWatch *watch = nullptr; // 被动 ARP/NDP 冲突监视（只读，检测本机被劫持/设备被争抢）
     NdpSpoofer *ndp = nullptr; // IPv6 邻居发现投毒器；v6 拓扑缺失时 configure 后自身 no-op
     quint32 localIp4 = 0, netMask4 = 0, gatewayIp4 = 0;
-    // 本机 MAC 打包成 quint64，用来在收帧热路径上判「这一帧是不是发给本机的」（= 设备的 ARP
-    // 确实已被我们毒到）。每帧一次整数比较，不做 QByteArray 构造。见 ArpSpoofer::noteVictimHeld。
-    quint64 localMacKey = 0;
     QByteArray prefix6Net;     // v6 前缀网络部分（16 字节；空=未知，则不做 v6 同网段旁路）
     int prefix6Len = -1;       // v6 前缀长度（bit 数；<0=未知）
     // ★ 从线上 RA 学到的 v6 拓扑，**必须与 spec 分开存**：configureLocal 每轮都 `n->spec = spec`
@@ -1012,13 +1009,6 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         n->localIp4 = ipToU32(spec.localIp);
         n->gatewayIp4 = ipToU32(spec.gatewayIp);
         n->netMask4 = ipToU32(spec.netmask);
-        // 本机 MAC 的打包形式（收帧热路径上判「这帧是不是发给本机」用）。configure 每轮才算一次。
-        {
-            const QByteArray lm = macBytes(spec.localMac);
-            n->localMacKey = lm.size() == 6
-                    ? macKey(reinterpret_cast<const uchar *>(lm.constData()))
-                    : 0;
-        }
         n->prefix6Net.clear();
         n->prefix6Len = -1;
         if (!spec.prefix6.isEmpty())
@@ -1130,15 +1120,6 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                         std::fflush(stderr);
                 return;
             }
-            // ★「我们是否真的握着这台设备」：只有它把帧发给**本机 MAC** 才算——那说明它的 ARP
-            //   确实已经被我们毒到了。ArpSpoofer 据此决定要不要对**网关**投毒（见 sendSpoof 里
-            //   (b) 那段的论证）。
-            //   判据必须是「目的 MAC 是本机」，不能是「收到过它的帧」：非混杂模式下我们照样收得到
-            //   它的广播（ARP request / DHCP），拿广播当证据会把「设备其实指着真网关」误判成
-            //   「握着」—— 而那恰恰是会造成回程黑洞的那个状态。
-            //   成本：每帧一次 quint64 比较（localMacKey 在 configureLocal 里算好）。
-            if (n->arp && n->localMacKey && macKey(f) == n->localMacKey)
-                n->arp->noteVictimHeld(f + 6);
             // 唤醒沿检测（item 2/3）：某 victim 空闲 >kWakeIdleMs 后又发帧 —— 它的邻居缓存多半刚老化、
             // 正在/即将重新解析网关。立刻让 ArpSpoofer 进高频重投窗口，抢在真网关的解析应答前把「网关
             // 在本机」钉回去，治「空闲后首次访问先失败、再走真路由、再代理」的过渡。该 victim 的 who-has
