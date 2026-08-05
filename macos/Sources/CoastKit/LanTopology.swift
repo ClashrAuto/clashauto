@@ -50,21 +50,81 @@ public enum LanTopology {
     }
 
     public static func defaultGateway() -> Gateway? {
-        guard let (ip, interface) = defaultRoute(), let mac = arpLookup(ip: ip) else { return nil }
-        return Gateway(ip: ip, mac: mac, interface: interface)
+        allGateways().first
+    }
+
+    /// **全部** IPv4 默认路由，每张出口网卡一个 Gateway。
+    ///
+    /// 同时接两条上行（有线一台路由器、Wi-Fi 另一台）时每张卡各有一个网关，而接管设备、
+    /// 复原 ARP、以及「设备该从哪条上行出去」都是**按卡**的事。只取第一条 = 另一张卡上的设备
+    /// 要么接管不了，要么被投毒到错的网关上。
+    ///
+    /// 顺序即 `netstat` 的输出顺序 —— macOS 的 netstat 不给可靠跃点数，所以这里退化为
+    /// 「按出现顺序」，与 Qt 线的 macOS 分支同样取舍（那边 Windows/Linux 才按跃点数选主卡）。
+    /// **index 0 视为主网卡。**
+    ///
+    /// 查不到网关 MAC 的那条**跳过**：没有真网关 MAC 就发不出复原包，被接管的设备会断网十几
+    /// 分钟 —— 宁可这张卡不接管，也不带着残缺拓扑硬上（与原 defaultGateway 同一条判据）。
+    /// 一张卡只取第一条默认路由（多条时后面的是备份路由，网关 MAC 相同或不可达）。
+    public static func allGateways() -> [Gateway] {
+        var result: [Gateway] = []
+        var seenInterfaces = Set<String>()
+        let table = arpTableByInterface()
+        for route in allDefaultRoutes() {
+            guard !seenInterfaces.contains(route.interface) else { continue }
+            // ★ 按**接口**查网关 MAC，不查全局 ARP 表：两台路由器都用出厂默认网段
+            //   （192.168.1.1 这种）时，全局表里同一个 IP 只留得下一条，另一张卡就会拿到
+            //   **别人家路由器**的 MAC —— 后果是复原时把错的 MAC 装回设备。
+            //   Qt 线上这正是真机踩过的坑（那边的修法是 `arp -a` 按接口分段解析）。
+            guard let mac = table[route.interface]?[route.ip] else { continue }
+            seenInterfaces.insert(route.interface)
+            result.append(Gateway(ip: route.ip, mac: mac, interface: route.interface))
+        }
+        return result
     }
 
     static func defaultRoute() -> (ip: String, interface: String)? {
-        guard let output = run("/usr/sbin/netstat", ["-rn", "-f", "inet"]) else { return nil }
+        allDefaultRoutes().first
+    }
+
+    /// `netstat -rn -f inet` 里的全部默认路由 → (下一跳, 出口网卡)。
+    /// 下一跳不是 IPv4 的行（`link#20` 那种，utun/VPN 的默认路由）直接跳过。
+    static func allDefaultRoutes() -> [(ip: String, interface: String)] {
+        guard let output = run("/usr/sbin/netstat", ["-rn", "-f", "inet"]) else { return [] }
+        return parseDefaultRoutes(output)
+    }
+
+    /// 纯解析（可单测）：见 allDefaultRoutes。
+    static func parseDefaultRoutes(_ output: String) -> [(ip: String, interface: String)] {
+        var result: [(ip: String, interface: String)] = []
         for line in output.split(separator: "\n") {
             let fields = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
             guard fields.count >= 4, fields[0] == "default", LanBrowser.isIPv4(fields[1]) else { continue }
-            return (fields[1], fields[3])
+            result.append((fields[1], fields[3]))
         }
-        return nil
+        return result
+    }
+
+    /// 整张 ARP 表**按接口分组**：接口名 → (IP → MAC)。
+    /// `arp -an` 每行自带 `on <iface>`，LanBrowser.parseARPLine 已经把它解析出来了。
+    static func arpTableByInterface() -> [String: [String: String]] {
+        guard let output = run("/usr/sbin/arp", ["-an"]) else { return [:] }
+        return parseArpTableByInterface(output)
+    }
+
+    /// 纯解析（可单测）：见 arpTableByInterface。抽不出接口名的条目归到空键那一桶。
+    static func parseArpTableByInterface(_ output: String) -> [String: [String: String]] {
+        var table: [String: [String: String]] = [:]
+        for line in output.split(separator: "\n") {
+            guard let device = LanBrowser.parseARPLine(String(line)) else { continue }
+            table[device.interface, default: [:]][device.ip] = device.mac
+        }
+        return table
     }
 
     /// 从 `arp -n <ip>` 查 MAC。复用 LanBrowser 的行解析（同一套「不补零」的坑）。
+    /// ⚠️ **不分接口**：只在「明确只关心某一个 IP、且不在乎它挂在哪张卡上」时用。
+    /// 网关 MAC 请走 arpTableByInterface（理由见 allGateways）。
     static func arpLookup(ip: String) -> String? {
         guard let output = run("/usr/sbin/arp", ["-n", ip]) else { return nil }
         for line in output.split(separator: "\n") {

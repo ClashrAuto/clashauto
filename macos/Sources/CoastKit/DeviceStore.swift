@@ -109,6 +109,14 @@ public final class DeviceStore: @unchecked Sendable {
     /// 与主混合端口分开：混合口仍 `allow-lan: false` 只监听本机，
     /// 而这个口只接受**经 PF 重定向进来的**流量，不对外广播。
     public static let redirPort = 7893
+
+    /// 第 `index` 张网卡对应的 redir 入站端口 = `redirPort - index`。
+    ///
+    /// ★ **每张网卡各一个入站**：出口网卡在核心里是 listener 的属性（`interface-name`，见
+    ///   core 的 `component/dialer/egress.go`）。同时接两条上行时，设备必须从它自己挂着的那条
+    ///   出去 —— 而入站是唯一能表达这件事的地方。ConfigBuilder 用它生成 listener 端口、
+    ///   Redirector 用它写 PF 的 rdr 目标，两边必须同源。
+    public static func redirPort(forNic index: Int) -> Int { redirPort - max(0, index) }
     /// mihomo 的 DNS 监听端口。被代理设备的 UDP :53 重定向到这里，
     /// 让它拿到 fake-ip 结果，域名规则才匹配得上。
     public static let dnsPort = 1053

@@ -31,6 +31,17 @@ public final class ConfigBuilder: @unchecked Sendable {
 
     public func updateConfig(_ config: AppConfig) { self.config = config }
 
+    /// 可作为**出口**的物理网卡，BSD 名（`en0`），**index 0 = 主网卡**。
+    /// 由 CoastController 每轮拓扑刷新推进来（`LanTopology.allGateways()` 的次序）。
+    ///
+    /// 用途只有一个：同时接两条上行时，让每张卡上的设备**从它自己那条出去**。做法是给每张卡
+    /// 各发一个 redir 入站并带上 `interface-name` —— 出口网卡是**入站**的属性，核心的配置语言
+    /// 只能把网卡绑在出站对象上，用出站表达就得把 身份 × 出站 做笛卡尔积（每张卡复制一份节点表
+    /// 与策略组，健康检查跟着翻倍）。详见 core 的 `component/dialer/egress.go`。
+    ///
+    /// 空或只有一张 = 完全不启用这套，产出与本改动前逐字节相同。
+    public var egressNics: [String] = []
+
     public var fullConfigPath: URL { directory.appendingPathComponent("full.yaml") }
 
     // MARK: - 入口
@@ -60,7 +71,13 @@ public final class ConfigBuilder: @unchecked Sendable {
         yaml = YAMLSurgery.setScalar(yaml, key: "find-process-mode", value: "always")
         // 透明代理口：PF 把被代理设备的 TCP 重定向到这里。**不对外广播**，
         // 只接受经内核重定向进来的连接，所以开着它不等于开放代理。
-        yaml = YAMLSurgery.setScalar(yaml, key: "redir-port", value: String(DeviceStore.redirPort))
+        //
+        // ★ 多网卡时改用**每卡一个 redir 入站**（下面 applyRedirListeners），因为「从哪张网卡
+        //   出去」是核心里 listener 的属性。单网卡时维持这个顶层标量 —— 与本改动前逐字节相同。
+        if egressNics.count < 2 {
+            yaml = YAMLSurgery.setScalar(yaml, key: "redir-port",
+                                         value: String(DeviceStore.redirPort))
+        }
         // DNS 监听口：被代理设备的 UDP :53 也被重定向过来。不转投的话设备会拿着它自己配的
         // DNS（常是路由器）去查，经我们转发出去解析不到，表现为「直连 IP 通、用域名全超时」。
         // 转过来之后它拿到 fake-ip，域名规则才匹配得上。
@@ -91,6 +108,7 @@ public final class ConfigBuilder: @unchecked Sendable {
         yaml = applySubscriptions(yaml, subscriptions: readSubscriptions())
         yaml = applyCustomRules(yaml)
         yaml = applyDevicePolicies(yaml)
+        yaml = applyRedirListeners(yaml)
         // ★ 私网直连必须**最后前插** —— 它和自定义规则都插在 rules: 顶部，后插的在最上面。
         //   私网要压过自定义规则：否则「访问自己家路由器后台 / 内网 NAS」也会被发到代理节点上。
         yaml = Self.applyPrivateNetworkRules(yaml, extraPrefixes: Self.localGlobal6Prefixes())
@@ -514,6 +532,47 @@ public final class ConfigBuilder: @unchecked Sendable {
         guard !ruleLines.isEmpty, let insertion = YAMLSurgery.rulesInsertionPoint(yaml) else { return yaml }
         var out = yaml
         out.insert(contentsOf: ruleLines, at: insertion)
+        return out
+    }
+
+    /// 每张网卡一个 redir 入站，各带 `interface-name` —— 这就是「设备从它自己那条上行出去」
+    /// 的全部配置面（PF 那边把每张卡的流量 rdr 到对应的口，见 Redirector）。
+    ///
+    /// 只在**至少两张网卡**且**确有设备开代理**时生成；否则原样返回（顶层 `redir-port` 那条
+    /// 已经在 ensureFullConfig 里发过了），单网卡用户的产出逐字节不变。
+    ///
+    /// 设备按台账里的 `interface` 归卡；归不出来的（该列为空、或那张卡不在 egressNics 里）
+    /// 算作主网卡 —— 与不启用这套时的行为一致，宁可走默认出口也不要没人接。
+    func applyRedirListeners(_ yaml: String) -> String {
+        guard egressNics.count >= 2 else { return yaml }
+        let devices = DeviceStore(configDir: directory).proxiedDevices()
+        guard !devices.isEmpty else { return yaml }
+
+        var used = Set<Int>()
+        for device in devices {
+            let index = egressNics.firstIndex(of: device.interface) ?? 0
+            used.insert(index)
+        }
+        guard !used.isEmpty else { return yaml }
+
+        var block = "listeners:\n"
+        for index in used.sorted() {
+            block += "  - name: coast-redir-\(index)\n"
+            block += "    type: redir\n"
+            // ★★ **必须写 127.0.0.1，不能写 0.0.0.0**：写 0.0.0.0 时核心建出来的是 IPv6 通配
+            //   套接字，v4 连接以 v4-mapped 形式到达，随后用 /dev/pf 的 DIOCNATLOOK 还原原始
+            //   目的地时地址族对不上、查不到那条状态 —— 而核心的 darwin redir 在拿不到原始
+            //   目的地时**不报错、不打日志**，accept 之后直接把连接丢掉。Qt 线真机踩过。
+            block += "    listen: 127.0.0.1\n"
+            block += "    port: \(DeviceStore.redirPort(forNic: index))\n"
+            block += "    interface-name: \(YAMLSurgery.quote(egressNics[index]))\n"
+        }
+
+        // 老核心**忽略**未知的 listener 键（实测 `core -t` rc=0），所以这个键可以无条件发：
+        // 新核心生效、老核心退回今天的行为。不需要版本门。
+        var out = yaml
+        if !out.hasSuffix("\n") { out += "\n" }
+        out += "\n" + block
         return out
     }
 
