@@ -9,6 +9,7 @@
 // M1 ARP 劫持接入后其它设备的流量也会带真实 sourceIP/inboundUser 出现）。
 //
 // M0 不做劫持：proxyEnabled 只写台账（供 M1 生效）；此处开关会给出「M1 才真正生效」的语义。
+#include "../ConfigBuilder.h" // ConfigBuilder::NicEgress —— 每网卡出口表推给核心配置生成器
 #include "DeviceConnectionsModel.h"
 #include "DeviceListModel.h"
 
@@ -228,6 +229,10 @@ private:
     // 本机 v6 前缀的上一次快照 + 是否已记过基线（见 syncLanPrefixRules）。
     QStringList m_lanPrefixes6;
     bool m_lanPrefixSynced = false;
+    // 每网卡出口表的上一次快照 + 是否已记过基线（见 ensureGatewayConfigured）。
+    // 扫描每 ~5s 一轮，只有集合**真的**变了才重生成配置——与上面 v6 前缀同一个套路。
+    QVector<ConfigBuilder::NicEgress> m_egressNics;
+    bool m_egressSynced = false;
     // 上次全量扫描的时刻：进页面时用它去抖，避免来回切导航反复触发重扫（scan() 里 restart）。
     QElapsedTimer m_lastScan;
     static constexpr int kRescanMinIntervalMs = 30000;

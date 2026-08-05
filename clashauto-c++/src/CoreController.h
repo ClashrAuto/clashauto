@@ -36,6 +36,11 @@ public:
     /// macOS 的 pf 数据面是否启用（见 AppConfig::gatewayPf）。
     bool gatewayPf() const { return m_config.gatewayPf; }
 
+    /// 每网卡出口表（见 ConfigBuilder::NicEgress）。DevicesController 每轮扫描后推进来。
+    /// **只存不重建** —— 扫描每 ~5s 一轮，每轮都热重载一次是不可接受的；调用方发现集合真的
+    /// 变了才调 rebuildConfig()（与 v6 前缀那条同一个套路）。
+    void setGatewayNics(const QVector<ConfigBuilder::NicEgress> &nics);
+
     // 设置 IPv6 开关。只改内存里的运行态，不自己触发重建 —— 调用方（SettingsController）
     // 落完 config.yaml 后统一调 rebuildConfig()，避免一次开关引发两次热重载。
     void setIpv6Enabled(bool enabled);
@@ -88,6 +93,9 @@ private:
 
     AppConfig m_config;
     ConfigBuilder m_configBuilder;
+    // ★ 单独存一份：m_configBuilder 在改端口时会被**整个重建**（见 setUiPort），
+    //   只调 setEgressNics 的话那次重建会把网卡表清空，随后生成的 full.yaml 悄悄退回单出口。
+    QVector<ConfigBuilder::NicEgress> m_gatewayNics;
     QNetworkAccessManager m_network;
     QProcess m_core;
     QString m_fullConfigPath;

@@ -782,6 +782,13 @@ void CoreController::setUiPort(int port)
     // ConfigBuilder 持有 AppConfig 副本，用新端口重建它；下次 ensureFullConfig 会把
     // external-controller 写成 host:新端口。CoreController 自身的 /configs 调用也走新端口。
     m_configBuilder = ConfigBuilder(m_config);
+    m_configBuilder.setEgressNics(m_gatewayNics); // 重建会清空它，必须补回（见 m_gatewayNics）
+}
+
+void CoreController::setGatewayNics(const QVector<ConfigBuilder::NicEgress> &nics)
+{
+    m_gatewayNics = nics;
+    m_configBuilder.setEgressNics(m_gatewayNics);
 }
 
 void CoreController::setIpv6Enabled(bool enabled)

@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <QFile>
 #include <QFileDialog>
+#include <QHostAddress> // 每网卡出口表：点分 IP/掩码 → 主机序 quint32
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSet>
@@ -340,6 +341,35 @@ void DevicesController::ensureGatewayConfigured()
         s.localGlobal6 = n.localGlobal6;
         s.prefix6 = n.prefix6;
         specs.append(s);
+    }
+    // —— 每网卡出口表 → 核心的配置生成器 ——
+    // 让「B 网段设备的直连从 B 那张网卡出去」。physicalNics() 的 index 0 就是主网卡
+    //（LanScanner 按有效跃点数选出来的那张），它本来就走系统默认出口，不需要专属出站。
+    {
+        QVector<ConfigBuilder::NicEgress> egress;
+        egress.reserve(nics.size());
+        for (int i = 0; i < nics.size(); ++i) {
+            const LanScanner::NicInfo &n = nics.at(i);
+            ConfigBuilder::NicEgress e;
+            e.friendlyName = n.friendlyName;
+            e.mask = QHostAddress(n.netmask).toIPv4Address();
+            e.base = QHostAddress(n.ip).toIPv4Address() & e.mask;
+            e.primary = (i == 0);
+            egress.append(e);
+        }
+        if (egress != m_egressNics) {
+            m_egressNics = egress;
+            if (m_core) {
+                m_core->setGatewayNics(egress);
+                // 首轮只记基线不重生成：启动路径上本来就会生成一次配置，而设备真正被接管时
+                // （enableDevice → resumeProxies）还会再重生成一次，那时表已经在了。
+                // 之后网卡真的变了（插拔网线/换 Wi-Fi/网段变）才值得热重载一次。
+                if (m_egressSynced) {
+                    m_core->rebuildConfig();
+                }
+            }
+            m_egressSynced = true;
+        }
     }
     // 数据面模式必须在 configure() **之前**设好：configureLocal 是按当前模式决定建不建 lwIP 的。
     LanGateway::DatapathSpec dp;
