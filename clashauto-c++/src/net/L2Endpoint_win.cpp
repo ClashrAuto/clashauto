@@ -764,6 +764,20 @@ public:
                     if (m_txAdapter && pkt->setLoopback)
                         pkt->setLoopback(m_txAdapter, COAST_NPF_DISABLE_LOOPBACK);
                 }
+                // ★ 把**最终选中的发送路径**写进日志。以前只能从诊断行的 `fpb` 去猜，而
+                //   `fpb=1` 有歧义：既可能是"批量没生效、退回逐帧"，也可能是"队列里本来就
+                //   只有一帧"。这两者在 WiFi 上差 53 倍（738 µs/帧 vs 12.3 µs/帧），
+                //   猜错方向就会去查完全不相干的地方。真机上为这件事绕过一圈。
+                GatewayDiag::note("txPath",
+                                  QStringLiteral("%1 的发送路径：%2")
+                                          .arg(QString::fromLatin1(ifname.toLatin1()),
+                                               (pkt && !txBatchForcedOff() && m_txAdapter)
+                                                       ? QStringLiteral("PacketSendPackets 批量")
+                                                       : QStringLiteral("逐帧 pcap_sendpacket"
+                                                                        "（WiFi 上约 738 µs/帧，"
+                                                                        "吞吐会被钉在 ~2 MB/s）")),
+                                  /*minGapMs=*/60000);
+
                 dbg("发送模式=%s（介质=%s）", m_txAdapter ? "批量(PacketSendPackets)" : "逐帧",
                     adapter.wifi ? "WiFi" : "以太网");
                 m_tx = new TxWorker(m_api, m_txPcap, m_txAdapter,
