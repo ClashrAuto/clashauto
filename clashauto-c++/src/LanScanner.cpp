@@ -28,6 +28,7 @@
 #include <QUdpSocket>
 #include <QUrl>
 
+#include <cstdio>    // ARP 解析自测直接打 stdout（与其余 COAST_*_SELFTEST 的惯例一致）
 #include <functional>
 #include <memory>
 
@@ -85,6 +86,72 @@ bool isJunkArpEntry(const QString &ip, const QString &mac)
         return true; // 广播 / 空
     return mac.startsWith(QStringLiteral("01:00:5e")) || mac.startsWith(QStringLiteral("33:33"));
 }
+
+// `arp` 输出的三种形态。**按运行期参数分派，不用 #ifdef** —— 这样三个解析器在三端都被编译、
+// 也都能被自测覆盖（COAST_ARPPARSE_SELFTEST）。用 #ifdef 的话，Windows 那段在 Linux/mac 的 CI
+// 里连编都不编，而它恰恰是这次要改对的那一段。
+enum class ArpFormat {
+    WindowsSections, // `arp -a`：分段输出，段头形如 "接口: 192.168.20.91 --- 0xd"
+    LinuxColumns,    // `arp -n`：每行末列即 Iface
+    MacOsAt,         // `arp -an`：每行 "? (ip) at <mac> on <iface> ifscope [ethernet]"
+};
+constexpr ArpFormat hostArpFormat()
+{
+#if defined(Q_OS_WIN)
+    return ArpFormat::WindowsSections;
+#elif defined(Q_OS_MACOS)
+    return ArpFormat::MacOsAt;
+#else
+    return ArpFormat::LinuxColumns;
+#endif
+}
+
+// 解析 `arp` 的输出为**按接口分段**的表：接口键 → (ip → mac)。
+//
+// 为什么不能拍平（这不是洁癖，是一个真实故障）：同时接两个路由器、而两台路由器又都用出厂默认
+// 网段（192.168.1.1 这种）时，拍平后一条直接覆盖另一条 ⇒ 一张卡拿到**另一台路由器**的 MAC。
+// 详见 LanScanner.h 里 m_arpByIf 的说明（反制失灵 + 还原装错 MAC）。
+//
+// Windows 段头的判据是「有 IPv4 + 没有 MAC + 含 ---」："接口"两字会随系统语言变，但 " --- "
+// 是格式串里的字面量、不本地化。★ 那个「含 ---」不是保险起见加的：真机 `arp -a` 里 TUN 网卡
+// 那一段的条目**物理地址是空的**（`198.18.0.2` 后面直接跟 dynamic），只判「有 IP 没 MAC」
+// 会把这种数据行当成段头，从此往后所有条目都记到一个不存在的接口名下。
+//
+// ★ 归不到接口的行一律落进**空键**那一桶。arpMacFor 会在本卡桶查不到时回落到它 ——
+//   万一哪个系统版本的输出形状变了、分段整个认不出来，行为退回"和以前一样"，
+//   而不是"每张卡的网关 MAC 全空、所有设备都代理不了"。
+QHash<QString, QHash<QString, QString>> parseArpTable(const QString &text,
+                                                      ArpFormat fmt = hostArpFormat())
+{
+    // 锚在 "at <mac> on <iface>" 这个完整形状上，而不是光找一个 "on " ——
+    // 后者会被恰好叫 "on" 的主机名骗走（行首那一段是主机名/`?`）。
+    static const QRegularExpression macOsIface(QStringLiteral("\\bat\\s+\\S+\\s+on\\s+(\\S+)"));
+    QHash<QString, QHash<QString, QString>> out;
+    QString cur; // 当前段的接口键（仅 Windows 形态用；其余形态接口从每行自取）
+    for (const QString &line : text.split('\n')) {
+        const QString ip = ipv4FromLine(line);
+        const QString mac = DeviceStore::normalizeMac(macFromLine(line));
+        if (fmt == ArpFormat::WindowsSections && !ip.isEmpty() && mac.isEmpty()
+            && line.contains(QLatin1String("---"))) {
+            cur = ip; // 段头
+            continue;
+        }
+        if (isJunkArpEntry(ip, mac))
+            continue;
+        QString iface = cur;
+        if (fmt == ArpFormat::MacOsAt) {
+            const auto m = macOsIface.match(line);
+            if (m.hasMatch())
+                iface = m.captured(1);
+        } else if (fmt == ArpFormat::LinuxColumns) {
+            const QStringList fields = line.simplified().split(' ');
+            if (fields.size() >= 2)
+                iface = fields.constLast();
+        }
+        out[iface].insert(ip, mac);
+    }
+    return out;
+}
 } // namespace
 
 LanScanner::LanScanner(QObject *parent) : QObject(parent)
@@ -133,12 +200,24 @@ bool isVirtualIface(const QNetworkInterface &iface, quint32 ip)
     return isTunSubnet(ip);
 }
 
-// 系统路由表里的全部默认路由 → (网关 IP, 网卡标识)。
-// 网卡标识一律是接口名（Windows 上即适配器 GUID，由接口索引查得）；macOS 拿不到时给空串。
-// 调用方按「接口名或接口 IP 对得上」配对，两种都兼容。
-QVector<QPair<QString, QString>> defaultRoutes()
+// 系统路由表里的一条默认路由。
+struct DefaultRoute {
+    QString gateway;
+    QString iface;      // 网卡标识：接口名（macOS 走兜底分支时拿不到 → 空串）
+    // **有效跃点数**，越小越优先。0 = 这个平台取不到（macOS），此时退化为「按出现顺序」，
+    // 与本改动之前的行为一致。
+    quint32 metric = 0;
+};
+
+// 系统路由表里的全部默认路由。调用方按「接口名或接口 IP 对得上」配对，两种都兼容。
+//
+// ★ metric 必须带出来。以前只返回 (网关, 接口)，于是"主网卡"实际是**Qt 枚举顺序里第一个
+//   配上默认路由的那张** —— 同时接两个路由器时，那多半不是系统真正用来出网的那张。
+//   而这个选择会一路漏进：状态页的本机/网关、延迟卡的「到路由」、以及 nicForIp 在多张
+//   同网段网卡之间的选主（LanGateway_linux.cpp 按 specs 次序取 order 最小者）。
+QVector<DefaultRoute> defaultRoutes()
 {
-    QVector<QPair<QString, QString>> out;
+    QVector<DefaultRoute> out;
     auto validIp = [](const QString &s) {
         const QHostAddress a(s);
         return a.protocol() == QAbstractSocket::IPv4Protocol && a.toIPv4Address() != 0;
@@ -149,7 +228,8 @@ QVector<QPair<QString, QString>> defaultRoutes()
         const QList<QByteArray> lines = rf.readAll().split('\n');
         for (const QByteArray &l : lines) {
             const QList<QByteArray> f = l.simplified().split(' ');
-            // 字段：Iface Destination Gateway Flags ...；目的地 00000000 即默认路由（多网卡多行）。
+            // 字段：Iface Destination Gateway Flags RefCnt Use Metric Mask ...
+            // 目的地 00000000 即默认路由（多网卡多行）。
             if (f.size() >= 3 && f.at(1) == "00000000") {
                 bool ok = false;
                 // 网关是十六进制、按内存(小端)存的：值的第 0 字节即第一个点分段。
@@ -157,8 +237,9 @@ QVector<QPair<QString, QString>> defaultRoutes()
                 const QString gw = QString("%1.%2.%3.%4")
                                        .arg(v & 0xFF).arg((v >> 8) & 0xFF)
                                        .arg((v >> 16) & 0xFF).arg((v >> 24) & 0xFF);
+                const quint32 metric = f.size() >= 7 ? f.at(6).toUInt() : 0; // 第 7 列 Metric
                 if (ok && v && validIp(gw))
-                    out.append({gw, QString::fromLatin1(f.at(0))});
+                    out.append({gw, QString::fromLatin1(f.at(0)), metric});
             }
         }
         rf.close();
@@ -172,8 +253,9 @@ QVector<QPair<QString, QString>> defaultRoutes()
             // 行："default  192.168.1.1  UGScg  en0 [Expire]"
             for (const QString &row : text.split('\n')) {
                 const QStringList c = row.simplified().split(' ');
+                // metric 留 0：netstat -rn 不给可靠的跃点数，macOS 上退化为「按出现顺序」。
                 if (c.size() >= 4 && c.at(0) == QStringLiteral("default") && validIp(c.at(1)))
-                    out.append({c.at(1), c.at(3)});
+                    out.append({c.at(1), c.at(3), 0});
             }
         }
     }
@@ -184,7 +266,7 @@ QVector<QPair<QString, QString>> defaultRoutes()
             static const QRegularExpression re("gateway:\\s*(\\S+)");
             const auto m = re.match(QString::fromLocal8Bit(p.readAllStandardOutput()));
             if (m.hasMatch() && validIp(m.captured(1)))
-                out.append({m.captured(1), QString()});
+                out.append({m.captured(1), QString(), 0});
         }
     }
 #else // Windows
@@ -192,6 +274,18 @@ QVector<QPair<QString, QString>> defaultRoutes()
     // 实测占住 GUI 线程 ~60ms，而 refreshLiveness 每 5 秒就要来一次 —— 设备页里最稳定的一段
     // 周期性卡顿就是它。GetIpForwardTable2 是纯内存查询，微秒级，还免了「解析本地化命令输出」。
     {
+        // ★ 接口跃点数要单独取。Windows 的「自动跃点」把随链路速率变化的那部分放在**接口**
+        //   metric 上（Wi-Fi 协商速率一变它就变），而 MIB_IPFORWARD_ROW2::Metric 是路由自身的
+        //   跃点数，两张卡上常常一模一样 —— 只看后者根本分不出主次。文档里的"有效跃点数"就是
+        //   这两项之和，这里照做。取不到就退化成只用路由 metric（不致命，最多退回旧行为）。
+        QHash<quint32, quint32> ifMetric;
+        MIB_IPINTERFACE_TABLE *itab = nullptr;
+        if (GetIpInterfaceTable(AF_INET, &itab) == NO_ERROR && itab) {
+            for (ULONG i = 0; i < itab->NumEntries; ++i)
+                ifMetric.insert(static_cast<quint32>(itab->Table[i].InterfaceIndex),
+                                static_cast<quint32>(itab->Table[i].Metric));
+            FreeMibTable(itab);
+        }
         MIB_IPFORWARD_TABLE2 *table = nullptr;
         if (GetIpForwardTable2(AF_INET, &table) == NO_ERROR && table) {
             for (ULONG i = 0; i < table->NumEntries; ++i) {
@@ -202,11 +296,14 @@ QVector<QPair<QString, QString>> defaultRoutes()
                 const QString gwStr = QHostAddress(gw).toString();
                 if (!validIp(gwStr))
                     continue;
-                // 网卡标识用 Qt 的接口名（Windows 上即适配器 GUID）——调用方拿它和 LocalIface::name
-                // 比对。索引→接口由 Qt 查表完成，与 QNetworkInterface::allInterfaces() 同源。
+                // 网卡标识用 Qt 的接口名（Windows 上即 LUID 名，如 "ethernet_32775"）——调用方
+                // 拿它和 LocalIface::name 比对。索引→接口由 Qt 查表完成，与
+                // QNetworkInterface::allInterfaces() 同源。
                 const QString ifName =
                     QNetworkInterface::interfaceFromIndex(static_cast<int>(r.InterfaceIndex)).name();
-                out.append({gwStr, ifName});
+                const quint32 metric = static_cast<quint32>(r.Metric)
+                        + ifMetric.value(static_cast<quint32>(r.InterfaceIndex), 0);
+                out.append({gwStr, ifName, metric});
             }
             FreeMibTable(table);
         }
@@ -264,6 +361,11 @@ void LanScanner::detectLocalTopology()
             // （"ethernet_32775"）而非适配器 GUID，Npcap 需要的 \Device\NPF_{GUID} 由
             // L2Endpoint_win::adapterFor() 反查——这里不要想当然按 GUID 用。
             f.name = iface.name();
+            // 友好名另存一份：Windows 上 humanReadableName() 给的正是适配器 FriendlyName
+            //（"以太网 2"/"WLAN"），与 Go 的 net.Interface.Name 同源于 GetAdaptersAddresses ——
+            // 核心的 `interface-name` 只认这个口径（见 NicInfo::friendlyName）。
+            // Linux/mac 上它与 name() 相同，拿不到时 Qt 自己回落到 name()。
+            f.friendlyName = iface.humanReadableName();
             f.mask = mask;
             f.base = ip32 & mask;
             m_physIfaces.append(f);
@@ -272,23 +374,35 @@ void LanScanner::detectLocalTopology()
 
     // 2) 全部默认路由 → m_gatewayIps。每个网络的路由器都要能被认出来，否则同时连两个网络时，
     //    另一个网络的路由器会被当成普通设备、还能对它开代理（劫持路由器会把那个网络打瘫）。
-    const QVector<QPair<QString, QString>> routes = defaultRoutes();
-    for (const auto &r : routes)
-        m_gatewayIps.insert(r.first);
+    const QVector<DefaultRoute> routes = defaultRoutes();
+    for (const DefaultRoute &r : routes)
+        m_gatewayIps.insert(r.gateway);
 
-    // 3) 主网卡：优先「带默认路由的那张物理网卡」（Windows 按接口 IP 配对，Linux/mac 按接口名；
-    //    配不上则退化为网关落在其子网内），否则第一张物理网卡。
+    // 3) 主网卡：带默认路由的那张物理网卡里，**有效跃点数最小**的那张（配对口径不变：接口名或
+    //    接口 IP 对得上，配不上则退化为网关落在其子网内）；一张都配不上就取第一张。
+    //
+    //    ★ 以前这里是「枚举顺序里第一个配上的」。同时接两个路由器时那多半不是系统真正用来
+    //      出网的那张，而这个选择会一路漏进状态页、延迟卡的「到路由」、以及 nicForIp 在多张
+    //      同网段网卡之间的选主。平局时仍按枚举顺序（严格小于才换人），行为与以前一致。
     int primary = -1;
-    for (int i = 0; i < m_physIfaces.size() && primary < 0; ++i) {
+    quint32 bestMetric = 0;
+    for (int i = 0; i < m_physIfaces.size(); ++i) {
         const LocalIface &f = m_physIfaces.at(i);
-        for (const auto &r : routes) {
-            const bool sameIface = !r.second.isEmpty()
-                                   && (r.second == f.ip || r.second == f.name);
-            const quint32 gw = QHostAddress(r.first).toIPv4Address();
-            if (sameIface || (gw && (gw & f.mask) == f.base)) {
-                primary = i;
-                break;
+        bool matched = false;
+        quint32 metric = 0;
+        for (const DefaultRoute &r : routes) {
+            const bool sameIface = !r.iface.isEmpty() && (r.iface == f.ip || r.iface == f.name);
+            const quint32 gw = QHostAddress(r.gateway).toIPv4Address();
+            if (!sameIface && !(gw && (gw & f.mask) == f.base))
+                continue;
+            if (!matched || r.metric < metric) { // 同一张卡上多条默认路由 → 取最优的那条
+                matched = true;
+                metric = r.metric;
             }
+        }
+        if (matched && (primary < 0 || metric < bestMetric)) {
+            primary = i;
+            bestMetric = metric;
         }
     }
     if (primary < 0 && !m_physIfaces.isEmpty())
@@ -307,24 +421,33 @@ void LanScanner::detectLocalTopology()
 
     // 4) **每张**物理网卡各自的网关（网关劫持要用，多网卡时每张卡都得有）：
     //    优先同网卡的默认路由，其次落在该卡网段内的路由，最后 base+1 兜底。
+    //    同一档里有多条时取有效跃点数最小的那条（以前是"第一条"）。
     for (LocalIface &f : m_physIfaces) {
         f.gatewayIp.clear();
-        for (const auto &r : routes) {
-            if (!r.second.isEmpty() && (r.second == f.ip || r.second == f.name)) {
-                f.gatewayIp = r.first;
-                break;
+        f.gatewayMetric = 0;
+        bool got = false;
+        for (const DefaultRoute &r : routes) {
+            if (r.iface.isEmpty() || (r.iface != f.ip && r.iface != f.name))
+                continue;
+            if (!got || r.metric < f.gatewayMetric) {
+                got = true;
+                f.gatewayIp = r.gateway;
+                f.gatewayMetric = r.metric;
             }
         }
-        if (f.gatewayIp.isEmpty() && f.mask) {
-            for (const auto &r : routes) {
-                const quint32 gw = QHostAddress(r.first).toIPv4Address();
-                if (gw && (gw & f.mask) == f.base) {
-                    f.gatewayIp = r.first;
-                    break;
+        if (!got && f.mask) {
+            for (const DefaultRoute &r : routes) {
+                const quint32 gw = QHostAddress(r.gateway).toIPv4Address();
+                if (!gw || (gw & f.mask) != f.base)
+                    continue;
+                if (!got || r.metric < f.gatewayMetric) {
+                    got = true;
+                    f.gatewayIp = r.gateway;
+                    f.gatewayMetric = r.metric;
                 }
             }
         }
-        if (f.gatewayIp.isEmpty() && f.base)
+        if (!got && f.base)
             f.gatewayIp = u32ToIp(f.base + 1);
         if (!f.gatewayIp.isEmpty())
             m_gatewayIps.insert(f.gatewayIp);
@@ -633,13 +756,160 @@ void LanScanner::detectIpv6Topology()
 #endif
 }
 
+// ———————————————————————— ARP 解析自测（COAST_ARPPARSE_SELFTEST）————————————————————————
+bool LanScanner::runArpParseSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](bool ok, const char *what) {
+        std::fputs(ok ? "  ok   " : "  FAIL ", stdout);
+        std::fputs(what, stdout);
+        std::fputc('\n', stdout);
+        if (!ok)
+            ++failed;
+    };
+
+    // —— 用例 1：真机 Windows `arp -a`（三段：mihomo TUN / 物理网卡 / WSL vEthernet）——
+    // 原文照抄，包括 TUN 那一段**物理地址为空**的条目 —— 正是它逼出了段头判据里的「含 ---」。
+    const QString win = QStringLiteral(
+        "Interface: 198.18.0.1 --- 0x3\n"
+        "  Internet Address      Physical Address      Type\n"
+        "  198.18.0.2                                  dynamic\n"
+        "  198.18.0.3                                  static\n"
+        "  224.0.0.251                                 static\n"
+        "\n"
+        "Interface: 192.168.20.51 --- 0xc\n"
+        "  Internet Address      Physical Address      Type\n"
+        // ★ 这一行是整个用例的支点：**同一段内**先出现一条物理地址为空的条目，后面才是网关。
+        //   段头判据若只写「有 IP 没 MAC」，这行就会被当成段头，从它往后的条目（含网关）全部
+        //   记到 "192.168.20.7" 名下 → 按本卡 IP 查网关 MAC 查不到 → 所有设备都代理不了。
+        //   （把它放在段尾是测不出来的：下一个真段头会把 cur 冲掉，损害正好被掩盖。）
+        "  192.168.20.7                                dynamic\n"
+        "  192.168.20.1          70-a7-41-a4-19-7b     dynamic\n"
+        "  192.168.20.91         2c-cf-67-95-32-80     dynamic\n"
+        "  192.168.20.255        ff-ff-ff-ff-ff-ff     static\n"
+        "  224.0.0.251           01-00-5e-00-00-fb     static\n"
+        "  255.255.255.255       ff-ff-ff-ff-ff-ff     static\n"
+        "\n"
+        "Interface: 172.22.144.1 --- 0x12\n"
+        "  Internet Address      Physical Address      Type\n"
+        "  172.22.159.255        ff-ff-ff-ff-ff-ff     static\n");
+    {
+        const auto t = parseArpTable(win, ArpFormat::WindowsSections);
+        check(t.value(QStringLiteral("192.168.20.51")).value(QStringLiteral("192.168.20.1"))
+                      == QStringLiteral("70:a7:41:a4:19:7b"),
+              "win: 网关落在本卡那一段");
+        check(t.value(QStringLiteral("192.168.20.51")).size() == 2, "win: 该段只留下两台真设备");
+        // 物理地址为空的行绝不能被当成段头 —— 否则从它往后全部记错接口。
+        check(!t.contains(QStringLiteral("192.168.20.7")), "win: 段中空 MAC 行没被当成段头");
+        check(!t.contains(QStringLiteral("198.18.0.2")), "win: 段尾空 MAC 行也没被当成段头");
+        check(!t.contains(QString()), "win: 没有归不到接口的残留条目");
+        check(!t.contains(QStringLiteral("198.18.0.1")), "win: TUN 段无有效条目（全被过滤）");
+    }
+
+    // —— 用例 2：**本次要修的那个故障**。两台路由器都用出厂默认 192.168.1.1，各自 MAC 不同。
+    //    拍平成一张表时后者覆盖前者；分段后各归各的。
+    const QString dual = QStringLiteral(
+        "Interface: 192.168.1.10 --- 0x5\n"
+        "  Internet Address      Physical Address      Type\n"
+        "  192.168.1.1           aa-aa-aa-aa-aa-aa     dynamic\n"
+        "\n"
+        "Interface: 192.168.1.20 --- 0x9\n"
+        "  Internet Address      Physical Address      Type\n"
+        "  192.168.1.1           bb-bb-bb-bb-bb-bb     dynamic\n");
+    {
+        const auto t = parseArpTable(dual, ArpFormat::WindowsSections);
+        check(t.value(QStringLiteral("192.168.1.10")).value(QStringLiteral("192.168.1.1"))
+                      == QStringLiteral("aa:aa:aa:aa:aa:aa"),
+              "dual: A 卡拿到 A 路由器的 MAC");
+        check(t.value(QStringLiteral("192.168.1.20")).value(QStringLiteral("192.168.1.1"))
+                      == QStringLiteral("bb:bb:bb:bb:bb:bb"),
+              "dual: B 卡拿到 B 路由器的 MAC（这条以前必错）");
+    }
+
+    // —— 用例 3：Linux `arp -n`（末列 Iface；表头行与 incomplete 行都要被滤掉）——
+    const QString lx = QStringLiteral(
+        "Address                  HWtype  HWaddress           Flags Mask            Iface\n"
+        "192.168.20.1             ether   70:a7:41:a4:19:7b   C                     eth0\n"
+        "192.168.31.1             ether   cc:d8:43:9b:e3:b6   C                     wlan0\n"
+        "192.168.20.77                    (incomplete)                              eth0\n");
+    {
+        const auto t = parseArpTable(lx, ArpFormat::LinuxColumns);
+        check(t.value(QStringLiteral("eth0")).value(QStringLiteral("192.168.20.1"))
+                      == QStringLiteral("70:a7:41:a4:19:7b"),
+              "linux: eth0 的网关");
+        check(t.value(QStringLiteral("wlan0")).value(QStringLiteral("192.168.31.1"))
+                      == QStringLiteral("cc:d8:43:9b:e3:b6"),
+              "linux: wlan0 的网关（另一张卡另一台路由器）");
+        check(t.value(QStringLiteral("eth0")).size() == 1, "linux: incomplete 行被滤掉");
+    }
+
+    // —— 用例 4：macOS `arp -an`（"at <mac> on <iface>"；主机名里带 on 不能骗走接口名）——
+    const QString mac = QStringLiteral(
+        "? (192.168.20.1) at 70:a7:41:a4:19:7b on en0 ifscope [ethernet]\n"
+        "salon (192.168.31.1) at cc:d8:43:9b:e3:b6 on en1 ifscope [ethernet]\n");
+    {
+        const auto t = parseArpTable(mac, ArpFormat::MacOsAt);
+        check(t.value(QStringLiteral("en0")).value(QStringLiteral("192.168.20.1"))
+                      == QStringLiteral("70:a7:41:a4:19:7b"),
+              "macos: en0 的网关");
+        check(t.value(QStringLiteral("en1")).value(QStringLiteral("192.168.31.1"))
+                      == QStringLiteral("cc:d8:43:9b:e3:b6"),
+              "macos: 主机名含 on 也不影响接口名");
+    }
+
+    std::printf("ARP 解析自测: %s\n", failed == 0 ? "全部通过" : "有失败项");
+    return failed == 0;
+}
+
+// 该卡在 m_arpByIf 里的键。口径必须与 parseArpTable 产出的键一致。
+QString LanScanner::arpKeyFor(const LocalIface &f)
+{
+#if defined(Q_OS_WIN)
+    return f.ip;   // `arp -a` 的分段头给的就是本机在该卡上的 IPv4
+#else
+    return f.name; // `arp -n` / `arp -an` 每行自带接口名
+#endif
+}
+
+QString LanScanner::arpMacFor(const LocalIface &f, const QString &ip) const
+{
+    if (ip.isEmpty())
+        return {};
+    const QString mac = m_arpByIf.value(arpKeyFor(f)).value(ip);
+    if (!mac.isEmpty())
+        return mac;
+    // 归不到接口的条目（解析降级：某个系统版本/语言下分段头认不出来）留在空键那一桶。
+    // 回落到它 —— 宁可退回"和以前一样"，也不能因为输出格式变了就让每张卡的网关 MAC 全空、
+    // 所有设备都代理不了（enableDevice 在网关 MAC 为空时是**直接拒绝接管**的）。
+    return m_arpByIf.value(QString()).value(ip);
+}
+
+void LanScanner::rebuildFlatArp()
+{
+    m_arp.clear();
+    for (auto it = m_arpByIf.constBegin(); it != m_arpByIf.constEnd(); ++it)
+        for (auto e = it->constBegin(); e != it->constEnd(); ++e)
+            m_arp.insert(e.key(), e.value());
+}
+
+QString LanScanner::gatewayMac() const
+{
+    if (m_physIfaces.isEmpty())
+        return {};
+    return arpMacFor(m_physIfaces.constFirst(), m_gatewayIp);
+}
+
 QSet<QString> LanScanner::gatewayMacs() const
 {
     QSet<QString> macs;
-    for (const QString &gw : m_gatewayIps) {
-        const QString mac = m_arp.value(gw);
-        if (!mac.isEmpty())
-            macs.insert(mac);
+    // 这是「哪些 MAC 是路由器」的判据（把路由器标出来、禁止对它开代理），跨全部接口取**并集**
+    // 才对。走分接口表而不是扁平表：两台路由器共用同一个 IP 时，扁平表只留得下其中一条。
+    for (auto it = m_arpByIf.constBegin(); it != m_arpByIf.constEnd(); ++it) {
+        for (const QString &gw : m_gatewayIps) {
+            const QString mac = it->value(gw);
+            if (!mac.isEmpty())
+                macs.insert(mac);
+        }
     }
     return macs;
 }
@@ -685,11 +955,14 @@ QVector<LanScanner::NicInfo> LanScanner::physicalNics() const
             continue;
         NicInfo n;
         n.name = f.name;
+        n.friendlyName = f.friendlyName;
         n.ip = f.ip;
         n.mac = f.mac;
         n.netmask = QHostAddress(f.mask).toString();
         n.gatewayIp = f.gatewayIp;
-        n.gatewayMac = m_arp.value(f.gatewayIp); // 扫过一轮后才有值；网关配置每轮刷新
+        // ★ 只查**这张卡自己**那份 ARP 表。以前查的是拍平后的全局表，两台路由器同网段时会
+        //   张冠李戴（见 m_arpByIf 的说明）。扫过一轮后才有值；网关配置每轮刷新。
+        n.gatewayMac = arpMacFor(f, f.gatewayIp);
         n.routerLinkLocal6 = f.gatewayLL6;
         n.routerMac6 = f.gatewayMac6;
         n.localGlobal6 = f.global6;
@@ -910,18 +1183,21 @@ void LanScanner::readArpTable(std::function<void()> onDone)
 
 void LanScanner::onArpOutput(const QByteArray &out)
 {
-    const QString text = QString::fromLocal8Bit(out);
-    const QStringList lines = text.split('\n');
-    for (const QString &line : lines) {
-        const QString ip = ipv4FromLine(line);
-        const QString mac = DeviceStore::normalizeMac(macFromLine(line));
-        if (isJunkArpEntry(ip, mac))
-            continue; // 组播/广播条目不是设备
-        m_arp.insert(ip, mac);
-        Signals &s = sig(ip);
-        s.mac = mac;
-        s.alive = true;
+    // **合并而不是整表替换**：一轮扫描里要读两次 arp 表（阶段⓪与阶段②），前一次见过、后一次
+    // 已从系统缓存老化掉的条目要留着。（refreshLiveness 那条路相反，必须整表替换——不然设备
+    // 永远显示在线，见那里的注释。）
+    const QHash<QString, QHash<QString, QString>> fresh =
+            parseArpTable(QString::fromLocal8Bit(out));
+    for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it) {
+        QHash<QString, QString> &bucket = m_arpByIf[it.key()];
+        for (auto e = it->constBegin(); e != it->constEnd(); ++e) {
+            bucket.insert(e.key(), e.value());
+            Signals &s = sig(e.key());
+            s.mac = e.value();
+            s.alive = true;
+        }
     }
+    rebuildFlatArp();
 }
 
 // ———————————————————————————— mDNS (5353) ————————————————————————————
@@ -1391,6 +1667,7 @@ void LanScanner::scanFull()
     m_scanning = true;
     emit scanningChanged(true);
 
+    m_arpByIf.clear();
     m_arp.clear();
     m_sig.clear();
 
@@ -1466,21 +1743,16 @@ void LanScanner::refreshLiveness(const QStringList &knownIps)
                 [this, p](int, QProcess::ExitStatus) {
                     const QString text = QString::fromLocal8Bit(p->readAllStandardOutput());
                     p->deleteLater();
-                    // arp -a 给的是完整表 → 整表替换 m_arp（顺带让 gatewayMac() 保持新鲜，
-                    // 网关劫持配置要用）。**必须整表替换而不是累加**：只有「本轮表里没了」
-                    // 才会走陈旧判定→离线，累加会让设备永远显示在线。
-                    QHash<QString, QString> fresh;
-                    for (const QString &line : text.split('\n')) {
-                        const QString ip = ipv4FromLine(line);
-                        const QString mac = DeviceStore::normalizeMac(macFromLine(line));
-                        if (isJunkArpEntry(ip, mac))
-                            continue;
-                        fresh.insert(ip, mac);
-                    }
-                    m_arp = fresh;
+                    // arp -a 给的是完整表 → 整表替换（顺带让 gatewayMac() 保持新鲜，网关劫持
+                    // 配置要用）。**必须整表替换而不是累加**：只有「本轮表里没了」才会走陈旧
+                    // 判定→离线，累加会让设备永远显示在线。
+                    // 解析走与扫描路径同一个 parseArpTable —— 这两处以前各写了一份几乎一样的
+                    // 循环，按接口分段这件事很容易只改一处就以为改完了。
+                    m_arpByIf = parseArpTable(text);
+                    rebuildFlatArp();
                     const QSet<QString> gwMacs = gatewayMacs();
                     QVector<DeviceRecord> out;
-                    for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it) {
+                    for (auto it = m_arp.constBegin(); it != m_arp.constEnd(); ++it) {
                         const QString ip = it.key();
                         const QString mac = it.value();
                         if (m_localMacs.contains(mac))

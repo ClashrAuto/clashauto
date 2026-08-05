@@ -48,7 +48,8 @@ public:
     QString localIp() const { return m_localIp; }
     QString localMac() const { return m_localMac; }
     QString gatewayIp() const { return m_gatewayIp; }
-    QString gatewayMac() const { return m_arp.value(m_gatewayIp); } // 网关 MAC（本轮 ARP 表里）
+    // 主网卡的网关 MAC（本轮 ARP 表里，**只认主网卡那张表**——见 m_arpByIf 的说明）。
+    QString gatewayMac() const;
     QString interfaceName() const { return m_ifaceName; }
     // 主网卡子网掩码（点分，如 "255.255.255.0"）；未知返回空。供网关做「同网段直连旁路」。
     QString localNetmask() const;
@@ -65,6 +66,13 @@ public:
     // 一张可做透明网关的物理网卡（喂给 LanGateway::configure）。
     struct NicInfo {
         QString name;       // OS 级接口名
+        // 适配器**友好名**（Windows: "以太网 2"/"WLAN"；Linux/mac: 与 name 相同）。
+        // ★ 这一项是给核心的 `interface-name` 用的，不是展示字段：mihomo 的
+        //   `iface.ResolveInterface()` 是拿 Go 的 net.Interface.Name 做**精确 map 查找**，
+        //   Windows 上那正是适配器 FriendlyName —— 给 LUID 名（name 的值，形如
+        //   "ethernet_32775"）或 GUID 都查不到，返回 ErrIfaceNotFound，于是那个出站的
+        //   **每一次拨号都失败且没有回退**。所以写配置前必须确认这一项非空且能反查得到。
+        QString friendlyName;
         QString ip;         // 本机在该卡上的 IPv4
         QString mac;
         QString netmask;    // 点分
@@ -80,6 +88,15 @@ public:
     QVector<NicInfo> physicalNics() const;
     // 全部网关的 MAC（按 m_gatewayIps 在本轮 ARP 表里查）——路由器可能有多个 IP，认 MAC 更稳。
     QSet<QString> gatewayMacs() const;
+
+    /// ARP 表解析自测（`COAST_ARPPARSE_SELFTEST=1`，见 main_qml.cpp）。三端都能跑：解析器按
+    /// 运行期参数分派而不是 #ifdef，所以 Linux 的 CI 也覆盖得到 Windows 那一种形态。
+    ///
+    /// ★ 为什么这一段值得一个自测：它是**文本解析**，而它的产物决定「每张网卡的网关 MAC」。
+    ///   解析一旦错，enableDevice 会因为网关 MAC 为空而拒绝接管 —— 表现是所有设备都代理不了，
+    ///   却没有任何崩溃或报错指向这里。用例里的样本全是真机 `arp -a`/`arp -n`/`arp -an` 原文。
+    /// 通过返回 true，失败把差异打到 stdout 后返回 false。
+    static bool runArpParseSelfTest();
 
 signals:
     // 一轮扫描（或轻量刷新）产出的设备快照（运行时字段已填，持久字段留空由 store 保留）。
@@ -108,8 +125,12 @@ private:
 
     // —— ARP 表 ——
     // onDone 在输出解析完（或进程起不来）后回调，用来串起两阶段探测。
-    void readArpTable(std::function<void()> onDone = {}); // QProcess arp → m_arp（ip→mac）
+    void readArpTable(std::function<void()> onDone = {}); // QProcess arp → m_arpByIf/m_arp
     void onArpOutput(const QByteArray &out);
+    // 把 m_arpByIf 压平成 m_arp（同一 IP 出现在多张卡上时留任意一条——扁平表的消费方只关心
+    // 「这个 IP 在不在、MAC 是什么」，网卡归属由下面 arpMacFor 那条精确路径负责）。
+    void rebuildFlatArp();
+    // （arpMacFor/arpKeyFor 声明在 LocalIface 之后 —— 类内的形参类型必须先声明。）
 
     // —— 名称/型号解析器（QUdpSocket，持续监听）——
     void setupMdns();
@@ -153,9 +174,12 @@ private:
     // 一张本机物理网卡（可作为二层劫持网卡的候选）。
     struct LocalIface {
         QString name;   // OS 级接口名（AF_PACKET/BPF/Npcap 绑定用）
+        QString friendlyName;       // 适配器友好名（核心的 interface-name 要它，见 NicInfo）
         QString ip;
         QString mac;
         QString gatewayIp;          // 这张卡自己的默认网关（多网卡各不相同）
+        quint32 gatewayMetric = 0;  // 该默认路由的**有效跃点数**（路由 metric + 接口 metric）。
+                                    // 主网卡就按它最小者选——不是按枚举顺序。
         quint32 base = 0, mask = 0; // 网段（主机序）
         // —— IPv6（Linux 尽力发现）——
         QString gatewayLL6;         // v6 默认路由器链路本地地址
@@ -163,6 +187,12 @@ private:
         QString global6;            // 本机在该卡上的全局 v6
         QString prefix6;            // 该卡 v6 前缀
     };
+    // 某张卡自己那张 ARP 表里的 ip → mac。**绝不回落到别的卡**——那正是这次要修的东西。
+    // 唯一的回落是「归不到任何接口」那一桶（解析降级时的保命路径，见 parseArpTable 与实现处）。
+    QString arpMacFor(const LocalIface &f, const QString &ip) const;
+    // 该卡在 m_arpByIf 里的键。Windows 用本机在该卡上的 IPv4（`arp -a` 的分段头给的就是它），
+    // 其余平台用接口名（`arp -n`/`arp -an` 每行自带）。见 parseArpTable。
+    static QString arpKeyFor(const LocalIface &f);
     // Linux 尽力发现 IPv6 拓扑（填 m_physIfaces 的 v6 字段）；其它平台为空实现。
     void detectIpv6Topology();
 
@@ -172,7 +202,17 @@ private:
     QVector<LocalIface> m_physIfaces;     // 全部物理网卡（第 0 个即主网卡）
     QSet<QString> m_localMacs;            // 本机全部网卡 MAC（含虚拟网卡）
     QSet<QString> m_gatewayIps;           // 全部默认路由网关 IP
-    QHash<QString, QString> m_arp;         // ip → mac（本轮 ARP 表）
+    // ★ ARP 表必须**按接口分开存**。系统 `arp -a` 的输出本来就是按接口分段的，以前被拍平成
+    //   一张 ip→mac 全局表 —— 同时接两个路由器、而两台路由器又都用出厂默认网段（192.168.1.1
+    //   这种）时，后读到的那条直接覆盖先读到的，于是**一张卡拿到另一台路由器的 MAC**。
+    //   后果不是投毒失效（投毒帧声明的是"网关 IP 在本机 MAC"，与此无关），而是：
+    //     · 反制触发器失灵 —— LanGateway 判「这帧是不是真网关自己发的」靠的就是拿源 MAC 比
+    //       NicSpec::gatewayMac（LanGateway_linux.cpp 的 reassertNow 那处）。比不上就永远不
+    //       反制，路由器每广播一次 ARP 就把设备解毒一次 ⇒ 教科书式的"时通时不通"；
+    //     · 还原（heal）会把**错的** MAC 装回设备 ⇒ 关代理后黑洞到缓存老化。
+    //   键的口径见 arpKeyFor。
+    QHash<QString, QHash<QString, QString>> m_arpByIf; // 接口键 → (ip → mac)
+    QHash<QString, QString> m_arp;         // 上表压平（ip → mac），给不关心网卡归属的消费方
     QHash<QString, Signals> m_sig;         // ip → 解析信号
     QTimer *m_settleTimer = nullptr;       // 探测发完后再等一小会儿收 ARP/名称，再 assemble
     QElapsedTimer m_topologyAge;           // 上次 detectLocalTopology 的时刻（配 ensureTopology 用）

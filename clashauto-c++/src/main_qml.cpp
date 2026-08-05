@@ -211,6 +211,14 @@ int main(int argc, char *argv[])
         return runSmolGatewayRealNicSelfTest();
 #endif
 
+    // 系统 ARP 表解析自测（纯文本，不碰网络、不需要权限、毫秒级）。
+    // ★ 必须放在 `#ifdef COAST_HAVE_RUST_STACK` 之**外**：那个宏只在 Windows + COAST_RUST=ON
+    //   时定义，放进去等于在 Linux/mac 上「设了 env 只会把 GUI 启动、进程不退出」——本文件
+    //   上面那条注释已经为同一个坑记过三次，这里不再犯第四次。而这个自测恰恰要在 Linux CI 上
+    //   跑（Windows 那种输出形态的解析器现在也是运行期分派的，Linux 一样覆盖得到）。
+    if (qEnvironmentVariableIsSet("COAST_ARPPARSE_SELFTEST"))
+        return LanScanner::runArpParseSelfTest() ? 0 : 1;
+
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
     // 后退出（配合 validate/gateway_selftest.sh）。用 offscreen 平台即可（无显示环境）。
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
