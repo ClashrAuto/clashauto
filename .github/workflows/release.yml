@@ -220,6 +220,14 @@ jobs:
         # 「库编出来了」和「库真能被 C++ 调用、结构体布局与错误码语义都对得上」是分不清的。
         # 这里跨 FFI 走一遍完整往返，任何一项对不上就非 0 退出、当场红灯。
         # （本地已验证可证伪：故意改坏一个断言 → exit=1 并指明位置。）
+        #
+        # ★★ 这一步曾经**长期是假绿灯**，两个原因叠在一起，都要照着办：
+        #   ① `& $exe` 对 **GUI 子系统**的 exe 不阻塞，`$LASTEXITCODE` 拿不到值（是 $null）。
+        #      `$null -ne 0` 为真 → 打出 `::error::` → 但 `exit $null` 等于 `exit`，退出码 0,
+        #      于是"报了错还是绿的"。必须用 Start-Process -Wait -PassThru，且 `exit 1` 用常量。
+        #   ② 构建目录里**没有 Qt 的 DLL**（windeployqt 在后面的打包步骤才跑），exe 起不来，
+        #      退出码 -1073741515 = 0xC0000135 STATUS_DLL_NOT_FOUND。所以要先把 $QT_ROOT\bin
+        #      挂到 PATH 上。下面两步同理。
         if: matrix.arch == 'x64'
         shell: pwsh
         env:
@@ -227,10 +235,13 @@ jobs:
         run: |
           $exe = Join-Path $env:BUILD_DIR "Release\Coast.exe"
           if (-not (Test-Path $exe)) { throw "找不到 $exe" }
-          & $exe
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::coaststack ABI 自证失败（exit=$LASTEXITCODE）——C ABI 与 Rust 侧不一致"
-            exit $LASTEXITCODE
+          $env:Path = "$env:QT_ROOT\bin;$env:Path"
+          $out = Join-Path $env:RUNNER_TEMP "ruststack.out"
+          $p = Start-Process -FilePath $exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $out) { Get-Content $out }
+            Write-Host "::error::coaststack ABI 自证失败（exit=$($p.ExitCode)）——C ABI 与 Rust 侧不一致"
+            exit 1
           }
 
       - name: coaststack gateway self-test
@@ -246,13 +257,16 @@ jobs:
         shell: pwsh
         run: |
           $exe = Join-Path $env:BUILD_DIR "Release\Coast.exe"
+          $env:Path = "$env:QT_ROOT\bin;$env:Path"
           $env:COAST_SMOLGW_SELFTEST = "1"
-          & $exe
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::网关数据面自测失败（exit=$LASTEXITCODE）"
-            exit $LASTEXITCODE
-          }
+          $out = Join-Path $env:RUNNER_TEMP "smolgw.out"
+          $p = Start-Process -FilePath $exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out
           Remove-Item Env:\COAST_SMOLGW_SELFTEST
+          if ($p.ExitCode -ne 0) {
+            if (Test-Path $out) { Get-Content $out }
+            Write-Host "::error::网关数据面自测失败（exit=$($p.ExitCode)）"
+            exit 1
+          }
 
       - name: Pure-logic self-tests (ARP parse / per-NIC egress)
         # 与上面两条不同，这里用 **Start-Process -Wait -PassThru** 而不是 `& $exe`：
@@ -264,6 +278,7 @@ jobs:
         run: |
           $exe = Join-Path $env:BUILD_DIR "Release\Coast.exe"
           if (-not (Test-Path $exe)) { throw "找不到 $exe" }
+          $env:Path = "$env:QT_ROOT\bin;$env:Path"
           foreach ($t in @('COAST_ARPPARSE_SELFTEST', 'COAST_NICEGRESS_SELFTEST')) {
             Set-Item "Env:\$t" '1'
             $out = Join-Path $env:RUNNER_TEMP "$t.out"
@@ -272,7 +287,7 @@ jobs:
             if ($p.ExitCode -ne 0) {
               if (Test-Path $out) { Get-Content $out }
               Write-Host "::error::$t 失败（exit=$($p.ExitCode)）"
-              exit $p.ExitCode
+              exit 1
             }
           }
 
