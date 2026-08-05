@@ -12,6 +12,56 @@ import Foundation
 ///   放在 helper 里，XPC 连接一断（app 正常退出、崩溃、被 SIGKILL）都能触发复原 ——
 ///   见 `HelperService` 的 `invalidationHandler`。如果像 Qt 版那样把 BPF fd 传回 app 自己发包，
 ///   app 被 SIGKILL 时没有任何人来发那几个复原包，设备就那么挂着。
+/// 转发开关（`net.inet.ip.forwarding` / `ip6.forwarding`）是**全机唯一**的，而多网卡时有
+/// 多个 Redirector 实例。用引用计数管：第一个开启时存下原值，最后一个关闭时才还原。
+///
+/// ★ 不能各存各的：实例 A 先启动（看到原值 0）、实例 B 后启动（看到的已经是 1）——
+///   若按启动顺序停，A 先把 forwarding 关掉，而 B 还在转发；若按相反顺序停，B 还原成 1，
+///   于是永久留下 forwarding=1。**顺序无关**是这里唯一能接受的性质。
+/// 返回值都是「原本是不是开着」，好让每个实例的崩溃记录都写同一个真实原值。
+enum ForwardingRefcount {
+    private static let lock = NSLock()
+    private static var v4Count = 0
+    private static var v4Original = false
+    private static var v6Count = 0
+    private static var v6Original = false
+
+    /// 返回 (原本是否开着, 是否成功)。已被别人开着时直接计数 +1。
+    static func retainV4(read: () -> Bool, write: (Bool) -> Bool) -> (original: Bool, ok: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        if v4Count == 0 {
+            v4Original = read()
+            if !v4Original, !write(true) { return (false, false) }
+        }
+        v4Count += 1
+        return (v4Original, true)
+    }
+
+    static func releaseV4(write: (Bool) -> Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard v4Count > 0 else { return }
+        v4Count -= 1
+        if v4Count == 0, !v4Original { _ = write(false) }
+    }
+
+    static func retainV6(read: () -> Bool, write: (Bool) -> Bool) -> (original: Bool, ok: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        if v6Count == 0 {
+            v6Original = read()
+            if !v6Original, !write(true) { return (false, false) }
+        }
+        v6Count += 1
+        return (v6Original, true)
+    }
+
+    static func releaseV6(write: (Bool) -> Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard v6Count > 0 else { return }
+        v6Count -= 1
+        if v6Count == 0, !v6Original { _ = write(false) }
+    }
+}
+
 final class Redirector: @unchecked Sendable {
 
     private let queue = DispatchQueue(label: "com.yuehongsun.coast.redirector")
@@ -79,7 +129,35 @@ final class Redirector: @unchecked Sendable {
     ///
     ///   只在这个通配命名空间下**新开我们自己的子 anchor**，不碰 Apple 已有的任何规则；
     ///   卸载时只 flush 这一个子 anchor（见 `uninstallPF`）。
-    static let anchorName = "com.apple/coast.redirect"
+    /// ★ **每张网卡一个实例、各用各的 anchor 与崩溃记录**。本类建模的本来就是「一张网卡」——
+    ///   它没写错，只是以前被当成单例用。多网卡时 helper 持有 `[Redirector]`，
+    ///   **一张卡就是长度 1 的数组**，没有「单网卡模式」这回事。
+    ///
+    ///   子 anchor 仍挂在 `com.apple/` 通配命名空间下（主规则集只有 `rdr-anchor "com.apple/*"`
+    ///   这类通配引用；平级 anchor 装得进去却永远不被求值 —— 见下方原注）。多加一级序号后
+    ///   `com.apple/coast.redirect.0` / `.1` 各自独立装卸，互不影响。
+    let index: Int
+    let anchorName: String
+    private let crashRecordPath: String
+
+    /// 允许的最大网卡数。只用于崩溃恢复时遍历「可能残留的 anchor / 记录」——
+    /// 真实数量由调用方决定，这里只要一个不会漏的上界。
+    static let maxNics = 8
+
+    static func anchorName(index: Int) -> String { "com.apple/coast.redirect.\(index)" }
+
+    /// `COAST_REDIRECT_RECORD` 可改写路径前缀，仅用于验证恢复逻辑本身（见下方原注）。
+    static func crashRecordPath(index: Int) -> String {
+        let base = ProcessInfo.processInfo.environment["COAST_REDIRECT_RECORD"]
+            ?? "/var/db/com.yuehongsun.coast.helper.redirect"
+        return "\(base).\(index)"
+    }
+
+    init(index: Int = 0) {
+        self.index = index
+        self.anchorName = Self.anchorName(index: index)
+        self.crashRecordPath = Self.crashRecordPath(index: index)
+    }
 
     // MARK: - 开始
 
@@ -139,16 +217,18 @@ final class Redirector: @unchecked Sendable {
 
             // 1) 开内核转发。记下原值，复原时**只在原本是关的时候才关回去** ——
             //    用户可能自己开着 forwarding 干别的，我们不该擅自关掉。v6 同理，且只在启用 v6 时才碰。
-            forwardingWasOn = Self.ipForwarding()
-            if !forwardingWasOn, !Self.setIPForwarding(true) {
-                return "开启 ip.forwarding 失败"
-            }
+            let v4Switch = ForwardingRefcount.retainV4(read: { Self.ipForwarding() },
+                                                       write: { Self.setIPForwarding($0) })
+            guard v4Switch.ok else { return "开启 ip.forwarding 失败" }
+            forwardingWasOn = v4Switch.original
             if v6Active {
-                forwarding6WasOn = Self.ip6Forwarding()
-                if !forwarding6WasOn, !Self.setIP6Forwarding(true) {
-                    if !forwardingWasOn { _ = Self.setIPForwarding(false) }
+                let v6Switch = ForwardingRefcount.retainV6(read: { Self.ip6Forwarding() },
+                                                           write: { Self.setIP6Forwarding($0) })
+                guard v6Switch.ok else {
+                    ForwardingRefcount.releaseV4(write: { Self.setIPForwarding($0) })
                     return "开启 ip6.forwarding 失败"
                 }
+                forwarding6WasOn = v6Switch.original
             }
 
             // 2) 装 PF anchor。**用实际接管的这批 IP**（ips，已过滤掉 MAC 解析失败的），
@@ -156,8 +236,8 @@ final class Redirector: @unchecked Sendable {
             let ipStringsForPF = ips.map { $0.map(String.init).joined(separator: ".") }
             if let error = installPF(deviceIPs: ipStringsForPF, deviceV6s: v6sForPF,
                                      redirPort: redirPort, dnsPort: dnsPort) {
-                if v6Active, !forwarding6WasOn { _ = Self.setIP6Forwarding(false) }
-                if !forwardingWasOn { _ = Self.setIPForwarding(false) }
+                if v6Active { ForwardingRefcount.releaseV6(write: { Self.setIP6Forwarding($0) }) }
+                ForwardingRefcount.releaseV4(write: { Self.setIPForwarding($0) })
                 return error
             }
             pfInstalled = true
@@ -165,8 +245,8 @@ final class Redirector: @unchecked Sendable {
             // 3) 打开 BPF，起欺骗定时器。失败同样回滚前两步。
             guard openBPF(interface: interface) else {
                 uninstallPF()
-                if v6Active, !forwarding6WasOn { _ = Self.setIP6Forwarding(false) }
-                if !forwardingWasOn { _ = Self.setIPForwarding(false) }
+                if v6Active { ForwardingRefcount.releaseV6(write: { Self.setIP6Forwarding($0) }) }
+                ForwardingRefcount.releaseV4(write: { Self.setIPForwarding($0) })
                 return "打开 BPF 失败"
             }
 
@@ -202,12 +282,9 @@ final class Redirector: @unchecked Sendable {
     /// 放在 `/var/db/` 下：root 可写、不随用户数据迁移，重启后也还在（PF anchor 本身不跨
     /// 重启，但 `ip.forwarding` 若被写进 sysctl 配置就会跨；宁可多恢复一次也不要漏）。
     ///
-    /// `COAST_REDIRECT_RECORD` 可改写路径，仅用于验证恢复逻辑本身。生产上够不着：
+    /// `COAST_REDIRECT_RECORD` 可改写路径前缀，仅用于验证恢复逻辑本身。生产上够不着：
     /// launchd 拉起的 daemon 不继承用户环境，这个变量只有直接执行二进制时才可能存在。
-    private static var crashRecordPath: String {
-        ProcessInfo.processInfo.environment["COAST_REDIRECT_RECORD"]
-            ?? "/var/db/com.yuehongsun.coast.helper.redirect"
-    }
+    /// 实际路径按网卡序号分开，见上方 `crashRecordPath(index:)`。
 
 
     /// 崩溃记录的**完整版**：除两个转发开关外，再落下**重发还原 ARP 所需的一切**。
@@ -232,7 +309,7 @@ final class Redirector: @unchecked Sendable {
             .map { "\(Self.ipv4Text($0.0))|\($0.1.text)" }
             .joined(separator: ",")
         text += "\ndevs=\(devs)"
-        try? text.write(toFile: Self.crashRecordPath, atomically: true, encoding: .utf8)
+        try? text.write(toFile: crashRecordPath, atomically: true, encoding: .utf8)
     }
 
     /// `[UInt8]` → 点分十进制。`ARPPacket` 只提供了反向的 `ipv4Bytes`。
@@ -260,7 +337,7 @@ final class Redirector: @unchecked Sendable {
         return nil
     }
 
-    private static func clearCrashRecord() {
+    private func clearCrashRecord() {
         try? FileManager.default.removeItem(atPath: crashRecordPath)
     }
 
@@ -272,7 +349,17 @@ final class Redirector: @unchecked Sendable {
     ///
     /// ARP 不在此列：欺骗随进程消失，设备的 ARP 缓存会自行老化（十几分钟），
     /// 而我们已经不知道当时接管的是哪几台、真网关 MAC 是什么，无从定向复原。
+    /// 遍历**全部可能的网卡序号**：多网卡时每张卡各留一份记录与 anchor，漏掉一个就等于
+    /// 那张卡上的设备继续断网（规则还在、却没有进程接管流量）。没有记录的序号是空转。
     static func recoverFromCrashIfNeeded(log: (String) -> Void) {
+        for index in 0..<maxNics {
+            recoverOne(index: index, log: log)
+        }
+    }
+
+    private static func recoverOne(index: Int, log: (String) -> Void) {
+        let crashRecordPath = crashRecordPath(index: index)
+        let anchorName = anchorName(index: index)
         guard let record = try? String(contentsOfFile: crashRecordPath, encoding: .utf8) else { return }
         // 解析两行 `v4=`/`v6=`；找不到 `v4=` 则退回旧的单字符格式（整串 == "1"）。
         var fields: [String: String] = [:]
@@ -321,7 +408,7 @@ final class Redirector: @unchecked Sendable {
         _ = runPfctlStatic(["-a", anchorName, "-F", "all"])   // 一并清掉 v4+v6 rdr 规则
         if !forwardingWasOn { _ = setIPForwarding(false) }
         if let v6WasOn = forwarding6WasOn, !v6WasOn { _ = setIP6Forwarding(false) }
-        clearCrashRecord()
+        try? FileManager.default.removeItem(atPath: crashRecordPath)
         let v6Note = forwarding6WasOn.map { "；ip6.forwarding 恢复为 \($0 ? "1(原本就开着)" : "0")" } ?? ""
         log("已清空 PF anchor \(anchorName);ip.forwarding 恢复为 \(forwardingWasOn ? "1(原本就开着)" : "0")\(v6Note)")
     }
@@ -391,9 +478,9 @@ final class Redirector: @unchecked Sendable {
 
         if pfInstalled { uninstallPF(); pfInstalled = false }
         // forwarding 只回滚我们开的那一次（v6 同理，且只在这次启用过 v6 时才碰）
-        if !forwardingWasOn { _ = Self.setIPForwarding(false) }
-        if v6Active, !forwarding6WasOn { _ = Self.setIP6Forwarding(false) }
-        Self.clearCrashRecord()   // 正常收尾了，不必再让下次启动去恢复
+        if v6Active { ForwardingRefcount.releaseV6(write: { Self.setIP6Forwarding($0) }) }
+        ForwardingRefcount.releaseV4(write: { Self.setIPForwarding($0) })
+        clearCrashRecord()   // 正常收尾了，不必再让下次启动去恢复
 
         active = false
         v6Active = false
@@ -623,7 +710,7 @@ final class Redirector: @unchecked Sendable {
         pfRedirPort = redirPort
         pfDnsPort = dnsPort
         pfV6set = Set(deviceV6s)
-        guard runPfctl(["-a", Self.anchorName, "-f", "-"], stdin: anchorRulesText()) else {
+        guard runPfctl(["-a", anchorName, "-f", "-"], stdin: anchorRulesText()) else {
             return "pfctl 装规则失败"
         }
         // 确保 PF 本身是开的（-E 引用计数，卸载时 -X 对应）。已开时 -E 也安全。
@@ -754,11 +841,11 @@ final class Redirector: @unchecked Sendable {
     /// 现学到一个新的设备 v6 源 → 重灌 anchor（幂等：只在集合真变了时才动 pfctl）。在 `queue` 上跑。
     private func learnDeviceV6(_ v6: String) {
         guard pfInstalled, pfV6set.insert(v6).inserted else { return }
-        _ = runPfctl(["-a", Self.anchorName, "-f", "-"], stdin: anchorRulesText())
+        _ = runPfctl(["-a", anchorName, "-f", "-"], stdin: anchorRulesText())
     }
 
     private func uninstallPF() {
-        _ = runPfctl(["-a", Self.anchorName, "-F", "all"], stdin: nil)  // 清空我们的 anchor
+        _ = runPfctl(["-a", anchorName, "-F", "all"], stdin: nil)  // 清空我们的 anchor
         restorePurgeInterval()
     }
 
