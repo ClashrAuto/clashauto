@@ -59,6 +59,7 @@ ApplicationWindow {
     onVisibleChanged: {
         if (!visible)
             return
+        fetchedTabs = ({})   // 重新开窗 = 重新取一轮
         fetchCurrentTab()
         if (win.isMac) {
             bridge.applyMacGlass(win, Theme.dark)
@@ -66,12 +67,22 @@ ApplicationWindow {
         }
     }
 
-    /// 切到某一页时才取那一页的数据。开着窗切页签也要取 —— 否则内核页显示的是上次打开
-    /// 时的旧值（或空），而用户并不知道自己看的是陈的。
+    /// 这次开窗里已经取过数据的页签。**每开一次窗、每页只自动取一次**。
+    ///
+    /// ★ 不能"每次切页签都取"：未登录的 GitHub API 是 60 次/小时，来回点几下页签就能
+    ///   烧掉一大截，之后连「获取更新」都会被限流打回来。想要最新的那一份，用户按
+    ///   「获取更新」就是 —— 那条路径**不看这个集合**，永远真取。
+    property var fetchedTabs: ({})
+
+    /// 切到某一页时补取那一页的数据（这次开窗里没取过的话）。不补的话，开着窗切到内核页
+    /// 看到的是空的，而界面上没有任何东西告诉你它还没查过。
     onCurrentTabChanged: if (visible) fetchCurrentTab()
 
-    /// 只取**当前页签**要用的那一份。
+    /// 只取**当前页签**要用的那一份，且这次开窗里没取过才取。
     function fetchCurrentTab() {
+        if (fetchedTabs[currentTab])
+            return
+        fetchedTabs[currentTab] = true
         if (currentTab === 0)
             updater.refreshApp()
         else if (currentTab === 1)
