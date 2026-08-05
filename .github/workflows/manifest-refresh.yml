@@ -40,6 +40,8 @@ jobs:
       - name: Fetch current manifest
         id: prev
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if ! curl -fsSL --max-time 60 -o version.json \
@@ -51,6 +53,14 @@ jobs:
           fi
           for ch in release prerelease; do
             tag="$(python3 -c "import json;print((json.load(open('version.json')).get('releases') or {}).get('$ch',{}).get('tag',''))")"
+            # ★ 引导：清单里还没有这条通道时（首份清单是在分支上生成的，正式通道天然是空的），
+            #   现问一次「最新正式版」把它接上。不引导的话正式通道会一直空着 —— 而那正是
+            #   绝大多数用户走的通道，表现为「查更新说没有适配本平台的包」。
+            #   prerelease 没有等价的 latest 端点，只能等下一次分支推送把它建起来。
+            if [ -z "$tag" ] && [ "$ch" = "release" ]; then
+              tag="$(curl -fsSL --max-time 30 -H "Authorization: token ${GITHUB_TOKEN}"                        "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest"                      | python3 -c "import json,sys;print(json.load(sys.stdin).get('tag_name',''))" || echo "")"
+              [ -z "$tag" ] || echo "正式通道为空，已从 /releases/latest 引导到 $tag"
+            fi
             echo "${ch}_tag=${tag}" >> "$GITHUB_OUTPUT"
             echo "$ch -> ${tag:-无}"
           done

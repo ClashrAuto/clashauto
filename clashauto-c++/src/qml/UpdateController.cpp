@@ -2,6 +2,8 @@
 #include "CoreRelease.h"
 #include "UpdateController.h"
 
+#include "../VersionManifest.h"
+
 #include "CoreController.h"
 #include "Version.h" // APP_VERSION
 
@@ -153,6 +155,8 @@ void UpdateController::refreshApp()
         m_nam = new QNetworkAccessManager(this);
     }
     applyDownloadProxy(m_nam);
+    // 用户手点「获取更新」时必须真取一次 —— 拿 30 秒前的缓存糊弄，等于按钮没反应。
+    VersionManifest::invalidateCache();
     fetchReleases();
 }
 
@@ -162,6 +166,7 @@ void UpdateController::refreshCore()
         m_nam = new QNetworkAccessManager(this);
     }
     applyDownloadProxy(m_nam);
+    VersionManifest::invalidateCache();
     fetchCore();
 }
 
@@ -254,31 +259,22 @@ void UpdateController::fetchReleases()
     emit releaseChanged();
     emit betaChanged();
 
-    QNetworkRequest req(QUrl(QStringLiteral("https://api.github.com/repos/ClashrAuto/clashauto/releases")));
-    req.setRawHeader("Accept", "application/vnd.github+json");
-    req.setRawHeader("User-Agent", "clashauto-cpp");
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    req.setTransferTimeout(15000);
-#endif
-
-    QNetworkReply *reply = m_nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, plat, arch] {
-        reply->deleteLater();
+    // ★ 数据源是 CI 维护的 version.json，**不是 GitHub API**（60 次/小时按出口 IP 算，
+    //   机场出口后面几百人共用，限流几乎必中）。清单被翻译成 GitHub releases 的形状后
+    //   交给下面原样的解析逻辑 —— 资源过滤、mac 的 -qt 排除、边车校验一条都没重写。
+    VersionManifest::fetch(m_nam, this, [this, plat, arch](const QJsonDocument &doc,
+                                                           const QString &err) {
         setChecking(false);
-        const bool ok = reply->error() == QNetworkReply::NoError;
-        const QByteArray body = reply->readAll();
-        if (!ok) {
-            const QString apiMsg = QJsonDocument::fromJson(body).object().value(QStringLiteral("message")).toString();
+        if (doc.isNull()) {
             const QString failText = QString::fromUtf8("获取失败: ")
-                                     + (apiMsg.isEmpty() ? reply->errorString() : apiMsg);
+                                     + (err.isEmpty() ? QString::fromUtf8("未取到版本清单") : err);
             m_releaseNotes = failText;
             m_betaNotes = failText;
             emit releaseChanged();
             emit betaChanged();
             return;
         }
-        const QJsonArray arr = QJsonDocument::fromJson(body).array();
+        const QJsonArray arr = VersionManifest::appReleases(doc);
 
         auto fill = [this, plat, arch](const QJsonObject &r, bool beta) {
             QString &verOut = beta ? m_betaVersion : m_releaseVersion;
@@ -396,28 +392,19 @@ void UpdateController::fetchCore()
     m_coreNotes = QString::fromUtf8("正在获取...");
     emit coreChanged();
 
-    QNetworkRequest coreReq{QUrl(CoreRelease::apiUrl())}; // 花括号：避免 most vexing parse（MSVC/Clang 会把它当函数声明）
-    coreReq.setRawHeader("Accept", "application/vnd.github+json");
-    coreReq.setRawHeader("User-Agent", "clashauto-cpp");
-    coreReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    coreReq.setTransferTimeout(10000);
-#endif
-    QNetworkReply *coreReply = m_nam->get(coreReq);
-    connect(coreReply, &QNetworkReply::finished, this, [this, coreReply, localCoreVer, localShown] {
-        coreReply->deleteLater();
-        const bool ok = coreReply->error() == QNetworkReply::NoError;
-        const QByteArray body = coreReply->readAll();
-        const QString err = coreReply->errorString();
-        if (!ok) {
+    // 内核版本同样取自清单（见 VersionManifest.h）——不打 API。
+    VersionManifest::fetch(m_nam, this, [this, localCoreVer, localShown](const QJsonDocument &doc,
+                                                                        const QString &err) {
+        if (doc.isNull()) {
             m_coreVersion = QString::fromUtf8("内核版本: %1（查询最新版失败）").arg(localShown);
-            m_coreNotes = QString::fromUtf8("获取失败: ") + err;
+            m_coreNotes = QString::fromUtf8("获取失败: ")
+                          + (err.isEmpty() ? QString::fromUtf8("未取到版本清单") : err);
             emit coreChanged();
             return;
         }
         const bool wantBeta = AppConfigLoader::load().receiveBeta;
         const CoreRelease::Pick pick =
-            CoreRelease::pick(QJsonDocument::fromJson(body).array(), wantBeta);
+            CoreRelease::pick(VersionManifest::coreReleases(doc), wantBeta);
         if (!pick.isValid()) {
             m_coreVersion = QString::fromUtf8("内核版本: %1（%2通道暂无可用产物）")
                                 .arg(localShown, wantBeta ? QString::fromUtf8("测试版")

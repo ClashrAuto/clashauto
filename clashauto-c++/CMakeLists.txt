@@ -108,6 +108,7 @@ endif()
 # ————————————————————————————————————————————————————————————————
 set(BACKEND_SOURCES
     src/AppConfig.cpp        src/AppConfig.h
+    src/VersionManifest.cpp  src/VersionManifest.h
     src/ConfigBuilder.cpp    src/ConfigBuilder.h
     src/SubscriptionStore.cpp src/SubscriptionStore.h
     src/CoreController.cpp   src/CoreController.h

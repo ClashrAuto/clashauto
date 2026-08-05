@@ -6,6 +6,7 @@
 // 本地测 UI 时设环境变量 COAST_NO_AUTOSTART=1 可跳过自动起核心——本机常已有一个实例在跑，
 // 避免端口(9090)/系统代理/TUN 冲突。ClashService::start() 只是只读轮询 REST API，始终安全。
 #include "AppConfig.h"
+#include "VersionManifest.h"
 #include "ClashService.h"
 #include "CoreController.h"
 #include "DeviceStore.h"
@@ -227,6 +228,12 @@ int main(int argc, char *argv[])
     // 实时拓扑转储（COAST_TOPO_DUMP=1）：不是自测，是**真机排查的第一步** —— 把「这台机器上
     // 我们究竟看到了什么」（谁是主网卡、每张卡的网关/网关 MAC、ARP 表分接口的样子、跨接口
     // 有没有同 IP 不同 MAC）打出来。自测能验解析器，验不了这台机器上的解析结果。
+    // 版本清单的适配自测（清单 → GitHub releases 形状）。翻错的表现是「更新页一片空白」
+    // 或者「挑到别的产品线的包」，两者都不会在编译期暴露。
+    if (qEnvironmentVariableIsSet("COAST_MANIFEST_SELFTEST")) {
+        return VersionManifest::runSelfTest() ? 0 : 1;
+    }
+
     if (qEnvironmentVariableIsSet("COAST_TOPO_DUMP")) {
         auto *scanner = new LanScanner(&app);
         scanner->probeTopology([](const QString &report) {

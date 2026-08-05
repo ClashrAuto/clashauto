@@ -1,6 +1,8 @@
 #include "CoreRelease.h"
 #include "AboutController.h"
 
+#include "../VersionManifest.h"
+
 #include "MmdbFile.h"
 #include "Version.h" // APP_VERSION（由 CMake configure_file 生成，QmlBridge.cpp 同款包含）
 
@@ -82,60 +84,46 @@ void AboutController::check()
         m_nam = new QNetworkAccessManager(this);
     }
     setChecking(true);
+    // 手动检查必须真取一次，不吃 30 秒缓存。
+    VersionManifest::invalidateCache();
 
-    // ★ 用 /releases 全量列表而不是 /releases/latest —— 后者按 GitHub 的定义**排除 prerelease**，
-    //   开了「接收测试版」也永远看不到 beta。这里一次拉回来自己挑：正式版永远参与比较，
-    //   prerelease 只在开关打开时参与。开关每次现读 AppConfig（而不是构造时的那份快照），
-    //   免得用户刚在设置页打开、下一次小时检查还按旧值走。
+    // ★ 数据源是 CI 维护的 version.json，**不是 GitHub API** —— 未登录的 API 是 60 次/
+    //   小时按出口 IP 算，机场出口后面几百人共用，限流几乎必中，而它的报错读起来像网络
+    //   故障。清单走的是 release 资源的 CDN，没有配额。详见 VersionManifest.h。
+    //
+    // 开关每次现读 AppConfig（而不是构造时的那份快照），免得用户刚在设置页打开、
+    // 下一次小时检查还按旧值走。
     const bool wantBeta = AppConfigLoader::load().receiveBeta;
-    QNetworkRequest req(QUrl(QStringLiteral(
-        "https://api.github.com/repos/ClashrAuto/clashauto/releases?per_page=20")));
-    req.setRawHeader("Accept", "application/vnd.github+json");
-    req.setRawHeader("User-Agent", "clashauto-cpp");
-    // 组织/仓库改名会以 301 跳转——必须跟随，否则拿到空响应而「查不到版本」。
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    req.setTransferTimeout(10000);
-#endif
 
-    QNetworkReply *reply = m_nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, wantBeta] {
-        reply->deleteLater();
+    VersionManifest::fetch(m_nam, this, [this, wantBeta](const QJsonDocument &doc,
+                                                        const QString &err) {
         setChecking(false);
+        if (doc.isNull()) {
+            emit checkFailed(err.isEmpty() ? QStringLiteral("未取到版本清单") : err);
+            return;
+        }
 
-        if (reply->error() != QNetworkReply::NoError) {
-            emit checkFailed(reply->errorString());
-            return;
-        }
-        const QByteArray body = reply->readAll();
-        const QJsonDocument doc = QJsonDocument::fromJson(body);
-        if (!doc.isArray()) {
-            // 出错时 GitHub 返的是对象（rate limit / 404），把它的 message 原样交给用户。
-            const QString apiMsg = doc.object().value(QStringLiteral("message")).toString();
-            emit checkFailed(apiMsg.isEmpty() ? QStringLiteral("未取到版本号") : apiMsg);
-            return;
-        }
-        // 列表按发布时间倒序，但 tag 版本号才是权威（补发/改期都可能打乱时间序），所以逐条比。
-        const QString local = QString::fromUtf8(APP_VERSION);
-        QString tag;
-        for (const QJsonValue &v : doc.array()) {
-            const QJsonObject r = v.toObject();
-            if (r.value(QStringLiteral("draft")).toBool()) {
-                continue;
-            }
-            if (r.value(QStringLiteral("prerelease")).toBool() && !wantBeta) {
-                continue; // 没开测试版：prerelease 当作不存在
-            }
-            const QString t = r.value(QStringLiteral("tag_name")).toString();
-            if (t.isEmpty()) {
-                continue;
-            }
-            if (tag.isEmpty() || versionNewer(t, tag)) {
-                tag = t;
+        // ★ **比的是「本平台能装到的版本」，不是 release 的 tag。**
+        //   同一个 tag 上各平台的包是陆续到的（mac 的 DMG 由外部签名仓库异步追加），
+        //   按 tag 比会让「角标说有新版、点进去没有可下的包」——比不提示更糟。
+        QString ver = VersionManifest::versionForThisPlatform(doc, QStringLiteral("release"));
+        QString tag = doc.object().value(QStringLiteral("releases")).toObject()
+                              .value(QStringLiteral("release")).toObject()
+                              .value(QStringLiteral("tag")).toString();
+        if (wantBeta) {
+            // 开了测试版：两条通道里取更新的那个。正式版永远参与比较 —— 不然
+            // 正式版反超时（beta 分支停更）用户会被钉死在旧 beta 上。
+            const QString bver =
+                    VersionManifest::versionForThisPlatform(doc, QStringLiteral("prerelease"));
+            if (!bver.isEmpty() && (ver.isEmpty() || versionNewer(bver, ver))) {
+                ver = bver;
+                tag = doc.object().value(QStringLiteral("releases")).toObject()
+                              .value(QStringLiteral("prerelease")).toObject()
+                              .value(QStringLiteral("tag")).toString();
             }
         }
-        if (tag.isEmpty()) {
-            emit checkFailed(QStringLiteral("未取到版本号"));
+        if (ver.isEmpty()) {
+            emit checkFailed(QStringLiteral("清单里没有适配本平台的安装包"));
             return;
         }
 
@@ -143,7 +131,7 @@ void AboutController::check()
             m_latestVersion = tag;
             emit latestVersionChanged();
         }
-        const bool newer = versionNewer(tag, local);
+        const bool newer = versionNewer(ver, QString::fromUtf8(APP_VERSION));
         if (m_updateAvailable != newer) {
             m_updateAvailable = newer;
             emit updateAvailableChanged();
@@ -153,7 +141,6 @@ void AboutController::check()
         }
     });
 }
-
 void AboutController::setCoreUpdateAvailable(bool v)
 {
     if (m_coreUpdateAvailable == v) {
@@ -233,24 +220,19 @@ void AboutController::checkCore()
         return;
     }
 
-    QNetworkRequest req{QUrl(CoreRelease::apiUrl())}; // 花括号：避免 most vexing parse（MSVC/Clang 会把它当函数声明）
-    req.setRawHeader("Accept", "application/vnd.github+json");
-    req.setRawHeader("User-Agent", "clashauto-cpp");
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    req.setTransferTimeout(10000);
-#endif
-    QNetworkReply *reply = m_nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, localCoreVer] {
-        reply->deleteLater();
+    // 内核版本也在清单里（见 VersionManifest.h）——同样不打 API。
+    VersionManifest::fetch(m_nam, this, [this, localCoreVer](const QJsonDocument &doc,
+                                                             const QString &) {
         setCoreChecking(false);
-        if (reply->error() != QNetworkReply::NoError) {
-            return; // 网络失败：保持原角标状态，不动
+        if (doc.isNull()) {
+            return; // 取不到：保持原角标状态，不动
         }
         // 按当前通道（是否接收测试版）挑，版本嵌在产物名里而不是 tag 上。
+        // 清单被翻译成 GitHub releases 的形状后原样交给 CoreRelease::pick —— 按 CPU 特性
+        // 分 v1/v2/v3/compatible 那套规则一行都没重写（重写就意味着两份逻辑要长期一致）。
         const bool wantBeta = AppConfigLoader::load().receiveBeta;
         const CoreRelease::Pick pick =
-            CoreRelease::pick(QJsonDocument::fromJson(reply->readAll()).array(), wantBeta);
+                CoreRelease::pick(VersionManifest::coreReleases(doc), wantBeta);
         if (!pick.isValid()) {
             return;
         }
@@ -264,22 +246,13 @@ void AboutController::checkGeoip()
         m_nam = new QNetworkAccessManager(this);
     }
     // 用 meta-rules-dat「最新发布时间(published_at)」当版本戳：与上次记录不同（或本地 mmdb 缺失）→ 有新数据。
-    QNetworkRequest req(QUrl(QStringLiteral(
-        "https://api.github.com/repos/MetaCubeX/meta-rules-dat/releases/latest")));
-    req.setRawHeader("Accept", "application/vnd.github+json");
-    req.setRawHeader("User-Agent", "clashauto-cpp");
-    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    req.setTransferTimeout(10000);
-#endif
-    QNetworkReply *reply = m_nam->get(req);
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
-        reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError) {
+    // GeoIP 的发布时间戳同样取自清单（CI 那边替我们问过 meta-rules-dat 了）。
+    // 下载地址仍是上游的固定直链 —— 那是资源下载，本来就没有 API 配额问题。
+    VersionManifest::fetch(m_nam, this, [this](const QJsonDocument &doc, const QString &) {
+        if (doc.isNull()) {
             return;
         }
-        const QJsonObject r = QJsonDocument::fromJson(reply->readAll()).object();
-        const QString stamp = r.value(QStringLiteral("published_at")).toString();
+        const QString stamp = VersionManifest::geoipPublished(doc);
         if (stamp.isEmpty()) {
             return;
         }
