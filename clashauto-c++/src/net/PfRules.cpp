@@ -267,26 +267,16 @@ bool PfRules::install(const Spec &spec, QString *err)
         //   XPC 签名**。helper 侧按最后一个冒号拆出端口（拆不出就当整串是网卡名），见
         //   helper_main.mm 的 pfInstallRedirPort。
         //
-        // ★★ 老 helper 认不出这个形式：它会把 "en0:7897" 整个当网卡名拼进 rdr 规则，pfctl 拒绝、
-        //    install 返回失败。所以失败后**退回只发网卡名**再试一次 —— 那就是本改动之前的行为
-        //    （单口、macOS 上没有按卡出口），而不是让网关整个不可用。
-        //    用户装的 helper 与 .app 同包发布，正常情况下版本是齐的；这条回退是给"装了新 app
-        //    但 helper 还是上一版"那个窗口兜底的。
+        //   一张卡就是长度 1 的列表，**没有"单网卡形式"可退回** —— helper 与 .app 同包发布、
+        //   一起安装，版本天然是齐的。真要退回也只会把「设备从自己那条上行出去」悄悄关掉，
+        //   换来一个查不出原因的抖动网络，比明着失败糟得多。
         QStringList encoded;
         for (const Spec::NicPort &np : spec.nicPorts) {
             if (!np.ifname.isEmpty() && np.port != 0)
                 encoded << QStringLiteral("%1:%2").arg(np.ifname).arg(np.port);
         }
-        if (!encoded.isEmpty()
-            && MacHelper::pfInstall(spec.redirPort, spec.dnsPort, encoded, nullptr)) {
-            m_installed = true;
-            return true;
-        }
-        if (!MacHelper::pfInstall(spec.redirPort, spec.dnsPort, spec.ifnames, err))
+        if (!MacHelper::pfInstall(spec.redirPort, spec.dnsPort, encoded, err))
             return false;
-        if (!encoded.isEmpty()) {
-            qWarning() << "pf: helper 不认按卡端口，已退回单口安装（macOS 上按卡出口不生效）";
-        }
         m_installed = true;
         return true;
     }

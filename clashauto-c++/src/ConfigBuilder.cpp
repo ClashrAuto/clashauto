@@ -754,15 +754,13 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         block += "    type: socks\n";
         block += "    listen: 127.0.0.1\n";
         block += QString("    port: %1\n").arg(DeviceStore::gatewayPortFor(idx));
-        // 两个前提都满足才发这个键：
-        //   · **至少两张网卡** —— 单网卡时"绑哪张"没有歧义，不发 = 与本改动前逐字节相同，
-        //     绝大多数用户零变化；
-        //   · 友好名拿得到 —— 核心的 iface.ResolveInterface 是精确查找，名字对不上会让这个入站的
-        //     每一次拨号都失败且**没有回退**。宁可退回全局默认出口。
-        // 多网卡时主卡也发：把它钉死，顺带治了「Windows 自动跃点一变默认路由就换卡、在途连接
-        // 成批断」那个抖动 —— 那是"不稳定"的另一半。
-        if (m_egressNics.size() >= 2 && idx < m_egressNics.size()
-            && !m_egressNics.at(idx).friendlyName.isEmpty()) {
+        // 发这个键的唯一前提：友好名拿得到。核心的 iface.ResolveInterface 是**精确查找**，
+        // 名字对不上会让这个入站的每一次拨号都失败且没有回退 —— 名字没拿到时宁可不写。
+        // ★ **不分单卡多卡，一律发**：一张卡就是长度 1 的数组，没有「单网卡模式」可回退。
+        //   主卡也钉死还顺带治了「Windows 自动跃点一变默认路由就换卡、在途连接成批断」那个
+        //   抖动 —— 那是"不稳定"的另一半。拓扑还没探到时这张表是空的，那时才少写这一行，
+        //   出口交回核心自己的默认路由判断。
+        if (idx < m_egressNics.size() && !m_egressNics.at(idx).friendlyName.isEmpty()) {
             block += QString("    interface-name: %1\n")
                              .arg(yamlQuote(m_egressNics.at(idx).friendlyName));
         }
@@ -794,9 +792,8 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
             //   条件（另一半是 TproxyRules 里那套 ip6 规则 + v6 策略路由）。
             block += "    listen: '::'\n";
             block += QString("    port: %1\n").arg(DeviceStore::tproxyPortFor(idx));
-            // 与 socks 那侧同一条判据：多网卡 + 友好名拿得到，才绑。
-            if (m_egressNics.size() >= 2 && idx < m_egressNics.size()
-                && !m_egressNics.at(idx).friendlyName.isEmpty()) {
+            // 与 socks 那侧同一条判据：友好名拿得到就绑（拿不到才少写这一行）。
+            if (idx < m_egressNics.size() && !m_egressNics.at(idx).friendlyName.isEmpty()) {
                 block += QString("    interface-name: %1\n")
                                  .arg(yamlQuote(m_egressNics.at(idx).friendlyName));
             }
@@ -833,8 +830,7 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
             //   给整个局域网。（与 TPROXY 那条相反——那边**必须**写 `::`。别照抄。）
             block += "    listen: 127.0.0.1\n";
             block += QString("    port: %1\n").arg(DeviceStore::redirPortFor(idx));
-            if (m_egressNics.size() >= 2 && idx < m_egressNics.size()
-                && !m_egressNics.at(idx).friendlyName.isEmpty()) {
+            if (idx < m_egressNics.size() && !m_egressNics.at(idx).friendlyName.isEmpty()) {
                 block += QString("    interface-name: %1\n")
                                  .arg(yamlQuote(m_egressNics.at(idx).friendlyName));
             }
@@ -1472,19 +1468,28 @@ bool ConfigBuilder::runNicEgressSelfTest()
         return text;
     };
 
-    // —— 单网卡回归：与本改动前**逐字节相同** ——
-    // 只有一张卡时"绑哪张"没有歧义，所以连 interface-name 都不该出现；三台设备全在一个入站里，
-    // 端口就是 7899。绝大多数用户走的是这一档，它必须零变化。
+    // —— 单网卡：**走的是同一段代码**，一张卡就是长度 1 的数组 ——
+    // 所以照样发 interface-name（把主卡钉死，顺带治 Windows 自动跃点抖动），只是只有一个入站、
+    // 端口就是 7899。这一档是绝大多数用户走的，钉住它别多冒出第二个入站。
     {
         QVector<NicEgress> one;
         one << primary;
         const QString y2 = rebuildIn(configDir + QStringLiteral("/../single"), false, false, one);
         check(!y2.isEmpty() && y2.contains(QStringLiteral("  - name: coast-gw-0\n"))
                       && !y2.contains(QStringLiteral("coast-gw-1"))
-                      && !y2.contains(QStringLiteral("interface-name:")),
-              "单网卡：只有一个入站、且不带 interface-name");
+                      && y2.contains(QStringLiteral("    port: 7899\n    interface-name: '以太网'\n")),
+              "单网卡：只有一个入站，且照样绑在那张卡上");
         check(!y2.contains(QStringLiteral("COAST-OUT")) && !y2.contains(QStringLiteral("sub-rules:")),
-              "单网卡：没有任何每网卡出口的痕迹");
+              "单网卡：不靠出站/子规则表达出口（那套是笛卡尔积，已删）");
+    }
+    // 拓扑还没探到的窗口：网卡表是空的 —— 没有名字可写就少写那一行，出口交回核心自己判断。
+    // 口还是要开的，不然设备被投毒到本机却没人监听，那是断网不是回退。
+    {
+        const QString y2b = rebuildIn(configDir + QStringLiteral("/../nonic"), false, false,
+                                      QVector<NicEgress>());
+        check(!y2b.isEmpty() && y2b.contains(QStringLiteral("  - name: coast-gw-0\n"))
+                      && !y2b.contains(QStringLiteral("interface-name:")),
+              "网卡表为空：仍开口，只是不带 interface-name");
     }
     // TPROXY 形态（Linux 的默认数据面）：身份载体是 SRC-IP-CIDR，而**入站仍然按卡分**，
     // 所以出口绑定这件事在两条数据面上是同一套。
