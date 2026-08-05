@@ -159,4 +159,14 @@ public:
 
     // 进程退出/网关停用时调一次：把最后一个窗口写掉，并留一条 "stop" 标记。
     static void flush(const QString &extra, const char *reason);
+
+    /// 往同一个 gateway-diag.log 里补一条**事件行**（不是十秒采样行）。
+    ///
+    /// ★ 为什么不能用 qWarning/qDebug：本二进制是 **GUI 子系统**，Qt 的日志在 Windows 上走
+    ///   OutputDebugString —— stdout/stderr/文件里**一个字都看不到**。真机排查时那等于没写。
+    ///   （CI 里那三个自测也栽在同一件事上，见 release.yml 里的说明。）
+    ///
+    /// `key` 用来限频：同一个 key 在 `minGapMs` 内只写一条。坏起来往往是每条连接一次，
+    /// 不限频会把十秒采样行全冲掉 —— 而那些行才是判断趋势的依据。
+    static void note(const char *key, const QString &text, int minGapMs = 3000);
 };

@@ -62,6 +62,10 @@ struct DeviceInfo {
 struct SmolConn {
     NetStack::Impl *impl = nullptr;
     quint64 id = 0;              // coaststack 的连接 id（0 恒无效）
+    // 最后一次**有字节流动**的时刻。只做观测用（诊断行里的 idle5m/idleMaxS），
+    // 不据此回收 —— RFC 5382 REQ-5 要求已建立的 TCP 映射不短于 2 小时 4 分，按空闲砍会把
+    // 推送/IMAP 这类合法长连接掐断。有了这两个数才分得清「92 条是真在用」还是「僵尸堆积」。
+    qint64 lastActive = 0;
     // ★ 出站是**接口**，不是具体实现：Socks5Tcp（拨 mihomo）与进程内协议出站都实现它。
     //   由 Impl::outFactory 创建 —— 换出站不需要动桥接这一侧的任何一行。
     IOutboundTcp *socks = nullptr;
@@ -550,6 +554,23 @@ QString smolStatsLine(NetStack::Impl *d)
                       .arg(s.poll_max_gap_ms)
                       .arg(polls)
                       .arg(s.rx_overflow - prev.rx_overflow);
+
+    // ★ 僵尸判据。`conns=` 只说「有多少条」，说不了「它们还活着吗」。真机上见过 92 条挂着
+    //   不掉、而设备几乎不发包的情形 —— 光看 conns 分不出是「设备真开着这么多」还是
+    //   「对端早没了、两侧都没人关」。idle5m 就是后者的数量，idleMaxS 是最老那条的年纪。
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    int idle5m = 0;
+    qint64 idleMaxMs = 0;
+    for (SmolConn *c : d->smolConns) {
+        if (!c || c->lastActive == 0)
+            continue;
+        const qint64 idle = nowMs - c->lastActive;
+        idleMaxMs = qMax(idleMaxMs, idle);
+        if (idle > 5 * 60 * 1000)
+            ++idle5m;
+    }
+    out += QStringLiteral(" idle5m=%1 idleMaxS=%2").arg(idle5m).arg(idleMaxMs / 1000);
+
     prev = s;
     return out;
 }
@@ -961,6 +982,7 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
         delete c;
         return false;
     }
+    c->lastActive = QDateTime::currentMSecsSinceEpoch();
     d->smolConns.insert(id, c);
     ++GatewayDiag::c.tcpAccepted;
 
@@ -971,21 +993,18 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
     QObject::connect(c->socks, &IOutboundTcp::upstreamBytesWritten, d->owner,
                      [c]() { smolFlushRecvWindow(c); });
     QObject::connect(c->socks, &IOutboundTcp::dataReceived, d->owner, [c](const QByteArray &b) {
+        c->lastActive = QDateTime::currentMSecsSinceEpoch();
         c->toStack.append(b);
         smolPumpToStack(c);
     });
     QObject::connect(c->socks, &IOutboundTcp::failed, d->owner, [c](const QString &why) {
         ++GatewayDiag::c.socksFailed;
-        // ★ **原因不能丢**。以前这里是 `[c](const QString &)`，把失败原因整个扔掉，于是
-        //   `socksFail=17` 这个数字之外一无所有 —— 真机上排查「副卡设备一条连接都没有」
-        //   时，日志里没有任何东西指向「拨的是 7899、那儿没人听」。限频打印：坏起来是
-        //   每条连接一次，不限频会把日志刷爆、反而更难看。
-        static qint64 lastLog = 0;
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        if (now - lastLog > 3000) {
-            lastLog = now;
-            qWarning().noquote() << "网关: 出站拨号失败 —" << why;
-        }
+        // ★ **原因不能丢**，而且必须写进 gateway-diag.log。以前这里是 `[c](const QString &)`
+        //   把原因整个扔掉，于是 `socksFail=17` 这个数字之外一无所有 —— 真机上排查「副卡
+        //   设备一条连接都没有」时，日志里没有任何东西指向「拨的是 7899、那儿没人听」。
+        //   也**不能用 qWarning**：GUI 子系统的程序在 Windows 上那是 OutputDebugString，
+        //   文件里同样看不到，等于白写。限频在 note 里做。
+        GatewayDiag::note("socksFail", QStringLiteral("出站拨号失败 — %1").arg(why));
         smolDestroyConn(c, true);
     });
     QObject::connect(c->socks, &IOutboundTcp::closed, d->owner, [c]() {

@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QHash>
 #include <QFileInfo>
 #include <QTextStream>
 
@@ -243,6 +244,26 @@ void GatewayDiag::sample(const QString &extra)
     c.pumpMaxLagMs = 0;
     g_prev = c;
     g_lastSampleMs = now;
+}
+
+void GatewayDiag::note(const char *key, const QString &text, int minGapMs)
+{
+    if (g_path.isEmpty() || !key)
+        return;
+    static QHash<QByteArray, qint64> lastAt;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    qint64 &t = lastAt[QByteArray(key)];
+    if (t != 0 && now - t < minGapMs)
+        return;
+    t = now;
+
+    rotateIfNeeded();
+    QFile f(g_path);
+    if (f.open(QIODevice::Append | QIODevice::Text)) {
+        QTextStream ts(&f);
+        ts << QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+           << " !! " << text << '\n';
+    }
 }
 
 void GatewayDiag::flush(const QString &extra, const char *reason)
