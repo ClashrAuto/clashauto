@@ -98,6 +98,15 @@ public:
     /// 通过返回 true，失败把差异打到 stdout 后返回 false。
     static bool runArpParseSelfTest();
 
+    /// **实时**拓扑转储（`COAST_TOPO_DUMP=1`，见 main_qml.cpp）：重算一次网卡/路由拓扑 + 读一次
+    /// 系统 ARP 表，然后把「这台机器上我们究竟看到了什么」交回调用方。
+    ///
+    /// ★ 为什么需要它：这一带的判断（谁是主网卡、每张卡的网关是谁、那个网关的 MAC 从哪张卡的
+    ///   ARP 表里取）全都发生在进程内部，出了错只表现为「某张卡上的设备代理不了」。自测能验
+    ///   解析器，验不了**这台真实机器上的解析结果**。有了它，真机排查的第一步从"猜"变成"看"。
+    /// 异步（读 ARP 表要起子进程），报告经 onDone 交回。
+    void probeTopology(std::function<void(QString)> onDone);
+
 signals:
     // 一轮扫描（或轻量刷新）产出的设备快照（运行时字段已填，持久字段留空由 store 保留）。
     void discovered(QVector<DeviceRecord> devices);

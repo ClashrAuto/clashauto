@@ -224,6 +224,24 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsSet("COAST_NICEGRESS_SELFTEST"))
         return ConfigBuilder::runNicEgressSelfTest() ? 0 : 1;
 
+    // 实时拓扑转储（COAST_TOPO_DUMP=1）：不是自测，是**真机排查的第一步** —— 把「这台机器上
+    // 我们究竟看到了什么」（谁是主网卡、每张卡的网关/网关 MAC、ARP 表分接口的样子、跨接口
+    // 有没有同 IP 不同 MAC）打出来。自测能验解析器，验不了这台机器上的解析结果。
+    if (qEnvironmentVariableIsSet("COAST_TOPO_DUMP")) {
+        auto *scanner = new LanScanner(&app);
+        scanner->probeTopology([](const QString &report) {
+            std::fputs(qUtf8Printable(report), stdout);
+            std::fflush(stdout);
+            qApp->exit(0);
+        });
+        // 兜底：读 ARP 表那步若整个回调链断了，别把进程挂死在这里。
+        QTimer::singleShot(15000, qApp, [] {
+            std::fputs("拓扑转储超时（读 ARP 表没回来）\n", stdout);
+            qApp->exit(2);
+        });
+        return app.exec();
+    }
+
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
     // 后退出（配合 validate/gateway_selftest.sh）。用 offscreen 平台即可（无显示环境）。
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)

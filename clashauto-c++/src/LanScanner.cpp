@@ -867,6 +867,61 @@ bool LanScanner::runArpParseSelfTest()
     return failed == 0;
 }
 
+// ———————————————————— 实时拓扑转储（COAST_TOPO_DUMP）————————————————————
+void LanScanner::probeTopology(std::function<void(QString)> onDone)
+{
+    detectLocalTopology();
+    readArpTable([this, cb = std::move(onDone)] {
+        QString r;
+        r += QStringLiteral("== 物理网卡（index 0 = 主网卡，按有效跃点数选）==\n");
+        for (int i = 0; i < m_physIfaces.size(); ++i) {
+            const LocalIface &f = m_physIfaces.at(i);
+            const QString byIface = arpMacFor(f, f.gatewayIp);     // 本卡自己那张 ARP 表
+            const QString byFlat = m_arp.value(f.gatewayIp);       // 拍平后的全局表（旧口径）
+            r += QStringLiteral("  [%1]%2 %3 (%4)\n")
+                         .arg(i)
+                         .arg(i == 0 ? QStringLiteral(" ★主") : QStringLiteral("   "),
+                              f.name, f.friendlyName);
+            r += QStringLiteral("      本机 %1/%2  网关 %3  跃点 %4\n")
+                         .arg(f.ip, QHostAddress(f.mask).toString(), f.gatewayIp)
+                         .arg(f.gatewayMetric);
+            r += QStringLiteral("      网关 MAC：本卡表=%1  拍平表=%2%3\n")
+                         .arg(byIface.isEmpty() ? QStringLiteral("(未解析)") : byIface,
+                              byFlat.isEmpty() ? QStringLiteral("(未解析)") : byFlat,
+                              (!byIface.isEmpty() && !byFlat.isEmpty() && byIface != byFlat)
+                                      ? QStringLiteral("   ← **两者不一致：拍平表在这里会张冠李戴**")
+                                      : QString());
+            r += QStringLiteral("      ARP 键=%1 本卡表里 %2 条\n")
+                         .arg(arpKeyFor(f))
+                         .arg(m_arpByIf.value(arpKeyFor(f)).size());
+        }
+        r += QStringLiteral("== ARP 表分接口 ==\n");
+        for (auto it = m_arpByIf.constBegin(); it != m_arpByIf.constEnd(); ++it) {
+            r += QStringLiteral("  %1: %2 条\n")
+                         .arg(it.key().isEmpty() ? QStringLiteral("(归不到接口)") : it.key())
+                         .arg(it->size());
+        }
+        // 同一个 IP 出现在多张卡上、**且 MAC 不同** —— 拍平成一张全局表时正是这里会丢信息。
+        // 两台路由器都用出厂默认网段时，网关 IP 就会撞在这里。
+        QHash<QString, QSet<QString>> macsByIp;
+        for (auto it = m_arpByIf.constBegin(); it != m_arpByIf.constEnd(); ++it)
+            for (auto e = it->constBegin(); e != it->constEnd(); ++e)
+                macsByIp[e.key()].insert(e.value());
+        QStringList conflicts;
+        for (auto it = macsByIp.constBegin(); it != macsByIp.constEnd(); ++it)
+            if (it->size() > 1)
+                conflicts << it.key();
+        conflicts.sort();
+        r += QStringLiteral("== 跨接口冲突（同 IP 不同 MAC）：%1 %2\n")
+                     .arg(conflicts.size())
+                     .arg(conflicts.isEmpty() ? QString() : conflicts.join(QLatin1Char(' ')));
+        r += QStringLiteral("== 全部默认路由网关 IP：%1\n")
+                     .arg(QStringList(m_gatewayIps.values()).join(QLatin1Char(' ')));
+        if (cb)
+            cb(r);
+    });
+}
+
 // 该卡在 m_arpByIf 里的键。口径必须与 parseArpTable 产出的键一致。
 QString LanScanner::arpKeyFor(const LocalIface &f)
 {
