@@ -87,6 +87,27 @@ constexpr qint64 kWakeIdleMs = 8000;
 } // namespace
 
 namespace {
+
+/// 一份「网卡 → 入站口」映射的指纹。**用来判断内核规则要不要重装。**
+///
+/// ★ 规则原本是 `if (!isInstalled())` 只装一次。而每卡端口是按**网卡序号**算的
+///   （`tproxyPortFor(idx)` / `redirPortFor(idx)`），序号会随网卡增减而重排 ——
+///   插上/拔掉一张卡之后，nftables/pf 里还是旧的 `iifname → 端口`，包被投到一个
+///   没人监听的口上，那台设备**直接黑掉**。Windows 侧的同一个 bug（栈里缓存的
+///   socksPort 不跟着变）已由 `NetStack::setNicSocksPort` 修掉，这里是它的孪生兄弟。
+template <typename NicPortVec>
+QString nicPortFingerprint(const NicPortVec &ports)
+{
+    QStringList parts;
+    parts.reserve(ports.size());
+    for (const auto &np : ports)
+        parts << (np.ifname + QLatin1Char(':') + QString::number(np.port));
+    parts.sort(); // 只关心映射本身，不关心遍历次序
+    return parts.join(QLatin1Char(','));
+}
+
+} // namespace
+namespace {
 // "aa:bb:cc:dd:ee:ff" → 6 字节（非法返回空）。
 QByteArray macBytes(const QString &mac)
 {
@@ -329,6 +350,9 @@ private:
     // 此时二层端点只用来收发 ARP/NDP（劫持与安全监视），内核过滤器也只放行这两类帧。
     LanGateway::DatapathSpec m_datapath;
     TproxyRules m_tproxy;
+    // 已装规则里那份「网卡→入站口」映射的指纹。序号变了要重装（见 nicPortFingerprint）。
+    QString m_tproxyNicFingerprint;
+    QString m_pfNicFingerprint;
     const char *m_dbgLastMode = nullptr; // 上次报告过的数据面模式，只在变化时打日志
     PfRules m_pf;  // macOS 的 pf 数据面（非 macOS 上是空实现）
     // 把当前受害设备的 IP 集合推给 nft（谁被接管由这个集合决定）。lwIP 模式下是空操作。
@@ -984,7 +1008,10 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         // TPROXY 数据面：**不建 NetStack**。规则装不上就必须原地失败并让上层退回 lwIP——
         // 半开着（规则装了一半 / 装了但核心没起监听）等于把被覆盖的设备**整台断网**,
         // 那比"这条新路暂时用不了"糟糕得多。
-        if (!m_tproxy.isInstalled()) {
+        // ★ 不能只判 `!isInstalled()`：每卡端口按网卡序号算，序号会随网卡增减重排，
+        //   而旧规则里还是旧映射 —— 那台设备的包被投到没人监听的口上，直接黑掉。
+        //   所以先把想要的 spec 算出来，与已装的比指纹，不一致就重装。
+        {
             TproxyRules::Spec ts;
             ts.tproxyPort = m_datapath.tproxyPort;
             ts.dnsPort = m_datapath.dnsPort;
@@ -1000,17 +1027,28 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 ts.ifnames.append(ns.ifname);
                 ts.nicPorts.append({ns.ifname, DeviceStore::tproxyPortFor(nicIdx)});
             }
-            if (!m_tproxy.install(ts, &err)) {
-                emit deviceError(QString(),
-                                 QStringLiteral("TPROXY 规则装载失败（已保持未接管状态）: ") + err);
-                return;
+            const QString want = nicPortFingerprint(ts.nicPorts);
+            if (!m_tproxy.isInstalled() || m_tproxyNicFingerprint != want) {
+                if (m_tproxy.isInstalled() && m_tproxyNicFingerprint != want) {
+                    GatewayDiag::note("tproxyNicPort",
+                                      QStringLiteral("网卡序号变了，重装 TPROXY 规则：%1 → %2")
+                                              .arg(m_tproxyNicFingerprint, want));
+                }
+                if (!m_tproxy.install(ts, &err)) {
+                    emit deviceError(QString(),
+                                     QStringLiteral("TPROXY 规则装载失败（已保持未接管状态）: ")
+                                             + err);
+                    return;
+                }
+                m_tproxyNicFingerprint = want;
             }
         }
         syncTproxyDevices();
     } else if (m_datapath.pf) {
         // macOS 的 pf 数据面：与 tproxy 同构 —— **不建 NetStack**，规则装不上就原地失败并
         // 保持未接管状态（半开着等于把设备整台断网，比"这条路暂时用不了"糟得多）。
-        if (!m_pf.isInstalled()) {
+        // 与 tproxy 那侧同构：序号变了要重装（理由见 nicPortFingerprint）。
+        {
             PfRules::Spec ps;
             ps.redirPort = m_datapath.redirPort;
             ps.dnsPort = m_datapath.dnsPort;
@@ -1024,10 +1062,19 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 ps.ifnames.append(ns.ifname);
                 ps.nicPorts.append({ns.ifname, DeviceStore::redirPortFor(pfIdx)});
             }
-            if (!m_pf.install(ps, &err)) {
-                emit deviceError(QString(),
-                                 QStringLiteral("pf 规则装载失败（已保持未接管状态）: ") + err);
-                return;
+            const QString want = nicPortFingerprint(ps.nicPorts);
+            if (!m_pf.isInstalled() || m_pfNicFingerprint != want) {
+                if (m_pf.isInstalled() && m_pfNicFingerprint != want) {
+                    GatewayDiag::note("pfNicPort",
+                                      QStringLiteral("网卡序号变了，重装 pf 规则：%1 → %2")
+                                              .arg(m_pfNicFingerprint, want));
+                }
+                if (!m_pf.install(ps, &err)) {
+                    emit deviceError(QString(),
+                                     QStringLiteral("pf 规则装载失败（已保持未接管状态）: ") + err);
+                    return;
+                }
+                m_pfNicFingerprint = want;
             }
         }
         syncPfDevices();
@@ -1881,6 +1928,7 @@ LanGateway::LanGateway(QObject *parent) : QObject(parent), d(new Impl)
     connect(d->worker, &GatewayWorker::deviceIpChanged, this, &LanGateway::deviceIpChanged);
     d->thread->start();
 }
+
 
 void LanGateway::shutdown()
 {

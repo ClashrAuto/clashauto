@@ -62,6 +62,19 @@ bool NetStack::init(QString *err)
 
 // init() 恒失败 ⇒ 下面这些在生产里一个都到不了。仍然给出定义（而不是留成未定义符号），
 // 是为了让"谁不小心绕过 init 直接调"表现为一次无害的空操作，而不是链接错误或崩溃。
+// Linux/macOS 走 TPROXY / pf rdr，没有用户态栈，也就没有「每卡一个 SOCKS 口」这回事
+// ——那两个平台的按卡分口体现在**内核规则**里（TproxyRules/PfRules 的 nicPorts）。
+//
+// ★ 这个空实现是必须有的：`LanGateway::configureLocal` 是跨平台的同一份代码，它会无条件
+//   调用本方法来同步「网卡序号变了→端口跟着变」。漏掉 stub 的后果不是运行期出错，而是
+//   **Linux/macOS 整个链接不过** —— 我第一版就漏了，Pi 上一编就炸。
+bool NetStack::setNicSocksPort(IL2Endpoint *ep, quint16 socksPort)
+{
+    Q_UNUSED(ep);
+    Q_UNUSED(socksPort);
+    return false; // 没有这张卡（本平台压根没有栈）——调用方据此不更新指纹，行为正确
+}
+
 bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QString &localIp,
                       const QString &netmask, quint16 socksPort, QString *err)
 {
