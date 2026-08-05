@@ -21,7 +21,20 @@ The git repo root tracks:
 
 ## Build & run
 
-**You usually can't build locally** (dev box is a GPU-less QEMU VM without the full toolchain) — verify via **CI** + the **`validate/`** Docker tool instead. When a local build *is* possible: Qt 6.8.3 + MinGW/MSVC + Ninja.
+**The dev box now has a working local toolchain** (installed 2026-08-05; it used to have none, and older notes saying "you can't build locally" are stale). What's there:
+
+| | |
+|---|---|
+| Qt 6.8.3 mingw_64 | `C:\Qt\6.8.3\mingw_64` (aqtinstall) |
+| MinGW 13.1 / Ninja / CMake | `C:\Qt\Tools\{mingw1310_64,Ninja,CMake_64}` |
+| Rust | `rustup`, default toolchain **`stable-x86_64-pc-windows-gnu`** |
+| Npcap SDK | `C:\Users\ultra\npcap-sdk` |
+
+⚠️ **rustup's default host is MSVC and that does not work here.** `rustup target add x86_64-pc-windows-gnu` alone is not enough: cargo builds each dependency's *build script* for the **host**, so an MSVC host goes looking for `link.exe` and the build dies with `error: linker 'link.exe' not found` on `heapless`/`smoltcp`. Install the GNU **toolchain** and make it default.
+
+There is also a **Linux build box** at `root@192.168.20.239` (Ubuntu 24.04, 8 cores) with Qt 6.8.3 under `/opt/Qt`, a source copy in `/root/coast`, and the mihomo core at `/root/core/coast` for `-t` config validation. Use it for the POSIX side and for anything that needs a real `core -t -f` run.
+
+Still true: **CI is the final word** for packaging, and the `validate/` Docker tool checks the released artifacts.
 
 ```powershell
 # From clashauto-c++/. Put Qt + MinGW on PATH first.
@@ -40,7 +53,15 @@ cmake --build build-ninja
 
 ## Verifying a release — `validate/`
 
-There is **no unit-test framework** for the C++ side (the Rust crate has `cargo test`: 19 tests, run in CI). Verification = CI builds+packages green, then `validate/` checks the packaged artifacts. Headless self-test hooks worth knowing (all are env vars on the built binary, exit 0 = pass): `COAST_RUSTSTACK_SELFTEST` (Rust C-ABI round trip), `COAST_SMOLGW_SELFTEST` (whole gateway data plane: synthetic frames → SYN-ACK → SOCKS CONNECT with the right per-device user), `COAST_NDP_RA_SELFTEST` (RA parsing — the only guard against the silent "dual-stack device leaks IPv6" failure), `COAST_TPROXY_SELFTEST` / `COAST_PF_SELFTEST` (kernel rule layers; need root). ⚠️ The TPROXY/pf **data planes** have no end-to-end self-test — a known gap, not a solved problem.
+There is **no unit-test framework** for the C++ side (the Rust crate has `cargo test`: 19 tests, run in CI). Verification = CI builds+packages green, then `validate/` checks the packaged artifacts. Headless self-test hooks worth knowing (all are env vars on the built binary, exit 0 = pass): `COAST_RUSTSTACK_SELFTEST` (Rust C-ABI round trip), `COAST_SMOLGW_SELFTEST` (whole gateway data plane: synthetic frames → SYN-ACK → SOCKS CONNECT with the right per-device user), `COAST_NDP_RA_SELFTEST` (RA parsing — the only guard against the silent "dual-stack device leaks IPv6" failure), `COAST_TPROXY_SELFTEST` / `COAST_PF_SELFTEST` (kernel rule layers; need root), `COAST_ARPPARSE_SELFTEST` (system `arp` output → per-interface IP→MAC; all three platforms' formats, dispatched at runtime so Linux CI covers the Windows one too), `COAST_NICEGRESS_SELFTEST` (the per-NIC `direct` outbound generation: builds a throwaway device ledger, really runs `ensureFullConfig`, asserts on the product, and prints the `full.yaml` path). ⚠️ The TPROXY/pf **data planes** have no end-to-end self-test — a known gap, not a solved problem.
+
+★ **The one check that matters most for anything touching config generation**: let the core itself judge the YAML.
+
+```bash
+/root/core/coast -t -f <full.yaml> -d <dir>   # <dir> must contain Country.mmdb, else it tries to download GeoIP and times out
+```
+
+`COAST_NICEGRESS_SELFTEST` prints a path made for exactly this. Every YAML in this repo is hand-assembled from strings, so **a broken product is invisible at compile time and costs the whole config** (the core refuses to load it — not "one feature is off", but "the proxy doesn't start"). Two gotchas learned the hard way: without the mmdb the run fails on a *download timeout* that looks like a config error; and on Windows the product is CRLF, so any test asserting across lines must normalise `\r\n` first (the product is fine — a CRLF `full.yaml` passes `-t`).
 
 ```bash
 bash validate/run.sh      # Docker: pull latest release's Coast artifacts + verify all platforms
