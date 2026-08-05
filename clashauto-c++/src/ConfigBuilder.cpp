@@ -779,15 +779,28 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
     //   · 不带 users:：TPROXY 下核心直接看得到设备的真实源 IP,设备身份用 SRC-IP-CIDR 规则表达,
     //     比 socks 用户名那套更原生(也少一层认证开销)。
     //   · TCP 与 UDP 共用这一个口,mihomo 的 tproxy inbound 两者都收。
+    //   · ★ **也是每张卡一个**：出口网卡是 listener 的属性（interface-name），所以 tproxy 这条
+    //     数据面同样要按卡分口，否则 Linux 上「设备从自己那条上行出去」根本不生效 —— 流量全从
+    //     那个唯一的 tproxy 口进来，核心也就只有一个出口。nft 侧按 `iifname` 把每张卡的流量投给
+    //     对应的口（见 TproxyRules 的 nicPorts）。端口向下编号，与 socks 那侧向上编号背向展开。
     if (m_config.gatewayTproxy) {
-        block += "  - name: coast-tproxy\n";
-        block += "    type: tproxy\n";
-        // ★ `::` 而不是 `0.0.0.0`：Linux 的双栈套接字（net.ipv6.bindv6only=0，发行版默认）
-        //   一个 `::` 监听同时收 v4 与 v6，v4 连接以 ::ffff:a.b.c.d 形式到达。写 0.0.0.0 则
-        //   **只收 v4**，v6 的 TPROXY 投递会因无监听而失败——这是 v6 走 TPROXY 的第一个必要条件
-        //   （另一半是 TproxyRules 里那套 ip6 规则 + v6 策略路由）。
-        block += "    listen: '::'\n";
-        block += QString("    port: %1\n").arg(DeviceStore::kTproxyPort);
+        for (auto it = byNic.constBegin(); it != byNic.constEnd(); ++it) {
+            const int idx = it.key();
+            block += QString("  - name: coast-tproxy-%1\n").arg(idx);
+            block += "    type: tproxy\n";
+            // ★ `::` 而不是 `0.0.0.0`：Linux 的双栈套接字（net.ipv6.bindv6only=0，发行版默认）
+            //   一个 `::` 监听同时收 v4 与 v6，v4 连接以 ::ffff:a.b.c.d 形式到达。写 0.0.0.0 则
+            //   **只收 v4**，v6 的 TPROXY 投递会因无监听而失败——这是 v6 走 TPROXY 的第一个必要
+            //   条件（另一半是 TproxyRules 里那套 ip6 规则 + v6 策略路由）。
+            block += "    listen: '::'\n";
+            block += QString("    port: %1\n").arg(DeviceStore::tproxyPortFor(idx));
+            // 与 socks 那侧同一条判据：多网卡 + 友好名拿得到，才绑。
+            if (m_egressNics.size() >= 2 && idx < m_egressNics.size()
+                && !m_egressNics.at(idx).friendlyName.isEmpty()) {
+                block += QString("    interface-name: %1\n")
+                                 .arg(yamlQuote(m_egressNics.at(idx).friendlyName));
+            }
+        }
     } else if (m_config.gatewayPf) {
         // macOS 的数据面：pf rdr 把转发流量重定向到这个口，核心用 redir 入站接收，
         // 原始目的地由 PfRules::lookupOriginalDest（/dev/pf 的 DIOCNATLOOK）还原。
@@ -1467,8 +1480,20 @@ bool ConfigBuilder::runNicEgressSelfTest()
     // 所以出口绑定这件事在两条数据面上是同一套。
     {
         const QString y3 = rebuildIn(configDir + QStringLiteral("/../tproxy"), true, nics);
-        check(!y3.isEmpty() && y3.contains(QStringLiteral("    interface-name: 'WLAN'")),
-              "tproxy 形态：副卡入站同样绑到副卡");
+        // ★ tproxy **也要按卡分口**：Linux 的数据面走的是 tproxy 入站，不是上面那个 socks 口。
+        //   这一条不成立时，Linux 上「设备从自己那条上行出去」整个不生效 —— 而配置看起来是对的
+        //   （socks 那两个入站都带着 interface-name），最容易被当成已经修好。
+        check(!y3.isEmpty()
+                      && y3.contains(QStringLiteral("  - name: coast-tproxy-0\n    type: tproxy\n"
+                                                    "    listen: '::'\n    port: 7898\n"
+                                                    "    interface-name: '以太网'\n")),
+              "tproxy 形态：主卡的 tproxy 入站绑到主卡");
+        check(y3.contains(QStringLiteral("  - name: coast-tproxy-1\n    type: tproxy\n"
+                                         "    listen: '::'\n    port: 7897\n"
+                                         "    interface-name: 'WLAN'\n")),
+              "tproxy 形态：副卡的 tproxy 入站绑到副卡（端口向下编号）");
+        check(!y3.contains(QStringLiteral("- name: coast-tproxy\n")),
+              "tproxy 形态：没有残留那个不分卡的老入站");
         check(y3.contains(QStringLiteral("SRC-IP-CIDR,192.168.2.61/32,DIRECT")),
               "tproxy 形态：direct 设备按源 IP 指向普通 DIRECT");
     }

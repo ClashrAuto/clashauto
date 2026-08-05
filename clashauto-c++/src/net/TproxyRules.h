@@ -42,6 +42,7 @@
 #include <QHash>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <QtGlobal>
 
 class TproxyRules
@@ -55,6 +56,19 @@ public:
         // 网关接管的网卡名。用于往 iptables 的 FORWARD/DOCKER-USER 里插一条**限定到这些网卡**
         // 的 ACCEPT —— 见 ensureIptablesForward() 的论证：光有 nft 链挡不住 Docker 的 policy DROP。
         QStringList ifnames;
+        // —— 每张网卡投给**它自己那个**核心入站 ——
+        //
+        // 「从哪张网卡出去」在核心里是 listener 的属性（`interface-name`，见 core 的
+        // component/dialer/egress.go）。所以同时接多条上行时，每张卡各有一个 tproxy 入站，
+        // 设备的流量必须投给**它进来的那张卡**对应的那个口 —— 投错口就等于走错上行。
+        //
+        // 判据用 `iifname`：转发到本机的包天然带着入口网卡，比按设备 IP 分组稳（设备换址不影响）。
+        // 空 = 退回单口（全都投 tproxyPort），与本改动之前逐字节相同。
+        struct NicPort {
+            QString ifname;
+            quint16 port = 0;
+        };
+        QVector<NicPort> nicPorts;
     };
 
     TproxyRules() = default;

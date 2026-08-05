@@ -244,6 +244,17 @@ public:
     // TPROXY 下设备身份由**原始源 IP**承载(核心直接看得到),不再需要 socks 用户名那套,
     // 所以这个 listener 不带 users:。
     static constexpr quint16 kTproxyPort = 7898;
+    /// 第 nicIndex 张网卡对应的 tproxy 入站端口。
+    ///
+    /// ★ **向下**编号（7898、7897、7896…），与 socks 那侧的向上编号（7899、7900…）背向展开，
+    ///   免得两串端口在网卡多了之后撞在一起。ConfigBuilder 用它生成 listener 端口、TproxyRules
+    ///   用它写 nft 的投递目标，两边必须同源。
+    ///   ⚠️ 与 kRedirPort(7897) 会重叠 —— 但那是 macOS 专用、与 tproxy 互斥（同一台机器上不会
+    ///   两条数据面并存），所以不冲突。
+    static constexpr quint16 tproxyPortFor(int nicIndex)
+    {
+        return quint16(kTproxyPort - (nicIndex > 0 ? nicIndex : 0));
+    }
 
     // macOS 的 redir 入站端口（pf rdr 的目的地）。与 kTproxyPort 分开：两条数据面
 

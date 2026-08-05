@@ -498,6 +498,20 @@ table inet %1 {
                          .arg(QString::fromLatin1(kTable));
     if (m_spec.dnsPort != 0)
         script += QStringLiteral("    ip saddr @proxied udp dport 53 return\n");
+    // ★ 按**入口网卡**分发：每张卡投给它自己那个核心入站（那个入站带 interface-name，决定这条
+    //   连接从哪张网卡出去）。转发到本机的包天然带着 iif，比按设备 IP 分组稳 —— 设备换址
+    //   （DHCP 续约）不影响归属，也不需要维护第二份「设备→网卡」的集合。
+    //   最后仍留一条不限 iif 的兜底：认不出入口网卡时按老行为投给 tproxyPort。
+    //   **宁可走错上行，也不要断网** —— 这条链上没有第二个人来兜底。
+    for (const Spec::NicPort &np : m_spec.nicPorts) {
+        if (np.ifname.isEmpty() || np.port == 0)
+            continue;
+        script += QStringLiteral("    iifname \"%1\" ip saddr @proxied meta l4proto { tcp, udp } "
+                                 "counter meta mark set %2 tproxy ip to :%3 accept\n")
+                          .arg(np.ifname)
+                          .arg(mark)
+                          .arg(np.port);
+    }
     script += QStringLiteral(
                   "    ip saddr @proxied meta l4proto { tcp, udp } counter meta mark set %1 "
                   "tproxy ip to :%2 accept\n  }\n")
@@ -512,6 +526,16 @@ table inet %1 {
                              "    type filter hook prerouting priority mangle; policy accept;\n");
     if (m_spec.dnsPort != 0)
         script += QStringLiteral("    ip6 saddr @proxied6 udp dport 53 return\n");
+    // 按入口网卡分发 + 兜底，与上面 v4 那段完全对称。
+    for (const Spec::NicPort &np : m_spec.nicPorts) {
+        if (np.ifname.isEmpty() || np.port == 0)
+            continue;
+        script += QStringLiteral("    iifname \"%1\" ip6 saddr @proxied6 meta l4proto { tcp, udp } "
+                                 "counter meta mark set %2 tproxy ip6 to :%3 accept\n")
+                          .arg(np.ifname)
+                          .arg(mark)
+                          .arg(np.port);
+    }
     script += QStringLiteral(
                   "    ip6 saddr @proxied6 meta l4proto { tcp, udp } counter meta mark set %1 "
                   "tproxy ip6 to :%2 accept\n  }\n")

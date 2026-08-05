@@ -985,9 +985,18 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             TproxyRules::Spec ts;
             ts.tproxyPort = m_datapath.tproxyPort;
             ts.dnsPort = m_datapath.dnsPort;
-            for (const LanGateway::NicSpec &ns : specs)
-                if (!ns.ifname.isEmpty())
-                    ts.ifnames.append(ns.ifname);
+            // ★ 端口按**网卡下标**取，与 ConfigBuilder 生成 tproxy listener 的端口同源
+            //   （DeviceStore::tproxyPortFor）。下标就是 specs 的次序 = physicalNics() 的次序，
+            //   两边都从同一份网卡表来，所以对得上；改一边必须改另一边。
+            //   投错口 = 设备从别的上行出去，正是这次要修的那件事。
+            int nicIdx = -1;
+            for (const LanGateway::NicSpec &ns : specs) {
+                ++nicIdx;
+                if (ns.ifname.isEmpty())
+                    continue;
+                ts.ifnames.append(ns.ifname);
+                ts.nicPorts.append({ns.ifname, DeviceStore::tproxyPortFor(nicIdx)});
+            }
             if (!m_tproxy.install(ts, &err)) {
                 emit deviceError(QString(),
                                  QStringLiteral("TPROXY 规则装载失败（已保持未接管状态）: ") + err);
