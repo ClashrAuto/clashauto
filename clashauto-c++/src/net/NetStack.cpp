@@ -749,9 +749,29 @@ void smolFlushRecvWindow(SmolConn *c)
     if (!c || !c->impl || !c->impl->smol || c->pendingRecved == 0)
         return;
     // socks 没了 → 无条件归还，否则窗口永远关着 = 设备卡死（lwIP 侧同款兜底）
-    const qint64 queued = c->socks ? c->socks->bytesToWrite() : 0;
+    //
+    // ★ 「没了」必须**同时包含「连接已关」**，不能只判指针空 —— 这里原先写的是 `c->socks`，
+    //   而 c->socks 只在 smolDestroyConn 里才被置空；上游正常关闭走的是 closed 信号，那里
+    //   只置 socksClosed、指针照旧非空。于是这条兜底**从来没有在它专门为之而写的场景里生效过**。
+    //
+    //   漏掉的后果是一条会永久滞留的连接：上游关闭时若 socket 写缓冲里还压着超过水位的字节
+    //   （对端在我们把请求发完之前就关了 —— HTTP keep-alive 复用的竞争里很常见），这里会照旧
+    //   return 扣住窗口；而那些字节**永远不可能再写出去**（连接已经没了），于是 pendingRecved
+    //   永远不为 0 → smolPumpToStack 末尾的 coast_conn_close 因 peeked != 0 恒返回
+    //   COAST_ERR_STATE → stackClosed 永远是 false。更糟的是此后**没有任何事件会再驱动重试**：
+    //   socket 已关，不会再有 dataReceived / upstreamBytesWritten；pendingDown() 是 0，也不会
+    //   有 conn_sent。连接就此挂死，**设备侧收不到 FIN**，它以为这条连接还能用，下次 keep-alive
+    //   复用就打进黑洞，直到应用自己超时。
+    //
+    //   真机佐证（2026-08-05，四台被代理设备）：栈里 conns 稳定在 230~305，而同一时刻核心侧的
+    //   设备连接只有 ~50 —— 四倍多的差额挂在我们这一侧。
+    //
+    //   归还窗口在这里是安全的：连接马上就要关（调用方是 flush-then-close），设备即便再多发
+    //   一点也只是被丢弃，而这远好过让它永远等一个不会到来的 FIN。
+    const bool socksGone = !c->socks || c->socksClosed;
+    const qint64 queued = socksGone ? 0 : c->socks->bytesToWrite();
     const qint64 limit = c->upThrottled ? kUpQueueLowWater : kUpQueueHighWater;
-    if (c->socks && queued > limit) {
+    if (!socksGone && queued > limit) {
         if (!c->upThrottled) {
             c->upThrottled = true;
             ++GatewayDiag::c.upThrottleHits;
