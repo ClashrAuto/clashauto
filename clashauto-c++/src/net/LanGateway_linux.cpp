@@ -234,6 +234,9 @@ struct GwNic {
             return learnedRouterMac6;
         return spec.gatewayMac;
     }
+    // 挂上协议栈**那一刻**登记进去的本机地址/掩码。栈里那份是快照、不会自己更新，所以要留一份
+    // 用来发现「本机在这张卡上的地址后来变了」（DHCP 续约、或从 APIPA 转正）。
+    QString netIp, netMask;
     bool ready = false;      // ep 已打开且 netif 已挂上协议栈
     int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
     int order = 0;           // configure 传入的 specs 次序（LanScanner 保证 index 0 = 主网卡）。
@@ -588,16 +591,45 @@ GwNic *GatewayWorker::nicForIp(const QString &ip) const
     const quint32 v = ipToU32(ip);
     if (!v)
         return nullptr;
-    // 多张网卡可能都命中同一网段(如一台机器有线+WiFi 接同一路由)。**必须确定性地选主网卡**——
-    // 否则 QHash 无序遍历可能选到 WiFi 那张,把 ARP 投毒发错网卡(经 WiFi 发的投毒常被 AP 隔离/
-    // 到不了有线侧设备),表现为「开了代理但设备没被劫持」。按 order(specs 次序,主网卡=0)取最小者。
-    // 真机联调实证:同网段双卡下选错卡 → 投毒无效;选对主卡 → 稳定劫持。
-    GwNic *best = nullptr;
+    QVector<GwNic *> candidates; // 网段命中这个 IP 的全部已就绪网卡
     for (GwNic *n : m_nics) {
         if (!n->ready || !n->netMask4 || (v & n->netMask4) != (n->localIp4 & n->netMask4))
             continue;
-        if (!best || n->order < best->order)
+        candidates.append(n);
+    }
+    if (candidates.isEmpty())
+        return nullptr;
+    if (candidates.size() == 1)
+        return candidates.constFirst();
+
+    // 多张卡都命中同一网段。两种成因：一台机器有线+WiFi 接**同一台**路由器（此时选谁都对，
+    // 但必须确定性地选主卡 —— 经 WiFi 发的投毒常被 AP 隔离、到不了有线侧设备）；以及**接了
+    // 两台路由器而它们用同一个出厂网段**（192.168.1.0/24 这种，消费级路由的默认值）——
+    // 这时按 order 选主卡就是**猜**，猜错的表现是「开了代理但设备根本没被劫持」，且完全静默。
+    //
+    // 有一条硬证据能把这个猜变成判：ArpSpoofer 的 IP→MAC 是从**本卡收到的** ARP 帧里学的
+    // （见帧分流里那处 learnLanMac，已提到 victim 过滤之前）。谁学到过这个 IP，这台设备就在
+    // 谁的线上。恰好一张卡见过 → 用它；没人见过或多张都见过（= 同一个二层域）→ 才退回 order。
+    GwNic *seen = nullptr;
+    int seenCount = 0;
+    for (GwNic *n : candidates) {
+        if (n->arp && n->arp->lanMac(v).size() == 6) {
+            seen = n;
+            ++seenCount;
+        }
+    }
+    GwNic *best = candidates.constFirst();
+    for (GwNic *n : candidates) {
+        if (n->order < best->order)
             best = n;
+    }
+    if (seenCount == 1) {
+        if (seen != best) {
+            // 这条日志值得留：它意味着「按主卡猜会猜错」，而这正是双路由器同网段那个场景。
+            qInfo() << "网关: " << ip << "按 ARP 证据归到" << seen->spec.ifname << "而非主卡"
+                    << best->spec.ifname;
+        }
+        return seen;
     }
     return best;
 }
@@ -1031,8 +1063,27 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                                  n->effectiveRouterMac6());
         }
 
-        if (n->ready)
-            continue; // 已就绪：只刷新拓扑，不重建（重建会断掉这张卡上的活动劫持）
+        if (n->ready) {
+            // 已就绪：只刷新拓扑，不重建（重建会断掉这张卡上的活动劫持）。
+            // **唯一的例外**：本机在这张卡上的地址/掩码变了。栈里登记的是**挂载那一刻**的快照，
+            // 不会自己更新 —— 留着不管，栈就一直按旧网段判「哪些目的是本网段的」。摘掉重挂会
+            // 断掉这张卡上的在途连接，所以只在真的变了时才做（DHCP 续约/从 APIPA 转正才会撞上）。
+            if (m_net && !spec.netmask.isEmpty()
+                && (n->netIp != spec.localIp || n->netMask != spec.netmask)) {
+                qInfo() << "网关: 本机地址变了，重挂协议栈网卡" << spec.ifname << n->netIp << "->"
+                        << spec.localIp;
+                m_net->removeNic(n->ep);
+                if (m_net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask, &err)) {
+                    n->netIp = spec.localIp;
+                    n->netMask = spec.netmask;
+                } else {
+                    emit deviceError(QString(),
+                                     QStringLiteral("协议栈重挂网卡失败(%1): ").arg(spec.ifname) + err);
+                    n->ready = false; // 摘掉了又挂不回去 → 别再当它就绪，下一轮从头来
+                }
+            }
+            continue;
+        }
         if (!n->netMask4) {
             // 没有有效掩码就没法给 netif 定路由，也没法做同网段旁路——这张卡直接不启用。
             continue;
@@ -1058,6 +1109,8 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                              QStringLiteral("协议栈挂载网卡失败(%1): ").arg(spec.ifname) + err);
             continue;
         }
+        n->netIp = spec.localIp; // 记下登记进栈的那一份，供上面那段发现「地址后来变了」
+        n->netMask = spec.netmask;
         // 二层帧过滤：只把被劫持设备发来的帧喂进用户态栈（按这张卡的网段做旁路判断）。
         // context = this(worker)，sender = n->ep 也在工作线程 → 直连，lambda 在工作线程上跑。
         // ★ 这条「必须直连」不只是性能取向，是**正确性硬约束**：Linux 端点用 TPACKET_v3 收环，
@@ -1074,6 +1127,15 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             // 既看得到真网关广播、也看得到冲我而来的毒帧（本机自己发的帧按 sender MAC 被它排掉）。
             if (n->watch)
                 n->watch->observe(frame);
+            // ★ 「这个 IP 在哪张网卡的线上」——从每一帧 ARP 的 sender 字段学，**在 victim 过滤
+            //   之前**。以前只在 victim 分支里学，于是「还没被劫持的设备」一条都学不到，而
+            //   nicForIp 恰恰是在 enableDevice（还没劫持）那一刻要用它判归属的。内核过滤器本来
+            //   就放行全部 ARP，这一步只多一次哈希写；ARP 是低频帧，代价可以忽略。
+            if (isArp && frame.size() >= 42 && n->arp) {
+                const quint32 spa = (quint32(f[28]) << 24) | (quint32(f[29]) << 16)
+                                    | (quint32(f[30]) << 8) | quint32(f[31]);
+                n->arp->learnLanMac(spa, QByteArray(reinterpret_cast<const char *>(f + 22), 6));
+            }
             // ★ 反应式反制:真网关自己发的 ARP(它周期性广播 who-has,携带「网关 IP 在真 MAC」,
             //   设备一收到就把投毒解掉)→ 立刻把所有 victim 重投一轮盖回去。这是「时通时不通」的
             //   根治:周期重发跟网关的 ARP 刷新是 1:1 拉锯,必须一看到解毒就抢回(tcpdump 实证 UniFi

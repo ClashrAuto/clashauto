@@ -197,6 +197,12 @@ bool isVirtualIface(const QNetworkInterface &iface, quint32 ip)
         return true;
     if (DeviceStore::normalizeMac(iface.hardwareAddress()).isEmpty())
         return true; // 没有 MAC = 三层虚拟网卡（wintun 等），二层收发无从谈起
+    // ★ 169.254.0.0/16（APIPA）：一张**还在等 DHCP** 的网卡。它不是"某个局域网"，把它当成物理
+    //   网卡的后果是实打实的：会被选成主网卡、会被交给 LanGateway 去开二层端点并按这个假网段
+    //   登记进协议栈（栈里那份是挂载时的快照），还会被当作一条「每网卡出口」写进核心配置。
+    //   第二张网卡（尤其 Wi-Fi，关联比网线晚）正是最容易在这个窗口里被扫到的那张。
+    if ((ip & 0xFFFF0000u) == 0xA9FE0000u)
+        return true;
     return isTunSubnet(ip);
 }
 
