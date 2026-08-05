@@ -14,7 +14,9 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
     /// 由本 helper 启动的核心进程。只允许有一个。
     private var core: Process?
     /// 透明代理接管器（root：ARP 欺骗 + PF + ip.forwarding）。
-    private let redirector = Redirector()
+    /// **每张网卡一个 Redirector**（各自的 PF anchor 与崩溃记录，见 Redirector 顶部）。
+    /// 一张卡就是长度 1 的数组 —— 没有单网卡这个特例。startRedirect 时按下发的网卡数重建。
+    private var redirectors: [Redirector] = []
     private let queue = DispatchQueue(label: "com.yuehongsun.coast.helper.state")
 
     // MARK: - NSXPCListenerDelegate
@@ -172,36 +174,58 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
         }
     }
 
-    func startRedirect(deviceIPsCommaSep: String, deviceMACsCommaSep: String,
-                       interface: String, gatewayIP: String, gatewayMAC: String,
-                       redirPort: Int, dnsPort: Int,
-                       routerLL6: String, routerMAC6: String, deviceV6sCommaSep: String,
+    /// 停掉全部网卡上的接管并复原。幂等。
+    private func stopAllRedirectors() {
+        let list = queue.sync { redirectors }
+        for redirector in list { redirector.stop() }
+    }
+
+    func startRedirect(nicsJSON: String, dnsPort: Int,
                        withReply reply: @escaping (Bool, String) -> Void) {
-        // 接管别人的流量是本程序做过的最重的一件事，日志必须记全:接管了谁、冒充哪个网关、
+        let nics = RedirectNicSpec.decode(nicsJSON)
+        guard !nics.isEmpty else { reply(false, "没有要接管的网卡（nicsJSON 为空或解析失败）"); return }
+        guard nics.count <= Redirector.maxNics else {
+            reply(false, "网卡数超过上限 \(Redirector.maxNics)")
+            return
+        }
+        // 接管别人的流量是本程序做过的最重的一件事,日志必须记全:接管了谁、冒充哪个网关、
         // 走哪块网卡。出问题时(局域网异常、某台设备断网)这是唯一能自证「我做了什么」的记录。
-        let v6Note = routerLL6.isEmpty ? "" : " v6路由器=\(routerLL6)/\(routerMAC6) v6设备=[\(deviceV6sCommaSep)]"
-        Audit.log("startRedirect 设备=[\(deviceIPsCommaSep)] 网卡=\(interface) "
-                  + "网关=\(gatewayIP)/\(gatewayMAC) redir=\(redirPort) dns=\(dnsPort)\(v6Note)",
-                  caller: NSXPCConnection.current())
+        for (index, nic) in nics.enumerated() {
+            let v6Note = nic.routerLL6.isEmpty
+                ? "" : " v6路由器=\(nic.routerLL6)/\(nic.routerMAC6) v6设备=[\(nic.deviceV6s.joined(separator: ","))]"
+            Audit.log("startRedirect[\(index)] 设备=[\(nic.deviceIPs.joined(separator: ","))] "
+                      + "网卡=\(nic.interface) 网关=\(nic.gatewayIP)/\(nic.gatewayMAC) "
+                      + "redir=\(nic.redirPort) dns=\(dnsPort)\(v6Note)",
+                      caller: NSXPCConnection.current())
+        }
         // 先取住这条连接:reply 之后 `NSXPCConnection.current()` 就不在本次调用上下文里了。
         let caller = NSXPCConnection.current()
-        let ips = deviceIPsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-        let macs = deviceMACsCommaSep.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
-        // v6 地址表用 omittingEmptySubsequences:true —— 空串（无 v6）不该变成一个空元素。
-        let v6s = deviceV6sCommaSep.split(separator: ",", omittingEmptySubsequences: true).map(String.init)
-        if let error = redirector.start(deviceIPs: ips, deviceMACs: macs, interface: interface,
-                                        gatewayIP: gatewayIP, gatewayMAC: gatewayMAC,
-                                        redirPort: redirPort, dnsPort: dnsPort,
-                                        routerLL6: routerLL6, routerMAC6: routerMAC6,
-                                        deviceV6s: v6s) {
-            reply(false, error)
-        } else {
-            // **只在真的接管成功后**才记下发起方。失败时记下的话会留一个悬空 owner ——
-            // 那条连接稍后断开时会去撤销一个根本不存在的接管（无害但会误导日志），
-            // 更糟的是它会挡住下一次真正的接管去认领 owner。
-            queue.sync { redirectOwner = caller }
-            reply(true, "")
+
+        // 换一批网卡时先把上一轮整个收干净（Redirector.start 自己也幂等，但实例数可能变少）。
+        stopAllRedirectors()
+        let fresh = (0..<nics.count).map { Redirector(index: $0) }
+        queue.sync { redirectors = fresh }
+
+        // ★ **任何一张卡失败就整体回滚**：半开着比不开更糟 —— 那张卡上的设备已经被投毒、
+        //   却没人转发它的流量，直接断网到 ARP 缓存老化。
+        for (redirector, nic) in zip(fresh, nics) {
+            if let error = redirector.start(deviceIPs: nic.deviceIPs, deviceMACs: nic.deviceMACs,
+                                            interface: nic.interface,
+                                            gatewayIP: nic.gatewayIP, gatewayMAC: nic.gatewayMAC,
+                                            redirPort: nic.redirPort, dnsPort: dnsPort,
+                                            routerLL6: nic.routerLL6, routerMAC6: nic.routerMAC6,
+                                            deviceV6s: nic.deviceV6s) {
+                stopAllRedirectors()
+                queue.sync { redirectors = [] }
+                reply(false, "\(nic.interface): \(error)")
+                return
+            }
         }
+        // **只在真的接管成功后**才记下发起方。失败时记下的话会留一个悬空 owner ——
+        // 那条连接稍后断开时会去撤销一个根本不存在的接管（无害但会误导日志），
+        // 更糟的是它会挡住下一次真正的接管去认领 owner。
+        queue.sync { redirectOwner = caller }
+        reply(true, "")
     }
 
     /// 发起接管的那条连接。只有它断开才意味着「app 没了，把设备放回去」。
@@ -213,14 +237,14 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
             Audit.log("接管发起方的连接已\(reason) —— app 可能已崩溃/被强杀，撤销接管")
             redirectOwner = nil
         }
-        redirector.stop()
+        stopAllRedirectors()
     }
 
     func terminate(withReply reply: @escaping () -> Void) {
         Audit.log("terminate:收到退出请求,先还原接管与核心")
         // 顺序要紧:先还原 ARP 接管(否则局域网里那些设备会继续把流量发给一个不存在的网关),
         // 再停核心。反过来的话,接管还在、转发目标已经没了 —— 被接管的设备直接断网。
-        redirector.stop()
+        stopAllRedirectors()
         queue.sync { stopCoreLocked() }
         Audit.log("terminate:已收拾干净,退出")
         reply()
@@ -231,7 +255,7 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
     func stopRedirect(withReply reply: @escaping (Bool, String) -> Void) {
         Audit.log("stopRedirect", caller: NSXPCConnection.current())
         queue.sync { redirectOwner = nil }
-        redirector.stop()
+        stopAllRedirectors()
         reply(true, "")
     }
 

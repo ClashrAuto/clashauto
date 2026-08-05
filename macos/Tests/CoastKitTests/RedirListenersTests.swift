@@ -49,21 +49,35 @@ struct RedirListenersTests {
         }
     }
 
-    @Test("单网卡：一个 listener 都不发（这一档必须与改动前逐字节相同）")
-    func singleNicUnchanged() {
+    // ★ 一张卡就是长度 1 的数组，走的是**同一段代码** —— 没有「单网卡模式」这个分支。
+    //   顶层 redir-port 已经删掉，这个 listener 就是唯一的透明代理口。
+    @Test("单网卡：照样发一个 listener，端口与老的顶层 redir-port 同值")
+    func singleNicStillListens() {
         let temp = TempDir()
         seed(temp)
         var builder = ConfigBuilder(config: AppConfig(), directory: temp.directory)
         builder.egressNics = ["en0"]
-        #expect(builder.applyRedirListeners(base) == base)
+        let out = builder.applyRedirListeners(base)
+        #expect(out.contains("""
+          - name: coast-redir-0
+            type: redir
+            listen: 127.0.0.1
+            port: \(DeviceStore.redirPort)
+            interface-name: 'en0'
+        """))
+        #expect(!out.contains("coast-redir-1"))
     }
 
-    @Test("没有网卡表时也什么都不发（拓扑还没探到的窗口）")
-    func noNicsNoListeners() {
+    // 拓扑还没探到的窗口：没有名字可写就少写 interface-name，出口交回核心自己判断。
+    // 口还是要开的 —— 不然设备被 rdr 到一个没人监听的端口，那是断网不是回退。
+    @Test("网卡表为空时仍开口，只是不带 interface-name")
+    func noNicsStillListens() {
         let temp = TempDir()
         seed(temp)
         let builder = ConfigBuilder(config: AppConfig(), directory: temp.directory)
-        #expect(builder.applyRedirListeners(base) == base)
+        let out = builder.applyRedirListeners(base)
+        #expect(out.contains("  - name: coast-redir-0"))
+        #expect(!out.contains("interface-name"))
     }
 
     @Test("没有设备开代理时不发（两张卡也一样）")

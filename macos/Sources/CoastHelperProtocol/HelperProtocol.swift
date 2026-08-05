@@ -90,16 +90,11 @@ public enum HelperConstants {
     ///   —— PF 规则按源地址匹配，不需要与 MAC 对齐）。它决定哪些 v6 源被 rdr 进核心；查不到 v6 的
     ///   设备照样会被 NDP 投毒（无害），只是其 v6 走转发而非代理，直到下次同步补上。
     ///   NDP 投毒**只需设备 MAC + 路由器 LL/MAC**（组播 target + L2 单播），不依赖这份地址表。
-    func startRedirect(deviceIPsCommaSep: String,
-                       deviceMACsCommaSep: String,
-                       interface: String,
-                       gatewayIP: String,
-                       gatewayMAC: String,
-                       redirPort: Int,
+    /// `nicsJSON`：`[RedirectNicSpec]` 的 JSON（见该结构）。**每张网卡一组** ——
+    /// 一张卡就是长度 1 的数组，没有单网卡这个特例。
+    /// `dnsPort`：核心的 DNS 监听口，全机一个，不随网卡变。
+    func startRedirect(nicsJSON: String,
                        dnsPort: Int,
-                       routerLL6: String,
-                       routerMAC6: String,
-                       deviceV6sCommaSep: String,
                        withReply reply: @escaping (Bool, String) -> Void)
 
     /// 停止接管并**把设备复原**：向它们发真网关 MAC 的 ARP 应答，卸掉 PF anchor。

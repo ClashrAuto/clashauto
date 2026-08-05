@@ -1,3 +1,4 @@
+import CoastHelperProtocol
 import Foundation
 import Observation
 
@@ -95,7 +96,7 @@ public final class CoastController {
         guard !isCoreRunning else { return }
         // 记下拉起时刻：意外退出时据此判断「这次是不是稳定跑了一阵才崩的」，是就把重启预算清零。
         coreStartedAt = Date()
-        let path = builder.ensureFullConfig(tunEnabled: isTunEnabled)
+        let path = buildFullConfig()
         guard let path else {
             log("生成 full.yaml 失败")
             return
@@ -414,7 +415,7 @@ public final class CoastController {
         if let path = fullConfigPath {
             _ = builder.writeTunEnabled(at: path, enabled: isTunEnabled)
         } else {
-            fullConfigPath = builder.ensureFullConfig(tunEnabled: isTunEnabled)
+            fullConfigPath = buildFullConfig()
         }
 
         log(isTunEnabled ? "已开启增强模式，正在以 root 重启核心以应用 TUN"
@@ -427,9 +428,23 @@ public final class CoastController {
 
     // MARK: - 配置重建
 
+    /// 出口网卡（有序，index 0 = 主网卡），生成 full.yaml 那一刻定下来的那份。
+    ///
+    /// ★ 下发给 helper 时**必须用同一份**，不能各自再去探一次：每张卡的 redir 端口是按这个
+    ///   次序算的（`DeviceStore.redirPort(forNic:)`），两处次序不一致 —— 比如两次探测之间
+    ///   网线插拔了 —— PF 就会把设备的包 rdr 到一个没人监听的端口，那台设备直接断网。
+    private var egressGateways: [LanTopology.Gateway] = []
+
+    /// 生成 full.yaml。出口网卡表在这里现取并记下，配置与下发共用这一份次序。
+    private func buildFullConfig() -> URL? {
+        egressGateways = LanTopology.allGateways()
+        builder.egressNics = egressGateways.map(\.interface)
+        return builder.ensureFullConfig(tunEnabled: isTunEnabled)
+    }
+
     /// 设置/规则/订阅变更后重新生成 full.yaml 并热重载。
     public func rebuildConfig() async {
-        guard let path = builder.ensureFullConfig(tunEnabled: isTunEnabled) else {
+        guard let path = buildFullConfig() else {
             log("生成 full.yaml 失败")
             return
         }
@@ -464,7 +479,10 @@ public final class CoastController {
         guard let store = deviceStore else { return }
         // 每台设备的 (IP, MAC)。MAC 是接管的硬前提 —— 单播欺骗要它、复原要它。
         // proxiedDevices 已保证 lastIP 非空；mac 是主键，恒有值。
-        let requested = store.proxiedDevices().map { (ip: $0.lastIP, mac: $0.mac) }
+        // interface 也要带上：多网卡时它决定这台设备归哪张卡（台账里由扫描侧 recordSeen 写）。
+        let requestedFull = store.proxiedDevices()
+            .map { (ip: $0.lastIP, mac: $0.mac, interface: $0.interface) }
+        let requested = requestedFull.map { (ip: $0.ip, mac: $0.mac) }
 
         // ★ 安全闸门:下发前把网关与本机剔掉。
         //
@@ -472,11 +490,22 @@ public final class CoastController {
         //   在 A 网把 192.168.1.50 设成代理,换到 B 网时那个地址可能正是路由器。
         //   真给路由器发「你自己的地址在我这儿」,污染的是它对自身地址的 ARP,
         //   整个局域网都可能被打瘫。这一道必须在这里、在下发之前。
-        let gatewayNow = LanTopology.defaultGateway()
-        let targets = RedirectTargets.allowed(requested,
-                                              gatewayIP: gatewayNow?.ip ?? "",
-                                              gatewayMAC: gatewayNow?.mac ?? "",
-                                              localMACs: LanTopology.localMACs())
+        //   多网卡时**每张卡各有一个网关**，全都要剔 —— 只剔主网卡那个，等于允许把另一张卡的
+        //   路由器当设备接管，那个网络会被打瘫。
+        // 用生成配置时那份网关表（见 egressGateways 的注释），不再现探一次。
+        let gateways = egressGateways
+        let localMACs = LanTopology.localMACs()
+        var targets = requested
+        if gateways.isEmpty {
+            targets = RedirectTargets.allowed(targets, gatewayIP: "", gatewayMAC: "",
+                                              localMACs: localMACs)
+        } else {
+            for gateway in gateways {
+                targets = RedirectTargets.allowed(targets, gatewayIP: gateway.ip,
+                                                  gatewayMAC: gateway.mac, localMACs: localMACs)
+            }
+        }
+        let gatewayNow = gateways.first
         if targets.count != requested.count {
             let dropped = requested.count - targets.count
             log("已跳过 \(dropped) 台不可接管的设备(网关/本机/离线)")
@@ -501,7 +530,7 @@ public final class CoastController {
             return
         }
 
-        guard let gateway = gatewayNow else {
+        guard gatewayNow != nil else {
             log("取不到默认网关，无法接管设备")
             v6GatewayActive = false
             return
@@ -513,20 +542,50 @@ public final class CoastController {
         let deviceV6s = gateway6 == nil
             ? []
             : LanTopology.deviceV6Addresses(ofMACs: Set(targets.map(\.mac)))
+
+        // —— 按网卡分组下发 ——
+        // 每张卡一组：自己的网关、自己那批设备、自己的 redir 入站端口（出口网卡是**入站**的
+        // 属性，见 core 的 component/dialer/egress.go）。一张卡就是长度 1 的数组。
+        // 设备归哪张卡看台账里的 interface；归不出来的（还没扫到 / 那张卡不在网关表里）
+        // 算主网卡 —— 宁可从默认出口出去，也不能没人接管。
+        let interfaceByMAC = Dictionary(requestedFull.map { ($0.mac, $0.interface) },
+                                        uniquingKeysWith: { first, _ in first })
+        var grouped: [Int: [(ip: String, mac: String)]] = [:]
+        for target in targets {
+            let iface = interfaceByMAC[target.mac] ?? ""
+            let index = gateways.firstIndex { $0.interface == iface } ?? 0
+            grouped[index, default: []].append(target)
+        }
+        // v6 拓扑只对**它自己那张卡**成立（defaultGatewayV6 返回的 interface）。别的卡不带 v6 ——
+        // 带着别人的路由器 LL 去投毒，设备会把 v6 默认路由指到一个不转发它的地方。
+        let nics: [RedirectNicSpec] = grouped.keys.sorted().compactMap { index in
+            guard index < gateways.count, let devices = grouped[index], !devices.isEmpty
+            else { return nil }
+            let gateway = gateways[index]
+            let sameNicV6 = gateway6?.interface == gateway.interface
+            return RedirectNicSpec(
+                interface: gateway.interface,
+                gatewayIP: gateway.ip,
+                gatewayMAC: gateway.mac,
+                redirPort: DeviceStore.redirPort(forNic: index),
+                routerLL6: sameNicV6 ? (gateway6?.routerLL ?? "") : "",
+                routerMAC6: sameNicV6 ? (gateway6?.routerMAC ?? "") : "",
+                deviceIPs: devices.map(\.ip),
+                deviceMACs: devices.map(\.mac),
+                deviceV6s: sameNicV6 ? deviceV6s : [])
+        }
+        guard !nics.isEmpty else {
+            log("没有任何设备能归到已知网卡上，未接管")
+            v6GatewayActive = false
+            return
+        }
         do {
-            try await helper.startRedirect(devices: targets,
-                                           interface: gateway.interface,
-                                           gatewayIP: gateway.ip,
-                                           gatewayMAC: gateway.mac,
-                                           redirPort: DeviceStore.redirPort,
-                                           dnsPort: DeviceStore.dnsPort,
-                                           routerLL6: gateway6?.routerLL ?? "",
-                                           routerMAC6: gateway6?.routerMAC ?? "",
-                                           deviceV6s: deviceV6s)
+            try await helper.startRedirect(nics: nics, dnsPort: DeviceStore.dnsPort)
             activeRedirectIPs = ips
             v6GatewayActive = gateway6 != nil
             let v6Note = gateway6 == nil ? "" : "（含 IPv6，\(deviceV6s.count) 个 v6 源）"
-            log("正在接管 \(targets.count) 台设备的流量\(v6Note)")
+            let nicNote = nics.count > 1 ? "，跨 \(nics.count) 张网卡" : ""
+            log("正在接管 \(targets.count) 台设备的流量\(nicNote)\(v6Note)")
         } catch {
             v6GatewayActive = false
             log("接管设备失败：\(error)")

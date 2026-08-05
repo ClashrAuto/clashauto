@@ -69,15 +69,9 @@ public final class ConfigBuilder: @unchecked Sendable {
         // 用 always 而不是 strict：strict 由核心自行决定要不要查，没有 PROCESS-NAME 规则时它就不查了，
         // 于是 UI 永远拿不到进程名。代价是每条新连接多一次本机套接字表查询，核心内部有缓存。
         yaml = YAMLSurgery.setScalar(yaml, key: "find-process-mode", value: "always")
-        // 透明代理口：PF 把被代理设备的 TCP 重定向到这里。**不对外广播**，
-        // 只接受经内核重定向进来的连接，所以开着它不等于开放代理。
-        //
-        // ★ 多网卡时改用**每卡一个 redir 入站**（下面 applyRedirListeners），因为「从哪张网卡
-        //   出去」是核心里 listener 的属性。单网卡时维持这个顶层标量 —— 与本改动前逐字节相同。
-        if egressNics.count < 2 {
-            yaml = YAMLSurgery.setScalar(yaml, key: "redir-port",
-                                         value: String(DeviceStore.redirPort))
-        }
+        // 透明代理口不在这里发顶层 `redir-port` 了 —— 改成**每张卡一个 redir 入站**
+        // （下面 applyRedirListeners），因为「从哪张网卡出去」是核心里 listener 的属性。
+        // 一张卡就是长度 1 的数组，没有单网卡特例可言。
         // DNS 监听口：被代理设备的 UDP :53 也被重定向过来。不转投的话设备会拿着它自己配的
         // DNS（常是路由器）去查，经我们转发出去解析不到，表现为「直连 IP 通、用域名全超时」。
         // 转过来之后它拿到 fake-ip，域名规则才匹配得上。
@@ -538,13 +532,16 @@ public final class ConfigBuilder: @unchecked Sendable {
     /// 每张网卡一个 redir 入站，各带 `interface-name` —— 这就是「设备从它自己那条上行出去」
     /// 的全部配置面（PF 那边把每张卡的流量 rdr 到对应的口，见 Redirector）。
     ///
-    /// 只在**至少两张网卡**且**确有设备开代理**时生成；否则原样返回（顶层 `redir-port` 那条
-    /// 已经在 ensureFullConfig 里发过了），单网卡用户的产出逐字节不变。
+    /// ★ **没有「单网卡模式」这个特例** —— 一张卡就是长度 1 的数组，走的是同一段代码。
+    ///   顶层 `redir-port` 已经删掉了：`redirPort(forNic: 0)` 与它同值，`listen: 127.0.0.1`
+    ///   还比它更严（顶层标量按 `bind-address` 绑，默认是全网卡）。PF 把包 rdr 到
+    ///   `127.0.0.1:<port>`，两种写法收到的是同一批包。
+    ///
+    /// 一台设备都没开代理时不发 —— 那是「没有要接管的流量」，不是回退。
     ///
     /// 设备按台账里的 `interface` 归卡；归不出来的（该列为空、或那张卡不在 egressNics 里）
-    /// 算作主网卡 —— 与不启用这套时的行为一致，宁可走默认出口也不要没人接。
+    /// 算作主网卡 —— 宁可从默认出口出去，也不能没人接管。
     func applyRedirListeners(_ yaml: String) -> String {
-        guard egressNics.count >= 2 else { return yaml }
         let devices = DeviceStore(configDir: directory).proxiedDevices()
         guard !devices.isEmpty else { return yaml }
 
@@ -565,7 +562,11 @@ public final class ConfigBuilder: @unchecked Sendable {
             //   目的地时**不报错、不打日志**，accept 之后直接把连接丢掉。Qt 线真机踩过。
             block += "    listen: 127.0.0.1\n"
             block += "    port: \(DeviceStore.redirPort(forNic: index))\n"
-            block += "    interface-name: \(YAMLSurgery.quote(egressNics[index]))\n"
+            // 拓扑还没探到时 egressNics 是空的，没有名字可写 —— 少写这一行而已，
+            // 出口就交回核心自己的默认路由判断（等于今天的行为）。
+            if index < egressNics.count {
+                block += "    interface-name: \(YAMLSurgery.quote(egressNics[index]))\n"
+            }
         }
 
         // 老核心**忽略**未知的 listener 键（实测 `core -t` rc=0），所以这个键可以无条件发：
