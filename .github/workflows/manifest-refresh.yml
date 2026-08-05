@@ -82,13 +82,9 @@ jobs:
           set -euo pipefail
           # `generated` 每次都变，不能拿整份文件比 —— 那样每半小时都会传一次新资源，
           # release 的资源历史会被这个噪声淹掉。只比真正的内容。
-          strip() { python3 -c "
-import json,sys
-d=json.load(open(sys.argv[1])); d.pop('generated', None)
-print(json.dumps(d, ensure_ascii=False, sort_keys=True))" "$1"; }
-          curl -fsSL --max-time 60 -o old.json \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/version/version.json" || : > old.json
-          if [ -s old.json ] && [ "$(strip old.json)" = "$(strip version.json)" ]; then
+          norm() { python3 -c "import json,sys;d=json.load(open(sys.argv[1],encoding='utf-8'));d.pop('generated',None);print(json.dumps(d,ensure_ascii=False,sort_keys=True))" "$1"; }
+          curl -fsSL --max-time 60 -o old.json             "https://github.com/${GITHUB_REPOSITORY}/releases/download/version/version.json" || : > old.json
+          if [ -s old.json ] && [ "$(norm old.json)" = "$(norm version.json)" ]; then
             echo "内容无变化，不重传"
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
