@@ -839,17 +839,12 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
                 ruleNics.insert(idx); // follow / rule / 空 / 未知
             }
         }
+        // 先给候选卡定名（下面建副本要用），**出站定义等到确定谁真被引用了再发** ——
+        // 副本可能整个不生成（见下面那段的说明），那时再发出站就是一条没人引用的悬空定义。
         QList<int> all = (directNics | ruleNics).values();
         std::sort(all.begin(), all.end());
-
-        QStringList proxyBlocks;
-        for (int idx : all) {
-            const QString name = QStringLiteral("COAST-OUT-%1").arg(idx);
-            outName.insert(idx, name);
-            proxyBlocks << QStringLiteral("  - name: %1\n    type: direct\n    interface-name: %2\n")
-                                   .arg(name, yamlQuote(m_egressNics.at(idx).friendlyName));
-        }
-        yaml = appendProxies(yaml, proxyBlocks);
+        for (int idx : all)
+            outName.insert(idx, QStringLiteral("COAST-OUT-%1").arg(idx));
 
         // follow/rule 的设备走整套订阅规则，里面的 DIRECT 是所有设备共享的 —— 只能给这些卡各复制
         // 一份规则树、把**目标** DIRECT 改写成本卡出站，再用 SUB-RULE 按设备身份分派进去。
@@ -862,19 +857,51 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         if (!ruleIdx.isEmpty()) {
             const QStringList base = currentRuleLines(yaml);
             if (!base.isEmpty()) {
-                subRulesBlock = QStringLiteral("sub-rules:\n");
+                QString block;
                 for (int idx : ruleIdx) {
                     const QString sub = QStringLiteral("coast-nic-%1").arg(idx);
-                    subRuleName.insert(idx, sub);
-                    subRulesBlock += QStringLiteral("  %1:\n").arg(sub);
+                    QString body;
+                    int rewritten = 0;
                     for (const QString &line : base) {
                         // "  - xxx" → "    - xxx"（子规则比 rules: 多一层缩进）
-                        subRulesBlock += QStringLiteral("  ") + retargetDirect(line, outName.value(idx))
-                                + QLatin1Char('\n');
+                        const QString out = retargetDirect(line, outName.value(idx));
+                        if (out != line)
+                            ++rewritten;
+                        body += QStringLiteral("  ") + out + QLatin1Char('\n');
                     }
+                    // ★ **一条都没改写就整个不发。** 真机实测（树莓派 + 用户自己的订阅）：那份规则
+                    //   表里的 DIRECT 只有我们注入的私网那几条，而它们是 applyPrivateNetworkRules
+                    //   在**复制之后**才加的、天然不在副本里；订阅自己的规则全指向策略组，最后一条
+                    //   是 MATCH,<策略组>。于是副本逐字等于正本 —— 1400 行死重量 + 一条什么都不改
+                    //   的 SUB-RULE 分派。发它既无收益，又让人以为"这台机器上已经按卡分流了"。
+                    //   不发的好处还在于自证：**看到 sub-rules 就说明真的有东西被改写了。**
+                    if (rewritten == 0)
+                        continue;
+                    subRuleName.insert(idx, sub);
+                    block += QStringLiteral("  %1:\n").arg(sub) + body;
                 }
+                if (!block.isEmpty())
+                    subRulesBlock = QStringLiteral("sub-rules:\n") + block;
             }
         }
+
+        // 真被引用的卡 = 有 direct 设备的 ∪ 副本真的生成了的。只给这些发出站定义，
+        // 其余的从 outName 里摘掉（留着会让 direct 设备指到一条根本没定义的出站上）。
+        QList<int> referenced = (directNics + QSet<int>(subRuleName.keyBegin(),
+                                                        subRuleName.keyEnd())).values();
+        std::sort(referenced.begin(), referenced.end());
+        const QSet<int> refSet(referenced.begin(), referenced.end());
+        for (int idx : all) {
+            if (!refSet.contains(idx))
+                outName.remove(idx);
+        }
+        QStringList proxyBlocks;
+        for (int idx : referenced) {
+            proxyBlocks << QStringLiteral("  - name: %1\n    type: direct\n    interface-name: %2\n")
+                                   .arg(outName.value(idx),
+                                        yamlQuote(m_egressNics.at(idx).friendlyName));
+        }
+        yaml = appendProxies(yaml, proxyBlocks);
     }
 
     // 2) 非 follow/非 rule 的设备 → 前插 IN-USER 规则到 rules: 顶部（follow/rule 走正常规则，不发）。
@@ -1511,9 +1538,13 @@ bool ConfigBuilder::runNicEgressSelfTest()
         c.userDir = dir;
         c.configDir = dir;
         c.gatewayTproxy = tproxy;
-        // 台账（coast.db）也得跟着复制过去 —— proxiedDevices 是按 configDir 打开库的。
-        QFile::copy(QDir(configDir).filePath(QStringLiteral("coast.db")),
-                    QDir(dir).filePath(QStringLiteral("coast.db")));
+        // 台账（coast.db）与自定义规则（rules.json）都得跟着复制过去：前者 proxiedDevices 按
+        // configDir 打开，后者是夹具里**唯一带 DIRECT 目标**的来源 —— 漏了它，副本无可改写，
+        // 而"没东西改写就不发副本"是有意的行为，于是断言会挂在一个假原因上。（就这么挂过一次。）
+        for (const char *f : {"coast.db", "rules.json"}) {
+            QFile::copy(QDir(configDir).filePath(QLatin1String(f)),
+                        QDir(dir).filePath(QLatin1String(f)));
+        }
         ConfigBuilder b(c);
         b.setEgressNics(use);
         const QString p = b.ensureFullConfig(false, false);
