@@ -63,7 +63,15 @@ There is **no unit-test framework** for the C++ side (the Rust crate has `cargo 
 /root/core/coast -t -f <full.yaml> -d <dir>   # <dir> must contain Country.mmdb, else it tries to download GeoIP and times out
 ```
 
-`COAST_NICEGRESS_SELFTEST` prints a path made for exactly this. Every YAML in this repo is hand-assembled from strings, so **a broken product is invisible at compile time and costs the whole config** (the core refuses to load it — not "one feature is off", but "the proxy doesn't start"). Two gotchas learned the hard way: without the mmdb the run fails on a *download timeout* that looks like a config error; and on Windows the product is CRLF, so any test asserting across lines must normalise `\r\n` first (the product is fine — a CRLF `full.yaml` passes `-t`).
+`COAST_NICEGRESS_SELFTEST` prints a path made for exactly this. Every YAML in this repo is hand-assembled from strings, so **a broken product is invisible at compile time and costs the whole config** (the core refuses to load it — not "one feature is off", but "the proxy doesn't start"). Gotchas learned the hard way:
+
+- **`-t` exits 0 either way.** Failure prints `configuration file … test failed` and *still* returns rc=0. Grep the message; never gate on the exit code.
+- **`-t` does not resolve `interface-name`.** A listener bound to a nonexistent NIC passes `-t` cleanly. Only a real dial can falsify that binding (below).
+- Without the mmdb in `-d <dir>` the run fails on a *download timeout* that reads like a config error.
+- On Windows the product is CRLF, so any test asserting across lines must normalise `\r\n` first — the product itself is fine, a CRLF `full.yaml` passes `-t`.
+- **Don't hand-copy the seed `config/*.yaml` from a Windows checkout to a Mac/Linux box.** `core.autocrlf=true` means the working tree has CRLF while the blob is LF; `mergePlugin`'s `^dns:$` match then misses and the plugin block gets **appended instead of replacing**, producing a duplicate `dns:`/`tun:` that the core rejects outright. It looks exactly like a generator bug and is not one. `git clone` on the target box, or strip the CRs after copying.
+
+**Verifying per-NIC egress for real** (the `-t` pass proves nothing here): point the listener at a **numeric destination IP** and watch `netstat -ibn` byte deltas per interface before/after. Use a numeric IP because a machine running any other TUN VPN resolves names to **fake-ip** (198.18.x.x) through the system resolver — those are routable only inside *that* VPN, so a correctly-bound listener times out and looks broken. Real result on the dual-uplink Mac (2026-08-05, core v1.10.4393): `interface-name: en0` → en0 +2344 B / en1 **+0**; `interface-name: en1` → en0 **+0** / en1 +2392 B; unbound → follows the default route. Same shape as the Pi's Linux run.
 
 ```bash
 bash validate/run.sh      # Docker: pull latest release's Coast artifacts + verify all platforms
