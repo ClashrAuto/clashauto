@@ -254,6 +254,28 @@ jobs:
           }
           Remove-Item Env:\COAST_SMOLGW_SELFTEST
 
+      - name: Pure-logic self-tests (ARP parse / per-NIC egress)
+        # 与上面两条不同，这里用 **Start-Process -Wait -PassThru** 而不是 `& $exe`：
+        # Coast.exe 是 WIN32_EXECUTABLE（GUI 子系统），直接调用时 PowerShell 不保证等它退出，
+        # 拿到的 $LASTEXITCODE 可能压根没被设过 —— 那样这一步的绿灯说明不了任何事。
+        # 顺带把 stdout 收下来，失败时把断言逐条打出来，省得只看到一个退出码。
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:BUILD_DIR "Release\Coast.exe"
+          if (-not (Test-Path $exe)) { throw "找不到 $exe" }
+          foreach ($t in @('COAST_ARPPARSE_SELFTEST', 'COAST_NICEGRESS_SELFTEST')) {
+            Set-Item "Env:\$t" '1'
+            $out = Join-Path $env:RUNNER_TEMP "$t.out"
+            $p = Start-Process -FilePath $exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out
+            Remove-Item "Env:\$t"
+            if ($p.ExitCode -ne 0) {
+              if (Test-Path $out) { Get-Content $out }
+              Write-Host "::error::$t 失败（exit=$($p.ExitCode)）"
+              exit $p.ExitCode
+            }
+          }
+
       - name: Stage portable app
         shell: pwsh
         run: |
@@ -866,6 +888,22 @@ jobs:
       - name: Build
         shell: bash
         run: cmake --build "$BUILD_DIR" --parallel
+
+      - name: Pure-logic self-tests (ARP parse / per-NIC egress)
+        shell: bash
+        # 两个都不碰网络、不需要 root、毫秒级，所以两种架构都跑。
+        # · ARP 表解析：**三个平台的 arp 输出形态全覆盖** —— 解析器按运行期参数分派而不是 #ifdef，
+        #   所以 Windows 那种分段格式在这条 Linux 流水线上一样被测到（以前它连编都不编）。
+        #   解析错的表现是「每张网卡的网关 MAC 都为空 → 所有设备都代理不了」，且没有任何报错
+        #   指向那里。
+        # · 每网卡出口：造临时台账真跑一遍 ensureFullConfig 并对产物断言。这段生成一旦写坏，
+        #   核心是**整份配置拒绝加载**（代理全起不来），而 YAML 是手搓字符串、编译期查不出来。
+        run: |
+          set -euo pipefail
+          bin="$BUILD_DIR/coast"
+          export QT_QPA_PLATFORM=offscreen
+          COAST_ARPPARSE_SELFTEST=1 "$bin"
+          COAST_NICEGRESS_SELFTEST=1 "$bin"
 
       - name: Stage portable app
         shell: bash
