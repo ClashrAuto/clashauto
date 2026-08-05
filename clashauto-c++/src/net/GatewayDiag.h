@@ -40,6 +40,28 @@ public:
     //    class"。没有 NSDMI 时 Counters 是纯聚合体，`c{}` 值初始化把每个成员置 0，效果相同。
     //    唯一的代价：谁要是在栈上 `Counters x;` 就是未初始化的——本工程只有静态存储的实例
     //    （c 和 .cpp 里的 g_prev{}），都显式值初始化了。
+    // —— 按网卡分桶的帧分流计数 ——
+    //
+    // 为什么要分：多网卡下「设备没流量」这类问题，全局计数**回答不了是哪张卡**。真机上一台机器
+    // 有线接 A 路由、WiFi 接 B 路由时，B 那张卡整段不工作而 A 正常，合计数字看起来完全健康。
+    //
+    // **只分这四项**，不是整个 Counters：它们是在 LanGateway 的帧分流里加的，那里手上正好握着
+    // 网卡；rx/tx 那些加在二层端点内部，端点并不知道自己是第几张卡 —— 要分得先给端点带一个槽位，
+    // 为此改三个平台的端点实现不值当。这四项已经足够回答「是哪张卡在丢 / 在旁路 / 根本没帧」。
+    struct NicCounters {
+        qint64 fedLwip;
+        qint64 bypassLan;
+        qint64 bypassBcast;
+        qint64 dropNonVictim;
+    };
+    // 槽位数。**最后一个是溢出桶**（网卡多于槽位时都记到它），这样 nicSlot 永远返回合法下标，
+    // 热路径上就不需要判空 —— 与 Counters 那条"直接 ++、不判开关"的取舍同源。
+    static constexpr int kMaxNicSlots = 5;
+    static inline NicCounters nics[kMaxNicSlots] {};
+    static inline QString nicNames[kMaxNicSlots] {};
+    /// 给一张网卡要一个计数槽（按 ifname 幂等）。只在 configureLocal 里调（工作线程，低频）。
+    static int nicSlot(const QString &ifname);
+
     struct Counters {
         // —— 二层：收 ——
         qint64 rxFrames;      // 从二层端点交上来的帧（已过内核 BPF 源 MAC 过滤）

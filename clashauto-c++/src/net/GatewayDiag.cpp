@@ -22,6 +22,8 @@ QString g_path;                 // 空 = 未启用落盘
 // 上一次采样时的快照，用来算增量。**显式值初始化**：Counters 故意不带默认成员初始化器
 // （原因见 GatewayDiag.h 里那段 ★★），所以这里的 {} 不是冗余，去掉就是未初始化读。
 GatewayDiag::Counters g_prev{};
+// 按网卡那四项的上一次快照（同样显式值初始化）。
+GatewayDiag::NicCounters g_nicPrev[GatewayDiag::kMaxNicSlots] {};
 
 // 采样窗口的起点，用来把速率折算成「每秒」。
 qint64 g_lastSampleMs = 0;
@@ -50,6 +52,26 @@ qint64 d(qint64 now, qint64 prev)
 }
 
 } // namespace
+
+int GatewayDiag::nicSlot(const QString &ifname)
+{
+    if (ifname.isEmpty())
+        return kMaxNicSlots - 1; // 溢出桶
+    for (int i = 0; i < kMaxNicSlots - 1; ++i) {
+        if (nicNames[i] == ifname)
+            return i; // 幂等：每轮 configureLocal 都会来问一次
+    }
+    for (int i = 0; i < kMaxNicSlots - 1; ++i) {
+        if (nicNames[i].isEmpty()) {
+            nicNames[i] = ifname;
+            nics[i] = NicCounters{};
+            return i;
+        }
+    }
+    // 槽位用完 → 最后那个溢出桶。名字标出来，免得把它的数当成某一张卡的。
+    nicNames[kMaxNicSlots - 1] = QStringLiteral("(其它)");
+    return kMaxNicSlots - 1;
+}
 
 void GatewayDiag::setLogDir(const QString &userDir)
 {
@@ -128,6 +150,31 @@ void GatewayDiag::sample(const QString &extra)
                 .arg(d(c.bypassLan, g_prev.bypassLan))
                 .arg(d(c.bypassBcast, g_prev.bypassBcast))
                 .arg(d(c.dropNonVictim, g_prev.dropNonVictim));
+    // 按网卡拆开的那四项 —— **只在真有两张以上网卡登记时才打**（单网卡下它与上面那行逐字相同，
+    // 白占宽度）。多网卡时上面那行是合计数，一张卡整段不工作也看不出来，这一段就是为它加的。
+    {
+        int registered = 0;
+        for (const QString &n : GatewayDiag::nicNames) {
+            if (!n.isEmpty())
+                ++registered;
+        }
+        if (registered >= 2) {
+            for (int i = 0; i < GatewayDiag::kMaxNicSlots; ++i) {
+                if (GatewayDiag::nicNames[i].isEmpty())
+                    continue;
+                const GatewayDiag::NicCounters &n = GatewayDiag::nics[i];
+                GatewayDiag::NicCounters &p = g_nicPrev[i];
+                line += QStringLiteral(" [%1 fed=%2 bypLan=%3 bypBcast=%4 nonVictim=%5]")
+                                .arg(GatewayDiag::nicNames[i])
+                                .arg(d(n.fedLwip, p.fedLwip))
+                                .arg(d(n.bypassLan, p.bypassLan))
+                                .arg(d(n.bypassBcast, p.bypassBcast))
+                                .arg(d(n.dropNonVictim, p.dropNonVictim));
+            }
+        }
+        for (int i = 0; i < GatewayDiag::kMaxNicSlots; ++i)
+            g_nicPrev[i] = GatewayDiag::nics[i];
+    }
     line += QStringLiteral(" tx=%1(%2/s) txKB=%3 defer=%4 txdrop=%5 backlogPeakKB=%6")
                 .arg(txF)
                 .arg(rate(txF))

@@ -237,6 +237,7 @@ struct GwNic {
     // 挂上协议栈**那一刻**登记进去的本机地址/掩码。栈里那份是快照、不会自己更新，所以要留一份
     // 用来发现「本机在这张卡上的地址后来变了」（DHCP 续约、或从 APIPA 转正）。
     QString netIp, netMask;
+    int diagSlot = 0;        // GatewayDiag 里这张卡的计数槽（见 GatewayDiag::nicSlot）
     bool ready = false;      // ep 已打开且 netif 已挂上协议栈
     int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
     int order = 0;           // configure 传入的 specs 次序（LanScanner 保证 index 0 = 主网卡）。
@@ -537,6 +538,7 @@ void GatewayWorker::forwardIsolatedLan(GwNic *n, const QByteArray &frame, const 
     const QString claimed = m_victimByMac.value(macKey(f + 6));
     if (claimed.isEmpty() || ipToU32(claimed) != src) {
         ++GatewayDiag::c.dropNonVictim;
+        ++GatewayDiag::nics[n->diagSlot].dropNonVictim;
         return;
     }
     const uchar proto = f[23];
@@ -554,7 +556,8 @@ void GatewayWorker::forwardIsolatedLan(GwNic *n, const QByteArray &frame, const 
     }
     // UDP(17) 与其余协议：allow 保持 false —— 理由见调用处的论证。
     if (!allow) {
-        ++GatewayDiag::c.dropNonVictim; // 复用「被丢弃」计数，避免为此新增一栏
+        ++GatewayDiag::c.dropNonVictim;
+        ++GatewayDiag::nics[n->diagSlot].dropNonVictim; // 复用「被丢弃」计数，避免为此新增一栏
         return;
     }
     const quint32 dst = (quint32(f[30]) << 24) | (quint32(f[31]) << 16)
@@ -1036,6 +1039,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             m_nics.insert(spec.ifname, n);
         }
         n->order = specIndex;
+        n->diagSlot = GatewayDiag::nicSlot(spec.ifname); // 幂等，每轮问一次即可
         // 拓扑数值每次都刷新（网关 MAC 常常是扫描几轮后才解析出来的）。
         n->spec = spec;
         n->localIp4 = ipToU32(spec.localIp);
@@ -1175,6 +1179,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 // 计数在涨，说明设备的帧收到了、但它的源 MAC 和台账里的 MAC 对不上（随机 MAC /
                 // 台账 MAC 有误），是 victim 匹配的问题，不是抓包的问题。
                 ++GatewayDiag::c.dropNonVictim;
+                ++GatewayDiag::nics[n->diagSlot].dropNonVictim;
                 if (gwDbgOn() && (m_dbgDropNonVictim++ % 200) == 0)
                     std::fprintf(stderr, "[GW] drop non-victim src=%02x:%02x:%02x:%02x:%02x:%02x "
                                          "(count=%lld)\n",
@@ -1234,6 +1239,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     if (ip6Len >= 40 && isLocalIp6(p6 + 24))
                         return;
                     ++GatewayDiag::c.fedLwip;
+                    ++GatewayDiag::nics[n->diagSlot].fedLwip;
                     if (gwDbgOn() && (m_dbgFedLwip++ % 100) == 0) // 标签按真实模式，理由见 v4 那处
                         std::fprintf(stderr, "[GW] -> %s fed(v6)=%lld\n",
                                      m_net ? "lwIP" : (m_datapath.tproxy ? "tproxy" : "pf"),
@@ -1291,6 +1297,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     const bool bcastOrMcast = (dst == 0xFFFFFFFFu) || ((dst >> 28) == 0xE);
                     if (bcastOrMcast) {
                         ++GatewayDiag::c.bypassBcast;
+                        ++GatewayDiag::nics[n->diagSlot].bypassBcast;
                         if (gwDbgOn() && (m_dbgBypassLan++ % 200) == 0)
                             std::fprintf(stderr,
                                          "[GW] bypass bcast/mcast dst=%u.%u.%u.%u (count=%lld)\n",
@@ -1315,6 +1322,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     //   放不放行无关。对 policy=reject 的隔离设备同理——它本来就拦不住内核那一份。
                     if (!sameSubnet && m_localIp4.contains(dst)) {
                         ++GatewayDiag::c.bypassLan;
+                        ++GatewayDiag::nics[n->diagSlot].bypassLan;
                         return;
                     }
                     // ★ 局域网隔离（policy=reject 的设备）：按**方向**决定放不放。
@@ -1333,6 +1341,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     }
                     if (sameSubnet && dst != n->gatewayIp4) {
                         ++GatewayDiag::c.bypassLan;
+                        ++GatewayDiag::nics[n->diagSlot].bypassLan;
                         // 同网段直连,放行给系统,不进 lwIP。若设备只访问 LAN、没真出网,这里会涨。
                         if (gwDbgOn() && (m_dbgBypassLan++ % 200) == 0)
                             std::fprintf(stderr, "[GW] bypass LAN dst=%u.%u.%u.%u (count=%lld)\n",
@@ -1345,6 +1354,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             // 走到这里 = 真出网 / 发往网关的帧 → 喂进用户态栈。这个计数在涨却仍「设备流量 0」,
             // 那问题在 lwIP 之后(SOCKS/mihomo);它不涨,问题在它上面几道。
             ++GatewayDiag::c.fedLwip;
+            ++GatewayDiag::nics[n->diagSlot].fedLwip;
             // ★ 标签按**当前真实模式**打。这行原来恒写死 "-> lwIP"，可它在 m_net 判空之**前**，
             //   于是 tproxy/pf 模式下（m_net 恒空、一个包都没进用户态栈）日志照样刷 "-> lwIP fed="。
             //   2026-08-03 就是被这行骗着查了一整轮"为什么 Linux 没走 TPROXY"——实际一直在走。
