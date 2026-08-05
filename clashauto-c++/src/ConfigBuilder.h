@@ -45,6 +45,18 @@ public:
     static QStringList proxyNames(const QString &yaml);
     static QStringList existingGroupNames(const QString &yaml);
 
+    /// 「每网卡出口」的生成自测（`COAST_NICEGRESS_SELFTEST=1`，见 main_qml.cpp）。
+    ///
+    /// 造一个临时 configDir + 一份两台设备分属两个网段的台账，真跑一遍 ensureFullConfig，
+    /// 对产出的 full.yaml 做断言，并把路径打到 stdout —— 外面可以直接
+    /// `core -t -f <路径>` 让**核心自己**判这份配置合不合法。
+    ///
+    /// ★ 为什么必须有它：本仓库的 YAML 全是手搓字符串拼出来的，**坏输出编译期一点都发现不了**。
+    ///   而这段生成的东西（proxies / sub-rules / rules 三处联动）一旦写坏，核心会直接拒绝加载
+    ///   整份配置 —— 不是"这个功能不生效"，是"代理整个起不来"。
+    /// 通过返回 true。临时目录**不自动删**（要留给 core -t 用），路径在输出里。
+    static bool runNicEgressSelfTest();
+
     // 本机各网卡的 IPv6 全局单播前缀，已拼成 IP-CIDR6 规则行。**静态公开**：除了本类生成配置要用，
     // DevicesController 每轮扫描也拿它比对「网段变了没有」——变了才触发 rebuildConfig()。
     // 两处必须是同一份实现，否则会出现「探测说变了、生成出来却没变」的空转热重载。

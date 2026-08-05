@@ -219,6 +219,11 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsSet("COAST_ARPPARSE_SELFTEST"))
         return LanScanner::runArpParseSelfTest() ? 0 : 1;
 
+    // 「每网卡出口」的配置生成自测（造临时台账 + 真跑一遍 ensureFullConfig，对产物做断言）。
+    // 同样放在 Rust 守卫之外：它要在 Linux CI 上跑，而且产物路径会打出来供 `core -t -f` 复核。
+    if (qEnvironmentVariableIsSet("COAST_NICEGRESS_SELFTEST"))
+        return ConfigBuilder::runNicEgressSelfTest() ? 0 : 1;
+
     // 透明网关 headless 自测（Linux + COAST_GATEWAY_SELFTEST）：不建 GUI，跑 TAP+NetStack+假SOCKS
     // 后退出（配合 validate/gateway_selftest.sh）。用 offscreen 平台即可（无显示环境）。
 #if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)

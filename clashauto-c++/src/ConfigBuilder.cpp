@@ -12,7 +12,10 @@
 #include <QNetworkInterface>
 #include <QRegularExpression>
 #include <QSet>
+#include <QTemporaryDir> // COAST_NICEGRESS_SELFTEST 的临时 configDir
 #include <QTextStream>
+
+#include <cstdio> // 自测直接打 stdout（与其余 COAST_*_SELFTEST 的惯例一致）
 
 ConfigBuilder::ConfigBuilder(AppConfig config) : m_config(std::move(config))
 {
@@ -823,10 +826,17 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
                 || m_egressNics.at(idx).friendlyName.isEmpty()) {
                 continue; // 主卡本来就走默认出口；友好名拿不到时宁可退回今天的行为
             }
+            // ★ 判据必须与下面那个 emit 循环**同构**：不是 reject/global/direct 的一律算「走整套
+            //   规则」。别写成 `== "follow" || == "rule"` —— 台账里**默认策略存的是空串**，不是
+            //   "follow"（真机库里 policy_mode='' 的就是用户从没手动设过策略的那些，也就是绝大
+            //   多数设备）。第一版正是这么写的，于是这条路对默认设备整个不生效，而且悄无声息。
+            if (dev.mode == QStringLiteral("reject") || dev.mode == QStringLiteral("global")) {
+                continue; // 前者由 applyRejectDevices 单独处理；后者指向节点，不涉及直连出口
+            }
             if (dev.mode == QStringLiteral("direct")) {
                 directNics.insert(idx);
-            } else if (dev.mode == QStringLiteral("follow") || dev.mode == QStringLiteral("rule")) {
-                ruleNics.insert(idx);
+            } else {
+                ruleNics.insert(idx); // follow / rule / 空 / 未知
             }
         }
         QList<int> all = (directNics | ruleNics).values();
@@ -1338,6 +1348,199 @@ QString ConfigBuilder::applyIpv6(QString yaml, bool enabled) const
         yaml = setNestedScalar(yaml, "dns", "fake-ip-range6", "fdfe:dcba:9876::1/64");
     }
     return yaml;
+}
+
+// ———————————— 每网卡出口的生成自测（COAST_NICEGRESS_SELFTEST）————————————
+bool ConfigBuilder::runNicEgressSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](bool ok, const char *what) {
+        std::fputs(ok ? "  ok   " : "  FAIL ", stdout);
+        std::fputs(what, stdout);
+        std::fputc('\n', stdout);
+        if (!ok)
+            ++failed;
+    };
+
+    // 临时 configDir。**不自动删** —— 产物要留给 `core -t -f <path>` 让核心自己判合不合法。
+    QTemporaryDir tmp;
+    tmp.setAutoRemove(false);
+    if (!tmp.isValid()) {
+        std::printf("每网卡出口自测: 建不了临时目录\n");
+        return false;
+    }
+    const QString configDir = tmp.path();
+
+    // 造台账：三台设备。
+    //   A 在**主**网卡网段、follow  → 不该被改写（主卡本来就走默认出口）
+    //   B 在副网卡网段、follow      → 该走 SUB-RULE 进副卡的规则副本
+    //   C 在副网卡网段、direct      → 该直接指到 COAST-OUT-1
+    const QString macA = QStringLiteral("aa:aa:aa:aa:aa:01");
+    const QString macB = QStringLiteral("bb:bb:bb:bb:bb:02");
+    const QString macC = QStringLiteral("cc:cc:cc:cc:cc:03");
+    {
+        DeviceStore store(configDir);
+        QVector<DeviceRecord> found;
+        for (const auto &pair : {qMakePair(macA, QStringLiteral("192.168.1.50")),
+                                 qMakePair(macB, QStringLiteral("192.168.2.60")),
+                                 qMakePair(macC, QStringLiteral("192.168.2.61"))}) {
+            DeviceRecord d;
+            d.mac = pair.first;
+            d.ip = pair.second;
+            d.online = true;
+            d.lastSeen = QDateTime::currentDateTime();
+            found.append(d);
+        }
+        store.mergeDiscovered(found);
+        store.setProxyEnabled(macA, true);
+        store.setProxyEnabled(macB, true);
+        store.setProxyEnabled(macC, true);
+        store.setPolicy(macC, DevicePolicyMode::Direct, QString());
+        store.save();
+    }
+
+    // 造几条自定义规则。**夹具必须自带 DIRECT 目标**：种子 default.yaml 的规则全指向策略组，
+    // 私网那几条 DIRECT 又是 applyPrivateNetworkRules 在**复制之后**才加的 —— 光用种子跑，
+    // 副本里一条 DIRECT 都没有，"改写对不对"这件事等于没测（第一版就是这样，白绿了一轮）。
+    // 顺带把 REJECT 混进去，验证只改目标位上的 DIRECT、不误伤别的目标。
+    {
+        QFile rj(QDir(configDir).filePath(QStringLiteral("rules.json")));
+        if (rj.open(QIODevice::WriteOnly)) {
+            rj.write(R"({"rule":[
+  {"type":"GEOIP","node":"DIRECT","value":"CN"},
+  {"type":"DOMAIN-SUFFIX","node":"DIRECT","value":"cn"},
+  {"type":"DOMAIN-SUFFIX","node":"REJECT","value":"ads.example.com"}
+]})");
+            rj.close();
+        }
+    }
+
+    AppConfig cfg;
+    cfg.userDir = configDir;
+    cfg.configDir = configDir;
+    // ★ 数据面必须**显式钉死**，不能吃平台默认值：AppConfig::gatewayTproxy 在 Linux 上默认
+    //   true，于是同一份代码在 Linux 上生成的是 SRC-IP-CIDR、在 Windows 上是 IN-USER。
+    //   第一版没钉，在 Linux 上跑出来的断言全是错的对象 —— 而"每网卡出口"要修的正是 Windows
+    //   那条路。这里先测 IN-USER 形态，tproxy 形态在后面单独再测一遍。
+    cfg.gatewayTproxy = false;
+    ConfigBuilder builder(cfg);
+    QVector<NicEgress> nics;
+    NicEgress primary;      // 192.168.1.0/24，主网卡
+    primary.friendlyName = QStringLiteral("以太网");
+    primary.mask = 0xFFFFFF00u;
+    primary.base = 0xC0A80100u;
+    primary.primary = true;
+    NicEgress second;       // 192.168.2.0/24，副网卡
+    second.friendlyName = QStringLiteral("WLAN");
+    second.mask = 0xFFFFFF00u;
+    second.base = 0xC0A80200u;
+    nics << primary << second;
+    builder.setEgressNics(nics);
+
+    const QString path = builder.ensureFullConfig(false, false);
+    QFile f(path);
+    if (path.isEmpty() || !f.open(QIODevice::ReadOnly)) {
+        std::printf("每网卡出口自测: 生成失败 (%s)\n", qUtf8Printable(path));
+        return false;
+    }
+    const QString yaml = QString::fromUtf8(f.readAll());
+    f.close();
+
+    const QString userA = DeviceStore::socksUser(macA);
+    const QString userB = DeviceStore::socksUser(macB);
+    const QString userC = DeviceStore::socksUser(macC);
+
+    check(yaml.contains(QStringLiteral("  - name: COAST-OUT-1\n    type: direct\n"
+                                       "    interface-name: 'WLAN'")),
+          "副网卡生成了绑定它的 direct 出站");
+    // 主网卡**不**生成 —— 它本来就走系统默认出口，多一条只是噪声，还会出现在节点列表里。
+    check(!yaml.contains(QStringLiteral("COAST-OUT-0")), "主网卡没有多余的出站");
+    check(yaml.contains(QStringLiteral("\nsub-rules:\n  coast-nic-1:\n")), "生成了副卡的规则副本");
+    check(yaml.contains(QStringLiteral("SUB-RULE,(IN-USER,%1),coast-nic-1").arg(userB)),
+          "副卡上 follow 的设备被分派进副本");
+    check(yaml.contains(QStringLiteral("IN-USER,%1,COAST-OUT-1").arg(userC)),
+          "副卡上 direct 的设备直接指到本卡出站");
+    check(!yaml.contains(userA + QStringLiteral(",COAST-OUT"))
+                  && !yaml.contains(QStringLiteral("(IN-USER,%1)").arg(userA)),
+          "主网卡上的设备一个字都没被改写");
+
+    // 副本里的目标 DIRECT 必须已改写；而 rules: 正本里的 DIRECT 必须原样留着
+    //（正本是本机自己 + 主卡设备在走的那份）。
+    const qsizetype subPos = yaml.indexOf(QStringLiteral("\nsub-rules:\n"));
+    const qsizetype rulesPos = yaml.indexOf(QStringLiteral("\nrules:\n"));
+    const QString subBlock = (subPos >= 0 && rulesPos > subPos)
+            ? yaml.mid(subPos, rulesPos - subPos) : QString();
+    const QString rulesBlock = rulesPos >= 0 ? yaml.mid(rulesPos) : QString();
+    check(!subBlock.isEmpty() && subBlock.contains(QStringLiteral(",COAST-OUT-1")),
+          "副本里的目标 DIRECT 已改写成本卡出站");
+    check(!subBlock.contains(QStringLiteral(",DIRECT'")) && !subBlock.contains(QStringLiteral(",DIRECT,")),
+          "副本里不再有指向普通 DIRECT 的目标");
+    check(rulesBlock.contains(QStringLiteral(",DIRECT")), "正本里的 DIRECT 原样保留");
+    check(subBlock.contains(QStringLiteral("GEOIP,CN,COAST-OUT-1"))
+                  && subBlock.contains(QStringLiteral("DOMAIN-SUFFIX,cn,COAST-OUT-1")),
+          "副本里自定义的 DIRECT 规则确实被改写了");
+    check(subBlock.contains(QStringLiteral("DOMAIN-SUFFIX,ads.example.com,REJECT")),
+          "REJECT 目标原样保留");
+    // retargetDirect 的边界（整词 + 只在目标位）。这几条不经 YAML，直接打函数。
+    check(retargetDirect(QStringLiteral("  - 'GEOIP,CN,DIRECT,no-resolve'"), QStringLiteral("X"))
+                  == QStringLiteral("  - 'GEOIP,CN,X,no-resolve'"),
+          "retarget: 带 no-resolve 参数");
+    check(retargetDirect(QStringLiteral("  - 'MATCH,DIRECT'"), QStringLiteral("X"))
+                  == QStringLiteral("  - 'MATCH,X'"),
+          "retarget: MATCH 只有两段");
+    check(retargetDirect(QStringLiteral("  - 'DOMAIN,DIRECT.example.com,DIRECT'"), QStringLiteral("X"))
+                  == QStringLiteral("  - 'DOMAIN,DIRECT.example.com,X'"),
+          "retarget: payload 里的 DIRECT 不动");
+    check(retargetDirect(QStringLiteral("  - 'GEOIP,CN,DIRECT-CUSTOM'"), QStringLiteral("X"))
+                  == QStringLiteral("  - 'GEOIP,CN,DIRECT-CUSTOM'"),
+          "retarget: DIRECT-CUSTOM 这类同前缀目标不动");
+
+    // 下面两轮都**换一个 configDir** 再生成。
+    // ★ 全用同一个目录时，后一轮的 full.yaml 会把前一轮的**覆盖掉** —— 断言读的是内存里的
+    //   字符串所以照样过，但最后打出来那条"配置在:"指的是被覆盖后的文件，拿它去跑 `core -t`
+    //   验的就不是刚断言过的那份。第一版正是这样，差点照着错的产物下结论。
+    auto rebuildIn = [&](const QString &dir, bool tproxy, const QVector<NicEgress> &use) -> QString {
+        QDir().mkpath(dir);
+        AppConfig c = cfg;
+        c.userDir = dir;
+        c.configDir = dir;
+        c.gatewayTproxy = tproxy;
+        // 台账（coast.db）也得跟着复制过去 —— proxiedDevices 是按 configDir 打开库的。
+        QFile::copy(QDir(configDir).filePath(QStringLiteral("coast.db")),
+                    QDir(dir).filePath(QStringLiteral("coast.db")));
+        ConfigBuilder b(c);
+        b.setEgressNics(use);
+        const QString p = b.ensureFullConfig(false, false);
+        QFile fh(p);
+        if (!fh.open(QIODevice::ReadOnly))
+            return QString();
+        const QString text = QString::fromUtf8(fh.readAll());
+        fh.close();
+        return text;
+    };
+
+    // 单网卡回归：同一份台账，只给一张卡 → 产出里一个字的 COAST-OUT/sub-rules 都不该有。
+    {
+        QVector<NicEgress> one;
+        one << primary;
+        const QString y2 = rebuildIn(configDir + QStringLiteral("/../single"), false, one);
+        check(!y2.isEmpty() && !y2.contains(QStringLiteral("COAST-OUT"))
+                      && !y2.contains(QStringLiteral("sub-rules:")),
+              "单网卡时产出不含任何每网卡出口的痕迹");
+    }
+    // TPROXY 形态（Linux 的默认数据面）：身份载体换成 SRC-IP-CIDR，别的应当一致。
+    {
+        const QString y3 = rebuildIn(configDir + QStringLiteral("/../tproxy"), true, nics);
+        check(!y3.isEmpty() && y3.contains(QStringLiteral("SUB-RULE,(SRC-IP-CIDR,192.168.2.60/32),"
+                                                          "coast-nic-1")),
+              "tproxy 形态：follow 设备按源 IP 分派");
+        check(y3.contains(QStringLiteral("SRC-IP-CIDR,192.168.2.61/32,COAST-OUT-1")),
+              "tproxy 形态：direct 设备指到本卡出站");
+    }
+
+    std::printf("每网卡出口自测: %s\n配置在: %s\n（可直接用 `core -t -f <上面这个路径>` 让核心判合法性）\n",
+                failed == 0 ? "全部通过" : "有失败项", qUtf8Printable(path));
+    return failed == 0;
 }
 
 // ———————————————————————— 每网卡出口（NicEgress）————————————————————————
