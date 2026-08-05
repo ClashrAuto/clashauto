@@ -1443,7 +1443,13 @@ bool ConfigBuilder::runNicEgressSelfTest()
         std::printf("每网卡出口自测: 生成失败 (%s)\n", qUtf8Printable(path));
         return false;
     }
-    const QString yaml = QString::fromUtf8(f.readAll());
+    // ★ 断行统一成 \n 再断言。写盘走的是 QTextStream，**Windows 上落地的是 CRLF**（实测一份
+    //   产物 2910 个 CRLF、0 个裸 LF），于是所有跨行的断言在 Windows 上全部匹配不上 ——
+    //   第一次在 Windows 原生跑这个自测就是这样：产物明明是对的（拿给核心 `-t` 判过 rc=0），
+    //   却报了 6 条 FAIL。**在它要保护的那个平台上会假报警的测试，比没有测试更糟**：
+    //   下一个人不是去调查，就是把断言改松。这里只归一化断行，不放松任何一条判据。
+    const QString yaml = QString::fromUtf8(f.readAll()).replace(QStringLiteral("\r\n"),
+                                                                QStringLiteral("\n"));
     f.close();
 
     const QString userA = DeviceStore::socksUser(macA);
@@ -1514,7 +1520,8 @@ bool ConfigBuilder::runNicEgressSelfTest()
         QFile fh(p);
         if (!fh.open(QIODevice::ReadOnly))
             return QString();
-        const QString text = QString::fromUtf8(fh.readAll());
+        const QString text = QString::fromUtf8(fh.readAll())
+                                     .replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
         fh.close();
         return text;
     };
