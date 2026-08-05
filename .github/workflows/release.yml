@@ -1142,6 +1142,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # ★ 必须 0：版本号是 `major.minor.<提交数>`，而默认的浅克隆只有 1 个提交，
+          #   `git rev-list --count HEAD` 会返回 1 —— 本 job 第一次上线就是这么算出
+          #   `v1.0.1-beta.…` 去查一个不存在的 tag、404 崩掉的。其余 job 也都是 0。
+          fetch-depth: 0
 
       - name: Resolve release tag
         id: ver

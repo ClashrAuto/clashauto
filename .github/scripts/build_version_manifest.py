@@ -306,7 +306,16 @@ def main():
             print(f"::warning::旧 version.json 读不了（{e}），本次按首份生成", file=sys.stderr)
 
     prev_packages = prev.get("packages") if isinstance(prev.get("packages"), list) else []
-    rel = api(f"https://api.github.com/repos/{APP_REPO}/releases/tags/{args.tag}", token)
+    try:
+        rel = api(f"https://api.github.com/repos/{APP_REPO}/releases/tags/{args.tag}", token)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # 十有八九是版本号算错了（CI 里忘了 fetch-depth: 0 → 提交数变成 1）。
+            # 原始的 404 traceback 完全指不到这一点，这里把话说明白。
+            print(f"::error::release tag `{args.tag}` 不存在 —— 版本号算错了？"
+                  f"（CI 里 checkout 少了 fetch-depth: 0 时，提交数会变成 1）", file=sys.stderr)
+            return 1
+        raise
 
     # 本通道重算，另一通道原样留着。
     packages = [p for p in prev_packages if p.get("type") != args.channel]
