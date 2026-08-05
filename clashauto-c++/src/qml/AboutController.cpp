@@ -182,15 +182,29 @@ void AboutController::checkAll()
     checkGeoip(); // GeoIP（有新发布则静默下载）
 }
 
+void AboutController::setCoreChecking(bool v)
+{
+    if (m_coreChecking == v) {
+        return;
+    }
+    m_coreChecking = v;
+    emit coreCheckingChanged();
+}
+
 void AboutController::checkCore()
 {
+    if (m_coreChecking) {
+        return; // 检查中不重复发起（与 check() 同一条规矩）
+    }
     if (!m_nam) {
         m_nam = new QNetworkAccessManager(this);
     }
+    setCoreChecking(true);
     // 本地内核版本：核心存在则跑 `-v` 解析（无核心 = 无「可更新」，不置角标）。
     const QString exe = m_config.clashExecutable();
     if (!QFile::exists(exe)) {
         setCoreUpdateAvailable(false);
+        setCoreChecking(false);
         return;
     }
     QString localCoreVer;
@@ -215,6 +229,7 @@ void AboutController::checkCore()
     }
     if (localCoreVer.isEmpty()) {
         setCoreUpdateAvailable(false); // 版本探测失败，宁可不误报
+        setCoreChecking(false);
         return;
     }
 
@@ -228,6 +243,7 @@ void AboutController::checkCore()
     QNetworkReply *reply = m_nam->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, localCoreVer] {
         reply->deleteLater();
+        setCoreChecking(false);
         if (reply->error() != QNetworkReply::NoError) {
             return; // 网络失败：保持原角标状态，不动
         }

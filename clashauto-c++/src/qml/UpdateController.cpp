@@ -143,11 +143,25 @@ void UpdateController::applyDownloadProxy(QNetworkAccessManager *nam) const
 
 void UpdateController::refresh()
 {
+    refreshApp();
+    refreshCore();
+}
+
+void UpdateController::refreshApp()
+{
     if (!m_nam) {
         m_nam = new QNetworkAccessManager(this);
     }
     applyDownloadProxy(m_nam);
     fetchReleases();
+}
+
+void UpdateController::refreshCore()
+{
+    if (!m_nam) {
+        m_nam = new QNetworkAccessManager(this);
+    }
+    applyDownloadProxy(m_nam);
     fetchCore();
 }
 

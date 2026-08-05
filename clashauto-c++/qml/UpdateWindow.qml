@@ -59,11 +59,23 @@ ApplicationWindow {
     onVisibleChanged: {
         if (!visible)
             return
-        updater.refresh()
+        fetchCurrentTab()
         if (win.isMac) {
             bridge.applyMacGlass(win, Theme.dark)
             win.macInset = bridge.macTitleBarInset(win)
         }
+    }
+
+    /// 切到某一页时才取那一页的数据。开着窗切页签也要取 —— 否则内核页显示的是上次打开
+    /// 时的旧值（或空），而用户并不知道自己看的是陈的。
+    onCurrentTabChanged: if (visible) fetchCurrentTab()
+
+    /// 只取**当前页签**要用的那一份。
+    function fetchCurrentTab() {
+        if (currentTab === 0)
+            updater.refreshApp()
+        else if (currentTab === 1)
+            updater.refreshCore()
     }
 
     /// mac 标题栏占掉的高度，由 AppKit 实取（见 `MacWindow::macTitleBarInset`）。
@@ -109,6 +121,14 @@ ApplicationWindow {
 
     property bool checkedGeoip: false
 
+    /// 当前页签是不是正在检查。**按页签取**：程序页看 about.checking，内核页看
+    /// about.coreChecking —— 混着看的话，在内核页按下「获取更新」会立刻变回「获取更新」
+    /// （程序那份没在跑），看着像没反应。
+    readonly property bool checkingNow:
+        currentTab === 0 ? (updater.checking || about.checking)
+        : currentTab === 1 ? about.coreChecking
+                           : false
+
     /// 底部左侧那行状态/错误。
     readonly property string statusText:
         currentTab === 1 ? (settings.coreUpdating ? settings.coreUpdateStatus : "")
@@ -129,11 +149,24 @@ ApplicationWindow {
         }
     }
 
+    /// 「获取更新」= 刷新**当前页签**那一份数据 + 重做**当前页签**那一份版本比对。
+    ///
+    /// ★ 以前这里是 `updater.refresh() + about.check()`，两个都不分页签。后果不是"多取了点
+    ///   东西"，而是**内核页永远出不来「更新」按钮**：`about.check()` 只查程序，
+    ///   `coreUpdateAvailable` 一直由每小时的后台 checkAll 决定，手动检查根本碰不到它。
+    ///   在内核页按下去，转圈的是程序那份，内核这边什么都没变。
     function doCheck() {
-        updater.refresh()   // 拉 release 列表 + 内核说明（这一页的「更新内容」要用）
-        about.check()       // 版本比对（角标与本页的「有没有新版」同一来源）
-        if (currentTab === 2)
-            win.checkedGeoip = true   // GeoIP 没有版本可比，查过一轮就当可以更新
+        if (currentTab === 0) {
+            updater.refreshApp()
+            about.check()          // → about.updateAvailable
+        } else if (currentTab === 1) {
+            updater.refreshCore()  // → coreVersion / coreNotes（本页的「更新内容」）
+            about.checkCore()      // → about.coreUpdateAvailable（本页的「更新」按钮）
+        } else {
+            // GeoIP 上游天天重建同一个 tag，没有版本可比 —— 查过一轮就当可以更新，
+            // 说「已是最新」才是撒谎。
+            win.checkedGeoip = true
+        }
     }
 
     // ———————————————————————— 顶部 ————————————————————————
@@ -425,8 +458,8 @@ ApplicationWindow {
             PillButton {
                 Layout.alignment: Qt.AlignBottom
                 visible: !updater.downloading && !win.hasUpdate
-                label: (updater.checking || about.checking) ? qsTr("检查中…") : qsTr("获取更新")
-                disabled: updater.checking || about.checking || win.busy
+                label: win.checkingNow ? qsTr("检查中…") : qsTr("获取更新")
+                disabled: win.checkingNow || win.busy
                 onClicked: win.doCheck()
             }
         }
