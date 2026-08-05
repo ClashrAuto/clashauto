@@ -497,7 +497,7 @@ int runSmolGatewaySelfTest()
 
     FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
     if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
-                    QStringLiteral("255.255.255.0"), &err)) {
+                    QStringLiteral("255.255.255.0"), 0 /*单网卡自测：沿用构造时的口*/, &err)) {
         std::fprintf(stderr, "[smolgw] FAIL: addNic: %s\n", err.toLatin1().constData());
         return 1;
     }
@@ -698,7 +698,7 @@ int runSmolGatewayRealNicSelfTest()
                      err.toLatin1().constData());
         return 3;
     }
-    if (!net.addNic(ep, localMac, localIp, netmask, &err)) {
+    if (!net.addNic(ep, localMac, localIp, netmask, 0 /*单网卡自测：沿用构造时的口*/, &err)) {
         std::fprintf(stderr, "[realnic] FAIL: addNic: %s\n", err.toLatin1().constData());
         return 1;
     }
@@ -883,7 +883,7 @@ int runGatewayThroughputBench()
     }
     FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
     if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
-                    QStringLiteral("255.255.255.0"), &err)) {
+                    QStringLiteral("255.255.255.0"), 0 /*单网卡自测：沿用构造时的口*/, &err)) {
         std::fprintf(stderr, "[gwbench] FAIL: addNic: %s\n", err.toLatin1().constData());
         return 3;
     }
@@ -1276,7 +1276,7 @@ int runCoastCoreOutboundSelfTest()
 
     FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
     if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
-                    QStringLiteral("255.255.255.0"), &err)) {
+                    QStringLiteral("255.255.255.0"), 0 /*单网卡自测：沿用构造时的口*/, &err)) {
         std::fprintf(stderr, "[cc] FAIL: addNic: %s\n", err.toLatin1().constData());
         return 3;
     }

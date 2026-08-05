@@ -722,17 +722,55 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         return yaml; // 没有任何设备开代理 → 不生成 listener / 规则
     }
 
-    // 1) 生成 coast-gateway listener（>=1 台代理设备时才发）。严格 2 空格 YAML 缩进：
-    //    listeners:(0) -> - name:(2) -> 字段(4) -> users:(4) -> - username:(6) -> password:(8)
-    QString block = "listeners:\n";
-    block += "  - name: coast-gateway\n";
-    block += "    type: socks\n";
-    block += "    listen: 127.0.0.1\n";
-    block += QString("    port: %1\n").arg(DeviceStore::kGatewayPort);
-    block += "    users:\n";
+    // 1) —— 每张网卡一个 socks 入站 ——
+    //
+    // ★ 这是「设备从它自己那条上行出去」的**全部**实现。核心的 listener 支持 `interface-name`
+    //   （见 core 的 component/dialer/egress.go）：从这个入站进来的每一条连接，无论最终走
+    //   DIRECT 还是走某个节点，都从指定的那张网卡出去。
+    //
+    //   为什么必须落在**入站**上：出口网卡是「连接从哪来」的属性，而核心的配置语言只能把网卡绑
+    //   在**出站对象**上（proxy 的 interface-name / dialer-proxy；策略组两者都不接，本仓库也没有
+    //   relay 组类型）。用出站表达就得把 身份 × 出站 做笛卡尔积 —— 每张卡复制一份节点表与策略组，
+    //   健康检查跟着翻倍。上一版走的正是那条路，而且真机上还发现它**只能改写 DIRECT**，可真实
+    //   订阅里公网目的地一条 DIRECT 都没有（全指向策略组），于是整套完全惰性。
+    //
+    // ★ 老核心**忽略**未知的 listener 键（实测 `core -t` rc=0），所以这个键可以无条件发：
+    //   新核心生效、老核心退回今天的行为。不需要版本门。
+    //
+    // 端口 = kGatewayPort + 网卡下标（见 DeviceStore::gatewayPortFor）；LanGateway 按设备所在
+    // 网卡拨对应端口。只给「确实有代理设备」的网卡发 listener，设备按网卡分进各自的 users。
+    // 严格 2 空格 YAML 缩进：listeners:(0) -> - name:(2) -> 字段(4) -> users:(4) ->
+    //                        - username:(6) -> password:(8)
+    QMap<int, QVector<const ProxyDevice *>> byNic;
     for (const ProxyDevice &dev : proxied) {
-        block += QString("      - username: %1\n").arg(dev.user); // dev-<hex>，纯 ascii 无需引号
-        block += "        password: coast\n"; // 密码固定字面量 coast，与 LanGateway 拨号一致
+        const int idx = egressNicFor(dev.ip);
+        // 判不出网卡（不在任何已知网段 / 还没配过 NicEgress）→ 归 0 号，即今天的行为。
+        byNic[idx >= 0 ? idx : 0].append(&dev);
+    }
+    QString block = "listeners:\n";
+    for (auto it = byNic.constBegin(); it != byNic.constEnd(); ++it) {
+        const int idx = it.key();
+        block += QString("  - name: coast-gw-%1\n").arg(idx);
+        block += "    type: socks\n";
+        block += "    listen: 127.0.0.1\n";
+        block += QString("    port: %1\n").arg(DeviceStore::gatewayPortFor(idx));
+        // 两个前提都满足才发这个键：
+        //   · **至少两张网卡** —— 单网卡时"绑哪张"没有歧义，不发 = 与本改动前逐字节相同，
+        //     绝大多数用户零变化；
+        //   · 友好名拿得到 —— 核心的 iface.ResolveInterface 是精确查找，名字对不上会让这个入站的
+        //     每一次拨号都失败且**没有回退**。宁可退回全局默认出口。
+        // 多网卡时主卡也发：把它钉死，顺带治了「Windows 自动跃点一变默认路由就换卡、在途连接
+        // 成批断」那个抖动 —— 那是"不稳定"的另一半。
+        if (m_egressNics.size() >= 2 && idx < m_egressNics.size()
+            && !m_egressNics.at(idx).friendlyName.isEmpty()) {
+            block += QString("    interface-name: %1\n")
+                             .arg(yamlQuote(m_egressNics.at(idx).friendlyName));
+        }
+        block += "    users:\n";
+        for (const ProxyDevice *dev : *it) {
+            block += QString("      - username: %1\n").arg(dev->user); // dev-<hex>，纯 ascii
+            block += "        password: coast\n"; // 密码固定字面量，与 LanGateway 拨号一致
+        }
     }
 
     // TPROXY 数据面：额外发一个 tproxy inbound。**与上面那个 socks listener 并存**——
@@ -795,151 +833,24 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         yaml.append('\n').append(block); // 空行分隔，风格对齐 mergePlugin
     }
 
-    // 1.5) —— 每网卡出口：让「B 网段设备的直连」从 B 那张网卡出去 ——
-    //
-    // 被终结的连接全部由核心从本机重新发起，而核心只有**一个**默认出口。电脑同时接两个路由器
-    // 时，B 网段设备的直连整段绕道 A 路由器的宽带 —— 延迟高，还跟着 Windows 的自动跃点一起抖
-    // （Wi-Fi 协商速率一变，默认路由就换一张卡，在途连接成批断）。
-    //
-    // 解法是核心的 `type: direct` + `interface-name`：**出站自带的 interface-name 优先于
-    // tun.auto-detect-interface**（core: component/dialer/dialer.go 的 dialContext 里
-    // `if opt.interfaceName == "" { opt.interfaceName = DefaultInterface.Load() }`，非空就不覆盖），
-    // Windows 上落到 IP_UNICAST_IF。
-    //
-    // ★ 私网目的地**不走这条路，也不需要**：applyPrivateNetworkRules 生成的 IP-CIDR DIRECT 规则
-    //   排在更前面，而 auto-detect-interface 装的 finder 是**按目的地查**的（先 ByAddr(dst)，
-    //   on-link 就返回那张卡），所以设备访问自己路由器后台/内网 NAS 本来就走对卡。
-    //   这里要修的只有**公网目的地**那一档。
-    //
-    // ★ 只在**至少两张已知网卡**时生成。单网卡（绝大多数用户）的产出与本改动前逐字节相同。
-    QHash<int, QString> outName;    // 网卡下标 → COAST-OUT-<i> 出站名
-    QHash<int, QString> subRuleName; // 网卡下标 → coast-nic-<i> 子规则名
-    QString subRulesBlock;
-    if (m_egressNics.size() >= 2) {
-        // 先按下标收集「这张卡上确实有代理设备」的非主网卡。QSet 遍历无序，必须排序后再生成，
-        // 否则每轮重建都 diff 出不同文本 → 白白触发一次热重载。
-        QSet<int> directNics; // 有 policy=direct 设备的卡
-        QSet<int> ruleNics;   // 有 follow/rule 设备的卡（要一份规则副本）
-        for (const ProxyDevice &dev : proxied) {
-            const int idx = egressNicFor(dev.ip);
-            if (idx < 0 || m_egressNics.at(idx).primary
-                || m_egressNics.at(idx).friendlyName.isEmpty()) {
-                continue; // 主卡本来就走默认出口；友好名拿不到时宁可退回今天的行为
-            }
-            // ★ 判据必须与下面那个 emit 循环**同构**：不是 reject/global/direct 的一律算「走整套
-            //   规则」。别写成 `== "follow" || == "rule"` —— 台账里**默认策略存的是空串**，不是
-            //   "follow"（真机库里 policy_mode='' 的就是用户从没手动设过策略的那些，也就是绝大
-            //   多数设备）。第一版正是这么写的，于是这条路对默认设备整个不生效，而且悄无声息。
-            if (dev.mode == QStringLiteral("reject") || dev.mode == QStringLiteral("global")) {
-                continue; // 前者由 applyRejectDevices 单独处理；后者指向节点，不涉及直连出口
-            }
-            if (dev.mode == QStringLiteral("direct")) {
-                directNics.insert(idx);
-            } else {
-                ruleNics.insert(idx); // follow / rule / 空 / 未知
-            }
-        }
-        // 先给候选卡定名（下面建副本要用），**出站定义等到确定谁真被引用了再发** ——
-        // 副本可能整个不生成（见下面那段的说明），那时再发出站就是一条没人引用的悬空定义。
-        QList<int> all = (directNics | ruleNics).values();
-        std::sort(all.begin(), all.end());
-        for (int idx : all)
-            outName.insert(idx, QStringLiteral("COAST-OUT-%1").arg(idx));
-
-        // follow/rule 的设备走整套订阅规则，里面的 DIRECT 是所有设备共享的 —— 只能给这些卡各复制
-        // 一份规则树、把**目标** DIRECT 改写成本卡出站，再用 SUB-RULE 按设备身份分派进去。
-        // 复制的代价很小：RULE-SET/GEOSITE/GEOIP 都是**引用**，多的只是一份规则对象，geo 数据与
-        // provider 不复制；而且只给非主网卡、且确实有 follow/rule 设备的卡复制（现实里就 1 份）。
-        //
-        // ★ 必须在插入我们自己的规则**之前**取快照，否则副本里会套进 SUB-RULE 自身。
-        QList<int> ruleIdx = ruleNics.values();
-        std::sort(ruleIdx.begin(), ruleIdx.end());
-        if (!ruleIdx.isEmpty()) {
-            const QStringList base = currentRuleLines(yaml);
-            if (!base.isEmpty()) {
-                QString block;
-                for (int idx : ruleIdx) {
-                    const QString sub = QStringLiteral("coast-nic-%1").arg(idx);
-                    QString body;
-                    int rewritten = 0;
-                    for (const QString &line : base) {
-                        // "  - xxx" → "    - xxx"（子规则比 rules: 多一层缩进）
-                        const QString out = retargetDirect(line, outName.value(idx));
-                        if (out != line)
-                            ++rewritten;
-                        body += QStringLiteral("  ") + out + QLatin1Char('\n');
-                    }
-                    // ★ **一条都没改写就整个不发。** 真机实测（树莓派 + 用户自己的订阅）：那份规则
-                    //   表里的 DIRECT 只有我们注入的私网那几条，而它们是 applyPrivateNetworkRules
-                    //   在**复制之后**才加的、天然不在副本里；订阅自己的规则全指向策略组，最后一条
-                    //   是 MATCH,<策略组>。于是副本逐字等于正本 —— 1400 行死重量 + 一条什么都不改
-                    //   的 SUB-RULE 分派。发它既无收益，又让人以为"这台机器上已经按卡分流了"。
-                    //   不发的好处还在于自证：**看到 sub-rules 就说明真的有东西被改写了。**
-                    if (rewritten == 0)
-                        continue;
-                    subRuleName.insert(idx, sub);
-                    block += QStringLiteral("  %1:\n").arg(sub) + body;
-                }
-                if (!block.isEmpty())
-                    subRulesBlock = QStringLiteral("sub-rules:\n") + block;
-            }
-        }
-
-        // 真被引用的卡 = 有 direct 设备的 ∪ 副本真的生成了的。只给这些发出站定义，
-        // 其余的从 outName 里摘掉（留着会让 direct 设备指到一条根本没定义的出站上）。
-        QList<int> referenced = (directNics + QSet<int>(subRuleName.keyBegin(),
-                                                        subRuleName.keyEnd())).values();
-        std::sort(referenced.begin(), referenced.end());
-        const QSet<int> refSet(referenced.begin(), referenced.end());
-        for (int idx : all) {
-            if (!refSet.contains(idx))
-                outName.remove(idx);
-        }
-        QStringList proxyBlocks;
-        for (int idx : referenced) {
-            proxyBlocks << QStringLiteral("  - name: %1\n    type: direct\n    interface-name: %2\n")
-                                   .arg(outName.value(idx),
-                                        yamlQuote(m_egressNics.at(idx).friendlyName));
-        }
-        yaml = appendProxies(yaml, proxyBlocks);
-    }
-
     // 2) 非 follow/非 rule 的设备 → 前插 IN-USER 规则到 rules: 顶部（follow/rule 走正常规则，不发）。
     //    前插方式对齐 applyCustomRules：定位 "\nrules:"，在该行行尾后插入规则块，使其优先命中。
     QString ruleLines;
     for (const ProxyDevice &dev : proxied) {
-        // 这台设备落在哪张网卡的网段上（-1 = 不在任何已知网段 / 没配过 NicEgress）。
-        const int nic = egressNicFor(dev.ip);
         QString target;
         if (dev.mode == "reject") {
             continue; // ★ 禁网**不在这里发**，见 applyRejectDevices（必须压过私网直连）
         } else if (dev.mode == "direct") {
-            // 该卡有专属出站就指过去（= 直连从设备自己那张网卡出去），否则维持普通 DIRECT。
-            target = outName.value(nic, QStringLiteral("DIRECT"));
+            target = "DIRECT";
         } else if (dev.mode == "global") {
             if (dev.target.isEmpty()) {
                 continue; // global 但没指定目标 → 跳过这台，避免写出悬空引用
             }
             target = dev.target;
-            // 注：global 指向的是节点，节点拨号仍走全局出口 —— 要按卡绑得给每个节点挂
-            // dialer-proxy（核心的 BasicOption 明写 dialer-proxy 不作用于策略组），等于复制整份
-            // 节点表，不划算。节点拨号的出口是性能偏好而非正确性问题，本轮不做。
         } else {
-            // follow / rule：走整套订阅规则。若这台设备所在的卡有一份「目标 DIRECT 已改写成本卡
-            // 出站」的规则副本，就用 SUB-RULE 按设备身份分派进去；没有副本就照旧什么都不发。
-            // 分派条件的载体与下面 IN-USER/SRC-IP-CIDR 同源（数据面不同，身份的表达也不同）。
-            const QString sub = subRuleName.value(nic);
-            if (sub.isEmpty()) {
-                continue;
-            }
-            if (m_config.gatewayTproxy && dev.ip.isEmpty()) {
-                continue; // tproxy 下身份靠源 IP，台账还没记到 IP 就写不出条件
-            }
-            const QString cond = m_config.gatewayTproxy
-                    ? QStringLiteral("SRC-IP-CIDR,%1/32").arg(dev.ip)
-                    : QStringLiteral("IN-USER,%1").arg(dev.user);
-            ruleLines += QStringLiteral("  - %1\n")
-                                 .arg(yamlQuote(QStringLiteral("SUB-RULE,(%1),%2").arg(cond, sub)));
+            // follow / rule：走整套订阅规则，这里什么都不发。
+            // 「从哪张网卡出去」不再靠规则表达 —— 它是**入站的属性**，写在这台设备所属那个
+            // listener 的 interface-name 上（见上面生成 listeners 的那段）。
             continue;
         }
         // 设备身份的载体按数据面分：
@@ -964,17 +875,6 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
             if (lineEnd >= 0) {
                 yaml.insert(lineEnd + 1, ruleLines);
             }
-        }
-    }
-
-    // 3) sub-rules: 顶层块（只有「每网卡出口」那一档才有）。插在 rules: **之前**：两个键同级，
-    //    上一步已把 SUB-RULE 分派行插进 rules: 顶部，这里再插只是把它整体往后推 —— 锚点用的是
-    //    "\nrules:" 而不是绝对位置，先后不影响正确性。
-    //    幂等靠「每次都从种子重建整份 full.yaml」，不存在上一轮残留的 sub-rules: 块。
-    if (!subRulesBlock.isEmpty()) {
-        const qsizetype rulesPos = yaml.indexOf(QStringLiteral("\nrules:"));
-        if (rulesPos >= 0) {
-            yaml.insert(rulesPos + 1, subRulesBlock);
         }
     }
 
@@ -1483,50 +1383,43 @@ bool ConfigBuilder::runNicEgressSelfTest()
     const QString userB = DeviceStore::socksUser(macB);
     const QString userC = DeviceStore::socksUser(macC);
 
-    check(yaml.contains(QStringLiteral("  - name: COAST-OUT-1\n    type: direct\n"
-                                       "    interface-name: 'WLAN'")),
-          "副网卡生成了绑定它的 direct 出站");
-    // 主网卡**不**生成 —— 它本来就走系统默认出口，多一条只是噪声，还会出现在节点列表里。
-    check(!yaml.contains(QStringLiteral("COAST-OUT-0")), "主网卡没有多余的出站");
-    check(yaml.contains(QStringLiteral("\nsub-rules:\n  coast-nic-1:\n")), "生成了副卡的规则副本");
-    check(yaml.contains(QStringLiteral("SUB-RULE,(IN-USER,%1),coast-nic-1").arg(userB)),
-          "副卡上 follow 的设备被分派进副本");
-    check(yaml.contains(QStringLiteral("IN-USER,%1,COAST-OUT-1").arg(userC)),
-          "副卡上 direct 的设备直接指到本卡出站");
-    check(!yaml.contains(userA + QStringLiteral(",COAST-OUT"))
-                  && !yaml.contains(QStringLiteral("(IN-USER,%1)").arg(userA)),
-          "主网卡上的设备一个字都没被改写");
+    // —— 每张卡一个入站，出口网卡写在入站上 ——
+    check(yaml.contains(QStringLiteral(
+                  "  - name: coast-gw-0\n    type: socks\n    listen: 127.0.0.1\n"
+                  "    port: 7899\n    interface-name: '以太网'\n")),
+          "主网卡的入站绑到主网卡");
+    check(yaml.contains(QStringLiteral(
+                  "  - name: coast-gw-1\n    type: socks\n    listen: 127.0.0.1\n"
+                  "    port: 7900\n    interface-name: 'WLAN'\n")),
+          "副网卡的入站绑到副网卡（端口 = 7899 + 卡号）");
 
-    // 副本里的目标 DIRECT 必须已改写；而 rules: 正本里的 DIRECT 必须原样留着
-    //（正本是本机自己 + 主卡设备在走的那份）。
-    const qsizetype subPos = yaml.indexOf(QStringLiteral("\nsub-rules:\n"));
-    const qsizetype rulesPos = yaml.indexOf(QStringLiteral("\nrules:\n"));
-    const QString subBlock = (subPos >= 0 && rulesPos > subPos)
-            ? yaml.mid(subPos, rulesPos - subPos) : QString();
-    const QString rulesBlock = rulesPos >= 0 ? yaml.mid(rulesPos) : QString();
-    check(!subBlock.isEmpty() && subBlock.contains(QStringLiteral(",COAST-OUT-1")),
-          "副本里的目标 DIRECT 已改写成本卡出站");
-    check(!subBlock.contains(QStringLiteral(",DIRECT'")) && !subBlock.contains(QStringLiteral(",DIRECT,")),
-          "副本里不再有指向普通 DIRECT 的目标");
-    check(rulesBlock.contains(QStringLiteral(",DIRECT")), "正本里的 DIRECT 原样保留");
-    check(subBlock.contains(QStringLiteral("GEOIP,CN,COAST-OUT-1"))
-                  && subBlock.contains(QStringLiteral("DOMAIN-SUFFIX,cn,COAST-OUT-1")),
-          "副本里自定义的 DIRECT 规则确实被改写了");
-    check(subBlock.contains(QStringLiteral("DOMAIN-SUFFIX,ads.example.com,REJECT")),
-          "REJECT 目标原样保留");
-    // retargetDirect 的边界（整词 + 只在目标位）。这几条不经 YAML，直接打函数。
-    check(retargetDirect(QStringLiteral("  - 'GEOIP,CN,DIRECT,no-resolve'"), QStringLiteral("X"))
-                  == QStringLiteral("  - 'GEOIP,CN,X,no-resolve'"),
-          "retarget: 带 no-resolve 参数");
-    check(retargetDirect(QStringLiteral("  - 'MATCH,DIRECT'"), QStringLiteral("X"))
-                  == QStringLiteral("  - 'MATCH,X'"),
-          "retarget: MATCH 只有两段");
-    check(retargetDirect(QStringLiteral("  - 'DOMAIN,DIRECT.example.com,DIRECT'"), QStringLiteral("X"))
-                  == QStringLiteral("  - 'DOMAIN,DIRECT.example.com,X'"),
-          "retarget: payload 里的 DIRECT 不动");
-    check(retargetDirect(QStringLiteral("  - 'GEOIP,CN,DIRECT-CUSTOM'"), QStringLiteral("X"))
-                  == QStringLiteral("  - 'GEOIP,CN,DIRECT-CUSTOM'"),
-          "retarget: DIRECT-CUSTOM 这类同前缀目标不动");
+    // 设备按所在网卡分进各自入站的 users —— 这就是「哪台设备从哪张卡出去」的全部表达。
+    const qsizetype gw0 = yaml.indexOf(QStringLiteral("  - name: coast-gw-0"));
+    const qsizetype gw1 = yaml.indexOf(QStringLiteral("  - name: coast-gw-1"));
+    const QString seg0 = (gw0 >= 0 && gw1 > gw0) ? yaml.mid(gw0, gw1 - gw0) : QString();
+    // gw-1 那一段到下一个顶层键为止（\n 后面直接跟非空格 = 顶层）。
+    qsizetype end1 = -1;
+    if (gw1 >= 0) {
+        static const QRegularExpression topKey(QStringLiteral("(?m)^[^ \n]"));
+        const auto m = topKey.match(yaml, gw1);
+        end1 = m.hasMatch() ? m.capturedStart() : yaml.size();
+    }
+    const QString seg1 = gw1 >= 0 ? yaml.mid(gw1, end1 - gw1) : QString();
+    check(seg0.contains(userA) && !seg0.contains(userB) && !seg0.contains(userC),
+          "主网卡网段的设备只在 gw-0 里");
+    check(seg1.contains(userB) && seg1.contains(userC) && !seg1.contains(userA),
+          "副网卡网段的两台设备只在 gw-1 里");
+
+    // 旧那套（给每张卡造 direct 出站 + 复制一份规则树）**必须一个字都不剩**：真机上它只能改写
+    // DIRECT，而真实订阅里公网目的地一条 DIRECT 都没有，整套完全惰性；现在由入站属性取代。
+    check(!yaml.contains(QStringLiteral("COAST-OUT")) && !yaml.contains(QStringLiteral("sub-rules:"))
+                  && !yaml.contains(QStringLiteral("SUB-RULE")),
+          "没有残留的 COAST-OUT / sub-rules / SUB-RULE");
+    // follow 设备不再产生任何规则（它走整套订阅规则，出口由它所在的入站决定）。
+    check(!yaml.contains(QStringLiteral("IN-USER,%1,").arg(userB)), "follow 设备不产生规则");
+    // policy=direct 的设备仍旧指向普通 DIRECT —— 出口同样由入站决定，与规则无关。
+    check(yaml.contains(QStringLiteral("IN-USER,%1,DIRECT").arg(userC)),
+          "direct 设备指向普通 DIRECT");
 
     // 下面两轮都**换一个 configDir** 再生成。
     // ★ 全用同一个目录时，后一轮的 full.yaml 会把前一轮的**覆盖掉** —— 断言读的是内存里的
@@ -1538,9 +1431,8 @@ bool ConfigBuilder::runNicEgressSelfTest()
         c.userDir = dir;
         c.configDir = dir;
         c.gatewayTproxy = tproxy;
-        // 台账（coast.db）与自定义规则（rules.json）都得跟着复制过去：前者 proxiedDevices 按
-        // configDir 打开，后者是夹具里**唯一带 DIRECT 目标**的来源 —— 漏了它，副本无可改写，
-        // 而"没东西改写就不发副本"是有意的行为，于是断言会挂在一个假原因上。（就这么挂过一次。）
+        // 台账（coast.db）与自定义规则（rules.json）都得跟着复制过去 —— 前者 proxiedDevices 按
+        // configDir 打开，后者决定规则表长什么样。
         for (const char *f : {"coast.db", "rules.json"}) {
             QFile::copy(QDir(configDir).filePath(QLatin1String(f)),
                         QDir(dir).filePath(QLatin1String(f)));
@@ -1557,23 +1449,28 @@ bool ConfigBuilder::runNicEgressSelfTest()
         return text;
     };
 
-    // 单网卡回归：同一份台账，只给一张卡 → 产出里一个字的 COAST-OUT/sub-rules 都不该有。
+    // —— 单网卡回归：与本改动前**逐字节相同** ——
+    // 只有一张卡时"绑哪张"没有歧义，所以连 interface-name 都不该出现；三台设备全在一个入站里，
+    // 端口就是 7899。绝大多数用户走的是这一档，它必须零变化。
     {
         QVector<NicEgress> one;
         one << primary;
         const QString y2 = rebuildIn(configDir + QStringLiteral("/../single"), false, one);
-        check(!y2.isEmpty() && !y2.contains(QStringLiteral("COAST-OUT"))
-                      && !y2.contains(QStringLiteral("sub-rules:")),
-              "单网卡时产出不含任何每网卡出口的痕迹");
+        check(!y2.isEmpty() && y2.contains(QStringLiteral("  - name: coast-gw-0\n"))
+                      && !y2.contains(QStringLiteral("coast-gw-1"))
+                      && !y2.contains(QStringLiteral("interface-name:")),
+              "单网卡：只有一个入站、且不带 interface-name");
+        check(!y2.contains(QStringLiteral("COAST-OUT")) && !y2.contains(QStringLiteral("sub-rules:")),
+              "单网卡：没有任何每网卡出口的痕迹");
     }
-    // TPROXY 形态（Linux 的默认数据面）：身份载体换成 SRC-IP-CIDR，别的应当一致。
+    // TPROXY 形态（Linux 的默认数据面）：身份载体是 SRC-IP-CIDR，而**入站仍然按卡分**，
+    // 所以出口绑定这件事在两条数据面上是同一套。
     {
         const QString y3 = rebuildIn(configDir + QStringLiteral("/../tproxy"), true, nics);
-        check(!y3.isEmpty() && y3.contains(QStringLiteral("SUB-RULE,(SRC-IP-CIDR,192.168.2.60/32),"
-                                                          "coast-nic-1")),
-              "tproxy 形态：follow 设备按源 IP 分派");
-        check(y3.contains(QStringLiteral("SRC-IP-CIDR,192.168.2.61/32,COAST-OUT-1")),
-              "tproxy 形态：direct 设备指到本卡出站");
+        check(!y3.isEmpty() && y3.contains(QStringLiteral("    interface-name: 'WLAN'")),
+              "tproxy 形态：副卡入站同样绑到副卡");
+        check(y3.contains(QStringLiteral("SRC-IP-CIDR,192.168.2.61/32,DIRECT")),
+              "tproxy 形态：direct 设备按源 IP 指向普通 DIRECT");
     }
 
     std::printf("每网卡出口自测: %s\n配置在: %s\n（可直接用 `core -t -f <上面这个路径>` 让核心判合法性）\n",
@@ -1596,73 +1493,6 @@ int ConfigBuilder::egressNicFor(const QString &ip) const
         }
     }
     return -1;
-}
-
-// 往顶层 proxies: 里追加若干条出站。
-// 锚点与 replaceTopLevelProxies 一致（`^proxies:` 到 `\nproxy-groups:`），插在这一段的**末尾**，
-// 所以订阅节点那一版重写不会把它冲掉 —— 前提是本函数在 applySubscriptions **之后**调用。
-// `proxies: []`（无订阅时 normalizeEmptyProxies 的产物）要先摊成块式再追加，否则是坏 YAML。
-QString ConfigBuilder::appendProxies(QString yaml, const QStringList &blocks) const
-{
-    if (blocks.isEmpty()) {
-        return yaml;
-    }
-    static const QRegularExpression proxiesKey("(?m)^proxies:[ \\t]*(.*)$");
-    const auto m = proxiesKey.match(yaml);
-    if (!m.hasMatch()) {
-        return yaml; // 没有 proxies: 这个键就不动——宁可不生成，也不凭空造一个块
-    }
-    const QString inlineValue = m.captured(1).trimmed();
-    if (inlineValue == QStringLiteral("[]") || inlineValue == QStringLiteral("null")) {
-        // 摊成块式：`proxies: []` → `proxies:`，后面直接跟列表项。
-        yaml.replace(m.capturedStart(0), m.capturedLength(0), QStringLiteral("proxies:"));
-    } else if (!inlineValue.isEmpty()) {
-        return yaml; // 行内流式序列（`proxies: [{...}]`）——不去动它，交回原样
-    }
-    const qsizetype groups = yaml.indexOf(QStringLiteral("\nproxy-groups:"));
-    if (groups < 0) {
-        return yaml;
-    }
-    yaml.insert(groups + 1, blocks.join(QString()));
-    return yaml;
-}
-
-QStringList ConfigBuilder::currentRuleLines(const QString &yaml)
-{
-    QStringList out;
-    const qsizetype rulesPos = yaml.indexOf(QStringLiteral("\nrules:"));
-    if (rulesPos < 0) {
-        return out;
-    }
-    qsizetype pos = yaml.indexOf('\n', rulesPos + 1);
-    if (pos < 0) {
-        return out;
-    }
-    ++pos;
-    while (pos < yaml.size()) {
-        const qsizetype nextEnd = yaml.indexOf('\n', pos);
-        const QString line = yaml.mid(pos, nextEnd < 0 ? -1 : nextEnd - pos);
-        if (!line.startsWith(QStringLiteral("  - "))) {
-            break; // 列表结束（下一个顶层键）
-        }
-        out << line;
-        if (nextEnd < 0) {
-            break;
-        }
-        pos = nextEnd + 1;
-    }
-    return out;
-}
-
-// 只改**目标字段**：DIRECT 必须整词出现在一个逗号分隔位上，且其后要么到头、要么是引号、
-// 要么是参数（,no-resolve / ,src）。这样 `DIRECT-FOO`、以及 payload 里恰好含 "DIRECT" 的
-// 域名/正则都不会被误伤。
-QString ConfigBuilder::retargetDirect(const QString &ruleLine, const QString &target)
-{
-    static const QRegularExpression re(",DIRECT(?=$|,|'|\")");
-    QString out = ruleLine;
-    out.replace(re, QStringLiteral(",") + target);
-    return out;
 }
 
 QString ConfigBuilder::normalizeEmptyProxies(QString yaml) const

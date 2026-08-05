@@ -229,6 +229,16 @@ public:
     // 独立于主混合口(7890)，让 Coast 自己的测速仍免认证走 7890。ConfigBuilder 生成此 listener，
     // LanGateway 拨号连此端口——两边必须一致。
     static constexpr quint16 kGatewayPort = 7899;
+    /// 第 nicIndex 张网卡对应的网关 socks 端口 = kGatewayPort + nicIndex。
+    ///
+    /// ★ **每张网卡各一个入站**，因为「从哪张网卡出去」是核心里 listener 的属性
+    ///   （`interface-name`，见 ConfigBuilder 生成 listeners 那段）。同时接两条上行时，
+    ///   设备必须从它自己挂着的那条出去 —— 而入站是唯一能表达这件事的地方。
+    ///   ConfigBuilder 用它生成 listener 端口、LanGateway 用它决定拨哪个口，两边必须同源。
+    static constexpr quint16 gatewayPortFor(int nicIndex)
+    {
+        return quint16(kGatewayPort + (nicIndex > 0 ? nicIndex : 0));
+    }
     // TPROXY 数据面的入站端口（AppConfig::gatewayTproxy 打开时才发这个 listener）。
     // 与 kGatewayPort 挨着放：这两个都是「网关专用、不对外」的口,改端口时容易一起看到。
     // TPROXY 下设备身份由**原始源 IP**承载(核心直接看得到),不再需要 socks 用户名那套,

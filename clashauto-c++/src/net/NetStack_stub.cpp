@@ -63,7 +63,7 @@ bool NetStack::init(QString *err)
 // init() 恒失败 ⇒ 下面这些在生产里一个都到不了。仍然给出定义（而不是留成未定义符号），
 // 是为了让"谁不小心绕过 init 直接调"表现为一次无害的空操作，而不是链接错误或崩溃。
 bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QString &localIp,
-                      const QString &netmask, QString *err)
+                      const QString &netmask, quint16 socksPort, QString *err)
 {
     Q_UNUSED(ep);
     Q_UNUSED(localMac6);

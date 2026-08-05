@@ -292,7 +292,8 @@ int runGatewaySelfTest()
     // 路由靠子网匹配（见 NetStack 头注释），默认 10.9.9.254/24 配默认 victim 10.9.9.1。
     const QString selfIp = QString::fromLatin1(envOr("COAST_SELFTEST_LOCAL_IP", "10.9.9.254"));
     const QString selfMask = QString::fromLatin1(envOr("COAST_SELFTEST_NETMASK", "255.255.255.0"));
-    if (!net->addNic(ep, localMac, selfIp, selfMask, &err)) {
+    // 0 = 沿用 NetStack 构造时那个口（自测只有一张卡，不需要按卡分入站）。
+    if (!net->addNic(ep, localMac, selfIp, selfMask, 0, &err)) {
         std::fprintf(stderr, "SELFTEST: NetStack.addNic 失败: %s\n", err.toLatin1().constData());
         return 3;
     }

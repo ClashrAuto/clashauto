@@ -42,6 +42,7 @@
 #include "core/ProxyConfig.h"
 #include "core/CoreRouter.h"
 #include "Socks5Client.h"   // Socks5OutboundFactory：CoastCore 的回退出站
+#include "../DeviceStore.h" // gatewayPortFor：每张网卡对应核心的哪个入站口
 #include "core/CoreDialerFactory.h"
 #include "PfRules.h"
 #include "TproxyRules.h" // TPROXY 数据面的内核规则（装/拆/设备集合）
@@ -1077,7 +1078,8 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 qInfo() << "网关: 本机地址变了，重挂协议栈网卡" << spec.ifname << n->netIp << "->"
                         << spec.localIp;
                 m_net->removeNic(n->ep);
-                if (m_net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask, &err)) {
+                if (m_net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask,
+                                  DeviceStore::gatewayPortFor(n->order), &err)) {
                     n->netIp = spec.localIp;
                     n->netMask = spec.netmask;
                 } else {
@@ -1107,8 +1109,12 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         }
         // ★ m_net 判空必须在**最前面**：tproxy 模式下它恒为空，而 && 是从左到右求值的。
         //   我第一版写成 `!m_net->hasNic(...) && m_net && ...`，hasNic 先解引用了空指针 → SIGSEGV。
+        // ★ 端口按**网卡下标**取：核心侧每张卡各有一个入站（listener 的 interface-name 决定
+        //   这条连接从哪张网卡出去），拨错口就等于走错网卡。与 ConfigBuilder 生成 listener 端口
+        //   同源（DeviceStore::gatewayPortFor），两边必须一起改。
         if (m_net && !m_net->hasNic(n->ep)
-            && !m_net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask, &err)) {
+            && !m_net->addNic(n->ep, n->ep->localMac(), spec.localIp, spec.netmask,
+                              DeviceStore::gatewayPortFor(n->order), &err)) {
             emit deviceError(QString(),
                              QStringLiteral("协议栈挂载网卡失败(%1): ").arg(spec.ifname) + err);
             continue;

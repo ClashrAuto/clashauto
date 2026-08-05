@@ -275,7 +275,7 @@ bool LocalTunService::start(std::shared_ptr<ProxyConfigStore> store,
                 return;
         }
         if (!m_net->addNic(m_ep, m_ep->localMac(), QString::fromLatin1(kTunIp),
-                           QString::fromLatin1(kMask), &stageErr))
+                           QString::fromLatin1(kMask), 0 /*沿用构造时的口*/, &stageErr))
             return;
         // TUN 上只有「本机」一个来源，登记成一个静态邻居即可（没有 ARP，见 TunEndpoint.h）。
         m_net->addDevice(QString::fromLatin1(kPeerIp), coastcore::tunPeerMac(),

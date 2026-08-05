@@ -237,8 +237,11 @@ public:
 
     // 挂一张网卡：ep 为其二层端点，localMac6/localIp/netmask 为本机在这张卡上的信息。
     // localIp/netmask 必须有效——栈据它们判断本网段（见文件头说明）。
+    /// socksPort：**这张卡**的连接该拨核心的哪个入站口。核心的 listener 支持 interface-name，
+    /// 所以「从哪张网卡出去」是由入站决定的 —— 每张卡各有一个入站，拨错口就等于走错网卡。
+    /// 0 = 沿用 NetStack 构造时那个（单网卡场景，行为与以前一致）。
     bool addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QString &localIp,
-                const QString &netmask, QString *err);
+                const QString &netmask, quint16 socksPort, QString *err);
     // 摘掉一张网卡（网卡消失/重配时）。其上的设备静态 ARP 由 removeDevice 各自清理。
     void removeNic(IL2Endpoint *ep);
     bool hasNic(IL2Endpoint *ep) const;

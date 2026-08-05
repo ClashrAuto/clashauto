@@ -105,12 +105,6 @@ private:
     // —— 每网卡出口（见 NicEgress）——
     // 该 IP 落在哪张卡上；-1 = 不在任何已知网段。
     int egressNicFor(const QString &ip) const;
-    // 往 proxies: 里追加若干条出站（整块 YAML 文本，含前导 "  - "）。空列表时原样返回。
-    QString appendProxies(QString yaml, const QStringList &blocks) const;
-    // 取 rules: 块里现有的全部规则行（"  - xxx" 原文，含缩进）。
-    static QStringList currentRuleLines(const QString &yaml);
-    // 把一条规则行里的目标 DIRECT 改写成 target（只改**目标字段**，不碰 payload 里的字样）。
-    static QString retargetDirect(const QString &ruleLine, const QString &target);
 
     AppConfig m_config;
     QVector<NicEgress> m_egressNics;

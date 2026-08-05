@@ -92,6 +92,11 @@ struct NetStack::Nic {
     IL2Endpoint *ep = nullptr;
     QByteArray localMac6;
     QString localIp, netmask;
+    // ★ 这张卡专属的出站工厂：拨**这张卡对应的**核心入站口。
+    //   「从哪张网卡出去」在核心里是 listener 的属性（interface-name），所以每张卡一个入站、
+    //   拨错口 = 走错网卡。为空 = 沿用 Impl::outFactory（单网卡，与以前一致）。
+    OutboundFactory *outFactory = nullptr;
+    quint16 socksPort = 0;
 };
 
 namespace {
@@ -910,10 +915,24 @@ void smolOutFrame(void *user, CoastNicId nic, const uint8_t *frame, size_t len)
     n->ep->send(QByteArray(reinterpret_cast<const char *>(frame), static_cast<int>(len)));
 }
 
+// 这条连接该用哪个出站工厂：
+//   CoastCore 装了全局工厂 → 用它（它自己按设备绑网卡，不经核心）；
+//   否则优先**这张卡专属**的（拨该卡对应的核心入站，出口网卡由那个入站的 interface-name 决定）；
+//   都没有 → 全局默认（单网卡，与以前一致）。
+OutboundFactory *outFactoryFor(NetStack::Impl *d, NetStack::Nic *n)
+{
+    if (!d)
+        return nullptr;
+    if (d->outFactory && d->outFactory != d->ownedDefault)
+        return d->outFactory; // CoastCore：进程内出站，自己管绑卡
+    if (n && n->outFactory)
+        return n->outFactory;
+    return d->outFactory;
+}
+
 bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *src, uint16_t sport,
                  const CoastAddr *dst, uint16_t dport)
 {
-    Q_UNUSED(nic);
     Q_UNUSED(sport);
     auto *d = static_cast<NetStack::Impl *>(user);
     if (!d || !src || !dst)
@@ -931,7 +950,8 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
     c->impl = d;
     c->id = id;
     // ★ 经工厂创建：默认工厂返回 Socks5Tcp（拨 mihomo），换成 CoreDialerFactory 就走进程内出站。
-    c->socks = d->outFactory ? d->outFactory->createTcp(d->owner) : nullptr;
+    OutboundFactory *fac = outFactoryFor(d, d->nicById.value(nic, nullptr));
+    c->socks = fac ? fac->createTcp(d->owner) : nullptr;
     if (!c->socks) {
         d->smolConns.remove(id);
         delete c;
@@ -1230,7 +1250,7 @@ bool NetStack::init(QString *err)
 }
 
 bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QString &localIp,
-                      const QString &netmask, QString *err)
+                      const QString &netmask, quint16 socksPort, QString *err)
 {
     if (!d->inited) {
         if (err)
@@ -1262,6 +1282,11 @@ bool NetStack::addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QStrin
     }
 
     auto *nic = new Nic;
+    nic->socksPort = socksPort;
+    // 只有「给了口、且和全局那个不同」时才建专属工厂；否则沿用全局的（省一个对象，也让
+    // 单网卡路径与以前逐字相同）。CoastCore 装了自己的工厂时由 outFactoryFor 让它优先。
+    if (socksPort != 0 && socksPort != d->socksPort)
+        nic->outFactory = new Socks5OutboundFactory(socksPort);
     nic->ep = ep;
     nic->localMac6 = localMac6;
     nic->localIp = localIp;
@@ -1309,6 +1334,8 @@ void NetStack::removeNic(IL2Endpoint *ep)
     if (d->smol && nid)
         coast_stack_remove_nic(d->smol, nid);
     d->nicById.remove(nid);
+    delete nic->outFactory;
+    nic->outFactory = nullptr;
     // 该卡上的 UDP 会话失去出口，一并收掉（设备重新发包会重建）。
     const QStringList victims = d->udp.keys();
     for (const QString &ip : victims) {
@@ -1542,7 +1569,10 @@ void NetStack::handleUdpFrame(Nic *nic, const QByteArray &frame, int ihl)
         flow->vport = sport;
         flow->idleMs = isShortLivedUdpPort(dport) ? kUdpDnsIdleMs : kUdpIdleMs;
         // 经工厂创建：默认返回 Socks5Udp（拨 mihomo），装了 CoreDialerFactory 就是进程内 UDP 出站。
-        flow->socks = d->outFactory ? d->outFactory->createUdp(this) : nullptr;
+        {
+            OutboundFactory *fac = outFactoryFor(d, s->nic);
+            flow->socks = fac ? fac->createUdp(this) : nullptr;
+        }
         if (!flow->socks) {
             // 工厂拒绝（协议没有 UDP 出站实现且严格模式）→ 这条流建不起来，丢包即可（UDP 语义）
             ++GatewayDiag::c.udpFlowsRefused;
@@ -1679,7 +1709,10 @@ void NetStack::handleUdpFrame6(Nic *nic, const QByteArray &frame)
         //（不校验来源），记录在案的取舍——v6 UDP（QUIC/DNS64 等）以此为代价换实现简单。
         flow->coneOpen = true;
         // 经工厂创建：默认返回 Socks5Udp（拨 mihomo），装了 CoreDialerFactory 就是进程内 UDP 出站。
-        flow->socks = d->outFactory ? d->outFactory->createUdp(this) : nullptr;
+        {
+            OutboundFactory *fac = outFactoryFor(d, s->nic);
+            flow->socks = fac ? fac->createUdp(this) : nullptr;
+        }
         if (!flow->socks) {
             // 工厂拒绝（协议没有 UDP 出站实现且严格模式）→ 这条流建不起来，丢包即可（UDP 语义）
             ++GatewayDiag::c.udpFlowsRefused;
