@@ -261,6 +261,13 @@ public:
     // 互斥、不会同时监听，但用不同端口能让「当前跑的是哪条路」一眼可辨，排查省事。
 
     static constexpr quint16 kRedirPort = 7897;
+    /// 第 nicIndex 张网卡对应的 redir 入站端口（macOS 的 pf 数据面）。
+    /// 与 tproxyPortFor 同样向下编号 —— 两者**互斥**（一台机器上不会 tproxy 与 pf 并存），
+    /// 所以端口重叠不成立冲突。
+    static constexpr quint16 redirPortFor(int nicIndex)
+    {
+        return quint16(kRedirPort - (nicIndex > 0 ? nicIndex : 0));
+    }
 
 signals:
     void changed();          // 任一展示字段变化（控制器据此刷新模型）

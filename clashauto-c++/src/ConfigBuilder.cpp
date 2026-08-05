@@ -813,24 +813,32 @@ QString ConfigBuilder::applyDevicePolicies(QString yaml) const
         //     · 其余 UDP（QUIC/HTTP3、游戏、WireGuard…）→ **无法接管**，会按内核转发直连出去。
         //   这是 BSD 平台的固有限制（没有 TPROXY），不是实现没写完。双栈站点大多有 TCP 回退，
         //   但 QUIC-only 的流量在 macOS 网关下确实绕过代理 —— 记在这里，别当 bug 反复查。
-        block += "  - name: coast-redir\n";
-        block += "    type: redir\n";
-        // ★★ **必须写 127.0.0.1，不能写 0.0.0.0。** 写 0.0.0.0 时 mihomo 建出来的是**IPv6
-        //   通配套接字**（真机 lsof：`core IPv6 *:7897 (LISTEN)`），v4 连接以 v4-mapped 形式
-        //   到达；随后核心用 /dev/pf 的 DIOCNATLOOK 还原原始目的地时地址族对不上，查不到那条
-        //   状态 —— 而 mihomo 的 darwin redir 在拿不到原始目的地时**不报错、不打日志**，
-        //   accept 之后直接把连接丢掉。表现就是"三边看起来都对，唯独不通"。
-        //   真机对照（同一条路由、同一个 pf 表，只改这一行）：
-        //       listen: 0.0.0.0    → lsof 显示 IPv6 *:7897   → 设备请求 http=000，核心日志 0 行
-        //       listen: 127.0.0.1  → lsof 显示 IPv4 127.0.0.1:7897 → 设备请求 http=404（真实响应）
-        //     两次 pf 的 rdr 计数都在涨（Packets/States 有值），也就是说流量确实被重定向进来了，
-        //     区别只在核心还不还得出原始目的地。
-        //   绑 127.0.0.1 够用且更严：rdr 的目标本来就是 127.0.0.1，没有任何流量需要从别的
-        //   地址进这个口；绑通配反而把 redir 口暴露给整个局域网。
-        //   （与 TPROXY 那条相反——那边**必须**写 `::`，因为 TPROXY 保留原始目的地址、要靠双栈
-        //     套接字同时收 v4/v6。两条数据面的约束正好相反，别照抄。）
-        block += "    listen: 127.0.0.1\n";
-        block += QString("    port: %1\n").arg(DeviceStore::kRedirPort);
+        // ★ 与 socks / tproxy 两侧同构：**每张卡一个 redir 入站**，pf 的 rdr 规则本来就是逐卡
+        //   下的（`rdr pass on <ifname>`），只是让它重定向到本卡专属的那个口。少了这一层，
+        //   macOS 上「设备从自己那条上行出去」不生效 —— 与 Linux 上 tproxy 那次是同一个坑。
+        for (auto it = byNic.constBegin(); it != byNic.constEnd(); ++it) {
+            const int idx = it.key();
+            block += QString("  - name: coast-redir-%1\n").arg(idx);
+            block += "    type: redir\n";
+            // ★★ **必须写 127.0.0.1，不能写 0.0.0.0。** 写 0.0.0.0 时 mihomo 建出来的是**IPv6
+            //   通配套接字**（真机 lsof：`core IPv6 *:7897 (LISTEN)`），v4 连接以 v4-mapped
+            //   形式到达；随后核心用 /dev/pf 的 DIOCNATLOOK 还原原始目的地时地址族对不上，查不
+            //   到那条状态 —— 而 mihomo 的 darwin redir 在拿不到原始目的地时**不报错、不打
+            //   日志**，accept 之后直接把连接丢掉。表现就是"三边看起来都对，唯独不通"。
+            //   真机对照（同一条路由、同一个 pf 表，只改这一行）：
+            //     listen: 0.0.0.0   → lsof 显示 IPv6 *:7897 → 设备请求 http=000，核心日志 0 行
+            //     listen: 127.0.0.1 → lsof 显示 IPv4 127.0.0.1:7897 → 设备请求 http=404（真响应）
+            //   两次 pf 的 rdr 计数都在涨，区别只在核心还不还得出原始目的地。
+            //   绑 127.0.0.1 够用且更严：rdr 的目标本来就是 127.0.0.1，绑通配反而把这个口暴露
+            //   给整个局域网。（与 TPROXY 那条相反——那边**必须**写 `::`。别照抄。）
+            block += "    listen: 127.0.0.1\n";
+            block += QString("    port: %1\n").arg(DeviceStore::redirPortFor(idx));
+            if (m_egressNics.size() >= 2 && idx < m_egressNics.size()
+                && !m_egressNics.at(idx).friendlyName.isEmpty()) {
+                block += QString("    interface-name: %1\n")
+                                 .arg(yamlQuote(m_egressNics.at(idx).friendlyName));
+            }
+        }
     }
 
     // 若已存在我们上轮生成的顶层 listeners: 块，整块替换（从 listeners: 到下一个顶层键为止，
@@ -1438,12 +1446,14 @@ bool ConfigBuilder::runNicEgressSelfTest()
     // ★ 全用同一个目录时，后一轮的 full.yaml 会把前一轮的**覆盖掉** —— 断言读的是内存里的
     //   字符串所以照样过，但最后打出来那条"配置在:"指的是被覆盖后的文件，拿它去跑 `core -t`
     //   验的就不是刚断言过的那份。第一版正是这样，差点照着错的产物下结论。
-    auto rebuildIn = [&](const QString &dir, bool tproxy, const QVector<NicEgress> &use) -> QString {
+    auto rebuildIn = [&](const QString &dir, bool tproxy, bool pf,
+                         const QVector<NicEgress> &use) -> QString {
         QDir().mkpath(dir);
         AppConfig c = cfg;
         c.userDir = dir;
         c.configDir = dir;
         c.gatewayTproxy = tproxy;
+        c.gatewayPf = pf;
         // 台账（coast.db）与自定义规则（rules.json）都得跟着复制过去 —— 前者 proxiedDevices 按
         // configDir 打开，后者决定规则表长什么样。
         for (const char *f : {"coast.db", "rules.json"}) {
@@ -1468,7 +1478,7 @@ bool ConfigBuilder::runNicEgressSelfTest()
     {
         QVector<NicEgress> one;
         one << primary;
-        const QString y2 = rebuildIn(configDir + QStringLiteral("/../single"), false, one);
+        const QString y2 = rebuildIn(configDir + QStringLiteral("/../single"), false, false, one);
         check(!y2.isEmpty() && y2.contains(QStringLiteral("  - name: coast-gw-0\n"))
                       && !y2.contains(QStringLiteral("coast-gw-1"))
                       && !y2.contains(QStringLiteral("interface-name:")),
@@ -1479,7 +1489,7 @@ bool ConfigBuilder::runNicEgressSelfTest()
     // TPROXY 形态（Linux 的默认数据面）：身份载体是 SRC-IP-CIDR，而**入站仍然按卡分**，
     // 所以出口绑定这件事在两条数据面上是同一套。
     {
-        const QString y3 = rebuildIn(configDir + QStringLiteral("/../tproxy"), true, nics);
+        const QString y3 = rebuildIn(configDir + QStringLiteral("/../tproxy"), true, false, nics);
         // ★ tproxy **也要按卡分口**：Linux 的数据面走的是 tproxy 入站，不是上面那个 socks 口。
         //   这一条不成立时，Linux 上「设备从自己那条上行出去」整个不生效 —— 而配置看起来是对的
         //   （socks 那两个入站都带着 interface-name），最容易被当成已经修好。
@@ -1496,6 +1506,24 @@ bool ConfigBuilder::runNicEgressSelfTest()
               "tproxy 形态：没有残留那个不分卡的老入站");
         check(y3.contains(QStringLiteral("SRC-IP-CIDR,192.168.2.61/32,DIRECT")),
               "tproxy 形态：direct 设备按源 IP 指向普通 DIRECT");
+    }
+    // pf 形态（macOS 的数据面）。★ 这一档在**任何平台**都测得到：redir 入站的生成是纯字符串
+    //   拼装、与平台无关；只有 PfRules 那半截才是 macOS 专属。没有它，macOS 的配置生成就是
+    //   零覆盖 —— 而这条线上没人能在本地编 macOS，CI 的 mac 任务又在外部仓库。
+    {
+        const QString y4 = rebuildIn(configDir + QStringLiteral("/../pf"), false, true, nics);
+        check(!y4.isEmpty()
+                      && y4.contains(QStringLiteral("  - name: coast-redir-0\n    type: redir\n"
+                                                    "    listen: 127.0.0.1\n    port: 7897\n"
+                                                    "    interface-name: '以太网'\n")),
+              "pf 形态：主卡的 redir 入站绑到主卡");
+        check(y4.contains(QStringLiteral("  - name: coast-redir-1\n    type: redir\n"
+                                         "    listen: 127.0.0.1\n    port: 7896\n"
+                                         "    interface-name: 'WLAN'\n")),
+              "pf 形态：副卡的 redir 入站绑到副卡");
+        check(!y4.contains(QStringLiteral("- name: coast-redir\n"))
+                      && !y4.contains(QStringLiteral("coast-tproxy")),
+              "pf 形态：没有老的单口 redir，也不该有 tproxy 入站");
     }
 
     std::printf("每网卡出口自测: %s\n配置在: %s\n（可直接用 `core -t -f <上面这个路径>` 让核心判合法性）\n",

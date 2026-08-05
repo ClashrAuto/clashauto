@@ -311,18 +311,39 @@ static BOOL applyProxies(BOOL enable, NSString *host, int port, NSArray<NSString
 
     // 网卡名要拼进规则文件，先做字符集校验（只允许字母数字和 .:-）。helper 是 root，
     // 放任任意字符串进 pf 规则等于让客户端间接改写整台机器的包过滤。
+    // 条目形式：`en0` 或 `en0:7897`。带端口的那种表示「这张卡 rdr 到它自己那个 redir 入站」——
+    // 出口网卡在核心里是 listener 的属性，同时接多条上行时每张卡各有一个入站（见应用侧
+    // PfRules.h 的 NicPort）。**按最后一个冒号拆**，尾巴不是合法端口就把整串当网卡名，
+    // 这样老形式（纯网卡名）逐字节等价，新旧客户端都能应付。
     NSMutableArray<NSString *> *ifs = [NSMutableArray array];
+    NSMutableArray<NSNumber *> *ports = [NSMutableArray array];
     for (NSString *raw in [ifnamesCommaSep componentsSeparatedByString:@","]) {
         NSString *s = [raw stringByTrimmingCharactersInSet:
                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
         if (!s.length) continue;
-        if (s.length > 24 || !pfNameIsSafe(s)) {
+        int perNic = 0;
+        const NSRange colon = [s rangeOfString:@":" options:NSBackwardsSearch];
+        if (colon.location != NSNotFound && colon.location + 1 < s.length) {
+            NSString *tail = [s substringFromIndex:colon.location + 1];
+            NSCharacterSet *nonDigit = [[NSCharacterSet decimalDigitCharacterSet] invertedSet];
+            if ([tail rangeOfCharacterFromSet:nonDigit].location == NSNotFound) {
+                const int p = tail.intValue;
+                if (p > 0 && p <= 65535) {
+                    perNic = p;
+                    s = [s substringToIndex:colon.location];
+                }
+            }
+        }
+        // 网卡名照旧做字符集校验：helper 是 root，放任任意字符串进 pf 规则等于让客户端
+        // 间接改写整台机器的包过滤。
+        if (!s.length || s.length > 24 || !pfNameIsSafe(s)) {
             reply(NO, [NSString stringWithFormat:@"网卡名非法：%@", s]);
             return;
         }
         [ifs addObject:s];
+        [ports addObject:@(perNic)];
     }
-    if (!ifs.count) [ifs addObject:@"en0"];
+    if (!ifs.count) { [ifs addObject:@"en0"]; [ports addObject:@0]; }
 
     [self pfTeardown]; // 上次可能被 kill -9 打死，先清干净
 
@@ -335,13 +356,16 @@ static BOOL applyProxies(BOOL enable, NSString *host, int port, NSArray<NSString
 
     // DNS 那条必须排在通配 rdr 之前，否则 53 会被一起截走、到不了核心的 DNS 监听。
     NSMutableString *rules = [NSMutableString stringWithString:@"table <coast_proxied> persist\n"];
-    for (NSString *ifn in ifs) {
+    for (NSUInteger i = 0; i < ifs.count; ++i) {
+        NSString *ifn = ifs[i];
         if (dnsPort > 0) {
             [rules appendFormat:@"rdr pass on %@ inet proto udp from <coast_proxied> "
                                  "to any port 53 -> 127.0.0.1 port %d\n", ifn, dnsPort];
         }
+        // 这张卡带了专属端口就用它（每卡一个 redir 入站），否则用全局那个。
+        const int p = ports[i].intValue > 0 ? ports[i].intValue : redirPort;
         [rules appendFormat:@"rdr pass on %@ inet proto tcp from <coast_proxied> "
-                             "to any -> 127.0.0.1 port %d\n", ifn, redirPort];
+                             "to any -> 127.0.0.1 port %d\n", ifn, p];
     }
 
     // ★ 必须写临时文件，**不能 `pfctl -f -` 从 stdin 喂** —— 后者静默失败（退出码 0、装 0 条）。

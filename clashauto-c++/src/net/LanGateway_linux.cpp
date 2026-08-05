@@ -1011,9 +1011,16 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             PfRules::Spec ps;
             ps.redirPort = m_datapath.redirPort;
             ps.dnsPort = m_datapath.dnsPort;
-            for (const LanGateway::NicSpec &ns : specs)
-                if (!ns.ifname.isEmpty())
-                    ps.ifnames.append(ns.ifname);
+            // 与 tproxy 那侧同构：端口按网卡下标取，与 ConfigBuilder 生成 redir listener 的
+            // 端口同源（DeviceStore::redirPortFor）。rdr 到别的口 = 设备从别的上行出去。
+            int pfIdx = -1;
+            for (const LanGateway::NicSpec &ns : specs) {
+                ++pfIdx;
+                if (ns.ifname.isEmpty())
+                    continue;
+                ps.ifnames.append(ns.ifname);
+                ps.nicPorts.append({ns.ifname, DeviceStore::redirPortFor(pfIdx)});
+            }
             if (!m_pf.install(ps, &err)) {
                 emit deviceError(QString(),
                                  QStringLiteral("pf 规则装载失败（已保持未接管状态）: ") + err);

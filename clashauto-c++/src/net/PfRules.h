@@ -172,6 +172,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 class PfRules
 {
@@ -183,6 +184,18 @@ public:
         quint16 redirPort = 0;   ///< 核心的 redir 入站端口（rdr 的目的地）
         quint16 dnsPort = 0;     ///< 核心的 DNS 监听端口；0 = 不劫持 DNS
         QStringList ifnames;     ///< 网关接管的网卡名（rdr 规则按网卡限定）
+        /// —— 每张网卡重定向到**它自己那个**核心 redir 入站 ——
+        ///
+        /// 「从哪张网卡出去」在核心里是 listener 的属性（`interface-name`，见 core 的
+        /// component/dialer/egress.go）。所以同时接多条上行时，每张卡各有一个 redir 入站，
+        /// 设备的流量必须 rdr 到**它进来的那张卡**对应的口 —— 重定向到别的口就等于走错上行。
+        /// rdr 规则本来就是 `on <ifname>` 逐卡下的，这里只是让端口也跟着卡变。
+        /// 空 = 全都用 redirPort，与本改动之前逐字节相同。
+        struct NicPort {
+            QString ifname;
+            quint16 port = 0;
+        };
+        QVector<NicPort> nicPorts;
     };
 
     ~PfRules();
