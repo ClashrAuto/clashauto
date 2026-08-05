@@ -280,6 +280,9 @@ struct NetStack::Impl {
     // 进程内 DNS 开关（见 setLocalDnsEnabled）。关 = 老行为：:53 全部转投 mihomo。
     bool localDns = false;
     Socks5OutboundFactory *ownedDefault = nullptr; // 默认工厂，由本对象持有
+    // 换过口的旧工厂（见 setNicSocksPort）。留到析构才清 —— 立刻 delete 会踩到还握着它
+    // 所造出站对象的活连接。
+    QVector<OutboundFactory *> retiredFactories;
     QHash<IL2Endpoint *, Nic *> nics;        // 二层端点 → 该网卡的上下文
     QHash<QString, DeviceInfo> devices;      // 设备 IP（v4 或 v6 串）→ {mac,user}
     QHash<QString, UdpSess *> udp;           // 设备 IP（v4 或 v6 串）→ UDP 会话
@@ -1095,6 +1098,9 @@ NetStack::NetStack(quint16 socksPort, QObject *parent)
 
 NetStack::~NetStack()
 {
+    qDeleteAll(d->retiredFactories);
+    d->retiredFactories.clear();
+
     // 诊断日志收尾：写掉最后一个采样窗口 + 一条停机标记。放在这里而不是 LanGateway::disableAll，
     // 是因为**本析构在工作线程上跑**（见 LanGateway_linux.cpp 的线程模型），与所有 sample() 调用
     // 同线程 —— GatewayDiag 的单线程前提得以保持。此刻 d->timer 还没被 delete d 干掉，但我们已经
@@ -1279,6 +1285,24 @@ bool NetStack::init(QString *err)
     d->timer->start();
 
     d->inited = true;
+    return true;
+}
+
+bool NetStack::setNicSocksPort(IL2Endpoint *ep, quint16 socksPort)
+{
+    if (!ep)
+        return false;
+    Nic *nic = d->nics.value(ep, nullptr);
+    if (!nic || nic->socksPort == socksPort)
+        return nic != nullptr; // 没这张卡 = 失败；没变化 = 什么都不用做
+    nic->socksPort = socksPort;
+    // ★ 旧工厂**不能立刻 delete**：可能还有连接握着它造出来的出站对象。挪进墓地，
+    //   随 Impl 一起销毁。换口只发生在网卡增减时（人手插拔/禁用），墓地长不大。
+    if (nic->outFactory)
+        d->retiredFactories.append(nic->outFactory);
+    nic->outFactory = (socksPort != 0 && socksPort != d->socksPort)
+                              ? new Socks5OutboundFactory(socksPort)
+                              : nullptr;
     return true;
 }
 

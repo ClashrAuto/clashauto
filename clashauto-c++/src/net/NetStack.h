@@ -242,6 +242,18 @@ public:
     /// 0 = 沿用 NetStack 构造时那个（单网卡场景，行为与以前一致）。
     bool addNic(IL2Endpoint *ep, const QByteArray &localMac6, const QString &localIp,
                 const QString &netmask, quint16 socksPort, QString *err);
+
+    /// 换掉某张卡对应的核心入站口（**就地改，不重挂网卡**）。
+    ///
+    /// ★ 为什么需要它：每张卡拨的是「自己那个入站」，端口由**网卡序号**算出
+    ///   （`DeviceStore::gatewayPortFor(order)`）。而序号会变 —— 拔掉/禁用另一张卡时，
+    ///   剩下那张就从 1 变成 0，配置侧跟着重生成成 `coast-gw-0:7899`，网关这边如果不同步，
+    ///   就会继续拨已经没人监听的 7900：**每条连接 Connection refused**，而设备侧只看到
+    ///   「网全断了」。真机上禁用有线卡的那一刻当场复现过。
+    ///
+    /// ★ 不用 removeNic+addNic：那会把这张卡上**所有活连接**一起打断。换口只影响此后
+    ///   新建的连接，已建立的照旧走它当初拨通的那条。
+    bool setNicSocksPort(IL2Endpoint *ep, quint16 socksPort);
     // 摘掉一张网卡（网卡消失/重配时）。其上的设备静态 ARP 由 removeDevice 各自清理。
     void removeNic(IL2Endpoint *ep);
     bool hasNic(IL2Endpoint *ep) const;

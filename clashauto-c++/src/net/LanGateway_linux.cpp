@@ -238,6 +238,9 @@ struct GwNic {
     // 挂上协议栈**那一刻**登记进去的本机地址/掩码。栈里那份是快照、不会自己更新，所以要留一份
     // 用来发现「本机在这张卡上的地址后来变了」（DHCP 续约、或从 APIPA 转正）。
     QString netIp, netMask;
+    // 已经登记进协议栈的那个 SOCKS 口。**必须单独记**：它由网卡序号算出，而序号会随
+    // 「另一张卡被拔掉/禁用」而变，光看地址/掩码是发现不了的（地址一个字节都没动）。
+    quint16 stackSocksPort = 0;
     int diagSlot = 0;        // GatewayDiag 里这张卡的计数槽（见 GatewayDiag::nicSlot）
     bool ready = false;      // ep 已打开且 netif 已挂上协议栈
     int victims = 0;         // 这张卡上正在被劫持的设备数（>0 时不重建，避免断流）
@@ -1057,6 +1060,23 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         }
         n->order = specIndex;
         n->diagSlot = GatewayDiag::nicSlot(spec.ifname); // 幂等，每轮问一次即可
+        // ★ 序号变了 → 这张卡该拨的入站口也变了，就地同步给协议栈。
+        //   不同步的后果是每条新连接 Connection refused（配置侧已经重生成成新端口，
+        //   而栈里还拨着旧的），设备侧表现为「网全断了」——真机禁用有线卡时当场复现过。
+        //   注意**不能只在地址变化时更新**：禁用另一张卡时本卡地址一个字节都没动。
+        if (m_net && n->ep) {
+            const quint16 want = DeviceStore::gatewayPortFor(n->order);
+            if (n->stackSocksPort != want && m_net->setNicSocksPort(n->ep, want)) {
+                if (n->stackSocksPort != 0) {
+                    GatewayDiag::note("nicPort",
+                                      QStringLiteral("%1 的入站口随网卡序号变了：%2 → %3")
+                                              .arg(spec.ifname)
+                                              .arg(n->stackSocksPort)
+                                              .arg(want));
+                }
+                n->stackSocksPort = want;
+            }
+        }
         // 拓扑数值每次都刷新（网关 MAC 常常是扫描几轮后才解析出来的）。
         n->spec = spec;
         n->localIp4 = ipToU32(spec.localIp);
@@ -1098,6 +1118,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                                   DeviceStore::gatewayPortFor(n->order), &err)) {
                     n->netIp = spec.localIp;
                     n->netMask = spec.netmask;
+                    n->stackSocksPort = DeviceStore::gatewayPortFor(n->order);
                 } else {
                     emit deviceError(QString(),
                                      QStringLiteral("协议栈重挂网卡失败(%1): ").arg(spec.ifname) + err);
@@ -1137,6 +1158,9 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
         }
         n->netIp = spec.localIp; // 记下登记进栈的那一份，供上面那段发现「地址后来变了」
         n->netMask = spec.netmask;
+        // 同理记下登记进栈的**端口**，供上面那段发现「网卡序号后来变了」。
+        if (n->stackSocksPort == 0)
+            n->stackSocksPort = DeviceStore::gatewayPortFor(n->order);
         // 二层帧过滤：只把被劫持设备发来的帧喂进用户态栈（按这张卡的网段做旁路判断）。
         // context = this(worker)，sender = n->ep 也在工作线程 → 直连，lambda 在工作线程上跑。
         // ★ 这条「必须直连」不只是性能取向，是**正确性硬约束**：Linux 端点用 TPACKET_v3 收环，
