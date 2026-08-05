@@ -923,10 +923,14 @@ OutboundFactory *outFactoryFor(NetStack::Impl *d, NetStack::Nic *n)
 {
     if (!d)
         return nullptr;
-    if (d->outFactory && d->outFactory != d->ownedDefault)
+    // ★ 判据是**意图**（这个工厂自己管绑卡吗），不是对象身份。
+    //   以前写的是 `outFactory != ownedDefault`，而关闭 CoastCore 的分支会装一个全新的
+    //   Socks5OutboundFactory —— 它同样 != ownedDefault，于是下面两条永远走不到，所有
+    //   设备一律拨基准端口。副卡上的设备就拨到一个没人监听的口上，socksFail 100%。
+    if (d->outFactory && d->outFactory->bindsInterfaceItself())
         return d->outFactory; // CoastCore：进程内出站，自己管绑卡
     if (n && n->outFactory)
-        return n->outFactory;
+        return n->outFactory; // 这张卡专属：拨该卡对应的核心入站
     return d->outFactory;
 }
 
@@ -970,8 +974,18 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
         c->toStack.append(b);
         smolPumpToStack(c);
     });
-    QObject::connect(c->socks, &IOutboundTcp::failed, d->owner, [c](const QString &) {
+    QObject::connect(c->socks, &IOutboundTcp::failed, d->owner, [c](const QString &why) {
         ++GatewayDiag::c.socksFailed;
+        // ★ **原因不能丢**。以前这里是 `[c](const QString &)`，把失败原因整个扔掉，于是
+        //   `socksFail=17` 这个数字之外一无所有 —— 真机上排查「副卡设备一条连接都没有」
+        //   时，日志里没有任何东西指向「拨的是 7899、那儿没人听」。限频打印：坏起来是
+        //   每条连接一次，不限频会把日志刷爆、反而更难看。
+        static qint64 lastLog = 0;
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - lastLog > 3000) {
+            lastLog = now;
+            qWarning().noquote() << "网关: 出站拨号失败 —" << why;
+        }
         smolDestroyConn(c, true);
     });
     QObject::connect(c->socks, &IOutboundTcp::closed, d->owner, [c]() {

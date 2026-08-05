@@ -50,6 +50,9 @@ public:
     IOutboundTcp *createTcp(QObject *parent) override;
     IOutboundUdp *createUdp(QObject *parent) override;
 
+    /// 进程内出站不经核心，绑卡由它自己做 —— 所以它盖过每卡工厂（见基类注释）。
+    bool bindsInterfaceItself() const override { return true; }
+
 private:
     ProxyConfigStore *m_store = nullptr; // 不持有
     OutboundFactory *m_fallback = nullptr; // 持有，dtor delete

@@ -1914,7 +1914,11 @@ void GatewayWorker::applyCoastCoreLocal()
                 << "，fake-ip 反查" << (m_dnsResolver ? "已接" : "**未接：域名类将回退核心**") << "）";
     } else {
         // 撤回默认（全走 mihomo）——与「从未启用」完全一致。
-        m_net->setOutboundFactory(new Socks5OutboundFactory(m_socksPort));
+        // ★ 必须传 nullptr 而不是 new 一个 —— setOutboundFactory(nullptr) 会退回 NetStack
+        //   自己持有的 ownedDefault。装一个**新对象**的话，`outFactoryFor` 会把它当成
+        //   「自带绑卡能力的工厂」而盖过每卡工厂（那条判据以前是按对象身份写的），
+        //   结果所有设备一律拨基准端口，副卡上的设备拨到没人监听的口，socksFail 100%。
+        m_net->setOutboundFactory(nullptr);
         m_net->setDnsLearner(nullptr);      // 连 fake-ip 改写也一并撤掉
         m_net->setLocalDnsEnabled(false);   // :53 回到转投 mihomo，与从未启用完全一致
         qInfo() << "网关: CoastCore 进程内出站已停用（恢复默认 SOCKS 全走核心）";

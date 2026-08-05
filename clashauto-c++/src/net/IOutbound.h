@@ -85,4 +85,17 @@ public:
     virtual ~OutboundFactory() = default;
     virtual IOutboundTcp *createTcp(QObject *parent) = 0;
     virtual IOutboundUdp *createUdp(QObject *parent) = 0;
+
+    /// 这个工厂**自己决定从哪张网卡出去**吗？
+    ///
+    /// 多网卡时每张卡各有一个核心入站（端口不同、各带 `interface-name`），网关按设备所在
+    /// 的卡拨对应那个口。只有进程内出站（CoastCore）是例外 —— 它不经核心，绑卡由它自己做，
+    /// 所以它要能盖过每卡工厂。
+    ///
+    /// ★ 这条以前是用**对象身份**判的（`outFactory != ownedDefault` 就当成 CoastCore）。
+    ///   那是错的：关闭 CoastCore 的那条分支会 `setOutboundFactory(new Socks5OutboundFactory(…))`
+    ///   —— 一个全新对象，同样 `!= ownedDefault`，于是每卡工厂被永久吞掉，所有设备一律拨
+    ///   基准端口。真机后果：副卡上的设备每条连接都拨一个没人监听的口，`socksFail` 100%，
+    ///   界面上连一条连接都看不到（流量根本没到核心）。用意图判，不要用身份判。
+    virtual bool bindsInterfaceItself() const { return false; }
 };
