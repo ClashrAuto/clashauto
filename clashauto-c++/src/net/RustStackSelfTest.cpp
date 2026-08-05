@@ -262,6 +262,8 @@ int runRustStackSelfTest()
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QUdpSocket>
+#include <QNetworkDatagram>
 
 namespace {
 
@@ -1452,4 +1454,201 @@ int runCoastCoreOutboundSelfTest()
                  "SOCKS 回退 0 次）\n",
                  static_cast<long long>(ccDelta));
     return 0;
+}
+
+// ═══ SOCKS5 UDP 身份自测（COAST_SOCKSUDPUSER_SELFTEST=1）═══════════════════════
+//
+// ★ **补的是一个真机上静默了很久的洞。** SOCKS5 的 UDP 中继是共享套接字，数据报本身不带
+//   认证信息 —— 核心唯一能把它认回「当初认证过的那条控制连接」的线索，是 RFC 1928 里
+//   UDP ASSOCIATE 请求的 DST.ADDR/DST.PORT（语义：「我将从这个地址发 UDP」）。
+//   我们以前填的是 0.0.0.0:0，等于什么都没说。后果全是**静默**的：
+//     · /connections 的 inboundUser 恒为空 → 被代理设备的 UDP 流量被记到「本机」头上
+//       （手机看 YouTube 走 QUIC/UDP443，设备页那行不动，本机那行在涨）
+//     · IN-USER 规则永不命中 → 每设备「指定节点」的策略对 UDP 整个失效
+//   TCP 没这个问题，身份在 SOCKS 认证里就带过去了 —— 所以两条路的行为长期不一致而没人发现。
+//
+// 这里不造合成断言，而是照生产的样子走一遍真握手，最后比一个**外部可观测**的事实：
+// 客户端声明的端口，必须就是它后来真正发数据报的那个端口。声明与行为对不上，核心那张
+// addr→user 表就查不到，洞照旧 —— 所以这一条是整个修复的可证伪点。
+namespace {
+
+/// 最小 SOCKS5 **UDP ASSOCIATE** 服务端：记下认证用户名 + 客户端声明的来源地址，
+/// 回一个指向自己 UDP 口的 BND，然后记录真正收到的数据报是从哪个端口来的。
+class MiniSocksUdp final : public QObject
+{
+public:
+    explicit MiniSocksUdp(quint16 tcpPort)
+    {
+        ok = m_udp.bind(QHostAddress(QHostAddress::LocalHost), 0);
+        udpPort = m_udp.localPort();
+        QObject::connect(&m_udp, &QUdpSocket::readyRead, this, [this] {
+            while (m_udp.hasPendingDatagrams()) {
+                QNetworkDatagram dg = m_udp.receiveDatagram();
+                dgramFromPort = dg.senderPort();
+                dgramBytes = dg.data().size();
+                ++dgrams;
+            }
+        });
+        QObject::connect(&m_srv, &QTcpServer::newConnection, this, [this] {
+            while (QTcpSocket *s = m_srv.nextPendingConnection()) {
+                auto *st = new St;
+                QObject::connect(s, &QTcpSocket::readyRead, s, [this, s, st] { onData(s, st); });
+                QObject::connect(s, &QTcpSocket::disconnected, s, [s, st] {
+                    delete st;
+                    s->deleteLater();
+                });
+            }
+        });
+        ok = ok && m_srv.listen(QHostAddress::LocalHost, tcpPort);
+    }
+
+    bool ok = false;
+    bool gotAssociate = false;
+    QString user;          // 认证握手里收到的用户名
+    quint8 offeredNoAuth = 0, offeredUserPass = 0; // 客户端问候包报了哪些方法
+    QString declaredIp;    // ASSOCIATE 请求里声明的来源地址
+    quint16 declaredPort = 0;
+    quint16 udpPort = 0;   // 本夹具的 UDP 中继口（写进 BND 回给客户端）
+    quint16 dgramFromPort = 0; // 真正收到的数据报来自哪个端口
+    int dgrams = 0;
+    int dgramBytes = 0;
+
+private:
+    struct St { int phase = 0; QByteArray buf; QString user; };
+    void onData(QTcpSocket *s, St *c)
+    {
+        c->buf += s->readAll();
+        if (c->phase == 0) {
+            if (c->buf.size() < 2) return;
+            const int n = quint8(c->buf[1]);
+            if (c->buf.size() < 2 + n) return;
+            const QByteArray methods = c->buf.mid(2, n);
+            offeredNoAuth = methods.contains(char(0x00)) ? 1 : 0;
+            offeredUserPass = methods.contains(char(0x02)) ? 1 : 0;
+            c->buf.remove(0, 2 + n);
+            // 照 mihomo 那样：配了 users 的入站一律选 0x02，不管客户端还报了什么
+            const char rep[2] = {0x05, 0x02};
+            s->write(rep, 2);
+            c->phase = 1;
+        }
+        if (c->phase == 1) {
+            if (c->buf.size() < 2) return;
+            const int ul = quint8(c->buf[1]);
+            if (c->buf.size() < 2 + ul + 1) return;
+            const int pl = quint8(c->buf[2 + ul]);
+            if (c->buf.size() < 3 + ul + pl) return;
+            c->user = QString::fromLatin1(c->buf.mid(2, ul));
+            c->buf.remove(0, 3 + ul + pl);
+            const char rep[2] = {0x01, 0x00};
+            s->write(rep, 2);
+            c->phase = 2;
+        }
+        if (c->phase == 2) {
+            if (c->buf.size() < 10) return; // ver cmd rsv atyp + v4(4) + port(2)
+            const int cmd = quint8(c->buf[1]);
+            const int atyp = quint8(c->buf[3]);
+            if (cmd != 0x03 || atyp != 0x01) { // 只认 v4 形态的 UDP ASSOCIATE
+                c->buf.clear();
+                return;
+            }
+            gotAssociate = true;
+            user = c->user;
+            declaredIp = QStringLiteral("%1.%2.%3.%4")
+                                 .arg(quint8(c->buf[4])).arg(quint8(c->buf[5]))
+                                 .arg(quint8(c->buf[6])).arg(quint8(c->buf[7]));
+            declaredPort = quint16((quint8(c->buf[8]) << 8) | quint8(c->buf[9]));
+            c->buf.remove(0, 10);
+            // BND.ADDR:BND.PORT = 本夹具的 UDP 中继口
+            char rep[10] = {0x05, 0x00, 0x00, 0x01, 0x7F, 0x00, 0x00, 0x01, 0, 0};
+            rep[8] = char((udpPort >> 8) & 0xFF);
+            rep[9] = char(udpPort & 0xFF);
+            s->write(rep, 10);
+            c->phase = 3;
+        }
+        if (c->phase == 3)
+            c->buf.clear(); // 会话建立后控制连接不该再有数据
+    }
+
+    QTcpServer m_srv;
+    QUdpSocket m_udp;
+};
+
+} // namespace
+
+int runSocksUdpUserSelfTest()
+{
+    constexpr quint16 kSocksPort = 47905;
+    const QString kUser = QStringLiteral("dev-aabbccddeeff");
+
+    int fails = 0;
+    auto check = [&fails](bool cond, const char *what) {
+        std::fputs(cond ? "  ok   " : "  FAIL ", stdout);
+        std::fputs(what, stdout);
+        std::fputs("\n", stdout);
+        if (!cond)
+            ++fails;
+    };
+
+    MiniSocksUdp fixture(kSocksPort);
+    if (!fixture.ok) {
+        std::fprintf(stderr, "[socksudp] 夹具端口被占（%u）——这不是被测逻辑的问题\n", kSocksPort);
+        return 3;
+    }
+
+    Socks5Udp client(kSocksPort);
+    bool ready = false;
+    QString failReason;
+    QObject::connect(&client, &IOutboundUdp::ready, &client, [&] {
+        ready = true;
+        // 就绪后立刻发一个数据报：它的**源端口**就是要拿来跟声明值比对的那个事实。
+        client.sendTo(QHostAddress(QStringLiteral("8.8.8.8")), 53, QByteArray(24, 'q'));
+    });
+    QObject::connect(&client, &IOutboundUdp::failed, &client,
+                     [&](const QString &e) { failReason = e.isEmpty() ? QStringLiteral("?") : e; });
+    client.associate(kUser);
+
+    {   // 等到「数据报也收到了」或超时，两者都不再需要继续等
+        QEventLoop w;
+        QTimer deadline, poll;
+        QObject::connect(&deadline, &QTimer::timeout, &w, &QEventLoop::quit);
+        QObject::connect(&poll, &QTimer::timeout, &w, [&] {
+            if (fixture.dgrams > 0 || !failReason.isEmpty())
+                w.quit();
+        });
+        deadline.setSingleShot(true);
+        deadline.start(5000);
+        poll.start(10);
+        w.exec();
+    }
+
+    if (!failReason.isEmpty()) {
+        std::fprintf(stderr, "[socksudp] 会话没建起来：%s\n", failReason.toLatin1().constData());
+        return 2;
+    }
+
+    check(fixture.offeredUserPass == 1, "问候包报了「用户名/密码 0x02」——有身份可谈");
+    check(fixture.gotAssociate, "收到 UDP ASSOCIATE 请求");
+    check(fixture.user == kUser, "认证握手带上了设备用户名 dev-<mac>");
+    check(ready, "客户端进入就绪态");
+
+    // ★★ 修复的核心：声明的来源地址必须是**真实**的、而不是 0.0.0.0:0。
+    check(fixture.declaredIp == QStringLiteral("127.0.0.1"),
+          "ASSOCIATE 声明的来源地址是 127.0.0.1（不是 0.0.0.0 = 什么都没说）");
+    check(fixture.declaredPort != 0, "ASSOCIATE 声明了具体端口（不是 0）");
+
+    // ★★★ 可证伪点：声明与行为必须一致。核心那张 addr→user 表就是按这个键查的，
+    //     对不上就等于没声明 —— 而这一条恰恰是编译期和「能上网」都看不出来的。
+    check(fixture.dgrams > 0, "数据报确实发出去了");
+    check(fixture.dgramFromPort == fixture.declaredPort,
+          "数据报的真实源端口 == ASSOCIATE 声明的端口");
+
+    if (fails == 0) {
+        std::printf("[socksudp] PASS —— 声明 127.0.0.1:%u，实发源端口 %u，用户名 %s\n",
+                    fixture.declaredPort, fixture.dgramFromPort, kUser.toLatin1().constData());
+    } else {
+        std::fprintf(stderr, "[socksudp] FAIL %d 项（声明 %s:%u，实发源端口 %u）\n", fails,
+                     fixture.declaredIp.toLatin1().constData(), fixture.declaredPort,
+                     fixture.dgramFromPort);
+    }
+    return fails == 0 ? 0 : 2;
 }

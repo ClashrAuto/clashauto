@@ -38,6 +38,11 @@ int runSmolGatewaySelfTest();
 /// 因为那个自测 `addNic(..., 0, ...)` 且从不装全局工厂，出问题的分支一次都没走过。
 int runNicWiringSelfTest();
 
+// SOCKS5 的 UDP 出站是否**声明了真实的来源地址**（COAST_SOCKSUDPUSER_SELFTEST=1）。
+// 那是核心把 UDP 数据报认回设备身份的唯一线索；填 0.0.0.0:0 时 inboundUser 恒空 ——
+// 设备的 QUIC 流量被记到「本机」头上，IN-USER 规则也永不命中。两种后果都是静默的。
+int runSocksUdpUserSelfTest();
+
 /// 软件路径吞吐基准（COAST_GW_THROUGHPUT=1）。
 /// ★ 用 FakeEp **把网卡整个拿掉** —— 本仓库此前所有网关吞吐数字都在一台 QEMU 虚机上量，
 ///   而那台机器上每帧 12~17 µs 里绝大部分是 e1000 模拟的开销（见

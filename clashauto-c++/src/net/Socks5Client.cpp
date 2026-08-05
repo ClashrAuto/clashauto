@@ -527,9 +527,13 @@ public:
                 // BND.ADDR 常为 0.0.0.0（表示「用你连控制连接的那个地址」）→ 回落 127.0.0.1
                 relayAddr = (ip == 0) ? QHostAddress(QHostAddress::LocalHost) : QHostAddress(ip);
 
-                udp = new QUdpSocket(q);
-                connect(udp, &QUdpSocket::readyRead, q, [this] { onDatagram(); });
-                udp->bind(QHostAddress(QHostAddress::LocalHost), 0); // 绑本地临时端口以收回程
+                // 正常路径上 sendAssociate() 已经绑好了（它要把真实端口写进请求）；这里只兜底
+                // 「当时没绑上」的情况，语义与改动前一致。
+                if (!udp) {
+                    udp = new QUdpSocket(q);
+                    QObject::connect(udp, &QUdpSocket::readyRead, q, [this] { onDatagram(); });
+                    udp->bind(QHostAddress(QHostAddress::LocalHost), 0); // 绑临时端口收回程
+                }
                 phase = Phase::Ready;
                 ready = true;
                 emit q->ready();
@@ -541,20 +545,53 @@ public:
         }
     }
 
+    // 先把本地 UDP 端口绑好（sendAssociate 要把真实端口写进请求）。绑不上返回 false，
+    // 调用方退回「不声明来源地址」的老形态。socket 本身留到 Associate 应答后仍可用。
+    bool bindLocalUdp()
+    {
+        if (udp) {
+            return udp->state() == QAbstractSocket::BoundState;
+        }
+        udp = new QUdpSocket(q);
+        QObject::connect(udp, &QUdpSocket::readyRead, q, [this] { onDatagram(); });
+        if (!udp->bind(QHostAddress(QHostAddress::LocalHost), 0)) {
+            delete udp;
+            udp = nullptr;
+            return false;
+        }
+        return true;
+    }
+
+    // ★ **先 bind 再发 ASSOCIATE**，请求里的 DST.ADDR/DST.PORT 填**真实的**来源地址。
+    //
+    // SOCKS5 的 UDP 中继是一个共享套接字，数据报本身不带任何认证信息 —— 核心唯一能把它认回
+    // 「当初认证过的那条控制连接」的线索，就是 RFC 1928 里这个「我将从这个地址发 UDP」的声明
+    // （核心侧的登记/反查见 clash/listener/socks/udpuser.go）。
+    //
+    // 以前这里填 0.0.0.0:0，等于什么都没说，于是被代理设备的 UDP 在核心眼里**没有身份**：
+    // IN-USER 规则不命中（每设备指定节点的策略对 UDP 整个失效）、/connections 的 inboundUser
+    // 为空，上层只能把这些流量记到「本机」头上 —— 手机看 YouTube（QUIC 走 UDP/443）时，
+    // 设备页那一行不动，本机那一行反而在涨。TCP 没这个问题，身份在 SOCKS 认证里就带过去了。
+    //
+    // 绑不上（端口耗尽等）就退回填 0.0.0.0:0 的老形态：拿不到身份，但会话照常能建。
     void sendAssociate()
     {
         phase = Phase::Associate;
+        const quint16 localPort = bindLocalUdp() ? udp->localPort() : 0;
         QByteArray req;
         req.append(char(0x05));
         req.append(char(0x03)); // CMD=UDP ASSOCIATE
         req.append(char(0x00)); // RSV
         req.append(char(0x01)); // ATYP=IPv4
-        req.append(char(0x00)); // 0.0.0.0
-        req.append(char(0x00));
-        req.append(char(0x00));
-        req.append(char(0x00));
-        req.append(char(0x00)); // 端口 0
-        req.append(char(0x00));
+        if (localPort != 0) {
+            req.append(char(0x7F)); // 127.0.0.1 —— 必须与 bindLocalUdp 绑的地址一致
+            req.append(char(0x00));
+            req.append(char(0x00));
+            req.append(char(0x01));
+        } else {
+            req.append(4, char(0x00)); // 0.0.0.0：没绑上，退回「不声明」
+        }
+        req.append(be16(localPort));
         ctrl->write(req);
     }
 
@@ -642,6 +679,12 @@ void Socks5Udp::associate(const QString &user)
     d->ready = false;
     d->closedEmitted = false;
     d->inbuf.clear();
+    // 重复 associate（正常不会发生：NetStack 每条流新建一个对象）时丢掉上一轮的端口 ——
+    // sendAssociate 会按新绑的端口重新声明来源地址，留着旧的等于声明了一个不再发包的地址。
+    if (d->udp) {
+        d->udp->deleteLater();
+        d->udp = nullptr;
+    }
 
     d->ctrl = new QTcpSocket(this);
     connect(d->ctrl, &QTcpSocket::connected, this, [this] { d->onConnected(); });

@@ -169,6 +169,8 @@ int main(int argc, char *argv[])
     // 见 GatewaySelfTest.h —— 两个真机 bug 都在这条路上，而当时既有自测全绿。
     if (qEnvironmentVariableIsSet("COAST_NICWIRING_SELFTEST"))
         return runNicWiringSelfTest();
+    if (qEnvironmentVariableIsSet("COAST_SOCKSUDPUSER_SELFTEST"))
+        return runSocksUdpUserSelfTest();
     // 软件路径吞吐基准（去掉网卡，量纯软件成本）。放在单实例守卫**之前** ——
     // 自测/基准一旦跑在守卫之后，遇到已有实例会走 notifyExistingAndQuit 返回 0，
     // 于是"断言坏了"也照样绿（这个坑本仓库踩过）。
