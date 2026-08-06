@@ -268,7 +268,7 @@ jobs:
             exit 1
           }
 
-      - name: Pure-logic self-tests (ARP parse / per-NIC egress / per-NIC wiring / SOCKS UDP identity)
+      - name: Pure-logic self-tests (ARP parse / per-NIC egress / per-NIC wiring / SOCKS UDP identity / dead-conn reap)
         # 与上面两条不同，这里用 **Start-Process -Wait -PassThru** 而不是 `& $exe`：
         # Coast.exe 是 WIN32_EXECUTABLE（GUI 子系统），直接调用时 PowerShell 不保证等它退出，
         # 拿到的 $LASTEXITCODE 可能压根没被设过 —— 那样这一步的绿灯说明不了任何事。
@@ -280,7 +280,8 @@ jobs:
           if (-not (Test-Path $exe)) { throw "找不到 $exe" }
           $env:Path = "$env:QT_ROOT\bin;$env:Path"
           foreach ($t in @('COAST_ARPPARSE_SELFTEST', 'COAST_NICEGRESS_SELFTEST',
-                           'COAST_NICWIRING_SELFTEST', 'COAST_SOCKSUDPUSER_SELFTEST')) {
+                           'COAST_NICWIRING_SELFTEST', 'COAST_SOCKSUDPUSER_SELFTEST',
+                           'COAST_TCPREAP_SELFTEST')) {
             Set-Item "Env:\$t" '1'
             $out = Join-Path $env:RUNNER_TEMP "$t.out"
             $p = Start-Process -FilePath $exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out

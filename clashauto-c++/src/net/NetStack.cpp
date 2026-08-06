@@ -77,6 +77,10 @@ struct SmolConn {
     //   而这恰好发生在"设备侧慢"——最不该雪上加霜的场景（弱信号 Wi-Fi 设备下载）。
     QByteArray toStack;
     int toStackOff = 0;          // toStack 里已经写进栈的前缀长度
+    // 上次**成功把下行字节灌进栈**的时刻。这与 lastActive 不是一回事：lastActive 记的是
+    // 「socks 送来数据」，而一旦下行水位顶满、我们停止从 socks 读，它就永远停在那一刻 ——
+    // 于是「设备还在不在取数」这件事没有任何字段能回答。清扫器要的正是后者。
+    qint64 lastDrainMs = 0;
     int pendingDown() const { return toStack.size() - toStackOff; }
     quint32 pendingRecved = 0;   // 已交给我们、但还没 coast_conn_recved 归还的窗口字节
     bool upThrottled = false;
@@ -846,6 +850,8 @@ bool smolPumpToStack(SmolConn *c)
         c->toStackOff += wrote;
         wroteAny = true;
     }
+    if (wroteAny)
+        c->lastDrainMs = QDateTime::currentMSecsSinceEpoch();
     // 排空即清零；否则等前缀攒够一批再压缩一次 —— 摊还 O(1)，且内存不会无界增长。
     if (c->pendingDown() <= 0) {
         c->toStack.clear();
@@ -909,6 +915,85 @@ void smolDestroyConn(SmolConn *c, bool abortIt)
         }
     }
     delete c;
+}
+
+// 定期清扫「上游已关、却再没人来关它」的连接。
+//
+// ★ 这**不是**空闲回收器，空闲也**不是**判据 —— 见 SmolConn::lastActive 的论证：RFC 5382
+//   REQ-5 要求已建立的 TCP 映射不短于 2 小时 4 分，按空闲砍会掐断推送/IMAP 这类合法长连接。
+//   这里只碰 `socksClosed` 的连接，也就是**上游已经确认关闭、不可能再有字节**的那些。
+//
+// ★ 为什么需要它：优雅关的判定写在 smolPumpToStack 里，而那个函数只被两件事驱动 ——
+//   socks 有新数据、或设备回 ACK。socks 关闭那一刻若 `pendingDown() > 0`（下行还没灌进栈），
+//   就只能等设备 ACK 来推；设备若从此不再 ACK（弱信号、休眠、走开了），这条连接就
+//   **永远没人再看它一眼**，coast_conn_close 永远发不出去。
+//   实测：一台机器 50 分钟里 conns 从 0 单调涨到 254，而核心侧同时只有 46 条 —— 那 208 条
+//   就是这么漏的，每条占 RX_BUF+TX_BUF = 256 KiB。堆满之后新连接建不起来，症状是
+//   **「单流下载正常，一上并发就全灭」**（测速软件和 fast.com 正是几十条并发，
+//   所以它们「根本测不了」，而看视频却没事）。
+// 上游已关但下行排不空 → 宽限这么久再中止。可用 COAST_GW_DEADGRACE_MS 覆盖：
+// 自测要把它压到毫秒级，否则一条用例得干等一分钟（同 COAST_GW_TXBATCH 那套做法）。
+qint64 deadConnGraceMs()
+{
+    static const qint64 v = qEnvironmentVariableIsSet("COAST_GW_DEADGRACE_MS")
+            ? qgetenv("COAST_GW_DEADGRACE_MS").toLongLong()
+            : 60 * 1000;
+    return v > 0 ? v : 60 * 1000;
+}
+
+void reapDeadTcpConns(NetStack::Impl *d)
+{
+    if (!d || !d->smol || d->smolConns.isEmpty())
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // ★ 先收集再销毁：smolDestroyConn 会 d->smolConns.remove()，边遍历边删是未定义行为。
+    QList<SmolConn *> drained, stuck;
+    if (qEnvironmentVariableIsSet("COAST_REAP_DEBUG")) {
+        std::fprintf(stderr, "[reap] 扫描 %d 条:", int(d->smolConns.size()));
+        for (SmolConn *c : std::as_const(d->smolConns))
+            std::fprintf(stderr,
+                         " {id=%llu socksClosed=%d stackClosed=%d pend=%d idle=%lldms drainAge=%lldms}",
+                         (unsigned long long)c->id, int(c->socksClosed), int(c->stackClosed),
+                         c->pendingDown(), (long long)(c->lastActive ? now - c->lastActive : -1),
+                         (long long)(c->lastDrainMs ? now - c->lastDrainMs : -1));
+        std::fprintf(stderr, "\n");
+        std::fflush(stderr);
+    }
+    for (SmolConn *c : std::as_const(d->smolConns)) {
+        if (!c || c->stackClosed)
+            continue;
+        // ★ 判据**不能**用 socksClosed：设备不排空 → downPaused → 我们停止从 socks 读 →
+        //   对端的 FIN 永远排在未读数据后面进不来，于是恰恰是会泄漏的那批连接，
+        //   socksClosed 永远是 false（自测实测 socksClosed=0 / pend=65536 / idle 2.7s 仍在涨）。
+        //   真正的不变量是：**我们攥着送不出去的字节，而设备已经很久没取了**。
+        //   这不违反 RFC 5382 —— 对端只要还在 ACK，lastDrainMs 就一直在走；
+        //   整整一分钟一个字节都推不进去的连接，TCP 自己的重传也快放弃了。
+        if (c->pendingDown() > 0 && c->lastDrainMs > 0
+            && now - c->lastDrainMs > deadConnGraceMs()) {
+            stuck.append(c);
+            continue;
+        }
+        if (!c->socksClosed)
+            continue;
+        if (c->pendingDown() <= 0)
+            drained.append(c);
+    }
+    // 下行已排空 → 走与 smolPumpToStack 里**同一套**优雅关：必须先还满窗口，
+    // 否则 coast_conn_close 以 COAST_ERR_STATE 失败（顺序不能反）。
+    for (SmolConn *c : drained) {
+        smolFlushRecvWindow(c);
+        if (coast_conn_close(d->smol, c->id) == COAST_OK) {
+            c->stackClosed = true;
+            ++GatewayDiag::c.tcpClosed;
+            ++GatewayDiag::c.tcpReaped;
+        }
+    }
+    // 上游早没了、设备也不再取数 → 只能 RST 收场。留着它既占 256 KiB，
+    // 也占着一个再不会有人读的 socket。
+    for (SmolConn *c : stuck) {
+        ++GatewayDiag::c.tcpReaped;
+        smolDestroyConn(c, true);
+    }
 }
 
 QString addrToString(const CoastAddr *a)
@@ -1272,6 +1357,7 @@ bool NetStack::init(QString *err)
         if (++d->pumpTick >= kHousekeepEveryTicks) {
             d->pumpTick = 0;
             reapUdpFlows(d);
+            reapDeadTcpConns(d); // TCP 侧的同款兜底：优雅关只在泵里判，泵不来就漏
         }
         // 诊断采样：按墙钟判间隔（不按拍数——泵一旦迟到，拍数和真实时间就对不上了）。
         if (GatewayDiag::enabled()) {

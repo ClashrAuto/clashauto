@@ -193,11 +193,12 @@ void GatewayDiag::sample(const QString &extra)
                          ? txF / d(c.txBatches, g_prev.txBatches)
                          : 0)
                 .arg(txF > 0 ? d(c.txSendUs, g_prev.txSendUs) / txF : 0);
-    line += QStringLiteral(" tcpAcc=%1 tcpClose=%2 tcpAbort=%3 socksFail=%4")
+    line += QStringLiteral(" tcpAcc=%1 tcpClose=%2 tcpAbort=%3 socksFail=%4 tcpReap=%5")
                 .arg(d(c.tcpAccepted, g_prev.tcpAccepted))
                 .arg(d(c.tcpClosed, g_prev.tcpClosed))
                 .arg(d(c.tcpAborted, g_prev.tcpAborted))
-                .arg(d(c.socksFailed, g_prev.socksFailed));
+                .arg(d(c.socksFailed, g_prev.socksFailed))
+                .arg(d(c.tcpReaped, g_prev.tcpReaped));
     line += QStringLiteral(" upThrottle=%1 downPause=%2")
                 .arg(d(c.upThrottleHits, g_prev.upThrottleHits))
                 .arg(d(c.downPauseHits, g_prev.downPauseHits));

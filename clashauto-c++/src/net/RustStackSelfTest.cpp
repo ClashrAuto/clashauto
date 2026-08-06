@@ -1652,3 +1652,92 @@ int runSocksUdpUserSelfTest()
     }
     return fails == 0 ? 0 : 2;
 }
+
+// ═══════ 死连接清扫（COAST_TCPREAP_SELFTEST=1）═══════
+//
+// 守的是这样一个洞：优雅关的判定写在 `smolPumpToStack` 里，而它只被「socks 有新数据」和
+// 「设备回 ACK」两件事驱动。上游关闭那一刻若下行还没排空，就只能等设备 ACK 来推 ——
+// 设备若从此不再 ACK（弱信号、休眠、人走开了），这条连接**永远没人再看它一眼**。
+//
+// 真机实测：50 分钟里 conns 从 0 单调涨到 254，核心侧同时只有 46 条。每条僵尸占
+// RX_BUF+TX_BUF = 256 KiB。堆满之后新连接建不起来，症状是**「单流下载正常，一上并发就全灭」**
+// —— 看视频没事，测速软件和 fast.com（几十条并发）直接「根本测不了」。
+//
+// ★ 用例必须能证伪「宽限期形同虚设」：所以 A 和 B 是一对 —— 只有 B 会让「不清扫」失败，
+//   只有 A 会让「立刻清扫」失败。少任何一条，一个把宽限期删成 0 的改动都能蒙混过关。
+int runTcpReapSelfTest()
+{
+    // ★ 3 秒不是随手写的：A 在约 700ms 处断言「还没被清扫」，而这台机器上实测过一次
+    //   ——同一份代码、机器正忙时——首次清扫被推迟到 1s 之后才跑，宽限期若也是 1s，
+    //   A 就会随机变红。留 3 秒等于给「进程被饿死两秒」留了余量。CI 上宁可多花 4 秒。
+    qputenv("COAST_GW_DEADGRACE_MS", "3000"); // 必须在泵跑起来之前设：那边是 static 缓存
+    const quint16 kSocksPort = 47903;
+    int fails = 0;
+    auto check = [&fails](bool ok, const char *what) {
+        std::printf("  %-4s %s\n", ok ? "ok" : "FAIL", what);
+        if (!ok) ++fails;
+    };
+    auto spin = [](int ms) {
+        QElapsedTimer t; t.start();
+        while (t.elapsed() < ms) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    };
+
+    MiniSocks socks(kSocksPort);
+    if (!socks.ok) { std::fprintf(stderr, "[tcpreap] FAIL: 假 SOCKS 监听失败\n"); return 3; }
+    NetStack net(kSocksPort);
+    QString err;
+    if (!net.init(&err)) { std::fprintf(stderr, "[tcpreap] FAIL: init: %s\n", qPrintable(err)); return 3; }
+    FakeEp ep(QByteArray(reinterpret_cast<const char *>(kOurMac), 6));
+    if (!net.addNic(&ep, ep.localMac(), QStringLiteral("10.99.0.2"),
+                    QStringLiteral("255.255.255.0"), 0, &err)) {
+        std::fprintf(stderr, "[tcpreap] FAIL: addNic: %s\n", qPrintable(err)); return 3;
+    }
+    net.addDevice(QStringLiteral("10.99.0.1"),
+                  QByteArray(reinterpret_cast<const char *>(kDevMac), 6),
+                  QStringLiteral("dev-reap01"), false);
+
+    uint8_t f[2048];
+    buildSyn(f, 51000, 443);
+    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), 54));
+    for (int i = 0; i < 200 && ep.synAck < 1; ++i) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    if (ep.synAck < 1) { std::fprintf(stderr, "[tcpreap] FAIL: 没等到 SYN-ACK\n"); return 1; }
+    buildTcp(f, 51000, 443, 0x10, 1001, ep.synAckSeq + 1);
+    net.inputFrame(&ep, QByteArray(reinterpret_cast<const char *>(f), 54));
+    for (int i = 0; i < 400 && !socks.gotConnect; ++i) QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+    if (!socks.gotConnect || !socks.tunnel) {
+        std::fprintf(stderr, "[tcpreap] FAIL: 没等到 SOCKS CONNECT\n"); return 1;
+    }
+    spin(100);
+
+    // ★ 基线必须取在**灌数据之前**：清扫的计时从「上次成功灌进栈」起算，若在灌完之后
+    //   才取基线，一个「立刻就清扫」的错误实现所产生的回收会被算进基线里，A 就废了
+    //   （实测过：把宽限判定改成恒真，红的是 B 而不是 A）。
+    const qint64 before = GatewayDiag::c.tcpReaped;
+
+    // 灌到「设备窗口 + 栈发送缓冲」都装不下为止 —— 设备从头到尾不回一个 ACK，
+    // 于是 toStack 里必然压着字节，`pendingDown() > 0`。这正是真机上那 208 条的状态。
+    const QByteArray blob(64 * 1024, 'x');
+    for (int i = 0; i < 8; ++i) socks.tunnel->write(blob);
+    socks.tunnel->flush();
+    spin(300);
+
+    // 上游试图关闭。★ 注意它**关不掉** —— 我们已经因为背压停止从这个 socket 读，
+    //   对端的 FIN 排在未读数据后面进不来，socksClosed 恒为 false。这不是测试的怪癖，
+    //   正是真机上那批僵尸连接的真实状态，也是判据不能用 socksClosed 的原因。
+    socks.tunnel->disconnectFromHost();
+    spin(400);                          // 累计约 700ms << 宽限期 3s：清扫器已跑过好几轮
+    check(GatewayDiag::c.tcpReaped == before,
+          "A：宽限期内不清扫（否则等于把 RFC 5382 的活映射也一起砍了）");
+
+    spin(4000);                         // > 宽限期(3s)
+    check(GatewayDiag::c.tcpReaped > before,
+          "B：宽限期过后清扫掉（这条不过 = 僵尸会一直堆到建不了新连接）");
+
+    if (fails == 0)
+        std::printf("[tcpreap] PASS —— 宽限期内保留、过期后回收，tcpReaped %lld → %lld\n",
+                    static_cast<long long>(before),
+                    static_cast<long long>(GatewayDiag::c.tcpReaped));
+    else
+        std::fprintf(stderr, "[tcpreap] FAIL %d 项\n", fails);
+    return fails == 0 ? 0 : 2;
+}

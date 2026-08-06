@@ -43,6 +43,14 @@ int runNicWiringSelfTest();
 // 设备的 QUIC 流量被记到「本机」头上，IN-USER 规则也永不命中。两种后果都是静默的。
 int runSocksUdpUserSelfTest();
 
+// 死连接清扫（COAST_TCPREAP_SELFTEST=1）。优雅关的判定只写在 smolPumpToStack 里，而它只被
+// 「socks 有新数据」「设备回 ACK」驱动 —— 上游关闭时下行若排不空，设备又不再 ACK，这条连接
+// 就永远没人再看它一眼。真机 50 分钟漏 208 条、每条 256 KiB，堆满后新连接建不起来，症状是
+// **「单流下载正常、一上并发全灭」**（测速软件和 fast.com 正是几十条并发）。
+// 用例是成对的：A 断言宽限期内**不**清扫（否则会砍掉 RFC 5382 要求保活的映射），
+// B 断言过期后清扫。少任何一条，把宽限期删成 0 的改动都能蒙混过关。
+int runTcpReapSelfTest();
+
 /// 软件路径吞吐基准（COAST_GW_THROUGHPUT=1）。
 /// ★ 用 FakeEp **把网卡整个拿掉** —— 本仓库此前所有网关吞吐数字都在一台 QEMU 虚机上量，
 ///   而那台机器上每帧 12~17 µs 里绝大部分是 e1000 模拟的开销（见
