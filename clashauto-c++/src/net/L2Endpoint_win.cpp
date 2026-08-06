@@ -846,9 +846,20 @@ public:
         if (now > m_lastPsDrop)
             GatewayDiag::c.rxKernelDrops += now - m_lastPsDrop;
         m_lastPsDrop = now; // 驱动重置过就跟着回退，不去猜
+
+        // ★ ps_recv = **通过 BPF 过滤、交给这个句柄**的帧数。它和我们自己数的 rxFrames 一比，
+        //   就把「帧压根没到内核抓包」和「到了却在环形缓冲/drain 这一段丢了」切成两半 ——
+        //   而这一刀**不依赖 ps_drop**。必须如此：Npcap 的 ps_drop 在不少驱动/模式下根本
+        //   不被写入，恒 0；拿它当「没丢帧」的证据，正是本项目栽过的那类假证据
+        //   （rxKernelDrops 这一栏在本次会话之前从未被写入过）。两个独立来源互为对照。
+        const qint64 rec = qint64(st.ps_recv);
+        if (rec > m_lastPsRecv)
+            GatewayDiag::c.rxKernelRecv += rec - m_lastPsRecv;
+        m_lastPsRecv = rec;
     }
 
     qint64 m_lastPsDrop = 0;
+    qint64 m_lastPsRecv = 0;
     qint64 m_lastStatsMs = 0;
     void close() override
     {

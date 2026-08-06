@@ -76,6 +76,10 @@ public:
         // ★ 仅 Linux 有值；mac 的 bpf 要走 BIOCGSTATS(bs_drop)，还没接 —— 在 mac 上这一栏恒 0，
         //   别把它当「mac 上没丢包」的证据。
         qint64 rxKernelDrops;
+        // 内核抓包层**收到并通过过滤**的帧数（Npcap pcap_stat::ps_recv，仅 Windows）。
+        // 与 rxFrames 的差 = 到了内核却没交到我们手上的帧。★ 它存在的理由是 rxKernelDrops
+        // 不可信：ps_drop 在不少驱动上恒 0。两个来源互为对照，别只信一个。
+        qint64 rxKernelRecv;
         // —— 二层：发 ——
         qint64 txFrames;
         qint64 txBytes;

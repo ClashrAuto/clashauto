@@ -216,6 +216,7 @@ void GatewayDiag::sample(const QString &extra)
                 // ★ 分母**只算事件驱动的唤醒**，泵主动排空(drains)另计——否则这一栏恒为 0。
                 .arg(wakes > 0 ? rxF / wakes : 0)
                 .arg(d(c.rxKernelDrops, g_prev.rxKernelDrops));
+    line += QStringLiteral(" krecv=%1").arg(d(c.rxKernelRecv, g_prev.rxKernelRecv));
     // 排空成本：drains = 泵兜底排空次数；drainUs = 每次排空平均微秒（含缓冲空时的阻塞等待）。
     line += QStringLiteral(" drains=%1 drainUs=%2")
                 .arg(drains)
