@@ -1226,6 +1226,9 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
             if (frame.size() < 12)
                 return;
             const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
+            // ★ 必须在**任何** return/旁路/victim 过滤之前：这一栏的全部价值就在于它卡在最前面，
+            //   于是「空口丢 / 被我们过滤掉 / 进栈没应答」三段可以逐段相减（见 noteRawSyn 注释）。
+            GatewayDiag::noteRawSyn(f, frame.size());
             const bool isArp = frame.size() >= 14 && f[12] == 0x08 && f[13] == 0x06;
             // 被动安全监视：在任何 return/旁路之前先看一眼这帧的 ARP/NDP 声明。它只读、内部去抖，
             // 既看得到真网关广播、也看得到冲我而来的毒帧（本机自己发的帧按 sender MAC 被它排掉）。

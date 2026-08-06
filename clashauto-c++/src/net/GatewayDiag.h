@@ -188,6 +188,18 @@ public:
     // 不适合让这个跨平台 TU 去碰。窗口内毫无活动时不写。
     static void sample(const QString &extra);
 
+    /// 在**任何过滤之前**给这一帧记账：如果它是纯 SYN，按源 IPv4 分桶计数（诊断行的 `synRaw=`）。
+    ///
+    /// ★ 为什么必须在过滤前。NetStack 的 `synSrc=` 是喂进栈之后才数的，它和设备侧 tcpdump 对不上时
+    ///   有两种截然不同的解释：帧根本没进主机（空口/驱动丢），或者被我们自己的 victim 判定丢了。
+    ///   这一栏卡在最前面，于是三段可以逐段相减：
+    ///     设备 tcpdump → synRaw   差值 = 空口/Npcap 丢
+    ///     synRaw       → synSrc   差值 = 被本网关过滤掉（nonVictim/旁路）
+    ///     synSrc       → synUnans 差值 = 进了栈却没被应答
+    ///   每帧成本：一次长度比较；只有真是 SYN 才会走到分桶（每秒个位数）。
+    static void noteRawSyn(const unsigned char *f, int len);
+    static QString rawSynLine(); // 读完清零，无数据返回空串
+
     // 进程退出/网关停用时调一次：把最后一个窗口写掉，并留一条 "stop" 标记。
     static void flush(const QString &extra, const char *reason);
 

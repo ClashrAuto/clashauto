@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFile>
 #include <QHash>
+#include <QStringList>
 #include <QFileInfo>
 #include <QTextStream>
 
@@ -99,6 +100,41 @@ int GatewayDiag::sampleIntervalMs()
         return (ok && v >= kMinSampleMs) ? v : kDefaultSampleMs;
     }();
     return ms;
+}
+
+// 过滤前的 SYN 分桶（源 IPv4 → 本窗口计数）。与 GatewayDiag 其余部分同一个单线程前提。
+static QHash<quint32, quint32> g_rawSynBySrc;
+
+void GatewayDiag::noteRawSyn(const unsigned char *f, int len)
+{
+    if (!f || len < 54)
+        return;
+    // 只认 IPv4/TCP 的**纯** SYN（SYN 置位、ACK 清零）。IPv6 不分桶：真机复现用的是 v4，
+    // 而这一栏存在的唯一目的就是和设备侧 tcpdump 的 v4 计数相减。
+    if (f[12] != 0x08 || f[13] != 0x00 || (f[14] >> 4) != 4 || f[23] != 6)
+        return;
+    const int off = 14 + (f[14] & 0x0F) * 4;
+    if (off + 14 > len || (f[off + 13] & 0x12) != 0x02)
+        return;
+    if (g_rawSynBySrc.size() > 256) // 有界：诊断量，宁可丢样本
+        g_rawSynBySrc.clear();
+    ++g_rawSynBySrc[(quint32(f[26]) << 24) | (quint32(f[27]) << 16) | (quint32(f[28]) << 8)
+                    | quint32(f[29])];
+}
+
+QString GatewayDiag::rawSynLine()
+{
+    if (g_rawSynBySrc.isEmpty())
+        return QString();
+    QStringList parts;
+    for (auto it = g_rawSynBySrc.constBegin(); it != g_rawSynBySrc.constEnd(); ++it)
+        parts << QStringLiteral("%1.%2/%3")
+                     .arg((it.key() >> 8) & 0xFF)
+                     .arg(it.key() & 0xFF)
+                     .arg(it.value());
+    g_rawSynBySrc.clear();
+    parts.sort();
+    return QStringLiteral(" synRaw=") + parts.join(QLatin1Char(','));
 }
 
 void GatewayDiag::sample(const QString &extra)
@@ -205,6 +241,7 @@ void GatewayDiag::sample(const QString &extra)
                 .arg(d(c.synLatSlow, g_prev.synLatSlow));
     line += QStringLiteral(" synRxIn=%1")
                 .arg(d(c.synRxIn, g_prev.synRxIn));
+    line += rawSynLine();
     line += QStringLiteral(" synackTx=%1")
                 .arg(d(c.synAckTx, g_prev.synAckTx));
     line += QStringLiteral(" dial=%1 estab=%2")

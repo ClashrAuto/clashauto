@@ -10,6 +10,7 @@
 #include <QHostAddress>
 #include <QList>
 #include <QSet>
+#include <QStringList>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QTimer>
@@ -537,6 +538,10 @@ constexpr int kToLwipLowWater = 16 * 1024;
 //     等的就是下一拍，**最坏间隔才决定性**。瞬时量，读完清零（引擎侧清）。
 // ★ rexmit 是 lwIP 从来给不出的（struct stats_proto 根本没有重传字段，tcp_out.c 那三个
 //   重传入口一个计数都不加），当年只能拿 xmit 总数当近似 —— 换栈顺手补上了真数。
+// 定义在本文件靠后（挨着 noteSynIn 的表），这里只前置声明。
+int sweepUnansweredSyns();
+QString synBySrcLine();
+
 QString smolStatsLine(NetStack::Impl *d)
 {
     if (!d || !d->smol)
@@ -577,6 +582,11 @@ QString smolStatsLine(NetStack::Impl *d)
             ++idle5m;
     }
     out += QStringLiteral(" idle5m=%1 idleMaxS=%2").arg(idle5m).arg(idleMaxMs / 1000);
+
+    // ★ 「收到了 SYN 却始终没回 SYN-ACK」的条数。synRxIn/synackTx 的差值答不了这个问题
+    //   —— SYN-ACK 会重传，把差值抹平甚至反号。这一栏是唯一直接的证据。
+    out += QStringLiteral(" synUnans=%1").arg(sweepUnansweredSyns());
+    out += synBySrcLine();
 
     prev = s;
     return out;
@@ -1012,12 +1022,17 @@ QString addrToString(const CoastAddr *a)
 
 // ———————————————————————— coaststack 的五个回调 ————————————————————————
 
-// SYN 进到收帧入口的时刻（源端口 → 微秒）。★ 只为量「进来之后多久回 SYN-ACK」——
-// 真机上这一段要 3 秒，而 Rust 侧三条用例证明栈本身是快的，所以慢在 C++ 这一层。
+// SYN 进到收帧入口的时刻（源端口 → 微秒）。量两件事：进来之后多久回 SYN-ACK（synLat），
+// 以及**进来之后压根没回**（synUnans）—— 后者才是「设备发了 SYN 却连不上」的直接证据。
 // 用普通 QHash + 单调时钟：与 GatewayDiag 同一个单线程前提（见其文件头）。
 // 有界：超过 512 条就整表丢弃 —— 这是诊断量，宁可丢样本也不吃内存。
 QHash<quint16, qint64> g_synSeenUs;
 QElapsedTimer g_synClock;
+
+// 每个源 IPv4 的 SYN 计数。★ 聚合的 synRxIn 把所有设备混在一起，答不了
+// 「设备发了 N 个 SYN，我们收到几个」—— 而那正是「丢在空口 / 丢在主机内」的唯一分界。
+// 按源分桶后可以直接和设备侧 tcpdump 的计数相减，不必先把别的设备停掉。
+QHash<quint32, quint32> g_synBySrc;
 
 void noteSynIn(quint16 sport)
 {
@@ -1025,7 +1040,49 @@ void noteSynIn(quint16 sport)
         g_synClock.start();
     if (g_synSeenUs.size() > 512)
         g_synSeenUs.clear();
-    g_synSeenUs.insert(sport, g_synClock.nsecsElapsed() / 1000);
+    // ★ 重传的 SYN **不覆盖**原时间戳：这条 SYN 已经等了多久，才是我们要的量。
+    //   覆盖的话，设备每秒重传一次就会把年龄永远压在 1 秒以内，未应答的 SYN 就隐身了。
+    if (!g_synSeenUs.contains(sport))
+        g_synSeenUs.insert(sport, g_synClock.nsecsElapsed() / 1000);
+}
+
+// 表里还挂着、且超过 1 秒没等到 SYN-ACK 的 SYN 数。设备的初始 RTO 就是 1 秒，
+// 所以到了 1 秒还没回，设备一定已经在重传 —— 这条连接在用户眼里已经卡住了。
+// 顺手丢弃超过 30 秒的条目：端口号会复用，陈年时间戳会污染延迟统计。
+int sweepUnansweredSyns()
+{
+    if (!g_synClock.isValid())
+        return 0;
+    const qint64 now = g_synClock.nsecsElapsed() / 1000;
+    int unanswered = 0;
+    for (auto it = g_synSeenUs.begin(); it != g_synSeenUs.end();) {
+        const qint64 age = now - it.value();
+        if (age > 30 * 1000 * 1000) {
+            it = g_synSeenUs.erase(it);
+            continue;
+        }
+        if (age > 1000 * 1000)
+            ++unanswered;
+        ++it;
+    }
+    return unanswered;
+}
+
+// 本窗口每个源 IP 的 SYN 数，形如 `synSrc=31.66/12,31.238/3`（省掉共同的 192.168. 前缀太脆，
+// 直接给后两段，够对照用）。读完清零。没有 SYN 就不占位置。
+QString synBySrcLine()
+{
+    if (g_synBySrc.isEmpty())
+        return QString();
+    QStringList parts;
+    for (auto it = g_synBySrc.constBegin(); it != g_synBySrc.constEnd(); ++it)
+        parts << QStringLiteral("%1.%2/%3")
+                     .arg((it.key() >> 8) & 0xFF)
+                     .arg(it.key() & 0xFF)
+                     .arg(it.value());
+    g_synBySrc.clear();
+    parts.sort();
+    return QStringLiteral(" synSrc=") + parts.join(QLatin1Char(','));
 }
 
 void noteSynAckOut(quint16 dport)
@@ -1060,9 +1117,10 @@ void smolOutFrame(void *user, CoastNicId nic, const uint8_t *frame, size_t len)
             off = 14 + (frame[14] & 0x0F) * 4;
         else if (et == 0x86DD && frame[20] == 6)
             off = 14 + 40;
-        if (off > 0 && size_t(off + 14) <= len && (frame[off + 13] & 0x12) == 0x12)
+        if (off > 0 && size_t(off + 14) <= len && (frame[off + 13] & 0x12) == 0x12) {
             ++GatewayDiag::c.synAckTx;
             noteSynAckOut(quint16((frame[off + 2] << 8) | frame[off + 3]));
+        }
     }
     // 必须是自有内存的 QByteArray：端点可能把它排进积压队列（IL2Endpoint.h 的硬契约）
     n->ep->send(QByteArray(reinterpret_cast<const char *>(frame), static_cast<int>(len)));
@@ -1635,9 +1693,13 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
             off = 14 + (f[14] & 0x0F) * 4;
         else if (et == 0x86DD && f[20] == 6)
             off = 14 + 40;
-        if (off > 0 && off + 14 <= frame.size() && (f[off + 13] & 0x12) == 0x02)
+        if (off > 0 && off + 14 <= frame.size() && (f[off + 13] & 0x12) == 0x02) {
             ++GatewayDiag::c.synRxIn;
             noteSynIn(quint16((f[off] << 8) | f[off + 1]));
+            if (et == 0x0800) // IPv4 源地址在以太头之后第 12 字节起
+                ++g_synBySrc[(quint32(f[26]) << 24) | (quint32(f[27]) << 16)
+                             | (quint32(f[28]) << 8) | quint32(f[29])];
+        }
     }
     if (g_debug) {
         const int proto = (frame.size() >= 24) ? f[14 + 9] : -1;
