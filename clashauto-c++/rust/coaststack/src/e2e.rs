@@ -112,7 +112,6 @@ fn conn_new_of(events: &[Event]) -> Option<(ConnId, u16)> {
     })
 }
 
-
 /// 完成三次握手，返回 (连接 id, SYN-ACK 的 seq)。
 /// ★ 必须走完握手才会有 ConnNew —— 引擎刻意只在 Established 才 promote，与 lwIP 的 accept
 ///   时机一致；否则 SYN 洪水会给每个 SYN 各拨一条上游（这个差异是 A/B 自测抓出来的）。
@@ -126,7 +125,10 @@ fn establish(e: &mut Engine, sport: u16, dport: u16, seq: u32) -> (ConnId, u32) 
         .map(|(_, _, _, s)| s)
         .expect("握手第二步应有 SYN-ACK");
     evs.clear();
-    e.input(1, &tcp_frame(sport, dport, 0x10, seq + 1, synack_seq.wrapping_add(1), b""));
+    e.input(
+        1,
+        &tcp_frame(sport, dport, 0x10, seq + 1, synack_seq.wrapping_add(1), b""),
+    );
     e.poll_collect(20, &mut evs);
     let id = conn_new_of(&evs).expect("握手完成后应有 ConnNew").0;
     (id, synack_seq)
@@ -156,7 +158,10 @@ fn syn_gets_synack_with_original_dport() {
     // ④ 补上第三次握手，ConnNew 才出现，且报的是原始目的端口
     let synack_seq = synack.unwrap().3;
     evs.clear();
-    e.input(1, &tcp_frame(51000, 443, 0x10, 1001, synack_seq.wrapping_add(1), b""));
+    e.input(
+        1,
+        &tcp_frame(51000, 443, 0x10, 1001, synack_seq.wrapping_add(1), b""),
+    );
     e.poll_collect(20, &mut evs);
     let (id, real) = conn_new_of(&evs).expect("握手完成后应有 ConnNew");
     assert_eq!(real, 443, "ConnNew 应报原始目的端口");
@@ -172,7 +177,10 @@ fn window_is_gated_until_recved() {
 
     // 设备发数据
     evs.clear();
-    e.input(1, &tcp_frame(51001, 443, 0x18, 5001, synack_seq.wrapping_add(1), b"ping"));
+    e.input(
+        1,
+        &tcp_frame(51001, 443, 0x18, 5001, synack_seq.wrapping_add(1), b"ping"),
+    );
     e.poll_collect(30, &mut evs);
 
     let got = evs.iter().find_map(|ev| match ev {
@@ -240,7 +248,10 @@ fn malformed_frames_never_panic() {
 #[test]
 fn unknown_nic_is_rejected() {
     let mut e = mk_engine();
-    assert!(!e.input(99, &tcp_frame(1, 2, 0x02, 1, 0, b"")), "未知网卡应被拒");
+    assert!(
+        !e.input(99, &tcp_frame(1, 2, 0x02, 1, 0, b"")),
+        "未知网卡应被拒"
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -322,9 +333,9 @@ fn measure_realistic_upstream_ceiling() {
     let ackno_to_peer = synack_seq.wrapping_add(1);
     let payload = [0x5Au8; 1460];
 
-    let mut seq: u32 = 2001;      // 设备下一个要发的序号
+    let mut seq: u32 = 2001; // 设备下一个要发的序号
     let mut peer_ack: u32 = 2001; // 我方已确认到哪
-    let mut wnd: u32 = 65535;     // 我方通告窗口（下面会被真值覆盖）
+    let mut wnd: u32 = 65535; // 我方通告窗口（下面会被真值覆盖）
     let mut wnd_seen_max: u32 = 0;
 
     const TARGET: usize = 1024 * 1024;
@@ -341,7 +352,10 @@ fn measure_realistic_upstream_ceiling() {
             if inflight as u64 + 1460 > wnd as u64 {
                 break;
             }
-            e.input(1, &tcp_frame(51020, 443, 0x18, seq, ackno_to_peer, &payload));
+            e.input(
+                1,
+                &tcp_frame(51020, 443, 0x18, seq, ackno_to_peer, &payload),
+            );
             seq = seq.wrapping_add(1460);
             sent_this_cycle += 1460;
         }
@@ -389,7 +403,11 @@ fn measure_realistic_upstream_ceiling() {
     let mbps = (delivered as f64) * 8.0 / secs / 1e6;
     std::eprintln!(
         "[REAL] 送达 {} B / {} 拍（{:.2}s @25ms）→ {:.1} Mb/s/连接；最大通告窗口 {} B",
-        delivered, cycles, secs, mbps, wnd_seen_max
+        delivered,
+        cycles,
+        secs,
+        mbps,
+        wnd_seen_max
     );
     assert!(delivered > 0, "一个字节都没送达");
 }
@@ -475,7 +493,11 @@ fn parse_ws_shift(frame: &[u8]) -> Option<u8> {
             0 => return None,
             1 => i += 1,
             3 => {
-                return if i + 2 < end { Some(frame[i + 2]) } else { None };
+                return if i + 2 < end {
+                    Some(frame[i + 2])
+                } else {
+                    None
+                };
             }
             _ => {
                 if i + 1 >= end {
@@ -517,7 +539,15 @@ fn establish_ws(e: &mut Engine, sport: u16, dport: u16, seq: u32) -> (ConnId, u3
     evs.clear();
     e.input(
         1,
-        &tcp_frame_opt(sport, dport, 0x10, seq + 1, synack_seq.wrapping_add(1), b"", &[]),
+        &tcp_frame_opt(
+            sport,
+            dport,
+            0x10,
+            seq + 1,
+            synack_seq.wrapping_add(1),
+            b"",
+            &[],
+        ),
     );
     e.poll_collect(20, &mut evs);
     let id = conn_new_of(&evs).expect("握手完成后应有 ConnNew").0;
@@ -562,7 +592,10 @@ fn measure_up(poll_ms: u64) -> (f64, usize, u32) {
             if inflight + 1460 > wnd {
                 break;
             }
-            e.input(1, &tcp_frame_opt(51030, 443, 0x18, seq, ackno, &payload, &[]));
+            e.input(
+                1,
+                &tcp_frame_opt(51030, 443, 0x18, seq, ackno, &payload, &[]),
+            );
             seq = seq.wrapping_add(1460);
             sent += 1460;
         }
@@ -628,7 +661,15 @@ fn measure_down(poll_ms: u64, cycles_target: u32) -> (f64, usize) {
         on_wire += payload_bytes(&evs);
         e.input(
             1,
-            &tcp_frame_opt(51031, 8080, 0x10, 4001, ack_base.wrapping_add(on_wire as u32), b"", &[]),
+            &tcp_frame_opt(
+                51031,
+                8080,
+                0x10,
+                4001,
+                ack_base.wrapping_add(on_wire as u32),
+                b"",
+                &[],
+            ),
         );
     }
     let secs = cyc as f64 * (poll_ms as f64 / 1000.0);
@@ -664,12 +705,14 @@ fn throughput_scales_with_poll_rate() {
         up1 > up25 * 8.0,
         "上行没有随推进变密而提升：25ms={:.1} 1ms={:.1} —— \
          说明瓶颈已经不是推进周期（或者模型写错了）",
-        up25, up1
+        up25,
+        up1
     );
     assert!(
         down1 > down25 * 8.0,
         "下行没有随推进变密而提升：25ms={:.1} 1ms={:.1}",
-        down25, down1
+        down25,
+        down1
     );
 }
 
@@ -714,7 +757,10 @@ fn rx_queue_is_bounded_and_counted() {
     let payload = [0u8; 1400];
     const FLOOD: usize = 40_000; // 远超 RX_QUEUE_MAX(16384)
     for i in 0..FLOOD {
-        e.input(1, &tcp_frame(50000, 443, 0x18, 1000 + i as u32 * 1400, 0, &payload));
+        e.input(
+            1,
+            &tcp_frame(50000, 443, 0x18, 1000 + i as u32 * 1400, 0, &payload),
+        );
     }
     assert!(
         e.rx_overflow > 0,
@@ -744,7 +790,10 @@ fn skip_rx_checksum_knob_actually_works() {
     let mut evs = Vec::new();
     e.input(1, &bad);
     e.poll_collect(10, &mut evs);
-    let synacks = tcp_out(&evs).into_iter().filter(|(fl, _, _, _)| fl & 0x12 == 0x12).count();
+    let synacks = tcp_out(&evs)
+        .into_iter()
+        .filter(|(fl, _, _, _)| fl & 0x12 == 0x12)
+        .count();
     assert_eq!(
         synacks, 0,
         "默认应当校验并丢弃坏帧，却回了 {} 个 SYN-ACK —— 那么「关掉校验和」的对照实验没有意义",
@@ -764,10 +813,81 @@ fn skip_rx_checksum_knob_actually_works() {
     let mut evs2 = Vec::new();
     e.input(1, &bad2);
     e.poll_collect(20, &mut evs2);
-    let synacks2 = tcp_out(&evs2).into_iter().filter(|(fl, _, _, _)| fl & 0x12 == 0x12).count();
+    let synacks2 = tcp_out(&evs2)
+        .into_iter()
+        .filter(|(fl, _, _, _)| fl & 0x12 == 0x12)
+        .count();
     assert!(
         synacks2 > 0,
         "关掉校验和之后坏帧仍被丢弃 —— 开关没生效，据它得出的「校验和不要钱」是假结论"
     );
 }
 
+/// 对端消失的连接必须被回收。
+///
+/// ★ smoltcp 的 `set_timeout` 与 `set_keep_alive` **默认都是 None** —— 不设的话，对端一旦
+///   消失（设备休眠 / 拔网线 / 进程被杀），socket 就永远卡在那里，没有任何东西会收场。
+///   真机后果：conns 只增不减（50 分钟 0→254，而核心侧同时只有 46 条）；由于每帧 poll 要
+///   遍历全部 socket，吞吐随连接数反向塌陷 —— 同一条链路 conns≈10 时 407 KB/s、
+///   conns≈80 时 21 KB/s。用户看到的是「用久了变慢、测速软件根本测不了、看视频却没事」。
+///
+/// ★ 这条用例只推时钟、不喂任何帧，正是「对端凭空消失」的最小复现。它同时守住两个设置：
+///   去掉 timeout 则永不回收（本断言直接红）；去掉 keep_alive 则探测不发，静默计时器
+///   照样会到期 —— 所以另有一条 idle_but_alive_connection_survives 守着「别砍活连接」。
+#[test]
+fn silent_peer_connection_is_reaped() {
+    let mut e = mk_engine();
+    let (id, _synack_seq) = establish(&mut e, 51030, 443, 3000);
+
+    let mut now = 1000u64;
+    let mut closed = false;
+    for _ in 0..400 {
+        now += 1000; // 1 秒一步：保活 75s 一次、静默中止 300s，400 步足够跨过去
+        let mut evs = Vec::new();
+        e.poll_collect(now, &mut evs);
+        if evs
+            .iter()
+            .any(|ev| matches!(ev, Event::ConnClosed { id: i, .. } if *i == id))
+        {
+            closed = true;
+            break;
+        }
+    }
+    assert!(
+        closed,
+        "对端静默 400 秒后连接仍未回收 —— socket 永生，conns 只增不减"
+    );
+}
+
+/// 反向守护：**还活着**的空闲连接不能被砍。
+///
+/// RFC 5382 REQ-5 要求已建立的 TCP 映射不短于 2 小时 4 分。只设 timeout 而不设 keep_alive，
+/// 或者把判据写成「按空闲砍」，都会掐断推送 / IMAP / SSH 这类合法长连接。这里设备一个字节
+/// 都不发，但**每次收到保活探测都回 ACK** —— 静默计时器应当不断归零，连接必须活下来。
+#[test]
+fn idle_but_alive_connection_survives() {
+    let mut e = mk_engine();
+    let (id, synack_seq) = establish(&mut e, 51031, 443, 4000);
+    let ackno = synack_seq.wrapping_add(1);
+
+    let mut now = 1000u64;
+    let mut probes = 0u32;
+    for _ in 0..400 {
+        now += 1000;
+        let mut evs = Vec::new();
+        e.poll_collect(now, &mut evs);
+        assert!(
+            !evs.iter().any(|ev| matches!(ev, Event::ConnClosed { id: i, .. } if *i == id)),
+            "设备一直在回 ACK，连接却被砍了（400 步里共收到 {probes} 次探测）—— 这会掐断推送/IMAP 这类合法长连接"
+        );
+        // ★ 设备**只在被探测到时**才回一个纯 ACK —— 真实的空闲连接不会自己发东西。
+        //   这正是 keep_alive 的作用：没有它就没有探测，设备没有理由说话，静默计时器
+        //   一路走到期，于是一条完全健康的长连接被砍掉。所以这条用例是 keep_alive 的守卫，
+        //   删掉 set_keep_alive 它必红（若设备每秒主动发包，这条就白写了）。
+        let probed = evs.iter().any(|ev| matches!(ev, Event::OutFrame { .. }));
+        if probed {
+            probes += 1;
+            e.input(1, &tcp_frame(51031, 443, 0x10, 4001, ackno, &[]));
+        }
+    }
+}

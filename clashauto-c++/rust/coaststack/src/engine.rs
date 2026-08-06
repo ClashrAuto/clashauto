@@ -46,16 +46,51 @@ const LISTEN_BACKLOG: usize = 32;
 /// 排空收队列时，每处理多少帧补一次监听 socket（见 poll_collect 里的说明）。
 const PROMOTE_EVERY: u32 = 16;
 
+/// 保活探测间隔 / 静默中止阈值。**两者必须成对**，缺一个都是错的：
+///
+/// · 只设 timeout：等于「按空闲砍」——推送、IMAP、SSH 这类合法长连接会被掐断，
+///   正是 RFC 5382 REQ-5（已建立的映射不短于 2 小时 4 分）要防的事。
+/// · 只设 keep_alive：探测发出去了，对端不答也没人收场，socket 照样永生。
+/// · 配对才对：健康的对端每次都回 ACK → 静默计时器不断归零，连接想空闲多久都行；
+///   对端真没了（设备休眠 / 拔网线 / 进程被杀），4 次探测无人应答后被中止。
+///
+/// 不设的后果是实测出来的：smoltcp 这两个默认都是 None，**对端消失的 socket 永不超时**。
+/// 真机上 conns 只增不减（50 分钟 0→254，核心侧同时只有 46）；而每帧 poll 要遍历全部
+/// socket，于是吞吐随连接数反向塌陷 —— 同一条链路 conns≈10 时 407 KB/s、conns≈80 时
+/// 21 KB/s。表现是「用久了变慢、测速软件根本测不了、看视频却没事」（测速开几十条并发）。
+const KEEPALIVE_SECS: u64 = 75;
+const SILENT_ABORT_SECS: u64 = 300;
+
 pub type ConnId = u64;
 pub type NicId = u32;
 
 /// 引擎产出的事件。FFI 层收走后再派发成 C 回调（见文件头「回调重入」）。
 pub enum Event {
-    OutFrame { nic: NicId, data: Vec<u8> },
-    ConnNew { id: ConnId, nic: NicId, src: [u8; 16], is_v6: bool, sport: u16, dst: [u8; 16], dport: u16 },
-    ConnData { id: ConnId, data: Vec<u8> },
-    ConnSent { id: ConnId, n: u32 },
-    ConnClosed { id: ConnId, is_abort: bool },
+    OutFrame {
+        nic: NicId,
+        data: Vec<u8>,
+    },
+    ConnNew {
+        id: ConnId,
+        nic: NicId,
+        src: [u8; 16],
+        is_v6: bool,
+        sport: u16,
+        dst: [u8; 16],
+        dport: u16,
+    },
+    ConnData {
+        id: ConnId,
+        data: Vec<u8>,
+    },
+    ConnSent {
+        id: ConnId,
+        n: u32,
+    },
+    ConnClosed {
+        id: ConnId,
+        is_abort: bool,
+    },
 }
 
 // ———————————————————————— phy：由 C++ 喂帧的队列设备 ————————————————————————
@@ -99,7 +134,13 @@ impl QueueDevice {
     const RX_QUEUE_MAX: usize = 16384;
 
     fn new(mtu: usize) -> Self {
-        Self { rx: VecDeque::new(), tx: Vec::new(), mtu, skip_rx_checksum: false, rx_budget: usize::MAX }
+        Self {
+            rx: VecDeque::new(),
+            tx: Vec::new(),
+            mtu,
+            skip_rx_checksum: false,
+            rx_budget: usize::MAX,
+        }
     }
     /// 返回 false = 队列已满，这一帧被丢（调用方据此记 rx_dropped）。
     fn push_rx(&mut self, frame: Vec<u8>) -> bool {
@@ -122,7 +163,10 @@ impl QueueDevice {
         self.tx
             .iter()
             .filter(|f| {
-                f.len() >= 14 + 40 + 24 && f[12] == 0x86 && f[13] == 0xDD && f[20] == 58
+                f.len() >= 14 + 40 + 24
+                    && f[12] == 0x86
+                    && f[13] == 0xDD
+                    && f[20] == 58
                     && f[54] == 135
             })
             .cloned()
@@ -149,8 +193,14 @@ impl<'a> TxToken for QTx<'a> {
 }
 
 impl Device for QueueDevice {
-    type RxToken<'a> = QRx where Self: 'a;
-    type TxToken<'a> = QTx<'a> where Self: 'a;
+    type RxToken<'a>
+        = QRx
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = QTx<'a>
+    where
+        Self: 'a;
 
     fn receive(&mut self, _t: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
         if self.rx_budget == 0 || self.rx.is_empty() {
@@ -206,10 +256,18 @@ fn new_listener(sockets: &mut SocketSet<'static>) -> Option<SocketHandle> {
     let mut s = tcp::Socket::new(rx, tx);
     // addr:None = 收任意目的 IP（等价于 lwIP 的 accept-all 补丁）；
     // port 只能是具体值 —— 任意目的**端口**靠 portmap 的改写实现（见 portmap.rs）。
-    if s.listen(IpListenEndpoint { addr: None, port: FIXED_PORT }).is_err() {
+    if s.listen(IpListenEndpoint {
+        addr: None,
+        port: FIXED_PORT,
+    })
+    .is_err()
+    {
         return None;
     }
     s.set_nagle_enabled(false); // 对应 lwIP 的 tcp_nagle_disable
+                                // 见 KEEPALIVE_SECS 的论证：必须成对，缺一个就退化成「永生」或「砍活连接」。
+    s.set_keep_alive(Some(Duration::from_secs(KEEPALIVE_SECS)));
+    s.set_timeout(Some(Duration::from_secs(SILENT_ABORT_SECS)));
     Some(sockets.add(s))
 }
 
@@ -278,7 +336,15 @@ impl Engine {
         self.conns.len()
     }
 
-    pub fn add_nic(&mut self, nic: NicId, mac: [u8; 6], ip: [u8; 16], is_v6: bool, prefix: u8, now_ms: u64) -> bool {
+    pub fn add_nic(
+        &mut self,
+        nic: NicId,
+        mac: [u8; 6],
+        ip: [u8; 16],
+        is_v6: bool,
+        prefix: u8,
+        now_ms: u64,
+    ) -> bool {
         if self.nics.contains_key(&nic) {
             return false;
         }
@@ -400,7 +466,9 @@ impl Engine {
         //   这里从帧里自动学，连 API 都不用加。
         self.learn_neighbor(nic, frame);
 
-        let Some(n) = self.nics.get_mut(&nic) else { return false };
+        let Some(n) = self.nics.get_mut(&nic) else {
+            return false;
+        };
         let mut buf = frame.to_vec();
         portmap::rewrite_rx(&mut buf, &mut n.portmap);
         if !n.device.push_rx(buf) {
@@ -433,7 +501,9 @@ impl Engine {
         src_ip[..4].copy_from_slice(&frame[26..30]);
 
         let now = self.last_seen_ms;
-        let Some(n) = self.nics.get_mut(&nic) else { return };
+        let Some(n) = self.nics.get_mut(&nic) else {
+            return;
+        };
         if n.our_is_v6 {
             return;
         }
@@ -449,10 +519,14 @@ impl Engine {
         a[6..12].copy_from_slice(&src_mac);
         a[12] = 0x08;
         a[13] = 0x06; // ARP
-        a[14] = 0x00; a[15] = 0x01; // htype ethernet
-        a[16] = 0x08; a[17] = 0x00; // ptype ipv4
-        a[18] = 6; a[19] = 4;
-        a[20] = 0x00; a[21] = 0x02; // oper = reply
+        a[14] = 0x00;
+        a[15] = 0x01; // htype ethernet
+        a[16] = 0x08;
+        a[17] = 0x00; // ptype ipv4
+        a[18] = 6;
+        a[19] = 4;
+        a[20] = 0x00;
+        a[21] = 0x02; // oper = reply
         a[22..28].copy_from_slice(&src_mac);
         a[28..32].copy_from_slice(&src_ip[..4]);
         a[32..38].copy_from_slice(&n.our_mac);
@@ -483,7 +557,9 @@ impl Engine {
         }
 
         let now = self.last_seen_ms;
-        let Some(n) = self.nics.get_mut(&nic) else { return };
+        let Some(n) = self.nics.get_mut(&nic) else {
+            return;
+        };
         match n.neighbors.get(&src_ip) {
             Some((mac, t)) if *mac == src_mac && now.saturating_sub(*t) < REFRESH_MS => return,
             _ => {}
@@ -528,7 +604,8 @@ impl Engine {
         let icmp_len = 24 + 8usize;
         let mut f = vec![0u8; 14 + 40 + icmp_len];
         // 组播 IPv6 → 以太目的是 33:33 + 目的地址后 4 字节（RFC 2464）
-        f[0] = 0x33; f[1] = 0x33;
+        f[0] = 0x33;
+        f[1] = 0x33;
         f[2..6].copy_from_slice(&dst_b[12..16]);
         f[6..12].copy_from_slice(&src_mac);
         f[12] = 0x86;
@@ -540,7 +617,7 @@ impl Engine {
         f[21] = 255; // hop limit（NDP 强制 255，否则被丢）
         f[22..38].copy_from_slice(&src_ip); // src = 设备
         f[38..54].copy_from_slice(&our_ll_b); // dst = 我们
-        // ICMPv6 邻居通告
+                                              // ICMPv6 邻居通告
         let i = 54usize;
         f[i] = 136; // type = NA
         f[i + 1] = 0; // code
@@ -568,56 +645,64 @@ impl Engine {
         // 收集本轮要发的事件；nic 逐个处理
         let nic_ids: Vec<NicId> = self.nics.keys().copied().collect();
         for nid in nic_ids {
-          // ★ 最多两轮：第一轮可能因为缺 v6 邻居而只发出一条 NS，drain_tx 会就地代答一条 NA
-          //   注入收队列；不再跑一轮的话，那条 NA 要等下一次泵（25ms）才被消化，
-          //   表现为"第一个 v6 连接慢一拍"。两轮即可收敛（NA 进来 → 重发 SYN-ACK）。
-          for _round in 0..2 {
-            // 反复 poll 直到没有新进展或收队列排空（一次 poll 只处理一帧）
-            //
-            // ★ 排空**途中**必须补充监听 socket。原来 promote_listeners 只在这个循环
-            //   之后跑一次，于是「一拍之内最多接受 LISTEN_BACKLOG(32) 条新连接」：
-            //   同一个 25ms 窗口里第 33 条起的 SYN 找不到处于 Listen 的 socket，被丢/回 RST，
-            //   设备要等初始 RTO（约 1 秒）重传。而多源页面同时开 30~100 条连接很常见 ——
-            //   症状是"偶发某些资源加载特别慢"，极难归因，且这条路**没有计数器**。
-            //   修法不能是调大 LISTEN_BACKLOG：每个监听 socket 都实打实占
-            //   RX_BUF+TX_BUF = 256 KiB，32 个已经是 8 MB 常驻，再乘 8 就是 64 MB。
-            //   所以改成排空途中按帧数分摊地补 —— 池子不变，但一拍能接受的连接数不再有上限。
-            loop {
-                // ★ 借用必须收在这个块里：promote_listeners 要 &mut self，
-                //   而 n 借的是 self.nics —— 不放开就是 E0499。
-                let (had_rx, r, still_rx) = {
-                    let Some(n) = self.nics.get_mut(&nid) else { break };
-                    let had_rx = n.device.rx_pending();
-                    // 每次 iface.poll 只放 PROMOTE_EVERY 帧进去，好让下面的补充逻辑插得进来
-                    n.device.rx_budget = PROMOTE_EVERY as usize;
-                    let r = n.iface.poll(now, &mut n.device, &mut n.sockets);
-                    n.device.rx_budget = usize::MAX;
-                    (had_rx, r, n.device.rx_pending())
-                };
-                if !had_rx && r == PollResult::None {
-                    break;
+            // ★ 最多两轮：第一轮可能因为缺 v6 邻居而只发出一条 NS，drain_tx 会就地代答一条 NA
+            //   注入收队列；不再跑一轮的话，那条 NA 要等下一次泵（25ms）才被消化，
+            //   表现为"第一个 v6 连接慢一拍"。两轮即可收敛（NA 进来 → 重发 SYN-ACK）。
+            for _round in 0..2 {
+                // 反复 poll 直到没有新进展或收队列排空（一次 poll 只处理一帧）
+                //
+                // ★ 排空**途中**必须补充监听 socket。原来 promote_listeners 只在这个循环
+                //   之后跑一次，于是「一拍之内最多接受 LISTEN_BACKLOG(32) 条新连接」：
+                //   同一个 25ms 窗口里第 33 条起的 SYN 找不到处于 Listen 的 socket，被丢/回 RST，
+                //   设备要等初始 RTO（约 1 秒）重传。而多源页面同时开 30~100 条连接很常见 ——
+                //   症状是"偶发某些资源加载特别慢"，极难归因，且这条路**没有计数器**。
+                //   修法不能是调大 LISTEN_BACKLOG：每个监听 socket 都实打实占
+                //   RX_BUF+TX_BUF = 256 KiB，32 个已经是 8 MB 常驻，再乘 8 就是 64 MB。
+                //   所以改成排空途中按帧数分摊地补 —— 池子不变，但一拍能接受的连接数不再有上限。
+                loop {
+                    // ★ 借用必须收在这个块里：promote_listeners 要 &mut self，
+                    //   而 n 借的是 self.nics —— 不放开就是 E0499。
+                    let (had_rx, r, still_rx) = {
+                        let Some(n) = self.nics.get_mut(&nid) else {
+                            break;
+                        };
+                        let had_rx = n.device.rx_pending();
+                        // 每次 iface.poll 只放 PROMOTE_EVERY 帧进去，好让下面的补充逻辑插得进来
+                        n.device.rx_budget = PROMOTE_EVERY as usize;
+                        let r = n.iface.poll(now, &mut n.device, &mut n.sockets);
+                        n.device.rx_budget = usize::MAX;
+                        (had_rx, r, n.device.rx_pending())
+                    };
+                    if !had_rx && r == PollResult::None {
+                        break;
+                    }
+                    // 每轮补一次监听 socket（一轮最多 PROMOTE_EVERY 帧，见上）
+                    self.promote_listeners(nid, out);
+                    if !still_rx && r == PollResult::None {
+                        break;
+                    }
                 }
-                // 每轮补一次监听 socket（一轮最多 PROMOTE_EVERY 帧，见上）
                 self.promote_listeners(nid, out);
-                if !still_rx && r == PollResult::None {
+                self.pump_conns(nid, out);
+                self.drain_tx(nid, out);
+                // drain_tx 里的 answer_ns 可能刚往收队列塞了 NA —— 有就再跑一轮消化掉
+                let more = self
+                    .nics
+                    .get(&nid)
+                    .map(|n| n.device.rx_pending())
+                    .unwrap_or(false);
+                if !more {
                     break;
                 }
             }
-            self.promote_listeners(nid, out);
-            self.pump_conns(nid, out);
-            self.drain_tx(nid, out);
-            // drain_tx 里的 answer_ns 可能刚往收队列塞了 NA —— 有就再跑一轮消化掉
-            let more = self.nics.get(&nid).map(|n| n.device.rx_pending()).unwrap_or(false);
-            if !more {
-                break;
-            }
-          }
         }
     }
 
     /// 监听 socket 被连上 → 转成连接，并补一个新的监听顶上。
     fn promote_listeners(&mut self, nid: NicId, out: &mut Vec<Event>) {
-        let Some(n) = self.nics.get_mut(&nid) else { return };
+        let Some(n) = self.nics.get_mut(&nid) else {
+            return;
+        };
         // ① 离开 Listen 的挪进 pending，并补一个新监听顶上（保持突发容忍度）
         let left: Vec<SocketHandle> = n
             .listeners
@@ -654,7 +739,10 @@ impl Engine {
             .iter()
             .copied()
             .filter(|h| {
-                matches!(n.sockets.get::<tcp::Socket>(*h).state(), tcp::State::Established)
+                matches!(
+                    n.sockets.get::<tcp::Socket>(*h).state(),
+                    tcp::State::Established
+                )
             })
             .collect();
 
@@ -693,10 +781,27 @@ impl Engine {
             }
             self.conns.insert(
                 id,
-                Conn { nic: nid, handle: h, peeked: 0, last_send_queue: 0, cip, cport, sip, closed_reported: false },
+                Conn {
+                    nic: nid,
+                    handle: h,
+                    peeked: 0,
+                    last_send_queue: 0,
+                    cip,
+                    cport,
+                    sip,
+                    closed_reported: false,
+                },
             );
             self.conns_accepted += 1;
-            out.push(Event::ConnNew { id, nic: nid, src: cip, is_v6, sport: cport, dst: sip, dport: real_dport });
+            out.push(Event::ConnNew {
+                id,
+                nic: nid,
+                src: cip,
+                is_v6,
+                sport: cport,
+                dst: sip,
+                dport: real_dport,
+            });
         }
     }
 
@@ -710,10 +815,19 @@ impl Engine {
         //      真到那一步应该改成按 nic 建索引，这里先把分配这一半解决掉。
         let mut ids = core::mem::take(&mut self.pump_scratch);
         ids.clear();
-        ids.extend(self.conns.iter().filter(|(_, c)| c.nic == nid).map(|(k, _)| *k));
+        ids.extend(
+            self.conns
+                .iter()
+                .filter(|(_, c)| c.nic == nid)
+                .map(|(k, _)| *k),
+        );
         for &id in ids.iter() {
-            let Some(c) = self.conns.get_mut(&id) else { continue };
-            let Some(n) = self.nics.get_mut(&nid) else { continue };
+            let Some(c) = self.conns.get_mut(&id) else {
+                continue;
+            };
+            let Some(n) = self.nics.get_mut(&nid) else {
+                continue;
+            };
             let s = n.sockets.get_mut::<tcp::Socket>(c.handle);
 
             // ① 上行：peek 出「已到达但还没交给 C++」的部分。
@@ -805,8 +919,12 @@ impl Engine {
         let mut ns_src = [0u8; 16];
         ns_src.copy_from_slice(&f[22..38]);
 
-        let Some(n) = self.nics.get_mut(&nid) else { return false };
-        let Some((dev_mac, _)) = n.neighbors.get(&target).copied() else { return false };
+        let Some(n) = self.nics.get_mut(&nid) else {
+            return false;
+        };
+        let Some((dev_mac, _)) = n.neighbors.get(&target).copied() else {
+            return false;
+        };
 
         // 被请求的 NA：src = 被问的那个地址（设备），dst = NS 的源（我们）
         let icmp_len = 24 + 8usize;
@@ -851,7 +969,9 @@ impl Engine {
             self.answer_ns(nid, &f);
         }
 
-        let Some(n) = self.nics.get_mut(&nid) else { return };
+        let Some(n) = self.nics.get_mut(&nid) else {
+            return;
+        };
         let frames = n.device.take_tx();
         for mut f in frames {
             // 出方向把源端口从 FIXED_PORT 改回真实目的端口
@@ -875,7 +995,10 @@ impl Engine {
 
     pub fn send(&mut self, id: ConnId, data: &[u8]) -> Result<usize, i32> {
         let c = self.conns.get(&id).ok_or(crate::ffi::COAST_ERR_NOCONN)?;
-        let n = self.nics.get_mut(&c.nic).ok_or(crate::ffi::COAST_ERR_NONIC)?;
+        let n = self
+            .nics
+            .get_mut(&c.nic)
+            .ok_or(crate::ffi::COAST_ERR_NONIC)?;
         let s = n.sockets.get_mut::<tcp::Socket>(c.handle);
         if !s.may_send() {
             return Err(crate::ffi::COAST_ERR_STATE);
@@ -885,22 +1008,33 @@ impl Engine {
 
     pub fn sndbuf(&mut self, id: ConnId) -> Result<usize, i32> {
         let c = self.conns.get(&id).ok_or(crate::ffi::COAST_ERR_NOCONN)?;
-        let n = self.nics.get_mut(&c.nic).ok_or(crate::ffi::COAST_ERR_NONIC)?;
+        let n = self
+            .nics
+            .get_mut(&c.nic)
+            .ok_or(crate::ffi::COAST_ERR_NONIC)?;
         let s = n.sockets.get::<tcp::Socket>(c.handle);
         Ok(s.send_capacity() - s.send_queue())
     }
 
     /// 归还接收窗口 —— 真正把字节从 smoltcp 的 rx 缓冲里消费掉。
     pub fn recved(&mut self, id: ConnId, want: u32) -> Result<(), i32> {
-        let c = self.conns.get_mut(&id).ok_or(crate::ffi::COAST_ERR_NOCONN)?;
-        let n = self.nics.get_mut(&c.nic).ok_or(crate::ffi::COAST_ERR_NONIC)?;
+        let c = self
+            .conns
+            .get_mut(&id)
+            .ok_or(crate::ffi::COAST_ERR_NOCONN)?;
+        let n = self
+            .nics
+            .get_mut(&c.nic)
+            .ok_or(crate::ffi::COAST_ERR_NONIC)?;
         let s = n.sockets.get_mut::<tcp::Socket>(c.handle);
         let take = (want as usize).min(c.peeked);
         if take == 0 {
             return Ok(());
         }
         let mut sink = vec![0u8; take];
-        let got = s.recv_slice(&mut sink).map_err(|_| crate::ffi::COAST_ERR_STATE)?;
+        let got = s
+            .recv_slice(&mut sink)
+            .map_err(|_| crate::ffi::COAST_ERR_STATE)?;
         c.peeked -= got;
         Ok(())
     }
@@ -913,7 +1047,10 @@ impl Engine {
         if c.peeked != 0 {
             return Err(crate::ffi::COAST_ERR_STATE);
         }
-        let n = self.nics.get_mut(&c.nic).ok_or(crate::ffi::COAST_ERR_NONIC)?;
+        let n = self
+            .nics
+            .get_mut(&c.nic)
+            .ok_or(crate::ffi::COAST_ERR_NONIC)?;
         n.sockets.get_mut::<tcp::Socket>(c.handle).close();
         Ok(())
     }
@@ -933,8 +1070,12 @@ impl Engine {
     /// 关掉某个设备地址上的所有连接。对应 lwIP 那边遍历 tcp_active_pcbs。
     /// 不能省：lwIP 的 established 超时是 24 小时，不主动关会造成慢性连接表泄漏。
     pub fn close_device_conns(&mut self, dev: &[u8; 16]) -> i32 {
-        let ids: Vec<ConnId> =
-            self.conns.iter().filter(|(_, c)| &c.cip == dev).map(|(k, _)| *k).collect();
+        let ids: Vec<ConnId> = self
+            .conns
+            .iter()
+            .filter(|(_, c)| &c.cip == dev)
+            .map(|(k, _)| *k)
+            .collect();
         let cnt = ids.len() as i32;
         for id in ids {
             let _ = self.abort(id);

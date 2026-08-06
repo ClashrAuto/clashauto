@@ -82,7 +82,13 @@ pub struct CoastStack {
 
 impl CoastStack {
     fn new(cb: CoastCallbacks, user: *mut c_void) -> Self {
-        Self { cb, user, stats: CoastStats::default(), engine: Engine::new(), last_poll_ms: 0 }
+        Self {
+            cb,
+            user,
+            stats: CoastStats::default(),
+            engine: Engine::new(),
+            last_poll_ms: 0,
+        }
     }
 }
 
@@ -107,7 +113,15 @@ unsafe fn dispatch(s: *mut CoastStack, events: alloc::vec::Vec<Event>) {
                 let st = &mut *s;
                 st.stats.tx_frames += 1;
             }
-            Event::ConnNew { id, nic, src, is_v6, sport, dst, dport } => {
+            Event::ConnNew {
+                id,
+                nic,
+                src,
+                is_v6,
+                sport,
+                dst,
+                dport,
+            } => {
                 let sa = CoastAddr { is_v6, bytes: src };
                 let da = CoastAddr { is_v6, bytes: dst };
                 let accepted = match cb.conn_new {
@@ -143,7 +157,11 @@ unsafe fn dispatch(s: *mut CoastStack, events: alloc::vec::Vec<Event>) {
 // —— 小工具：把裸指针安全地变成 &mut，非法就返回 None ——
 #[inline]
 unsafe fn stack_mut<'a>(s: *mut CoastStack) -> Option<&'a mut CoastStack> {
-    if s.is_null() { None } else { Some(&mut *s) }
+    if s.is_null() {
+        None
+    } else {
+        Some(&mut *s)
+    }
 }
 
 // ———————————————————————— 生命周期 ————————————————————————
@@ -186,7 +204,9 @@ pub unsafe extern "C" fn coast_stack_add_nic(
     ip: *const CoastAddr,
     prefix_len: u8,
 ) -> i32 {
-    let Some(st) = stack_mut(s) else { return COAST_ERR_BADARG };
+    let Some(st) = stack_mut(s) else {
+        return COAST_ERR_BADARG;
+    };
     if mac6.is_null() || ip.is_null() {
         return COAST_ERR_BADARG;
     }
@@ -200,7 +220,14 @@ pub unsafe extern "C" fn coast_stack_add_nic(
     }
     let mut mac = [0u8; 6];
     core::ptr::copy_nonoverlapping(mac6, mac.as_mut_ptr(), 6);
-    if st.engine.add_nic(nic, mac, addr.bytes, addr.is_v6, prefix_len, st.last_poll_ms) {
+    if st.engine.add_nic(
+        nic,
+        mac,
+        addr.bytes,
+        addr.is_v6,
+        prefix_len,
+        st.last_poll_ms,
+    ) {
         COAST_OK
     } else {
         COAST_ERR_NOMEM
@@ -209,8 +236,14 @@ pub unsafe extern "C" fn coast_stack_add_nic(
 
 #[no_mangle]
 pub unsafe extern "C" fn coast_stack_remove_nic(s: *mut CoastStack, nic: CoastNicId) -> i32 {
-    let Some(st) = stack_mut(s) else { return COAST_ERR_BADARG };
-    if st.engine.remove_nic(nic) { COAST_OK } else { COAST_ERR_NONIC }
+    let Some(st) = stack_mut(s) else {
+        return COAST_ERR_BADARG;
+    };
+    if st.engine.remove_nic(nic) {
+        COAST_OK
+    } else {
+        COAST_ERR_NONIC
+    }
 }
 
 /// **仅供归因测量**：关掉收包方向的 TCP/IPv4 校验和验证（发送仍生成）。
@@ -219,7 +252,9 @@ pub unsafe extern "C" fn coast_stack_remove_nic(s: *mut CoastStack, nic: CoastNi
 ///    我们是中间盒，收包不验等于把损坏数据洗成一条校验和有效的新连接。
 #[no_mangle]
 pub unsafe extern "C" fn coast_stack_debug_skip_rx_checksum(s: *mut CoastStack, on: bool) -> i32 {
-    let Some(st) = stack_mut(s) else { return COAST_ERR_BADARG };
+    let Some(st) = stack_mut(s) else {
+        return COAST_ERR_BADARG;
+    };
     st.engine.set_skip_rx_checksum(on);
     COAST_OK
 }
@@ -233,7 +268,9 @@ pub unsafe extern "C" fn coast_stack_input(
     frame: *const u8,
     len: usize,
 ) -> i32 {
-    let Some(st) = stack_mut(s) else { return COAST_ERR_BADARG };
+    let Some(st) = stack_mut(s) else {
+        return COAST_ERR_BADARG;
+    };
     if frame.is_null() || len < 14 {
         if let Some(st) = stack_mut(s) {
             st.stats.rx_dropped += 1;
@@ -409,17 +446,27 @@ mod tests {
 
     unsafe extern "C" fn cb_out(_u: *mut c_void, _n: CoastNicId, _f: *const u8, _l: usize) {}
     unsafe extern "C" fn cb_new(
-        _u: *mut c_void, _i: CoastConnId, _n: CoastNicId,
-        _s: *const CoastAddr, _sp: u16, _d: *const CoastAddr, _dp: u16,
-    ) -> bool { true }
+        _u: *mut c_void,
+        _i: CoastConnId,
+        _n: CoastNicId,
+        _s: *const CoastAddr,
+        _sp: u16,
+        _d: *const CoastAddr,
+        _dp: u16,
+    ) -> bool {
+        true
+    }
     unsafe extern "C" fn cb_data(_u: *mut c_void, _i: CoastConnId, _d: *const u8, _l: usize) {}
     unsafe extern "C" fn cb_sent(_u: *mut c_void, _i: CoastConnId, _n: u32) {}
     unsafe extern "C" fn cb_closed(_u: *mut c_void, _i: CoastConnId, _a: bool) {}
 
     fn cbs() -> CoastCallbacks {
         CoastCallbacks {
-            out_frame: Some(cb_out), conn_new: Some(cb_new), conn_data: Some(cb_data),
-            conn_sent: Some(cb_sent), conn_closed: Some(cb_closed),
+            out_frame: Some(cb_out),
+            conn_new: Some(cb_new),
+            conn_data: Some(cb_data),
+            conn_sent: Some(cb_sent),
+            conn_closed: Some(cb_closed),
         }
     }
 
@@ -428,11 +475,19 @@ mod tests {
         unsafe {
             // 空指针入口一律返回错误码，不 panic —— 这是 panic="abort" 下的硬要求
             assert!(coast_stack_new(ptr::null(), ptr::null_mut()).is_null());
-            assert_eq!(coast_stack_add_nic(ptr::null_mut(), 0, ptr::null(), ptr::null(), 0),
-                       COAST_ERR_BADARG);
-            assert_eq!(coast_stack_input(ptr::null_mut(), 0, ptr::null(), 0), COAST_ERR_BADARG);
+            assert_eq!(
+                coast_stack_add_nic(ptr::null_mut(), 0, ptr::null(), ptr::null(), 0),
+                COAST_ERR_BADARG
+            );
+            assert_eq!(
+                coast_stack_input(ptr::null_mut(), 0, ptr::null(), 0),
+                COAST_ERR_BADARG
+            );
             assert_eq!(coast_stack_poll(ptr::null_mut(), 0), u64::MAX);
-            assert_eq!(coast_conn_send(ptr::null_mut(), 1, ptr::null(), 0), COAST_ERR_BADARG);
+            assert_eq!(
+                coast_conn_send(ptr::null_mut(), 1, ptr::null(), 0),
+                COAST_ERR_BADARG
+            );
             coast_stack_free(ptr::null_mut()); // 空指针 free 必须安全
         }
     }
@@ -453,18 +508,33 @@ mod tests {
             let s = coast_stack_new(&c, ptr::null_mut());
             assert!(!s.is_null());
             let mac = [0x02u8, 0, 0x5b, 0, 0, 1];
-            let mut ip = CoastAddr { is_v6: false, bytes: [0; 16] };
+            let mut ip = CoastAddr {
+                is_v6: false,
+                bytes: [0; 16],
+            };
             ip.bytes[..4].copy_from_slice(&[192, 168, 20, 51]);
 
             assert_eq!(coast_stack_add_nic(s, 1, mac.as_ptr(), &ip, 24), COAST_OK);
             // 重复注册要显式报错，不能静默覆盖
-            assert_eq!(coast_stack_add_nic(s, 1, mac.as_ptr(), &ip, 24), COAST_ERR_BADARG);
+            assert_eq!(
+                coast_stack_add_nic(s, 1, mac.as_ptr(), &ip, 24),
+                COAST_ERR_BADARG
+            );
             // 前缀长度越界
-            assert_eq!(coast_stack_add_nic(s, 2, mac.as_ptr(), &ip, 33), COAST_ERR_BADARG);
+            assert_eq!(
+                coast_stack_add_nic(s, 2, mac.as_ptr(), &ip, 33),
+                COAST_ERR_BADARG
+            );
             // 未知网卡的帧要被计入 rx_dropped
             let frame = [0u8; 64];
-            assert_eq!(coast_stack_input(s, 99, frame.as_ptr(), frame.len()), COAST_ERR_NONIC);
-            assert_eq!(coast_stack_input(s, 1, frame.as_ptr(), frame.len()), COAST_OK);
+            assert_eq!(
+                coast_stack_input(s, 99, frame.as_ptr(), frame.len()),
+                COAST_ERR_NONIC
+            );
+            assert_eq!(
+                coast_stack_input(s, 1, frame.as_ptr(), frame.len()),
+                COAST_OK
+            );
 
             let mut st = CoastStats::default();
             coast_stack_stats(s, &mut st);
@@ -483,9 +553,9 @@ mod tests {
             let c = cbs();
             let s = coast_stack_new(&c, ptr::null_mut());
             coast_stack_poll(s, 1000);
-            coast_stack_poll(s, 1025);  // gap 25
-            coast_stack_poll(s, 1225);  // gap 200 ← 最坏
-            coast_stack_poll(s, 1250);  // gap 25
+            coast_stack_poll(s, 1025); // gap 25
+            coast_stack_poll(s, 1225); // gap 200 ← 最坏
+            coast_stack_poll(s, 1250); // gap 25
             let mut st = CoastStats::default();
             coast_stack_stats(s, &mut st);
             assert_eq!(st.poll_max_gap_ms, 200);

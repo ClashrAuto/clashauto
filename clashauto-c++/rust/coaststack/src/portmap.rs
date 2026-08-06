@@ -35,7 +35,9 @@ pub struct PortMap {
 
 impl PortMap {
     pub fn new() -> Self {
-        Self { map: BTreeMap::new() }
+        Self {
+            map: BTreeMap::new(),
+        }
     }
 
     pub fn lookup(&self, cip: &[u8; 16], cport: u16, sip: &[u8; 16]) -> Option<u16> {
@@ -114,7 +116,9 @@ fn tcp_frame(frame: &[u8]) -> Option<(usize, [u8; 16], [u8; 16])> {
 /// RX 改写：真实目的端口 → FIXED_PORT，并记下映射。就地改 `frame`。
 /// 非 TCP / 解析不了的帧原样放过。
 pub fn rewrite_rx(frame: &mut [u8], map: &mut PortMap) {
-    let Some((l4, src, dst)) = tcp_frame(frame) else { return };
+    let Some((l4, src, dst)) = tcp_frame(frame) else {
+        return;
+    };
     let dport = u16::from_be_bytes([frame[l4 + 2], frame[l4 + 3]]);
     if dport == FIXED_PORT {
         return; // 已经是改写后的，别重复处理
@@ -134,14 +138,18 @@ pub fn rewrite_rx(frame: &mut [u8], map: &mut PortMap) {
 /// TX 改写：源端口 FIXED_PORT → 真实目的端口（查反向映射）。就地改 `frame`。
 /// 出方向的 src 是「服务IP」、dst 是「客户端IP」，所以查表时要反过来。
 pub fn rewrite_tx(frame: &mut [u8], map: &PortMap) {
-    let Some((l4, src, dst)) = tcp_frame(frame) else { return };
+    let Some((l4, src, dst)) = tcp_frame(frame) else {
+        return;
+    };
     let sport = u16::from_be_bytes([frame[l4], frame[l4 + 1]]);
     if sport != FIXED_PORT {
         return;
     }
     let dport = u16::from_be_bytes([frame[l4 + 2], frame[l4 + 3]]); // 客户端端口
-    // key = (客户端IP, 客户端端口, 服务IP)：出方向 src=服务IP、dst=客户端IP
-    let Some(real) = map.lookup(&dst, dport, &src) else { return };
+                                                                    // key = (客户端IP, 客户端端口, 服务IP)：出方向 src=服务IP、dst=客户端IP
+    let Some(real) = map.lookup(&dst, dport, &src) else {
+        return;
+    };
 
     let mut c = [frame[l4 + 16], frame[l4 + 17]];
     csum_patch(&mut c, FIXED_PORT, real);
@@ -199,7 +207,11 @@ mod tests {
         // 回程：src=服务IP:FIXED，dst=客户端IP:客户端端口
         let mut tx = v4_frame([93, 184, 216, 34], [10, 0, 0, 2], FIXED_PORT, 51000);
         rewrite_tx(&mut tx, &m);
-        assert_eq!(u16::from_be_bytes([tx[34], tx[35]]), 443, "源端口应还原成 443");
+        assert_eq!(
+            u16::from_be_bytes([tx[34], tx[35]]),
+            443,
+            "源端口应还原成 443"
+        );
     }
 
     #[test]
@@ -224,7 +236,11 @@ mod tests {
         tx[54..56].copy_from_slice(&FIXED_PORT.to_be_bytes());
         tx[56..58].copy_from_slice(&51000u16.to_be_bytes());
         rewrite_tx(&mut tx, &m);
-        assert_eq!(u16::from_be_bytes([tx[54], tx[55]]), 8443, "v6 源端口应还原");
+        assert_eq!(
+            u16::from_be_bytes([tx[54], tx[55]]),
+            8443,
+            "v6 源端口应还原"
+        );
     }
 
     #[test]

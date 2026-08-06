@@ -114,9 +114,18 @@ fn all_out(events: &[Event]) -> Vec<(u16, u8, usize)> {
     let mut v = Vec::new();
     for ev in events {
         if let Event::OutFrame { data, .. } = ev {
-            let et = if data.len() >= 14 { u16::from_be_bytes([data[12], data[13]]) } else { 0 };
-            let nh = if et == 0x86DD && data.len() > 20 { data[20] }
-                     else if et == 0x0800 && data.len() > 23 { data[23] } else { 0 };
+            let et = if data.len() >= 14 {
+                u16::from_be_bytes([data[12], data[13]])
+            } else {
+                0
+            };
+            let nh = if et == 0x86DD && data.len() > 20 {
+                data[20]
+            } else if et == 0x0800 && data.len() > 23 {
+                data[23]
+            } else {
+                0
+            };
             v.push((et, nh, data.len()));
         }
     }
@@ -163,31 +172,61 @@ fn v6_full_handshake_and_data() {
 
     // 三次握手收尾 → 才该出现 ConnNew（与 v4 同一时机）
     evs.clear();
-    e.input(1, &tcp6(51002, 8443, 0x10, 9001, synack_seq.wrapping_add(1), b""));
+    e.input(
+        1,
+        &tcp6(51002, 8443, 0x10, 9001, synack_seq.wrapping_add(1), b""),
+    );
     e.poll_collect(20, &mut evs);
 
     let cn = evs.iter().find_map(|ev| match ev {
-        Event::ConnNew { id, dport, is_v6, src, .. } => Some((*id, *dport, *is_v6, *src)),
+        Event::ConnNew {
+            id,
+            dport,
+            is_v6,
+            src,
+            ..
+        } => Some((*id, *dport, *is_v6, *src)),
         _ => None,
     });
     let (id, dport, is_v6, src) = cn.expect("v6 握手完成后应有 ConnNew");
     assert_ne!(id, 0);
     assert_eq!(dport, 8443, "ConnNew 应报原始 v6 目的端口");
-    assert!(is_v6, "ConnNew 应标记为 v6（C++ 侧据此格式化地址查 socksUser）");
+    assert!(
+        is_v6,
+        "ConnNew 应标记为 v6（C++ 侧据此格式化地址查 socksUser）"
+    );
     assert_eq!(src, DEV_V6, "ConnNew 的源地址应是设备的 v6");
 
     // 设备发数据 → 应交给上层
     evs.clear();
-    e.input(1, &tcp6(51002, 8443, 0x18, 9001, synack_seq.wrapping_add(1), b"v6ping"));
+    e.input(
+        1,
+        &tcp6(
+            51002,
+            8443,
+            0x18,
+            9001,
+            synack_seq.wrapping_add(1),
+            b"v6ping",
+        ),
+    );
     e.poll_collect(30, &mut evs);
     let got = evs.iter().find_map(|ev| match ev {
         Event::ConnData { id: i, data } if *i == id => Some(data.clone()),
         _ => None,
     });
-    assert_eq!(got.as_deref(), Some(&b"v6ping"[..]), "v6 上行数据应交给 C++");
+    assert_eq!(
+        got.as_deref(),
+        Some(&b"v6ping"[..]),
+        "v6 上行数据应交给 C++"
+    );
 
     // 背压闸门在 v6 上同样生效
-    assert_eq!(e.close(id), Err(crate::ffi::COAST_ERR_STATE), "窗口没还满不许优雅关");
+    assert_eq!(
+        e.close(id),
+        Err(crate::ffi::COAST_ERR_STATE),
+        "窗口没还满不许优雅关"
+    );
     assert!(e.recved(id, 6).is_ok());
     assert!(e.close(id).is_ok());
 }
@@ -206,7 +245,10 @@ fn v6_close_device_conns() {
             .map(|(_, _, _, s)| s)
             .expect("应有 SYN-ACK");
         evs.clear();
-        e.input(1, &tcp6(53000 + i, 443, 0x10, 101, seq.wrapping_add(1), b""));
+        e.input(
+            1,
+            &tcp6(53000 + i, 443, 0x10, 101, seq.wrapping_add(1), b""),
+        );
         e.poll_collect(20, &mut evs);
         if let Some(Event::ConnNew { id, .. }) =
             evs.iter().find(|ev| matches!(ev, Event::ConnNew { .. }))

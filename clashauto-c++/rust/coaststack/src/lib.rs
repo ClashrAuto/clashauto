@@ -10,9 +10,9 @@
 
 extern crate alloc;
 
+mod engine;
 mod ffi;
 mod portmap;
-mod engine;
 
 #[cfg(test)]
 mod e2e;
