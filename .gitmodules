@@ -1,3 +1,6 @@
 [submodule "clash"]
 	path = clash
 	url = https://github.com/ClashrAuto/clash.git
+[submodule "tide"]
+	path = tide
+	url = https://github.com/ClashrAuto/tide.git
