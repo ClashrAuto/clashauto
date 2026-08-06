@@ -891,3 +891,37 @@ fn idle_but_alive_connection_survives() {
         }
     }
 }
+
+/// 一拍之内涌进来的 SYN 必须全部被接住。
+///
+/// ★ 真机症状：Pi 经网关同时开 8 条 curl 下载，**恰好 3 条从头到尾没出现在核心里**
+///   （核心侧只有 5 条 cachefly 连接，而到得了核心的那 5 条全部下满 10 MB、性能正常）。
+///   用户侧就是「测速软件根本测不了、fast.com 卡住、看视频却没事」—— 测速和多源页面
+///   正是几十条并发建连。
+///
+/// ★ 这条路**不经过任何现有计数器**：tcpAcc/tcpAbort/socksFail/refuse 全是 0，因为 SYN
+///   在 smoltcp 里就被静默丢了，根本走不到我们的回调。排查时我盯着那几个 0 看了好几轮
+///   才发现方向不对，所以这条用例的价值不只是防回归，更是把这条盲路变成可观测的。
+///
+/// promote_listeners 的补充逻辑是「监听 socket 离开 Listen 后再补一个」—— 补充永远滞后
+/// 于消耗。一拍内 SYN 数超过当时处于 Listen 的 socket 数，多出来的就没人接。
+#[test]
+fn burst_of_syns_all_get_accepted() {
+    const N: u16 = 200; // 远超真实并发，确保不是"刚好够用"
+    let mut e = mk_engine();
+    for i in 0..N {
+        e.input(1, &tcp_frame(51100 + i, 443, 0x02, 7000 + i as u32, 0, b""));
+    }
+    let mut evs = Vec::new();
+    e.poll_collect(10, &mut evs);
+    // ★ 判据是**回了几个 SYN-ACK**，不是 ConnNew —— 后者要等三次握手第三步才发
+    //   （见 establish），拿它当判据只会恒为 0，测不到"有没有 Listen socket 接住"。
+    let got = tcp_out(&evs)
+        .into_iter()
+        .filter(|(fl, _, _, _)| fl & 0x12 == 0x12)
+        .count();
+    assert_eq!(
+        got, N as usize,
+        "一拍内灌了 {N} 个 SYN，只回了 {got} 个 SYN-ACK —— 其余被静默丢弃，设备要等 RTO(~1s) 重传",
+    );
+}
