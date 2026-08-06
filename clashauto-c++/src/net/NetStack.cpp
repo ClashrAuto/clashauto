@@ -1020,6 +1020,19 @@ void smolOutFrame(void *user, CoastNicId nic, const uint8_t *frame, size_t len)
     NetStack::Nic *n = d->nicById.value(nic, nullptr);
     if (!n || !n->ep)
         return;
+    // 数一下发出去的 SYN-ACK（见 GatewayDiag 的 synAckTx）。只认 IPv4/IPv6 上的 TCP，
+    // 且 SYN|ACK 两位同时置位。判位置：以太头 14 + IPv4 头(IHL*4) 或 IPv6 固定头 40，
+    // 再 +13 是 TCP 的 flags 字节。开销是几条比较，只在出帧路径上，量级与 tx 计数同级。
+    if (len >= 54) {
+        const int et = (frame[12] << 8) | frame[13];
+        int off = -1;
+        if (et == 0x0800 && (frame[14] >> 4) == 4 && frame[23] == 6)
+            off = 14 + (frame[14] & 0x0F) * 4;
+        else if (et == 0x86DD && frame[20] == 6)
+            off = 14 + 40;
+        if (off > 0 && size_t(off + 14) <= len && (frame[off + 13] & 0x12) == 0x12)
+            ++GatewayDiag::c.synAckTx;
+    }
     // 必须是自有内存的 QByteArray：端点可能把它排进积压队列（IL2Endpoint.h 的硬契约）
     n->ep->send(QByteArray(reinterpret_cast<const char *>(frame), static_cast<int>(len)));
 }

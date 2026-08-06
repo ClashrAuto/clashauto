@@ -925,3 +925,110 @@ fn burst_of_syns_all_get_accepted() {
         "一拍内灌了 {N} 个 SYN，只回了 {got} 个 SYN-ACK —— 其余被静默丢弃，设备要等 RTO(~1s) 重传",
     );
 }
+
+/// 设备发来的 RST 必须让连接立刻死掉。
+///
+/// ★ 真机抓包（Pi 经网关下载，8 条并发）：curl 超时退出后，Pi 的内核已经没有那个 socket，
+///   于是每收到一个包就回一个 RST —— **一条连接上抓到 2839 个一模一样的 RST**：
+///     14:58:32  Pi:60020 > 服务器:443  Flags [R] seq 932167879 win 0
+///     14:58:33  同上（seq 一字不差）
+///     …（约 95 次/秒，持续到测试结束）
+///   而网关侧同期 tcpAbort 只有 11 —— **这些 RST 一个都没被当回事**。
+///
+/// ★ 那个 seq 是**正确**的：SYN-ACK 的 ack 是 932165893，设备随后发了 1986 字节，
+///   932165893 + 1986 = 932167879。所以这不是「序号对不上被当成攻击」，它本该被接受。
+///   连接不死 → 我们继续发包 → 设备继续 RST → 环路。这条路解释了 conns 只增不减、
+///   tcpAbort 恒低、以及并发时带宽被僵尸流量吃掉。
+#[test]
+fn device_rst_kills_the_connection() {
+    let mut e = mk_engine();
+    let (id, synack_seq) = establish(&mut e, 51040, 443, 9000);
+    let ackno = synack_seq.wrapping_add(1);
+
+    // 设备先发一段数据，让两边的序号都推进（复刻真机里"发过 1986 字节再 RST"的形态）。
+    let payload = [0x41u8; 512];
+    e.input(1, &tcp_frame(51040, 443, 0x18, 9001, ackno, &payload));
+    let mut evs = Vec::new();
+    e.poll_collect(30, &mut evs);
+
+    // 设备侧 socket 没了 → 内核回 RST，seq = 它的 snd_nxt（= 9001 + 512）。
+    evs.clear();
+    e.input(1, &tcp_frame(51040, 443, 0x04, 9001 + 512, ackno, b""));
+    e.poll_collect(40, &mut evs);
+
+    let closed = evs
+        .iter()
+        .any(|ev| matches!(ev, Event::ConnClosed { id: i, .. } if *i == id));
+    assert!(
+        closed,
+        "收到序号正确的 RST 后连接没死 —— 真机上这会变成每秒约 95 个 RST 的环路",
+    );
+}
+
+/// 收队列有积压时，新 SYN 还能不能在一拍之内被回应。
+///
+/// ★ 真机抓包（Pi 经网关，8 条并发下载）：
+///     14:57:52.627  Pi:60006 > 服务器 [S]
+///     14:57:53.653  重传 [S]
+///     14:57:54.673  重传 [S]
+///     14:57:55.701  重传 [S]
+///     14:57:55.704  服务器 > Pi:60006 [S.]   ← 3.08 秒、4 个 SYN 之后才回
+///   等不到的那几条就是 55 秒超时、curl 报 Connection timed out 的失败流。
+///
+/// ★ 已有的 burst_of_syns_all_get_accepted 抓不到这个：它验的是「回不回」，在一个**空闲**
+///   引擎上一次灌完再 poll。真机上是「引擎已经很忙、收队列积着上千帧」时才发生 ——
+///   泵 25ms 一拍、每拍处理的帧数有限，排在队尾的 SYN 就要等好几拍。
+///   所以这条用例的判据是**几拍**，不是「最终有没有」。
+#[test]
+fn syn_under_rx_backlog_is_answered_promptly() {
+    const BACKLOG: usize = 2000; // 真机上 fed 峰值 1024 帧/10s，队列积到这个量级很常见
+    const SPORT: u16 = 51050;
+    let mut e = mk_engine();
+    // 先建一条连接并让它有数据在跑，制造出"引擎正忙"的状态。
+    let (_id, synack_seq) = establish(&mut e, 51049, 443, 8000);
+    let ackno = synack_seq.wrapping_add(1);
+    let payload = [0x42u8; 1400];
+    let mut seq: u32 = 8001;
+    for _ in 0..BACKLOG {
+        e.input(1, &tcp_frame(51049, 443, 0x18, seq, ackno, &payload));
+        seq = seq.wrapping_add(1400);
+    }
+    // 队尾插入一个新连接的 SYN —— 正是真机上那条等了 3 秒的。
+    e.input(1, &tcp_frame(SPORT, 443, 0x02, 12345, 0, b""));
+
+    // 数它要几拍才被回应。每拍 = 生产泵的 25ms。
+    let mut ticks = 0;
+    let mut now = 100u64;
+    let mut answered = 0;
+    while ticks < 400 {
+        let mut evs = Vec::new();
+        now += 25;
+        e.poll_collect(now, &mut evs);
+        ticks += 1;
+        // 找目的端口 = SPORT 的 SYN-ACK（出帧里 TCP 的 dport 在 offset 34+2）
+        for ev in &evs {
+            if let Event::OutFrame { data, .. } = ev {
+                if data.len() >= 54 && data[23] == 6 && (data[47] & 0x12) == 0x12 {
+                    let dport = u16::from_be_bytes([data[36], data[37]]);
+                    if dport == SPORT {
+                        answered = ticks;
+                    }
+                }
+            }
+        }
+        if answered > 0 {
+            break;
+        }
+    }
+    assert!(
+        answered > 0,
+        "积压 {BACKLOG} 帧后，SYN 在 400 拍(10 秒)内都没被回应"
+    );
+    // 一拍 25ms。真机上设备的初始 RTO 是 1 秒 —— 超过 40 拍就会触发重传，
+    // 那正是抓包里看到的形态。留 4 拍(100ms)余量，超了就是队头阻塞。
+    assert!(
+        answered <= 4,
+        "积压 {BACKLOG} 帧后，SYN 等了 {answered} 拍({}ms) 才被回应 —— 队头阻塞，设备会重传",
+        answered * 25,
+    );
+}

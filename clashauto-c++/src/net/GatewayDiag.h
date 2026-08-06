@@ -113,6 +113,13 @@ public:
         //   8 条并发下载，栈接受了 9 条、核心里只有 3 条，而 socksFail=0。
         qint64 tcpDialed;
         qint64 tcpEstablished;
+        // 我们**发出去**的 SYN-ACK 帧数。★ 补的是最后一条盲路：tcpAccepted 只在三次握手
+        //   **完成后**才涨，所以「回了 SYN-ACK、但对端没收到」这种状态此前没有任何计数器覆盖。
+        //   真机症状：8 条并发里固定有一两条 curl 报 Connection timed out、0 字节、
+        //   local_port=-1（SYN 发了、55 秒等不到 SYN-ACK），而 rxdrop/nonVictim/socksFail
+        //   全是 0、栈的 SYN 突发自测又证明一拍 200 个 SYN 全接得住。
+        //   与设备侧 tcpdump 抓到的 SYN-ACK 数对照：差值 = 注入丢帧；相等 = 栈压根没回。
+        qint64 synAckTx;
         // 定期清扫收掉的「上游已关」连接。★ 这个数**长期为 0 才是正常**：它统计的是
         // 「本该在 smolPumpToStack 里关掉、却因为再没人调用它而漏下来」的连接。不为 0
         // 说明那条主路又漏了事件，而不是清扫器在干活 —— 清扫器只是兜底，不是主路。
