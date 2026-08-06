@@ -23,6 +23,20 @@ env:
   STAGE_DIR: dist/package/Coast
 
 jobs:
+  # 「无大括号的控制语句后跟了两条同缩进语句」——只有第一条真被守卫。
+  # CMakeLists 已把 GCC/Clang 的 -Wmisleading-indentation 设为错误，但那道门禁在 CI 里
+  # **漏掉了最需要它的文件**：Windows 专属源（NetStack.cpp、L2Endpoint_win.cpp…）在 CI 中
+  # 只被 MSVC 编译，而 MSVC 没有等价警告；macOS 专属源两边 GCC 也都碰不到。
+  # 2026-08-06 一晚踩了三处，两处正好落在 Windows 专属文件里（一处让诊断数据常年说谎并
+  # 越界读 f[-1]，一处是取消代理时的空指针解引用）。这个检查与平台无关，30 秒跑完。
+  # 脚本自带变异测试记录：对上述两个真 bug 分别注入验证过会红（见脚本头注释）。
+  lint-indent:
+    name: Misleading-indentation scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 clashauto-c++/scripts/check_misleading_indent.py
+
   windows:
     name: Windows ${{ matrix.arch }}
     runs-on: windows-2022
