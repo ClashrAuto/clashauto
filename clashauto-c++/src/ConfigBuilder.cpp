@@ -1623,3 +1623,109 @@ QMap<QString, QStringList> ConfigBuilder::autoGroups(const QStringList &nodeName
     }
     return groups;
 }
+
+// ———————————— TIDE 节点的生成自测（COAST_TIDE_SELFTEST）————————————
+bool ConfigBuilder::runTideSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](bool ok, const char *what) {
+        std::fputs(ok ? "  ok   " : "  FAIL ", stdout);
+        std::fputs(what, stdout);
+        std::fputc('\n', stdout);
+        if (!ok)
+            ++failed;
+    };
+
+    QTemporaryDir tmp;
+    tmp.setAutoRemove(false); // 产物要留给 `core -t -f <path>`
+    if (!tmp.isValid()) {
+        std::printf("TIDE 自测: 建不了临时目录\n");
+        return false;
+    }
+    const QString configDir = tmp.path();
+
+    // 一个真实长度的 TIDE 公钥：X25519(32) + ML-KEM-768 封装公钥(1184) = 1216 字节，
+    // base64（RawURL，无填充）后 ceil(1216*4/3) = 1622 个字符。
+    // **必须用真实长度**——这个自测存在的全部理由就是长标量，
+    // 拿一个短的占位串来测等于什么都没测。
+    constexpr int kPubKeyChars = 1622;
+    QString pub;
+    pub.reserve(kPubKeyChars);
+    static const char *alphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    for (int i = 0; i < kPubKeyChars; ++i)
+        pub.append(QLatin1Char(alphabet[(i * 7 + 13) % 64]));
+
+    const QString nodeName = QStringLiteral("自建-TIDE");
+    {
+        QFile sub(QDir(configDir).filePath(QStringLiteral("subscribe.yaml")));
+        if (!sub.open(QIODevice::WriteOnly)) {
+            std::printf("TIDE 自测: 写不了 subscribe.yaml\n");
+            return false;
+        }
+        // 节点缩进与 SubscriptionStore::parseProxyList 的产出保持一致（6 空格字段）。
+        const QString text = QStringLiteral(
+            "- name: 'tide-test'\n"
+            "  url: ''\n"
+            "  type: 'clash'\n"
+            "  use: true\n"
+            "  updateTime: 15\n"
+            "  speedtest: false\n"
+            "  proxy: false\n"
+            "  list:\n"
+            "    - name: '%1'\n"
+            "      type: tide\n"
+            "      server: tide.example.com\n"
+            "      port: 8443\n"
+            "      password: 'sup3r-s3cret'\n"
+            "      public-key: '%2'\n"
+            "      sni: www.example.com\n"
+            "      udp: true\n"
+            "      quic: true\n"
+            "      redundancy: true\n"
+            "      use: true\n").arg(nodeName, pub);
+        sub.write(text.toUtf8());
+        sub.close();
+    }
+
+    AppConfig cfg;
+    cfg.userDir = configDir;
+    cfg.configDir = configDir;
+    cfg.gatewayTproxy = false;
+    ConfigBuilder builder(cfg);
+
+    const QString path = builder.ensureFullConfig(false, false);
+    QFile f(path);
+    if (path.isEmpty() || !f.open(QIODevice::ReadOnly)) {
+        std::printf("TIDE 自测: 生成失败 (%s)\n", qUtf8Printable(path));
+        return false;
+    }
+    // Windows 上写盘落地的是 CRLF，跨行断言必须先归一化，否则在它要保护的平台上假报警
+    // （同 runNicEgressSelfTest 的说明）。
+    const QString yaml = QString::fromUtf8(f.readAll()).replace(QStringLiteral("\r\n"),
+                                                                QStringLiteral("\n"));
+    f.close();
+
+    check(yaml.contains(QStringLiteral("type: tide")), "节点类型 tide 落进了 full.yaml");
+    check(yaml.contains(nodeName), "节点名保留");
+    // ★ 最重要的一条：1623 字符的公钥必须**逐字节完整**，不能被截断、折行或转义。
+    check(yaml.contains(pub), "1622 字符的后量子公钥一字不差地穿过了字符串拼接");
+    check(!yaml.contains(pub.left(200) + QStringLiteral("\n")),
+          "公钥没有被折行（折行会让核心拒绝整份配置）");
+    check(yaml.contains(QStringLiteral("password: 'sup3r-s3cret'"))
+              || yaml.contains(QStringLiteral("password: sup3r-s3cret")),
+          "password 保留");
+    check(yaml.contains(QStringLiteral("quic: true")), "quic 开关保留");
+    check(yaml.contains(QStringLiteral("redundancy: true")), "redundancy 开关保留");
+    // 节点要真的被挂进策略组，否则生成是对的但用户选不到。
+    check(yaml.indexOf(QStringLiteral("proxy-groups:")) >= 0
+              && yaml.lastIndexOf(nodeName) > yaml.indexOf(QStringLiteral("proxy-groups:")),
+          "节点出现在 proxy-groups 里（不然界面上选不到）");
+
+    std::printf("\nfull.yaml: %s\n", qUtf8Printable(path));
+    std::printf("拿核心自己判一遍： core -t -f \"%s\" -d \"%s\"\n",
+                qUtf8Printable(path), qUtf8Printable(configDir));
+    std::printf("（-d 目录里要有 Country.mmdb，否则会卡在 GeoIP 下载超时上，"
+                "报错读起来像配置错误）\n");
+    return failed == 0;
+}

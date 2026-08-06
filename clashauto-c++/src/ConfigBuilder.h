@@ -57,6 +57,18 @@ public:
     /// 通过返回 true。临时目录**不自动删**（要留给 core -t 用），路径在输出里。
     static bool runNicEgressSelfTest();
 
+    /// TIDE 节点的生成自测（`COAST_TIDE_SELFTEST=1`，见 main_qml.cpp）。
+    ///
+    /// 造一份含 `type: tide` 节点的订阅，真跑一遍 ensureFullConfig，断言这个节点
+    /// **一个字段都没丢**地落进了 full.yaml，并把路径打到 stdout 供 `core -t -f` 复核。
+    ///
+    /// ★ 为什么单独给 TIDE 加一个：它的 `public-key` 是一千六百多个字符的 base64
+    ///   （后量子公钥的真实大小），比本仓库见过的任何配置标量都长一个量级。
+    ///   而这里的 YAML 全靠正则 + 手工字符串拼接（见 CLAUDE.md「YAML 是当文本处理的」），
+    ///   长标量正是这类代码最容易折断的地方——一旦被截断或换行，核心拒绝加载整份配置，
+    ///   表现是"代理整个起不来"，而不是"这个节点不可用"。编译期一点都发现不了。
+    static bool runTideSelfTest();
+
     // 本机各网卡的 IPv6 全局单播前缀，已拼成 IP-CIDR6 规则行。**静态公开**：除了本类生成配置要用，
     // DevicesController 每轮扫描也拿它比对「网段变了没有」——变了才触发 rebuildConfig()。
     // 两处必须是同一份实现，否则会出现「探测说变了、生成出来却没变」的空转热重载。

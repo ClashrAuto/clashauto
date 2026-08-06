@@ -230,6 +230,8 @@ int main(int argc, char *argv[])
 
     // 「每网卡出口」的配置生成自测（造临时台账 + 真跑一遍 ensureFullConfig，对产物做断言）。
     // 同样放在 Rust 守卫之外：它要在 Linux CI 上跑，而且产物路径会打出来供 `core -t -f` 复核。
+    if (qEnvironmentVariableIsSet("COAST_TIDE_SELFTEST"))
+        return ConfigBuilder::runTideSelfTest() ? 0 : 1;
     if (qEnvironmentVariableIsSet("COAST_NICEGRESS_SELFTEST"))
         return ConfigBuilder::runNicEgressSelfTest() ? 0 : 1;
 
