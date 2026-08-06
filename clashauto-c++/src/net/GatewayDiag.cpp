@@ -105,21 +105,43 @@ int GatewayDiag::sampleIntervalMs()
 // 过滤前的 SYN 分桶（源 IPv4 → 本窗口计数）。与 GatewayDiag 其余部分同一个单线程前提。
 static QHash<quint32, quint32> g_rawSynBySrc;
 
-void GatewayDiag::noteRawSyn(const unsigned char *f, int len)
+// 被各分支吃掉的 SYN（原因字符 → 源 IPv4 → 计数）。
+static QHash<char, QHash<quint32, quint32>> g_synDrop;
+
+// 是纯 IPv4 TCP SYN 就返回源 IP（网络序转主机序），否则返回 0。
+static quint32 pureSynSrcIp(const unsigned char *f, int len)
 {
     if (!f || len < 54)
-        return;
+        return 0;
     // 只认 IPv4/TCP 的**纯** SYN（SYN 置位、ACK 清零）。IPv6 不分桶：真机复现用的是 v4，
     // 而这一栏存在的唯一目的就是和设备侧 tcpdump 的 v4 计数相减。
     if (f[12] != 0x08 || f[13] != 0x00 || (f[14] >> 4) != 4 || f[23] != 6)
-        return;
+        return 0;
     const int off = 14 + (f[14] & 0x0F) * 4;
     if (off + 14 > len || (f[off + 13] & 0x12) != 0x02)
+        return 0;
+    return (quint32(f[26]) << 24) | (quint32(f[27]) << 16) | (quint32(f[28]) << 8) | quint32(f[29]);
+}
+
+void GatewayDiag::noteRawSyn(const unsigned char *f, int len)
+{
+    const quint32 src = pureSynSrcIp(f, len);
+    if (!src)
         return;
     if (g_rawSynBySrc.size() > 256) // 有界：诊断量，宁可丢样本
         g_rawSynBySrc.clear();
-    ++g_rawSynBySrc[(quint32(f[26]) << 24) | (quint32(f[27]) << 16) | (quint32(f[28]) << 8)
-                    | quint32(f[29])];
+    ++g_rawSynBySrc[src];
+}
+
+void GatewayDiag::noteSynDrop(const unsigned char *f, int len, char why)
+{
+    const quint32 src = pureSynSrcIp(f, len);
+    if (!src)
+        return;
+    auto &bucket = g_synDrop[why];
+    if (bucket.size() > 64)
+        bucket.clear();
+    ++bucket[src];
 }
 
 QString GatewayDiag::rawSynLine()
@@ -134,7 +156,22 @@ QString GatewayDiag::rawSynLine()
                      .arg(it.value());
     g_rawSynBySrc.clear();
     parts.sort();
-    return QStringLiteral(" synRaw=") + parts.join(QLatin1Char(','));
+    QString out = QStringLiteral(" synRaw=") + parts.join(QLatin1Char(','));
+
+    if (!g_synDrop.isEmpty()) {
+        QStringList drops;
+        for (auto b = g_synDrop.constBegin(); b != g_synDrop.constEnd(); ++b)
+            for (auto it = b.value().constBegin(); it != b.value().constEnd(); ++it)
+                drops << QStringLiteral("%1:%2.%3/%4")
+                             .arg(QChar(b.key()))
+                             .arg((it.key() >> 8) & 0xFF)
+                             .arg(it.key() & 0xFF)
+                             .arg(it.value());
+        g_synDrop.clear();
+        drops.sort();
+        out += QStringLiteral(" synDrop=") + drops.join(QLatin1Char(','));
+    }
+    return out;
 }
 
 void GatewayDiag::sample(const QString &extra)

@@ -198,6 +198,11 @@ public:
     ///     synSrc       → synUnans 差值 = 进了栈却没被应答
     ///   每帧成本：一次长度比较；只有真是 SYN 才会走到分桶（每秒个位数）。
     static void noteRawSyn(const unsigned char *f, int len);
+
+    /// 这一帧如果是 SYN，就按**被哪一条分支吃掉**分桶（诊断行的 `synDrop=`）。
+    /// `why` 取单字符：v=非 victim，l=旁路(本机地址/同网段)，b=广播，i=隔离转发。
+    /// synRaw 与 synSrc 的差值只说明「丢了」，这一栏说明「谁丢的」——差一步就还是猜。
+    static void noteSynDrop(const unsigned char *f, int len, char why);
     static QString rawSynLine(); // 读完清零，无数据返回空串
 
     // 进程退出/网关停用时调一次：把最后一个窗口写掉，并留一条 "stop" 标记。

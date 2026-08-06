@@ -1681,8 +1681,12 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
     if (!d->inited || frame.size() < 14)
         return;
     Nic *nic = d->nics.value(from);
-    if (!nic)
+    if (!nic) {
+        // 这一条在 synSrc 计数**之前**，所以它吃掉的 SYN 在 synRaw/synSrc 的差值里是隐形的。
+        GatewayDiag::noteSynDrop(reinterpret_cast<const unsigned char *>(frame.constData()),
+                                 frame.size(), 'n');
         return; // 帧来自一张没挂上来的卡（正在重配/已摘除）
+    }
     const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
     const quint16 ethType = (quint16(f[12]) << 8) | f[13];
     // 设备发来的 SYN（不含 SYN-ACK）打个时间戳，出帧那侧结算延迟。

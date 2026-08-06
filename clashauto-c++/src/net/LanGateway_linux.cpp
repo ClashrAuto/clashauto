@@ -1283,6 +1283,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                 // 台账 MAC 有误），是 victim 匹配的问题，不是抓包的问题。
                 ++GatewayDiag::c.dropNonVictim;
                 ++GatewayDiag::nics[n->diagSlot].dropNonVictim;
+                GatewayDiag::noteSynDrop(f, frame.size(), 'v');
                 if (gwDbgOn() && (m_dbgDropNonVictim++ % 200) == 0)
                     std::fprintf(stderr, "[GW] drop non-victim src=%02x:%02x:%02x:%02x:%02x:%02x "
                                          "(count=%lld)\n",
@@ -1401,6 +1402,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     if (bcastOrMcast) {
                         ++GatewayDiag::c.bypassBcast;
                         ++GatewayDiag::nics[n->diagSlot].bypassBcast;
+                        GatewayDiag::noteSynDrop(f, frame.size(), 'b');
                         if (gwDbgOn() && (m_dbgBypassLan++ % 200) == 0)
                             std::fprintf(stderr,
                                          "[GW] bypass bcast/mcast dst=%u.%u.%u.%u (count=%lld)\n",
@@ -1426,6 +1428,7 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     if (!sameSubnet && m_localIp4.contains(dst)) {
                         ++GatewayDiag::c.bypassLan;
                         ++GatewayDiag::nics[n->diagSlot].bypassLan;
+                        GatewayDiag::noteSynDrop(f, frame.size(), 'h'); // h = host-own-ip
                         return;
                     }
                     // ★ 局域网隔离（policy=reject 的设备）：按**方向**决定放不放。
@@ -1439,12 +1442,14 @@ void GatewayWorker::configureLocal(const QVector<LanGateway::NicSpec> &specs, qu
                     //       安全的取法。
                     //   放行的帧必须改写目的 MAC 为对端真实 MAC：设备是被我们骗了才发到本机的。
                     if (sameSubnet && dst != n->gatewayIp4 && isIsolatedMac(f + 6)) {
+                        GatewayDiag::noteSynDrop(f, frame.size(), 'i');
                         forwardIsolatedLan(n, frame, f);
                         return;
                     }
                     if (sameSubnet && dst != n->gatewayIp4) {
                         ++GatewayDiag::c.bypassLan;
                         ++GatewayDiag::nics[n->diagSlot].bypassLan;
+                        GatewayDiag::noteSynDrop(f, frame.size(), 'l'); // l = same-subnet LAN
                         // 同网段直连,放行给系统,不进 lwIP。若设备只访问 LAN、没真出网,这里会涨。
                         if (gwDbgOn() && (m_dbgBypassLan++ % 200) == 0)
                             std::fprintf(stderr, "[GW] bypass LAN dst=%u.%u.%u.%u (count=%lld)\n",
