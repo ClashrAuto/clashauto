@@ -441,6 +441,17 @@ endif()
 
 target_compile_options(clashauto-qml PRIVATE
     $<$<CXX_COMPILER_ID:MSVC>:/utf-8>
+    # ★ 只开这一条，并且直接当错误。它抓的正是本仓库**已经踩过两次**的 bug：
+    #       if (cond)
+    #           ++counter;
+    #           doSomething();   // ← 不在 if 里，每一帧都执行
+    #   2026-08-06 两处这样的代码同时存在于收帧和发帧路径上：一处让 SYN 延迟统计常年
+    #   报 75 秒的垃圾值（还越界读了 f[-1]），另一处对每个出帧做一次 QHash 查找、并把
+    #   还没配对的时间戳提前删掉。两处都不让程序崩，只让诊断数据**说谎** —— 而排查时
+    #   最贵的就是假证据（同一晚我据此走错了四次方向）。
+    #   不开 -Wall：这份代码从来没在警告下编译过，全开会淹掉真正的信号。
+    #   MSVC 无等价项；本机 MinGW 与 Linux CI 都是 GCC，覆盖得到。
+    $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Werror=misleading-indentation>
 )
 
 # GUI 子系统：Windows 上不弹控制台窗口

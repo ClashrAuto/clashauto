@@ -1658,10 +1658,11 @@ void GatewayWorker::disableDeviceLocal(const QString &mac)
     GatewayPanic::disarm(key); // 先撤兜底：这台已经要正常还原了，别让崩溃处理器再对它发一遍
     GwNic *n = m_nics.value(m_victimNic.value(ip));
     if (n) {
-        if (n->arp)
+        if (n->arp) {
             n->arp->stopSpoof(mac); // 内部会 heal（还原 ARP）
             // 撤销隔离：把我们替它答过的那些同网段条目还原成真实 MAC。
             n->arp->healIsolation(macBytes(mac));
+        }
         if (n->watch)
             n->watch->removeVictim(mac); // 从监视真相表移除（v4/v6 地址一并清）
         if (n->ndp)
