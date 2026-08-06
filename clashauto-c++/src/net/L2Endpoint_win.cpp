@@ -833,15 +833,34 @@ public:
     //    这一栏是**诊断量**，1 秒的粒度绰绰有余（采样窗口本来就是 10 秒）。
     void pollKernelDrops()
     {
-        if (!m_api || !m_api->stats || !m_pcap)
+        // ★★ 这一栏**必须自报为什么是 0**。今晚三次被「从未被写入的计数器」骗进错误方向
+        //    （rxdrop 恒 0 → 误判「抓包层没丢帧」）。一个静默失败的诊断计数器会主动提供
+        //    虚假的排除证据，比没有这一栏更贵。所以每一条提前 return 都留一行事件日志
+        //    （note() 有 key 限频，且写进 gateway-diag.log —— GUI 子系统下 qWarning 是看不见的）。
+        if (!m_api || !m_api->stats || !m_pcap) {
+            GatewayDiag::note("pcapstats-unavail",
+                              QStringLiteral("pcap_stats 不可用: api=%1 sym=%2 pcap=%3 —— "
+                                             "rxdrop/krecv 恒 0，不是「没丢帧」")
+                                      .arg(m_api ? 1 : 0)
+                                      .arg((m_api && m_api->stats) ? 1 : 0)
+                                      .arg(m_pcap ? 1 : 0),
+                              60000);
             return;
+        }
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         if (nowMs - m_lastStatsMs < 1000)
             return;
         m_lastStatsMs = nowMs;
         pcap_stat st {};
-        if (m_api->stats(m_pcap, &st) != 0)
+        const int src = m_api->stats(m_pcap, &st);
+        if (src != 0) {
+            GatewayDiag::note("pcapstats-fail",
+                              QStringLiteral("pcap_stats() 失败 rc=%1 —— rxdrop/krecv 恒 0，"
+                                             "不是「没丢帧」")
+                                      .arg(src),
+                              60000);
             return;
+        }
         const qint64 now = qint64(st.ps_drop);
         if (now > m_lastPsDrop)
             GatewayDiag::c.rxKernelDrops += now - m_lastPsDrop;
@@ -1094,6 +1113,10 @@ private:
     {
         GatewayDiag::c.rxFrames += frames.size();
         GatewayDiag::c.rxBytes += bytes;
+        // ★ 收帧有**两条**路径（RxWorker 线程 / QWinEventNotifier），而两张网卡各走哪条由
+        //   打开时的条件决定。内核统计只挂在通知器那条上时，用 RxWorker 的网卡就恒 0 ——
+        //   又是一个「看着像没丢帧、其实没人测」的坑。两条都挂。（自身 1 秒限频，无热路径代价。）
+        pollKernelDrops();
         for (const QByteArray &f : frames) {
             if (dbgOn() && f.size() >= 14) {
                 const uchar *p = reinterpret_cast<const uchar *>(f.constData());
