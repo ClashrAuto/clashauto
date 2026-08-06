@@ -76,6 +76,7 @@ struct PcapApi
     decltype(&pcap_getevent) getevent = nullptr;
     decltype(&pcap_sendpacket) sendpacket = nullptr;
     decltype(&pcap_next_ex) next_ex = nullptr;
+    decltype(&pcap_stats) stats = nullptr;
     decltype(&pcap_compile) compile = nullptr;
     decltype(&pcap_setfilter) setfilter = nullptr;
     decltype(&pcap_freecode) freecode = nullptr;
@@ -546,6 +547,7 @@ const PcapApi *pcapApi()
     api.getevent = reinterpret_cast<decltype(&pcap_getevent)>(sym("pcap_getevent"));
     api.sendpacket = reinterpret_cast<decltype(&pcap_sendpacket)>(sym("pcap_sendpacket"));
     api.next_ex = reinterpret_cast<decltype(&pcap_next_ex)>(sym("pcap_next_ex"));
+    api.stats = reinterpret_cast<decltype(&pcap_stats)>(sym("pcap_stats"));
     api.compile = reinterpret_cast<decltype(&pcap_compile)>(sym("pcap_compile"));
     api.setfilter = reinterpret_cast<decltype(&pcap_setfilter)>(sym("pcap_setfilter"));
     api.freecode = reinterpret_cast<decltype(&pcap_freecode)>(sym("pcap_freecode"));
@@ -808,6 +810,7 @@ public:
             QObject::connect(m_notifier, &QWinEventNotifier::activated, this, [this](HANDLE) {
                 ++GatewayDiag::c.rxWakes;
                 drain();
+                pollKernelDrops();
             });
             m_notifier->setEnabled(true);
         }
@@ -815,6 +818,38 @@ public:
         return true;
     }
 
+    // Npcap 内核收缓冲的丢包数。★ 这一栏此前**从未被写入过** —— GatewayDiag.h 的注释只
+    //   警告了 macOS「恒 0，别当成没丢包」，漏了 Windows，而 Windows 恰恰是唯一靠抓包
+    //   收帧的平台。一个从未被写入的计数器比没有计数器更危险：它会主动提供虚假的排除证据。
+    //   今晚排查「8 条并发里固定有一两条 SYN 从未到达用户态栈」时，我至少三次拿
+    //   `rxdrop=0` 当作"抓包层没丢帧"的依据而排除了正确方向。
+    //
+    //   pcap_stats 的 ps_drop 是**自进程启动以来的累计值**，而 GatewayDiag 要的是窗口增量，
+    //   所以这里存上次读数、只把差值加进去。
+    //
+    // ★★ **必须降频**。第一版写成"每次收帧唤醒读一次"，真机当场回归：rx 从 900~1400 帧/10s
+    //    掉到 191~534，txKB 从 6972~15501 掉到 6~21，8 条并发下载全部 0 字节。唤醒频率是
+    //    每秒几百次，而 pcap_stats 是一次用户态→驱动的 IOCTL —— 它把收帧路径本身拖垮了。
+    //    这一栏是**诊断量**，1 秒的粒度绰绰有余（采样窗口本来就是 10 秒）。
+    void pollKernelDrops()
+    {
+        if (!m_api || !m_api->stats || !m_pcap)
+            return;
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        if (nowMs - m_lastStatsMs < 1000)
+            return;
+        m_lastStatsMs = nowMs;
+        pcap_stat st {};
+        if (m_api->stats(m_pcap, &st) != 0)
+            return;
+        const qint64 now = qint64(st.ps_drop);
+        if (now > m_lastPsDrop)
+            GatewayDiag::c.rxKernelDrops += now - m_lastPsDrop;
+        m_lastPsDrop = now; // 驱动重置过就跟着回退，不去猜
+    }
+
+    qint64 m_lastPsDrop = 0;
+    qint64 m_lastStatsMs = 0;
     void close() override
     {
         // 收帧线程持有 m_pcap，必须在 m_api->close(m_pcap) 之前停掉，否则是 use-after-free。
