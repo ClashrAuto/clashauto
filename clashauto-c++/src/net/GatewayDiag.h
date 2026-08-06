@@ -107,10 +107,16 @@ public:
         qint64 tcpClosed;     // 优雅关闭
         qint64 tcpAborted;    // RST 收场（多半是上游 SOCKS 失败/出错）
         qint64 socksFailed;   // 拨 mihomo 失败（握手/认证/连不上）
-    // 定期清扫收掉的「上游已关」连接。★ 这个数**长期为 0 才是正常**：它统计的是
-    // 「本该在 smolPumpToStack 里关掉、却因为再没人调用它而漏下来」的连接。不为 0
-    // 说明那条主路又漏了事件，而不是清扫器在干活 —— 清扫器只是兜底，不是主路。
-    qint64 tcpReaped;
+        // 拨号发出 / 隧道建成。★ 差值 = **卡在 SOCKS 握手里、既不成功也不报错**的连接。
+        //   这类连接在核心的 /connections 里根本不出现（mihomo 要解析完 CONNECT 才登记），
+        //   socksFail 也不涨（failed 信号没触发），于是它是一条彻底的盲路。真机实测：
+        //   8 条并发下载，栈接受了 9 条、核心里只有 3 条，而 socksFail=0。
+        qint64 tcpDialed;
+        qint64 tcpEstablished;
+        // 定期清扫收掉的「上游已关」连接。★ 这个数**长期为 0 才是正常**：它统计的是
+        // 「本该在 smolPumpToStack 里关掉、却因为再没人调用它而漏下来」的连接。不为 0
+        // 说明那条主路又漏了事件，而不是清扫器在干活 —— 清扫器只是兜底，不是主路。
+        qint64 tcpReaped;
         // —— 背压（触发次数；频繁触发 = 两头速率长期不匹配）——
         qint64 upThrottleHits;  // 上行水位到顶 → 扣住 lwIP 接收窗口
         qint64 downPauseHits;   // 下行水位到顶 → 停止从 socks 读

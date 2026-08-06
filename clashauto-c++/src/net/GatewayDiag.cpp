@@ -199,6 +199,9 @@ void GatewayDiag::sample(const QString &extra)
                 .arg(d(c.tcpAborted, g_prev.tcpAborted))
                 .arg(d(c.socksFailed, g_prev.socksFailed))
                 .arg(d(c.tcpReaped, g_prev.tcpReaped));
+    line += QStringLiteral(" dial=%1 estab=%2")
+                .arg(d(c.tcpDialed, g_prev.tcpDialed))
+                .arg(d(c.tcpEstablished, g_prev.tcpEstablished));
     line += QStringLiteral(" upThrottle=%1 downPause=%2")
                 .arg(d(c.upThrottleHits, g_prev.upThrottleHits))
                 .arg(d(c.downPauseHits, g_prev.downPauseHits));

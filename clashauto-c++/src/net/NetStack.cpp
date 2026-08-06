@@ -1076,6 +1076,7 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
 
     QObject::connect(c->socks, &IOutboundTcp::established, d->owner, [c]() {
         c->established = true;
+        ++GatewayDiag::c.tcpEstablished;
         smolFlushRecvWindow(c);
     });
     QObject::connect(c->socks, &IOutboundTcp::upstreamBytesWritten, d->owner,
@@ -1119,6 +1120,7 @@ bool smolConnNew(void *user, CoastConnId id, CoastNicId nic, const CoastAddr *sr
             }
         }
     }
+    ++GatewayDiag::c.tcpDialed;
     c->socks->connectTo(dialHost, dport, socksUser);
     return true;
 }
