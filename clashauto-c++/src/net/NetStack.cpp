@@ -1012,6 +1012,36 @@ QString addrToString(const CoastAddr *a)
 
 // ———————————————————————— coaststack 的五个回调 ————————————————————————
 
+// SYN 进到收帧入口的时刻（源端口 → 微秒）。★ 只为量「进来之后多久回 SYN-ACK」——
+// 真机上这一段要 3 秒，而 Rust 侧三条用例证明栈本身是快的，所以慢在 C++ 这一层。
+// 用普通 QHash + 单调时钟：与 GatewayDiag 同一个单线程前提（见其文件头）。
+// 有界：超过 512 条就整表丢弃 —— 这是诊断量，宁可丢样本也不吃内存。
+QHash<quint16, qint64> g_synSeenUs;
+QElapsedTimer g_synClock;
+
+void noteSynIn(quint16 sport)
+{
+    if (!g_synClock.isValid())
+        g_synClock.start();
+    if (g_synSeenUs.size() > 512)
+        g_synSeenUs.clear();
+    g_synSeenUs.insert(sport, g_synClock.nsecsElapsed() / 1000);
+}
+
+void noteSynAckOut(quint16 dport)
+{
+    if (!g_synClock.isValid())
+        return;
+    const auto it = g_synSeenUs.constFind(dport);
+    if (it == g_synSeenUs.constEnd())
+        return;
+    const qint64 us = g_synClock.nsecsElapsed() / 1000 - it.value();
+    g_synSeenUs.erase(g_synSeenUs.constFind(dport));
+    if (us > GatewayDiag::c.synLatMaxUs)
+        GatewayDiag::c.synLatMaxUs = us;
+    if (us > 200000)
+        ++GatewayDiag::c.synLatSlow;
+}
 void smolOutFrame(void *user, CoastNicId nic, const uint8_t *frame, size_t len)
 {
     auto *d = static_cast<NetStack::Impl *>(user);
@@ -1032,6 +1062,7 @@ void smolOutFrame(void *user, CoastNicId nic, const uint8_t *frame, size_t len)
             off = 14 + 40;
         if (off > 0 && size_t(off + 14) <= len && (frame[off + 13] & 0x12) == 0x12)
             ++GatewayDiag::c.synAckTx;
+            noteSynAckOut(quint16((frame[off + 2] << 8) | frame[off + 3]));
     }
     // 必须是自有内存的 QByteArray：端点可能把它排进积压队列（IL2Endpoint.h 的硬契约）
     n->ep->send(QByteArray(reinterpret_cast<const char *>(frame), static_cast<int>(len)));
@@ -1596,6 +1627,17 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
         return; // 帧来自一张没挂上来的卡（正在重配/已摘除）
     const uchar *f = reinterpret_cast<const uchar *>(frame.constData());
     const quint16 ethType = (quint16(f[12]) << 8) | f[13];
+    // 设备发来的 SYN（不含 SYN-ACK）打个时间戳，出帧那侧结算延迟。
+    if (frame.size() >= 54) {
+        const quint16 et = (quint16(f[12]) << 8) | f[13];
+        int off = -1;
+        if (et == 0x0800 && (f[14] >> 4) == 4 && f[23] == 6)
+            off = 14 + (f[14] & 0x0F) * 4;
+        else if (et == 0x86DD && f[20] == 6)
+            off = 14 + 40;
+        if (off > 0 && off + 14 <= frame.size() && (f[off + 13] & 0x12) == 0x02)
+            noteSynIn(quint16((f[off] << 8) | f[off + 1]));
+    }
     if (g_debug) {
         const int proto = (frame.size() >= 24) ? f[14 + 9] : -1;
         std::fprintf(stderr, "NETSTACK IN nic=%s len=%d eth=%04x proto=%d\n",

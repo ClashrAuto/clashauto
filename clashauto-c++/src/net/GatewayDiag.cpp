@@ -117,6 +117,7 @@ void GatewayDiag::sample(const QString &extra)
         // 峰值是瞬时量，即使不写也要清，否则会把上一个忙窗口的高水位一直带到下一个忙窗口。
         c.txBacklogPeak = 0;
         c.pumpMaxLagMs = 0;
+        c.synLatMaxUs = 0;
         g_prev = c;
         g_lastSampleMs = now;
         return;
@@ -199,6 +200,9 @@ void GatewayDiag::sample(const QString &extra)
                 .arg(d(c.tcpAborted, g_prev.tcpAborted))
                 .arg(d(c.socksFailed, g_prev.socksFailed))
                 .arg(d(c.tcpReaped, g_prev.tcpReaped));
+    line += QStringLiteral(" synLatMaxMs=%1 synSlow=%2")
+                .arg(c.synLatMaxUs / 1000)
+                .arg(d(c.synLatSlow, g_prev.synLatSlow));
     line += QStringLiteral(" synackTx=%1")
                 .arg(d(c.synAckTx, g_prev.synAckTx));
     line += QStringLiteral(" dial=%1 estab=%2")
