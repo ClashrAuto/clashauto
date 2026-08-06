@@ -1636,6 +1636,7 @@ void NetStack::inputFrame(IL2Endpoint *from, const QByteArray &frame)
         else if (et == 0x86DD && f[20] == 6)
             off = 14 + 40;
         if (off > 0 && off + 14 <= frame.size() && (f[off + 13] & 0x12) == 0x02)
+            ++GatewayDiag::c.synRxIn;
             noteSynIn(quint16((f[off] << 8) | f[off + 1]));
     }
     if (g_debug) {

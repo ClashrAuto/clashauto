@@ -203,6 +203,8 @@ void GatewayDiag::sample(const QString &extra)
     line += QStringLiteral(" synLatMaxMs=%1 synSlow=%2")
                 .arg(c.synLatMaxUs / 1000)
                 .arg(d(c.synLatSlow, g_prev.synLatSlow));
+    line += QStringLiteral(" synRxIn=%1")
+                .arg(d(c.synRxIn, g_prev.synRxIn));
     line += QStringLiteral(" synackTx=%1")
                 .arg(d(c.synAckTx, g_prev.synAckTx));
     line += QStringLiteral(" dial=%1 estab=%2")
