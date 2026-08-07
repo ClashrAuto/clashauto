@@ -301,23 +301,8 @@ struct MainView: View {
     }
 }
 
-/// 尚未实现的页面占位。**明确写出属于哪个阶段** —— 空白页会让人以为是坏了。
-struct PlaceholderPage: View {
-    @Environment(Theme.self) private var theme
-    let title: String
-    let note: String
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "hammer")
-                .font(.system(size: 28))
-                .foregroundStyle(theme.textMuted)
-            Text(title).font(.system(size: 16)).foregroundStyle(theme.textPrimary)
-            Text(note).font(.system(size: 12)).foregroundStyle(theme.textMuted)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-}
+// 注：曾经这里有个 PlaceholderPage（"尚未实现的页面占位"）。所有页面都实现完之后
+// 它就再没被引用过，2026-08 删掉。
 
 enum AppInfo {
     static var version: String {
