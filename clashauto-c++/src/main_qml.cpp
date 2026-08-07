@@ -52,6 +52,7 @@
 #include <QFontDatabase>
 #include <QIcon>
 #include <QQmlApplicationEngine>
+#include <QProcessEnvironment> // 守卫命中时扫出所有 COAST_*SELFTEST，避免维护写死的名单
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
@@ -311,18 +312,28 @@ int main(int argc, char *argv[])
     //    走探测会连上它并把自己当成二次启动退出 —— 增强就永远开不起来。
     if (!app.arguments().contains(QStringLiteral("--tun-elevated"))
         && SingleInstance::notifyExistingAndQuit()) {
-        // ★ 剩下的 TPROXY / pf 规则层自测**必须**留在守卫之后：它们会往内核里真装 nft/pf 规则，
-        //   与正在跑的生产实例并存是危险的。但"守卫命中就 return 0"和"自测通过"撞车 ——
-        //   于是在这里把它区分开：请求了自测却被守卫挡下，一律报失败。
-        //   这个坑真骗过我一次（断言故意改坏，退出码仍是 0），别再让它重演。
-        for (const char *hook : {"COAST_TPROXY_SELFTEST", "COAST_PF_SELFTEST"}) {
-            if (qEnvironmentVariableIsSet(hook)) {
-                std::fprintf(stderr,
-                             "SELFTEST: %s 被单实例守卫挡下（本机已有 Coast 在跑）——"
-                             "报失败而不是静默返回 0。请先退出那个实例。\n",
-                             hook);
-                return 3;
+        // ★ 有九个自测排在守卫之后（规则层的 TPROXY/pf 会往内核真装 nft/pf 规则，与正在跑的
+        //   生产实例并存很危险；其余几个依赖守卫之后才建好的东西）。但"守卫命中就 return 0"
+        //   和"自测通过"撞车 —— 请求了自测却被守卫挡下，必须报失败而不是静默返回 0。
+        //
+        // ★★ 这里原本是一份**写死的两项名单**（TPROXY/PF），旁边还写着"这个坑真骗过我一次
+        //    （断言故意改坏，退出码仍是 0），别再让它重演"。它重演了：后来又加了七个守卫后的
+        //    自测（QUIT/SCAN/HISTORY/DEVICEDB/SUBS/SETTINGS/CONNSTATS），名单没跟上，于是
+        //    它们在"本机已有 Coast 在跑"时全部走到下面那句 return 0。2026-08-08 在 Windows
+        //    正式包上实测：这七个清一色 rc=0、零输出 —— 外部看就是七个通过。
+        //    所以别再维护名单了，直接扫环境：凡 COAST_*SELFTEST 被设过就报失败，
+        //    以后新增的自测自动覆盖，不会再有"忘了加进名单"这回事。
+        const QStringList envKeys = QProcessEnvironment::systemEnvironment().keys();
+        for (const QString &key : envKeys) {
+            if (!key.startsWith(QLatin1String("COAST_"))
+                || !key.endsWith(QLatin1String("SELFTEST"))) {
+                continue;
             }
+            std::fprintf(stderr,
+                         "SELFTEST: %s 被单实例守卫挡下（本机已有 Coast 在跑）——"
+                         "报失败而不是静默返回 0。请先退出那个实例。\n",
+                         qUtf8Printable(key));
+            return 3;
         }
         return 0;
     }

@@ -1168,22 +1168,45 @@ jobs:
           # ⚠️ 有一项**永远查不出来**，必须手写死：libssl3。TLS 后端编的是 -openssl-runtime，
           #    运行期 dlopen libssl.so.3，而 dlopen 的库不进 NEEDED 表。少了它订阅和更新全废，
           #    任何基于 NEEDED 的自动核对都不会提醒你。
-          DEB_DEPENDS="libc6, libgl1, libglx0, libopengl0, libegl1, libdbus-1-3, libfontconfig1, libfreetype6, zlib1g, libzstd1, libssl3 | libssl3t64, libx11-6, libx11-xcb1, libsm6, libice6, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcb-glx0, libxcb-util1, libxkbcommon0, libxkbcommon-x11-0"
+          DEB_DEPENDS="libc6, libgl1, libglx0, libopengl0, libegl1, libdbus-1-3, libfontconfig1, libfreetype6, libbrotli1, zlib1g, libzstd1, libssl3 | libssl3t64, libx11-6, libx11-xcb1, libsm6, libice6, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcb-glx0, libxcb-util1, libxkbcommon0, libxkbcommon-x11-0"
+          # libbrotli1 是**静态 Qt 带来的新直接依赖**：静态链系统 freetype 之后，freetype
+          # 自己那份 libbrotlidec.so.1 被提到了主程序的 NEEDED 表上（objdump 实测确有一条）。
+          # 靠 libfreetype6 间接带入是能work，但「反正有别的包会带」正是本仓库当年漏掉
+          # libopengl0 的那个假设 —— 直接依赖就直接写。
           # 相对静态化之前去掉了三项，每一项都有明确理由（不是"看着没用就删"）：
           #   libstdc++6 / libgcc-s1 → 已被 -static-libstdc++ -static-libgcc 收进二进制
           #   libglib2.0-0           → 静态 Qt 用 -no-glib 编，这条依赖不复存在
           # 删错了不会没人知道：下面的反查会把它列进 uncovered。
+          # ★★ 整段套 `set +e` / `|| true`：这是一条**诊断**，它本身绝不该有能力挡住打包。
+          #   第一版没做到，当场把 Linux 两条腿都弄红了（1.0.9xx，Create deb package 退出 1，
+          #   而 Qt/编译/自测/装包全是绿的）。根因很典型：NEEDED 表的第一项是动态链接器
+          #   ld-linux-<arch>.so.*，它在 ldd 输出里**没有 `=>` 路径**，于是 path 为空、
+          #   `dpkg -S ""` 退出 1；而这一步开着 `set -euo pipefail`，pipefail 把管道的失败
+          #   传出来、set -e 就地中止 —— 整个 .deb 都没生成。
+          #   （同类的还有 linux-vdso.so.1，内核提供，根本不属于任何包。）
           echo "—— NEEDED → 包名 反查 ——"
           uncovered=""
-          for so in $(objdump -p "$install_root/coast" | awk '/NEEDED/{print $2}' | sort -u); do
-            path="$(ldd "$install_root/coast" | awk -v s="$so" '$1==s{print $3}')"
-            pkg="$(dpkg -S "$path" 2>/dev/null | head -1 | cut -d: -f1)"
-            printf '  %-26s %-42s %s\n' "$so" "${path:-?}" "${pkg:-?}"
+          set +e
+          for so in $(objdump -p "$install_root/coast" 2>/dev/null | awk '/NEEDED/{print $2}' | sort -u); do
+            path="$(ldd "$install_root/coast" 2>/dev/null | awk -v s="$so" '$1==s{print $3}')"
+            if [ -z "$path" ]; then
+              # 动态链接器 / vdso：没有实体路径可查，也无需声明（libc6 已经带着它）。
+              printf '  %-26s %-42s %s\n' "$so" "(无路径)" "(链接器/vdso，跳过)"
+              continue
+            fi
+            # ★ 必须 readlink -f 之后再查。merged-/usr 的系统上 ldd 给的是 /lib/... 而
+            #   dpkg 数据库里记的是 /usr/lib/...（且带完整版本号后缀），直接拿 ldd 的路径查
+            #   **每一条都查不到** —— 那样这段反查会安安静静地把所有包都报成 "?"、uncovered
+            #   永远为空，看起来一切正常，实际什么都没验。第一版就是这样，白跑一轮。
+            real="$(readlink -f "$path" 2>/dev/null)"
+            pkg="$(dpkg -S "${real:-$path}" 2>/dev/null | head -1 | cut -d: -f1)"
+            printf '  %-26s %-42s %s\n' "$so" "$path" "${pkg:-?}"
             base="${pkg%t64}"   # t64 过渡期同一个库有两个包名，去后缀再比，免得误报
             if [ -n "$pkg" ]; then
               case "$DEB_DEPENDS" in *"$base"*) ;; *) uncovered="$uncovered $pkg";; esac
             fi
           done
+          set -e
           # 只告警不阻断：dpkg -S 在 t64/多架构布局下偶有认不出的情况，为此挡住整条发布线
           # 不划算。但结果必须**出现在日志里** —— 只在注释里写"请手动核对"等于没查。
           [ -z "$uncovered" ] || echo "::warning::这些 NEEDED 的包没写进 Depends:$uncovered"
