@@ -296,11 +296,17 @@ struct DeviceDetailView: View {
 
             // 90 高的实时带宽折线。Qt 那边喂的是这台设备的**下行**速率，
             // 固定 1s 一拍（它专门加了个定时器，因为挂在「选中设备变了」上会让入点节奏乱掉，
-            // 曲线一顿一顿）。这里的数据源 `downHistory` 本来就是每拍推一个点，节奏天然是稳的。
+            // 曲线一顿一顿）。
+            //
+            // ★ 节拍与格宽都取 `DeviceTraffic` 自己的，不取 `AppState.pollTick`：
+            //   `downHistory` 是**每拍 `/connections` 快照**推一个点（2 秒一轮），
+            //   与 1Hz 的界面节拍不同频。原来传的是 pollTick，于是每两拍就有一拍
+            //   「数据没动、曲线却滑出去又弹回来」—— 这就是详情窗里那张图一直在回滚的原因。
             BandwidthChart(samples: sample.downHistory,
                            title: "下载".t,
                            lineColor: Color(hex: 0x5B_B4_4B),
-                           tick: state.pollTick)
+                           tick: state.deviceTraffic.tick,
+                           slideInterval: state.deviceTraffic.interval)
                 .frame(height: 90)
 
             // 会话 / 今日 / 累计三块**定宽**，窗口一窄要能折行（Qt 用的是 Flow，

@@ -207,3 +207,69 @@ struct DeviceModelBrowserTests {
         #expect(DeviceModelBrowser.serviceTypes.contains("_airplay._tcp"))
     }
 }
+
+@Suite("按 MAC 去重")
+struct DedupeByMACTests {
+
+    private func device(_ mac: String, _ ip: String, interface: String = "en0",
+                        gateway: Bool = false) -> LanBrowser.Device {
+        var device = LanBrowser.Device(mac: mac, ip: ip, interface: interface)
+        device.isGateway = gateway
+        return device
+    }
+
+    /// ★ 这是设备列表「行内容串台/闪烁」的根因：`Device.id` 就是 MAC，
+    /// 而邻居表里同一个 MAC 出现多次是常态，重复 id 交给 SwiftUI 的 ForEach 是未定义行为。
+    @Test("同一个 MAC 只留一行")
+    func collapsesDuplicates() {
+        let result = LanBrowser.dedupeByMAC([
+            device("aa:bb:cc:dd:ee:01", "192.168.1.2"),
+            device("aa:bb:cc:dd:ee:01", "192.168.1.9"),
+            device("aa:bb:cc:dd:ee:02", "192.168.1.3"),
+        ])
+        #expect(result.count == 2)
+        #expect(Set(result.map(\.mac)).count == 2)
+    }
+
+    /// ★ 最要紧的一档：一台设备除了 DHCP 地址常常还挂着一个 169.254 链路本地地址
+    /// （拿到租约之前自配的那个），两条都在邻居表里。留错了的话这台设备在界面上
+    /// 顶着一个没用的地址，还会因为不在本机网段而被判成「其它网络」→ 不可代理。
+    /// 实测这台开发 Mac 的 `arp -an` 里就有三台是这个样子。
+    @Test("可路由地址胜过 169.254 链路本地，且与行序无关")
+    func prefersRoutableOverLinkLocal() {
+        let routable = device("aa:bb:cc:dd:ee:01", "192.168.20.42")
+        let linkLocal = device("aa:bb:cc:dd:ee:01", "169.254.181.166")
+        #expect(LanBrowser.dedupeByMAC([linkLocal, routable]).first?.ip == "192.168.20.42")
+        #expect(LanBrowser.dedupeByMAC([routable, linkLocal]).first?.ip == "192.168.20.42")
+    }
+
+    /// 网关那一条优先级最高 —— 丢了 `isGateway` 的话，路由器那一行会变成一台普通设备，
+    /// 于是「不可接管」的判据认不出它，用户能给网关自己开代理。
+    @Test("网关那一条压过其它")
+    func prefersGateway() {
+        let plain = device("aa:bb:cc:dd:ee:01", "192.168.1.2")
+        let gateway = device("aa:bb:cc:dd:ee:01", "192.168.1.250", gateway: true)
+        #expect(LanBrowser.dedupeByMAC([plain, gateway]).first?.isGateway == true)
+        #expect(LanBrowser.dedupeByMAC([gateway, plain]).first?.isGateway == true)
+    }
+
+    /// 全平票时按 IP 再按接口名，保证**任何输入顺序**都得到同一个结果 ——
+    /// 否则邻居表行序一变，列表里那台设备的 IP 就会在两个值之间来回跳。
+    @Test("判据是全序：输入顺序不影响结果")
+    func totallyOrdered() {
+        let devices = [
+            device("aa:bb:cc:dd:ee:01", "192.168.1.5", interface: "en1"),
+            device("aa:bb:cc:dd:ee:01", "192.168.1.5", interface: "en0"),
+        ]
+        #expect(LanBrowser.dedupeByMAC(devices).first?.interface == "en0")
+        #expect(LanBrowser.dedupeByMAC(devices.reversed()).first?.interface == "en0")
+    }
+
+    @Test("没有重复时原样返回，且保持原次序")
+    func keepsOrderWhenUnique() {
+        let devices = [device("aa:bb:cc:dd:ee:01", "192.168.1.2"),
+                       device("aa:bb:cc:dd:ee:02", "192.168.1.3"),
+                       device("aa:bb:cc:dd:ee:03", "192.168.1.4")]
+        #expect(LanBrowser.dedupeByMAC(devices).map(\.ip) == devices.map(\.ip))
+    }
+}

@@ -211,3 +211,50 @@ struct HistoryLengthTests {
         #expect(traffic.sample(ip: "192.168.1.9").downHistory.count == 42)
     }
 }
+
+/// 曲线左滑的节拍源。
+///
+/// ★ 这一组是为「设备页/详情窗的图一直在回滚」写的。根因不在画图那边：
+/// `DeviceTraffic` 的历史点跟的是 `/connections` 那条 **2 秒**的轮询，而视图原来
+/// 拿 1Hz 的 `AppState.pollTick` 去驱动它的左滑动画 —— 每两拍里有一拍数据没动、
+/// 动画却白滑一遍再弹回原位。所以这里必须有一个**只随实际入点前进**的节拍。
+struct DeviceTrafficTickTests {
+
+    private func row(_ id: String, ip: String, up: Int64, down: Int64) -> ConnectionRow {
+        ConnectionRow(id: id, host: "example.com", network: "tcp", type: "HTTP", process: "",
+                      chain: "🚀", upload: up, download: down,
+                      start: .distantPast, sourceIP: ip)
+    }
+
+    @Test("每并入一拍快照，节拍才 +1")
+    func tickAdvancesPerObservation() {
+        var traffic = DeviceTraffic()
+        #expect(traffic.tick == 0)
+        traffic.observe([row("a", ip: "10.0.0.2", up: 1, down: 1)])
+        #expect(traffic.tick == 1)
+        // 空快照也算一拍：那一拍的「速率归零」同样要推进曲线。
+        traffic.observe([])
+        #expect(traffic.tick == 2)
+    }
+
+    /// 一格的时长要跟实测间隔走。写死 1 秒的话，2 秒一拍的数据滑完一格要干等一秒，
+    /// 曲线一顿一顿的。
+    @Test("格宽时长 = 实测间隔，并钳在 [0.5, 5]")
+    func intervalTracksMeasuredGap() {
+        var traffic = DeviceTraffic()
+        let base = Date(timeIntervalSince1970: 1_700_000_000)
+        traffic.observe([], now: base)
+        traffic.observe([], now: base.addingTimeInterval(2))
+        #expect(abs(traffic.interval - 2) < 0.001)
+
+        // 睡眠唤醒后那一拍可能隔了几分钟 —— 照原样当动画时长，曲线会以看不出的速度爬。
+        traffic.observe([], now: base.addingTimeInterval(600))
+        #expect(traffic.interval == 5)
+
+        // 同一拍被喂两次（间隔≈0）也不能把时长压成 0。
+        var tight = DeviceTraffic()
+        tight.observe([], now: base)
+        tight.observe([], now: base.addingTimeInterval(0.01))
+        #expect(tight.interval >= 0.5)
+    }
+}

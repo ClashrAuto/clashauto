@@ -88,16 +88,28 @@ struct SlidingCurve: NSViewRepresentable {
         @available(*, unavailable)
         required init?(coder: NSCoder) { fatalError("init(coder:) is not implemented") }
 
+        /// 当前这一格左滑是**什么时候**开始的（CA 的媒体时间）。
+        ///
+        /// ★ 这是「回滚」的第二个来源，且与采样节拍无关：`layout()` 每被调一次就把动画
+        ///   从头加一遍的话，曲线会**弹回起点重滑**。而 AppKit 的 layout 远不止「尺寸变了」
+        ///   才跑 —— 详情窗里那张图底下就是一份每两秒长短一变的连接列表，滚动视图为它重排，
+        ///   这张图跟着 layout，于是一路回滚。记下起点、按同一个 `beginTime` 重挂，
+        ///   CA 会把动画摆在**它本来该在的相位**上，重挂多少次都看不出来。
+        private var slideStart: CFTimeInterval = 0
+
         override func layout() {
             super.layout()
-            if let model { apply(model, restartSlide: true) }   // 尺寸变了，路径要重画
+            // 尺寸变了路径要重画，但**不重启左滑** —— 相位由 `slideStart` 接着算。
+            if let model { apply(model, restartSlide: false) }
         }
 
         func apply(_ model: SlidingCurve, restartSlide: Bool) {
             self.model = model
-            lastTick = model.tick
             let size = bounds.size
+            // 还没拿到尺寸：连 `lastTick` 也不能记下 —— 记了的话这一拍就被吞掉，
+            // 等布局下来时谁也不会再为它重启一次左滑。
             guard size.width > 0, size.height > 0 else { return }
+            lastTick = model.tick
 
             // 建层与改色都不要隐式动画：CA 默认给每个属性变化补 0.25s 过渡，
             // 那会让换主题时曲线颜色慢慢淡过去，也会让新路径「变形」而不是直接就位。
@@ -136,12 +148,15 @@ struct SlidingCurve: NSViewRepresentable {
                 gradient.mask = mask
             }
 
-            if restartSlide { startSlide(model, in: size) }
+            applySlide(model, in: size, restart: restartSlide)
         }
 
         /// 一拍之内左移一格 `dx`，到位后**停住**（`fillMode: .forwards` + 不移除）——
         /// 与原来 `phase = min(1, elapsed)` 的封顶行为一致：采样断了，曲线就该停在那儿。
-        private func startSlide(_ model: SlidingCurve, in size: CGSize) {
+        ///
+        /// `restart == false` 时不是「什么都不做」，而是**按原相位重挂一遍**：路径刚被重画
+        /// （尺寸可能也变了，`dx` 跟着变），动画的 `toValue` 得跟上，但相位不能动。
+        private func applySlide(_ model: SlidingCurve, in size: CGSize, restart: Bool) {
             // ★ 零流量时**不挂动画**。此时整条曲线是一条贴底的平线（最高点离底边
             //   不到半个点），水平平移它在像素上没有任何区别 —— 但常驻的 CA 动画会让
             //   渲染服务按满帧率给整窗合成。Qt 版同一处优化把「窗口开着」的整机开销
@@ -155,14 +170,20 @@ struct SlidingCurve: NSViewRepresentable {
                size.height * model.headroom * CGFloat(min(1, peak / model.scale)) < 0.25 {
                 // 把上一轮可能残留的平移一并撤掉，图层回到相位 0（平线，看不出差别）。
                 container.removeAnimation(forKey: "slide")
+                // 相位一并作废：流量回来时该从头滑一格，而不是接着一个早就过期的起点。
+                slideStart = 0
                 return
             }
+            if restart || slideStart == 0 { slideStart = CACurrentMediaTime() }
             let slide = CABasicAnimation(keyPath: "transform.translation.x")
             slide.fromValue = 0
             slide.toValue = -Self.dx(model, in: size)
             slide.duration = model.slideInterval
+            // 相位锚在这一格开始的那一刻。重挂时 `beginTime` 已是过去时间，CA 会直接
+            // 把动画摆到对应相位；早就滑完的话 `.both` 让它停在终点（= 新路径的相位 0）。
+            slide.beginTime = slideStart
             slide.timingFunction = CAMediaTimingFunction(name: .linear)
-            slide.fillMode = .forwards
+            slide.fillMode = .both
             slide.isRemovedOnCompletion = false
             container.removeAnimation(forKey: "slide")
             container.add(slide, forKey: "slide")

@@ -85,6 +85,9 @@ public struct LanBrowser: Sendable {
             devices[index].vendor = OUIDatabase.shared.vendor(for: devices[index].mac)
             devices[index].isGateway = gateways.contains(devices[index].ip)
         }
+        // 一台设备只留一行（见 `dedupeByMAC`）。放在反查主机名**之前** ——
+        // 反查是每台一次 DNS，重复的那几条白等一轮。
+        devices = Self.dedupeByMAC(devices)
         // 反查主机名会走 DNS/mDNS，逐个串行会很慢（一台超时就拖住整轮），并发做。
         devices = await Self.resolveHostnames(devices)
         // 型号靠主机名连接，所以只能在反查之后填。浏览器是常驻的，这里只是取一次快照。
@@ -99,6 +102,52 @@ public struct LanBrowser: Sendable {
             return Self.ipSortKey(lhs.ip) < Self.ipSortKey(rhs.ip)
         }
     }
+
+    // MARK: - 去重
+
+    /// 按 MAC 去重，一台设备只留一行。
+    ///
+    /// ★ **同一个 MAC 在邻居表里出现好几次是常态，不是异常。** 两种来源都很普遍：
+    ///   一台设备除了 DHCP 地址还留着一个 `169.254.*` 链路本地地址（拿到租约之前
+    ///   自配的那个），两条都在表里；多网卡的机器还会在每张网卡上各看到同一台一次。
+    ///   实测这台开发 Mac 的 `arp -an`：24 行里有 3 个 MAC 各出现两次。
+    ///
+    ///   而 `Device.id` **就是 MAC** —— 把重复的 id 交给 SwiftUI 的 `ForEach` 是未定义行为
+    ///   （控制台只有一句 "ID … is used by multiple child views"），界面上表现为
+    ///   那几行内容串台、闪烁、点开的是另一台。台账那边同样会被同一个 MAC 连写两次。
+    ///
+    /// 留哪一条：**网关优先 → 可路由地址优先于 169.254 → IP 小的 → 接口名小的**。
+    /// 第二档是要紧的：留下 `169.254` 那条的话，这台设备在界面上顶着一个没用的地址，
+    /// 而且因为不在本机网段里会被判成「其它网络」—— 一台明明就在同一个局域网里的设备
+    /// 就此变成不可代理。整个判据**全序且与输入行序无关**，次序不会随邻居表漂移。
+    public static func dedupeByMAC(_ devices: [Device]) -> [Device] {
+        var best: [String: Device] = [:]
+        var order: [String] = []
+        for device in devices {
+            guard let existing = best[device.mac] else {
+                best[device.mac] = device
+                order.append(device.mac)
+                continue
+            }
+            if prefers(device, over: existing) { best[device.mac] = device }
+        }
+        return order.compactMap { best[$0] }
+    }
+
+    /// `dedupeByMAC` 的取舍判据。
+    static func prefers(_ lhs: Device, over rhs: Device) -> Bool {
+        if lhs.isGateway != rhs.isGateway { return lhs.isGateway }
+        let lhsLinkLocal = isLinkLocalIPv4(lhs.ip)
+        let rhsLinkLocal = isLinkLocalIPv4(rhs.ip)
+        if lhsLinkLocal != rhsLinkLocal { return rhsLinkLocal }
+        let lhsKey = ipSortKey(lhs.ip)
+        let rhsKey = ipSortKey(rhs.ip)
+        if lhsKey != rhsKey { return lhsKey < rhsKey }
+        return lhs.interface < rhs.interface
+    }
+
+    /// `169.254.0.0/16` —— DHCP 没拿到租约时自配的链路本地地址。
+    public static func isLinkLocalIPv4(_ text: String) -> Bool { text.hasPrefix("169.254.") }
 
     // MARK: - ARP 表
 
@@ -116,7 +165,9 @@ public struct LanBrowser: Sendable {
     /// 用子进程而不是自己 `sysctl(NET_RT_FLAGS)`：后者要手工走 `rt_msghdr` + `sockaddr_dl`
     /// 的变长结构，在不同 macOS 版本上是出过变动的地方；而这个调用每几秒才一次，
     /// 一个短命子进程的代价完全可以接受。
-    static func arpTable() -> [Device] {
+    /// public 是给 `COAST_DEVICES_SELFTEST` 用的：它要拿**去重之前**的原始行数
+    /// 跟 `scan()` 的结果对一下，才能确认这台机器确实覆盖到了「同一个 MAC 出现多次」。
+    public static func arpTable() -> [Device] {
         guard let output = run("/usr/sbin/arp", ["-an"]) else { return [] }
         return output.split(separator: "\n").compactMap { parseARPLine(String($0)) }
     }
