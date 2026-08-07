@@ -222,21 +222,12 @@ extension View {
     }
 }
 
-/// 一组互相融合的液态玻璃按钮。
-///
-/// `GlassEffectContainer` 会让**间距小于 spacing** 的相邻玻璃互相融合、连成一片 ——
-/// 这正是「一组、三选一」与「三颗各自独立的按钮」的区别所在：不靠高亮去暗示，
-/// 形状本身就说明了关系。
-struct GlassGroup<Content: View>: View {
-    var spacing: CGFloat = 4
-    @ViewBuilder var content: () -> Content
-
-    var body: some View {
-        GlassEffectContainer(spacing: spacing) {
-            HStack(spacing: spacing) { content() }
-        }
-    }
-}
+// 注：曾经这里有个 GlassGroup —— 把 GlassEffectContainer + HStack 包成一层。
+// 没人用它，两处真正需要"相邻玻璃融合"的地方（ConnectionsView / DevicesPage）
+// 都是直接内联 GlassEffectContainer(spacing: 2)，于是 2026-08 删掉。
+// 那条设计判断本身仍然成立、值得留着：间距小于 spacing 的相邻玻璃会连成一片，
+// 这正是「一组、三选一」与「三颗各自独立的按钮」的区别 —— 形状本身说明关系，
+// 不靠高亮去暗示。
 
 extension View {
     /// 给单个视图上液态玻璃（胶囊形）。`tinted` 时带主题色 —— 用来标出组里的当前项。
