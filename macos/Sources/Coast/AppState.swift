@@ -223,9 +223,23 @@ public final class AppState {
 
         // 内核那条**单独失败、单独静默**：程序更新查成功而内核查失败时，不该把
         // 关于页那行提示改写成「检查失败」—— 用户关心的主要是程序自身那条。
-        // 注意 `try?` 作用在返回 `String?` 的抛出函数上会**压平**成一层 `String?` ——
-        // 「网络失败」和「上游没给 tag」在这里合并成同一个 nil，两者的处置本来就一样。
-        // 内核用「不一样即可更新」而非「更大」（`coreHasUpdate` 的注释解释了为什么）。
+        await refreshCoreUpdateBadge(using: checker)
+    }
+
+    /// 重判侧栏那颗 "core" 角标：本地 `core -v` 与清单里那版比一下。
+    ///
+    /// ★ 单独抽出来是给**换完内核之后**调的（见 `UpdateView.runCoreUpdate`）。原来这段只
+    ///   长在 `checkUpdates()` 里，而换内核走的是另一条路，于是角标要等下一轮检查才会灭 ——
+    ///   用户刚在更新窗里看着「内核已更新到 v1.10.xxxx」，转头侧栏还红着说有新内核，
+    ///   看着像这次更新根本没成。判据翻面的唯一事件就是「二进制被换掉」，所以换完就得重判。
+    ///
+    /// 注意 `try?` 作用在返回 `String?` 的抛出函数上会**压平**成一层 `String?` ——
+    /// 「网络失败」和「上游没给 tag」在这里合并成同一个 nil，两者的处置本来就一样。
+    /// 内核用「不一样即可更新」而非「更大」（`coreHasUpdate` 的注释解释了为什么）。
+    public func refreshCoreUpdateBadge(using checker: UpdateChecker? = nil) async {
+        let checker = checker ?? UpdateChecker(
+            includePrerelease: config.receiveBeta,
+            proxyPort: controller.isCoreRunning ? config.mixedPort : nil)
         if let localCore = CoreVersion.local(), let remote = try? await checker.latestCoreTag() {
             coreUpdateAvailable = UpdateChecker.coreHasUpdate(remote: remote, local: localCore)
         } else {

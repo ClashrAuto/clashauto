@@ -77,6 +77,12 @@ public final class Theme {
     public var textSecondary: Color { dark ? Color(hex: 0xCCCCCC) : Color(hex: 0x333333) }
     public var textMuted: Color { dark ? Color(hex: 0x888888) : Color(hex: 0x999999) }
     public let versionColor = Color(hex: 0x666666)
+    /// 侧栏版本号那行「刻进去」用的下沿高光（画在文字下方 1pt 的一层同字副本）。
+    ///
+    /// 只做**下沿**一条：光按惯例从上来，凹槽是下沿受光、上沿背光 —— 而上沿那条背光在
+    /// `#666` 的字配深色侧栏上根本看不见，画了也是白画。取值与 `qml/Theme.qml` 相同。
+    /// 浅色主题下要重得多：底已经是 `#eeeeee`，低透明度的白与它分不开。
+    public var versionEmboss: Color { .white.opacity(dark ? 0.14 : 0.95) }
 
     // MARK: 控件
     /// 输入类控件的底与描边。**手画的控件才需要它们** —— 设置页把 Qt 的
