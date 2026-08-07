@@ -260,14 +260,37 @@ ApplicationWindow {
 
                 Item { Layout.fillHeight: true }
 
-                // 版本行：点击打开更新窗。平时灰色；程序有新版 → 右上角 "new" 角标，
-                // 内核有新版 → "core" 角标（均全圆角、红底、白边、白字）；有更新时版本转红（全 UI 不加粗）。
+                // 版本行：点击打开更新窗。版本号**恒为灰色**、刻进侧栏里（下沿 1px 高光）；
+                // 有更新时右上角浮一颗角标（全圆角、红底、白边、白字）。
+                //
+                // ★ 版本号原来会**跟着角标一起转红**。两件事说的是同一句话，而红字比角标
+                //   醒目得多 —— 侧栏底部于是长期挂着一行红字，等于把「有个更新可以看看」
+                //   喊成了「出事了」。红色在这套 UI 里另有职责（错误、断线、被争抢的设备），
+                //   被这行占着就贬值了。要提示的是角标，版本号只是版本号。
                 Item {
                     id: verRow
                     Layout.alignment: Qt.AlignHCenter
                     readonly property bool anyUpdate: about.updateAvailable || about.coreUpdateAvailable
                     implicitHeight: verText.implicitHeight + 6
-                    implicitWidth: verText.implicitWidth + (badgeRow.visible ? badgeRow.width + 4 : 0)
+                    // ★ **宽度只算文字，不把角标算进来。** verRow 在侧栏里是居中的，
+                    //   把角标算进宽度的话，检查一跑完角标一出现，整行版本号就往左跳一格
+                    //   （跳的距离还随 "new"/"core" 字宽不同而不同）。角标浮在文字右上角、
+                    //   不占布局，版本号的位置就与「有没有更新」无关了。侧栏没开 clip，
+                    //   溢出的那点宽度照常画得出来。
+                    implicitWidth: verText.implicitWidth
+
+                    // 「刻进去」的下沿高光：同一串字、同一位置、**往下 1px** 的一层副本，
+                    // 画在正文之下（同一父项里按声明顺序叠，所以它必须写在 verText 前面）。
+                    // 这就是文字版的内阴影 —— Qt 没有 InnerShadow 这种东西（Qt6 的 MultiEffect
+                    // 只做外投影），而凹槽本来就只靠这一条受光边读出来。
+                    Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.verticalCenterOffset: 1
+                        text: verText.text
+                        font: verText.font
+                        color: Theme.versionEmboss
+                    }
 
                     Text {
                         id: verText
@@ -275,51 +298,36 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         text: "Ver: " + bridge.version
                         font.pixelSize: 12
-                        color: verRow.anyUpdate ? Theme.danger : Theme.versionColor
+                        color: Theme.versionColor
                     }
 
-                    // 角标组：贴在版本文字右上角（全圆角、红底、白边、白字）
-                    Row {
-                        id: badgeRow
-                        visible: about.updateAvailable || about.coreUpdateAvailable
+                    // 角标：**同时只显示一颗**，程序更新压过内核更新（new > core）。
+                    //
+                    // ★ 原来两颗会一起亮。8px 的字挤在版本号右上角连成一团（"newcore"），
+                    //   读不出是两个词，而侧栏也没有第二颗的宽度。合成一颗不丢信息：
+                    //   两者的下一步是同一个 —— 点开更新窗，那里分页签写着各自的详情。
+                    //   程序优先是因为程序更新往往连内核一起带新（打包时内嵌最新正式版内核）。
+                    //
+                    // 位置：左缘贴文字右缘、竖直中线对着文字顶边 —— 也就是半颗浮在文字上方，
+                    // 与 verRow 的 implicitWidth 一起构成「浮在右上角、不占位」。
+                    Rectangle {
+                        id: badge
+                        visible: verRow.anyUpdate
                         anchors.left: verText.right
                         anchors.leftMargin: 3
                         anchors.verticalCenter: verText.top
-                        spacing: 3
-
-                        // "new"：程序有新版
-                        Rectangle {
-                            visible: about.updateAvailable
-                            implicitWidth: newTxt.implicitWidth + 8
-                            implicitHeight: newTxt.implicitHeight + 3
-                            radius: height / 2
-                            color: "#f56c6c"
-                            border.width: 1
-                            border.color: "#ffffff"
-                            Text {
-                                id: newTxt
-                                anchors.centerIn: parent
-                                text: "new"
-                                font.pixelSize: 8
-                                color: "#ffffff"
-                            }
-                        }
-                        // "core"：内核有新版
-                        Rectangle {
-                            visible: about.coreUpdateAvailable
-                            implicitWidth: coreTxt.implicitWidth + 8
-                            implicitHeight: coreTxt.implicitHeight + 3
-                            radius: height / 2
-                            color: "#f56c6c"
-                            border.width: 1
-                            border.color: "#ffffff"
-                            Text {
-                                id: coreTxt
-                                anchors.centerIn: parent
-                                text: "core"
-                                font.pixelSize: 8
-                                color: "#ffffff"
-                            }
+                        implicitWidth: badgeTxt.implicitWidth + 8
+                        implicitHeight: badgeTxt.implicitHeight + 3
+                        radius: height / 2
+                        color: "#f56c6c"
+                        border.width: 1
+                        border.color: "#ffffff"
+                        Text {
+                            id: badgeTxt
+                            anchors.centerIn: parent
+                            text: about.updateAvailable ? "new" : "core"
+                            font.pixelSize: 8
+                            color: "#ffffff"
                         }
                     }
 

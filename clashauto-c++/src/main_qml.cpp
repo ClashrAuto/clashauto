@@ -875,6 +875,10 @@ int main(int argc, char *argv[])
     tray->retranslate(); // 托盘菜单在翻译器安装前就已构造（Qt 托盘）；装好后刷成目标语言
     QObject::connect(settingsCtrl, &SettingsController::languageChangeRequested, i18n, &I18n::setLanguage);
     QObject::connect(settingsCtrl, &SettingsController::languageChangeRequested, tray, &TrayController::retranslate);
+    // 内核换完立刻重判一次侧栏的 "core" 角标。连在 C++ 这一层而不是某个 QML 页里，
+    // 是因为触发点有两个（设置页的「更新内核」和更新窗内核页的「更新」），两处走的
+    // 都是 `settings.updateCore()` —— 连在源头上，谁按的都一样灭。
+    QObject::connect(settingsCtrl, &SettingsController::coreReplaced, about, &AboutController::checkCore);
 
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &app,

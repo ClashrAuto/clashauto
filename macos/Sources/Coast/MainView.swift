@@ -138,9 +138,12 @@ struct MainView: View {
         .frame(width: 74, height: 74)
     }
 
-    /// 侧栏底部的版本行。对齐 `qml/Main.qml` 的 `verRow`：
-    /// 平时灰；程序有新版 → 右上角 "new" 角标，内核有新版 → "core" 角标；
-    /// **任一有更新，版本文字本身转红**（全 UI 不加粗，靠颜色说话）。
+    /// 侧栏底部的版本行。对齐 `qml/Main.qml` 的 `verRow`：版本号**恒为灰色**、
+    /// 刻进侧栏里（下沿 1pt 高光）；有更新时右上角浮一颗角标。
+    ///
+    /// ★ 版本号原来会**跟着角标一起转红**。两件事说的是同一句话，而红字比角标醒目得多 ——
+    ///   侧栏底部于是长期挂着一行红字，等于把「有个更新可以看看」喊成了「出事了」。
+    ///   红色在这套 UI 里另有职责（错误、断线、被争抢的设备），被这行占着就贬值了。
     ///
     /// 点它打开更新窗 —— 与 Qt 一样是**独立顶层窗**（`Window(id:)` scene）。
     /// （早期这里是 sheet，因为 600×560 比主窗还高被裁掉了底部动作行，已改掉；
@@ -149,25 +152,49 @@ struct MainView: View {
         Button {
             openWindow(id: UpdateWindowID.value)
         } label: {
-            // 角标贴在版本文字的**右上角**：QML 里 badgeRow 的
-            // `verticalCenter` 对的是 `verText.top`，也就是整组有一半浮在文字上方。
-            HStack(alignment: .top, spacing: 3) {
-                Text("Ver: \(AppInfo.version)")
-                    .font(.system(size: 12))
-                    .foregroundStyle(anyUpdate ? theme.danger : theme.versionColor)
-
-                if anyUpdate {
-                    HStack(spacing: 3) {
-                        if state.appUpdateAvailable { UpdateBadge(text: "new") }
-                        if state.coreUpdateAvailable { UpdateBadge(text: "core") }
-                    }
-                    .alignmentGuide(.top) { $0[VerticalAlignment.center] }
+            versionText
+                .foregroundStyle(theme.versionColor)
+                .contentShape(Rectangle())
+                // 「刻进去」的下沿高光：同一串字、往下 1pt 的一层副本画在正文**之下**。
+                // 这就是文字版的内阴影 —— SwiftUI 的 `.shadow()` 是外投影，做不出凹槽。
+                // 用 `.background` 而不是 `.overlay`，副本才压在正文底下（露出的只有下边缘那 1pt）。
+                .background {
+                    versionText
+                        .foregroundStyle(theme.versionEmboss)
+                        .offset(y: 1)
                 }
-            }
-            .contentShape(Rectangle())
+                // 角标**浮**在版本文字右上角：用 overlay 而不是并排放进 HStack ——
+                // 版本行在侧栏里是居中的，角标一旦占布局宽度，检查跑完角标一出现，
+                // 整行版本号就往左跳一格（跳多远还随 "new"/"core" 字宽而变）。
+                // overlay 不参与父视图定尺寸，位置就与「有没有更新」无关了。
+                .overlay(alignment: .topTrailing) { badge }
         }
         .buttonStyle(.plain)
         .pointingHandCursor()
+    }
+
+    /// 版本号本体。正文与那层高光副本必须**同字同字号**，所以只写一处。
+    private var versionText: Text {
+        Text("Ver: \(AppInfo.version)").font(.system(size: 12))
+    }
+
+    /// 更新角标。**同时只显示一颗**，程序更新压过内核更新（new > core）。
+    ///
+    /// ★ 原来两颗会一起亮。8px 的字挤在版本号右上角连成一团（"newcore"），读不出是两个词，
+    ///   侧栏也没有第二颗的宽度。合成一颗不丢信息：两者的下一步是同一个 —— 点开更新窗，
+    ///   那里分页签写着各自的详情。程序优先是因为程序更新往往连内核一起带新
+    ///   （打包时内嵌最新正式版内核）。
+    ///
+    /// 两条 `alignmentGuide` 逐字对应 QML 的 `anchors.left: verText.right` +
+    /// `anchors.leftMargin: 3` + `anchors.verticalCenter: verText.top`：
+    /// 左缘落在文字右缘外 3、竖直中线对着文字顶边（半颗浮在文字上方）。
+    @ViewBuilder
+    private var badge: some View {
+        if anyUpdate {
+            UpdateBadge(text: state.appUpdateAvailable ? "new" : "core")
+                .alignmentGuide(.trailing) { _ in -3 }
+                .alignmentGuide(.top) { $0[VerticalAlignment.center] }
+        }
     }
 
     private var anyUpdate: Bool { state.appUpdateAvailable || state.coreUpdateAvailable }

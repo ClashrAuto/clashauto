@@ -440,6 +440,9 @@ struct UpdateView: View {
             try installResult.get()
             status = String(format: "内核已更新到 %@".t, downloaded.version)
             coreLocalVersion = CoreVersion.local()
+            // 侧栏那颗 "core" 角标的判据刚被这次替换翻了面 —— 立刻重判，
+            // 不然它要等下一轮检查才灭（详见 `AppState.refreshCoreUpdateBadge`）。
+            await state.refreshCoreUpdateBadge()
         } catch {
             status = String(format: "内核更新失败：%@".t, "\(error)")
         }

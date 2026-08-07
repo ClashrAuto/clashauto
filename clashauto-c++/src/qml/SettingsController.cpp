@@ -1182,6 +1182,9 @@ void SettingsController::updateCore()
             setCoreStatus(QStringLiteral("更新内核"), false);
             if (replaced) {
                 setMessage(QStringLiteral("内核已更新到 %1%2").arg(tag, wasRunning ? QStringLiteral("，已重启核心") : QString()));
+                // 侧栏那颗 "core" 角标的判据（本地 `core -v` vs 清单）刚刚被这次替换翻了面，
+                // 让 AboutController 立刻重判一次；不发的话它要等下一轮每小时的 checkAll。
+                emit coreReplaced();
             } else {
                 setMessage(QStringLiteral("内核更新失败: 无法替换文件（可能被占用）"));
             }

@@ -181,6 +181,14 @@ signals:
     void messageChanged();
     // 「应用」时语言码变化：main_qml 连到 I18n::setLanguage 做运行时切换（装/卸翻译器 + retranslate）。
     void languageChangeRequested(const QString &lang);
+    // 内核二进制**真的被换掉了**（updateCore 替换成功那一刻）。
+    //
+    // ★ main_qml 把它连到 `AboutController::checkCore`。不连的话侧栏那颗 "core" 角标
+    //   要等下一轮**每小时**的后台 checkAll 才会灭 —— 用户刚在更新窗里看着「内核已更新到
+    //   v1.10.xxxx」，转头侧栏还在红着说有新内核，看着像更新根本没成。
+    //   角标的判据是「本地 `core -v` 与清单里那版是否不同」，而替换掉二进制正是
+    //   唯一能让这个判据翻面的事件 —— 所以信号发在这儿，不是发在「下载完成」。
+    void coreReplaced();
 
 private:
     void loadInitialValues();      // 从 AppConfigLoader::load() 填初始值

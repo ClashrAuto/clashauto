@@ -636,6 +636,9 @@ struct SettingsPage: View {
             if wasRunning { await state.controller.startCore() }
             try installResult.get()
             message = String(format: "内核已更新到 %@".t, downloaded.version)
+            // 换内核有**两个**入口（这里和更新窗的内核页），两处都得重判侧栏那颗
+            // "core" 角标 —— 少一处，从那个入口更新完角标就一直红着。
+            await state.refreshCoreUpdateBadge()
         } catch {
             message = String(format: "内核更新失败：%@".t, "\(error)")
         }
