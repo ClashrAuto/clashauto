@@ -19,8 +19,25 @@ ApplicationWindow {
     title: qsTr("安装 Npcap")
     color: Theme.card
 
+    readonly property bool isWin: Qt.platform.os === "windows"
+    // Windows 系统标题栏染成本窗背景色（同 ConnectionsWindow，理由见那里）。
+    // 这个窗本来就只在 Windows 上出现，漏染最显眼。
+    Connections {
+        target: Theme
+        function onDarkChanged() { win.paintTitleBar() }
+    }
+    function paintTitleBar() {
+        if (isWin && visible)
+            bridge.applyWindowsTitleBar(win, win.color, Theme.dark)
+    }
+
     // 打开即复检 + 查最新版本号。
-    onVisibleChanged: if (visible) npcap.refresh()
+    onVisibleChanged: {
+        if (!visible)
+            return
+        npcap.refresh()
+        win.paintTitleBar()
+    }
 
     // 装好了就自动关窗（状态文字已经由设备页的提示条消失来体现）。
     Connections {

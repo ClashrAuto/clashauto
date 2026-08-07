@@ -25,6 +25,22 @@ ApplicationWindow {
     title: qsTr("设备详情") + (win.dev.name ? "  ·  " + win.dev.name : "")
     color: Theme.card
 
+    readonly property bool isWin: Qt.platform.os === "windows"
+    // Windows 系统标题栏染成本窗背景色（同 ConnectionsWindow，理由见那里）。
+    // 这里尤其只能用 Connections —— 见本文件顶部那条「别在使用处写 onVisibleChanged」。
+    Connections {
+        target: win
+        function onVisibleChanged() { win.paintTitleBar() }
+    }
+    Connections {
+        target: Theme
+        function onDarkChanged() { win.paintTitleBar() }
+    }
+    function paintTitleBar() {
+        if (isWin && visible)
+            bridge.applyWindowsTitleBar(win, win.color, Theme.dark)
+    }
+
     // 单一数据源：所有子项都引用 win.dev.*。
     readonly property var dev: devices.selectedDevice
 

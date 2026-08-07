@@ -20,6 +20,24 @@ ApplicationWindow {
     title: qsTr("连接")
     color: Theme.card
 
+    readonly property bool isWin: Qt.platform.os === "windows"
+    // Windows：把系统标题栏染成本窗背景色。不染的话标题栏跟的是**系统**明暗而不是 Coast 的
+    // 主题，「系统浅色 + Coast 深色」就是白标题栏配黑窗体。Main.qml 一直有这一句，其余五个
+    // 窗口都漏了。绑 win.color 而不是写死某个色，窗口背景以后改了标题栏跟着走。
+    // 用 Connections 而不是 onVisibleChanged：实例化处写的同名处理器会覆盖组件内部那个。
+    Connections {
+        target: win
+        function onVisibleChanged() { win.paintTitleBar() }
+    }
+    Connections {
+        target: Theme
+        function onDarkChanged() { win.paintTitleBar() }
+    }
+    function paintTitleBar() {
+        if (isWin && visible)
+            bridge.applyWindowsTitleBar(win, win.color, Theme.dark)
+    }
+
     property string query: ""
     property bool showOnline: true
     property bool showOffline: true

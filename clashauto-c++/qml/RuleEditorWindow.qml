@@ -20,6 +20,21 @@ ApplicationWindow {
     title: win.editIndex >= 0 ? qsTr("编辑规则") : qsTr("新增规则")
     color: Theme.card
 
+    readonly property bool isWin: Qt.platform.os === "windows"
+    // Windows 系统标题栏染成本窗背景色（同 ConnectionsWindow，理由见那里）。
+    Connections {
+        target: win
+        function onVisibleChanged() { win.paintTitleBar() }
+    }
+    Connections {
+        target: Theme
+        function onDarkChanged() { win.paintTitleBar() }
+    }
+    function paintTitleBar() {
+        if (isWin && visible)
+            bridge.applyWindowsTitleBar(win, win.color, Theme.dark)
+    }
+
     property int editIndex: -1          // -1 = 新增
     // 进程候选：累积集合——每秒热更新合并当前系统进程，已结束的进程不移除（打开窗口时清空重新累积）。
     property var processNames: []

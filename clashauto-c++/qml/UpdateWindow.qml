@@ -90,6 +90,10 @@ ApplicationWindow {
         if (win.isMac) {
             bridge.applyMacGlass(win, Theme.dark)
             win.macInset = bridge.macTitleBarInset(win)
+        } else if (win.isWin) {
+            // 不染的话标题栏跟的是**系统**明暗，不是 Coast 的：系统浅色 + Coast 深色
+            // 就是白标题栏配 #222 窗体。Main.qml 一直有这一句，其余窗口漏了。
+            bridge.applyWindowsTitleBar(win, Theme.shell, Theme.dark)
         }
     }
 
@@ -122,7 +126,14 @@ ApplicationWindow {
     // 主题切换后毛玻璃深浅要重设（与 Main.qml 同）。
     Connections {
         target: Theme
-        function onDarkChanged() { if (win.isMac && win.visible) bridge.applyMacGlass(win, Theme.dark) }
+        function onDarkChanged() {
+            if (!win.visible)
+                return
+            if (win.isMac)
+                bridge.applyMacGlass(win, Theme.dark)
+            else if (win.isWin)
+                bridge.applyWindowsTitleBar(win, Theme.shell, Theme.dark)
+        }
     }
 
     // —— 每个页签的三样：当前版本 / 最新版本 / 更新内容 ——
