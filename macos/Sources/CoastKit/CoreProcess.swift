@@ -424,12 +424,51 @@ public final class CoreProcess {
 
     // MARK: - 内核种子
 
-    /// 首次运行把打包时集成的内核放到 `command/core`。
+    /// `core -v` 的输出形如 "Coast Meta v1.10.4420 darwin arm64 with go1.26.5 ..."，
+    /// 折成一个可比大小的整数；取不到返回 nil。纯函数，单测直接喂字符串。
+    nonisolated public static func coreVersionRank(_ versionText: String) -> Int? {
+        // 用 NSRegularExpression 而不是 /…/ 字面量 —— 后者要 bare-slash-regex 语言模式,
+        // 本包没开,写了直接编译不过。
+        guard let re = try? NSRegularExpression(pattern: "v([0-9]+)\\.([0-9]+)\\.([0-9]+)"),
+              let m = re.firstMatch(in: versionText,
+                                    range: NSRange(versionText.startIndex..., in: versionText))
+        else { return nil }
+        func part(_ i: Int) -> Int? {
+            guard let r = Range(m.range(at: i), in: versionText) else { return nil }
+            return Int(versionText[r])
+        }
+        guard let major = part(1), let minor = part(2), let build = part(3) else { return nil }
+        return major * 1_000_000_000_000 + minor * 1_000_000 + build
+    }
+
+    /// 跑一次 `<exe> -v` 拿版本；拿不到（文件损坏、架构不对、被 Gatekeeper 拦下）返回 nil。
+    nonisolated private static func coreVersionRank(of exe: URL) -> Int? {
+        guard FileManager.default.isExecutableFile(atPath: exe.path) else { return nil }
+        let p = Process()
+        p.executableURL = exe
+        p.arguments = ["-v"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        guard (try? p.run()) != nil else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return coreVersionRank(String(decoding: data, as: UTF8.self))
+    }
+
+    /// 把打包时集成的内核放到 `command/core`，**并在集成内核更新时顶掉旧的**。
     ///
-    /// `make_app.sh` 默认把最新**正式版**内核放进 `Contents/Resources/core`（随 .app 一起
-    /// 签名），这里只做「缺了才补」：**绝不覆盖**已装的内核 —— 用户手动升级过（或切了
-    /// 测试版通道）的内核被一次启动静默回滚是最难查的那种坑。集成只是让全新安装
-    /// 开箱即用，之后的版本管理仍归「设置 → 系统」的下载/更新。
+    /// `make_app.sh` 默认把最新**正式版**内核放进 `Contents/Resources/core`（随 .app 一起签名）。
+    ///
+    /// ★ 这里曾经是「缺了才补、绝不覆盖」。理由本身没错（用户手动升级过的内核被一次启动
+    ///   静默回滚是最难查的那种坑），但它同时意味着**内核更新永远到不了老用户**：装过一次
+    ///   Coast 的机器会把当初那个内核一直留着，之后无论 App 更新多少次都不换。
+    ///   2026-08-08 实测就是这么炸的 —— 一台 App 已是最新的 Mac，`command/core` 还停在
+    ///   v1.10.4394（早于 tide 支持），核心直接甩 `unsupport proxy type: tide`、REST 返回 400，
+    ///   用户看到的是「最新版还是用不了 tide」，而 App 版本、配置、订阅全都是对的。
+    ///
+    /// 现在按版本号比：**只在集成内核严格更新时才覆盖**。原来的顾虑照样成立 —— 手动装的
+    /// 新内核版本更高就不动它；版本读不出来也一律不动，宁可不升也不要降级。
     ///
     /// 开发期（`swift run`）没有打包资源，`Resources.asset` 返回 nil，安静跳过。
     /// 参数可注入是给单测用的；产品代码一律用默认值。
@@ -438,17 +477,30 @@ public final class CoreProcess {
         installedAt existing: URL = AppPaths.coreExecutable,
         to target: URL = AppPaths.userDir.appendingPathComponent("command/core")
     ) {
-        guard let bundled,
-              !FileManager.default.isExecutableFile(atPath: existing.path) else { return }
+        guard let bundled else { return }
+        if FileManager.default.isExecutableFile(atPath: existing.path) {
+            guard let have = coreVersionRank(of: existing),
+                  let want = coreVersionRank(of: bundled),
+                  want > have else { return }
+        }
         try? FileManager.default.createDirectory(at: target.deletingLastPathComponent(),
                                                  withIntermediateDirectories: true)
-        try? FileManager.default.removeItem(at: target)
-        guard (try? FileManager.default.copyItem(at: bundled, to: target)) != nil else { return }
+        // ★ 先拷到旁边再换上去,不要「先删后拷」。内核有 40 多 MB,拷贝失败(磁盘满、
+        //   源文件读不了)是真会发生的;先删的话,用户会落得一个**内核都没有**的 Coast——
+        //   而升级这条路是新开的,从前只在「本来就没内核」时才写,删了也没什么可丢。
+        let staging = target.appendingPathExtension("new")
+        try? FileManager.default.removeItem(at: staging)
+        guard (try? FileManager.default.copyItem(at: bundled, to: staging)) != nil else { return }
         // 0755：不给执行位内核起不来,报错只是一句含糊的「启动失败」（同 CoreDownloader.install）。
-        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: target.path)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staging.path)
         // .app 若带隔离标记（从 DMG 拖出来的都带）,拷出的副本会继承 —— 摘掉,
         // 否则首次 exec 会被 Gatekeeper 拦下,表现为「启动失败」且日志里毫无线索。
-        removexattr(target.path, "com.apple.quarantine", 0)
+        removexattr(staging.path, "com.apple.quarantine", 0)
+        try? FileManager.default.removeItem(at: target)
+        guard (try? FileManager.default.moveItem(at: staging, to: target)) != nil else {
+            try? FileManager.default.removeItem(at: staging)
+            return
+        }
     }
 
     // MARK: - GeoIP 种子

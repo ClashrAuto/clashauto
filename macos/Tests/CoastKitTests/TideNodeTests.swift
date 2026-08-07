@@ -125,3 +125,71 @@ struct TideNodeTests {
                 "节点没出现在任何策略组里——生成是对的，但用户在界面上选不到它")
     }
 }
+
+// ★ 订阅**导入**这条路（updateSubscription(at:fromText:)）—— 上面那几条测试是直接
+// 写好 subscribe.yaml 再生成，绕过了导入。而用户实际是「添加订阅 → 拉取 → 解析」，
+// 失败就发生在这一步：那台 Mac 上 subscribe.yaml 根本不存在，说明订阅从未成功建立。
+@Suite("TIDE 订阅导入")
+struct TideSubscriptionImportTests {
+
+    /// 用户手里那种 clash 配置：顶层 proxies: 里放一个 tide 节点。
+    private var clashConfigWithTide: String {
+        """
+        mixed-port: 7890
+        proxies:
+          - name: '自建-TIDE-SG'
+            type: tide
+            server: 47.0.0.1
+            port: 8443
+            password: 'pw'
+            public-key: '\(tidePublicKey)'
+            sni: tide.local
+            skip-cert-verify: true
+            udp: true
+            quic: true
+            redundancy: true
+        rules:
+          - MATCH,DIRECT
+        """
+    }
+
+    @Test("导入含 tide 的 clash 配置能解析出节点")
+    func importClashWithTide() {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("coast-imp-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = SubscriptionStore(config: AppConfig(), directory: dir)
+        // addSubscription 要求 url 非空——自建单节点的用户填的是**本地文件路径**
+        // （Qt 那边输入框写着"URL 或本地路径"，Swift 侧的取回逻辑也支持本地文件）。
+        let localFile = dir.appendingPathComponent("tide.yaml").path
+        try? clashConfigWithTide.write(toFile: localFile, atomically: true, encoding: .utf8)
+        #expect(store.addSubscription(name: "tide", url: localFile, type: "clash"))
+
+        let result = store.updateSubscription(at: 0, fromText: clashConfigWithTide)
+        #expect(result.ok, "导入失败：\(result.message) —— 用户看到的就是这一步不成功")
+
+        let nodes = store.nodes(at: 0)
+        #expect(nodes.count == 1, "解析出 \(nodes.count) 个节点，期望 1 个")
+    }
+
+    @Test("导入之后公钥仍然一字不差")
+    func importKeepsPublicKey() {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("coast-imp2-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let store = SubscriptionStore(config: AppConfig(), directory: dir)
+        let localFile2 = dir.appendingPathComponent("tide.yaml").path
+        try? clashConfigWithTide.write(toFile: localFile2, atomically: true, encoding: .utf8)
+        _ = store.addSubscription(name: "tide", url: localFile2, type: "clash")
+        _ = store.updateSubscription(at: 0, fromText: clashConfigWithTide)
+
+        let text = (try? String(contentsOf: dir.appendingPathComponent("subscribe.yaml"),
+                                encoding: .utf8)) ?? ""
+        #expect(text.contains(tidePublicKey),
+                "导入之后公钥就已经不完整了——后面生成 full.yaml 再对也没用")
+    }
+}

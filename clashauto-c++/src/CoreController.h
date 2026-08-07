@@ -33,6 +33,9 @@ public:
     /// 全新安装启动 30s 后既没有 command/ 目录、也没有 full.yaml、更没有核心进程。
     void seedBundledCore(); // 幂等；重复调用无副作用
 
+    /// 把 `core -v` 的输出折成可比大小的整数（取不到返回 -1）。决定集成内核该不该顶掉已装的。
+    static qint64 coreVersionRank(const QString &versionText);
+
     /// 集成内核落位自测（`COAST_BUNDLEDCORE_SELFTEST=1`，见 main_qml.cpp）。
     static bool runBundledCoreSelfTest();
     bool isHelperCore() const;    // macOS：当前核心是否由特权 helper（root）启动（决定 TUN 是否可用）

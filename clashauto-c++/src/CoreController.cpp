@@ -395,16 +395,53 @@ bool CoreController::isCoreInstalled() const
     return QFileInfo::exists(m_config.clashExecutable());
 }
 
+// `core -v` 的输出形如 "Coast Meta v1.10.4420 darwin arm64 with go1.26.5 ..."，
+// 把其中的版本号折成一个可比大小的整数。取不到返回 -1 —— 调用方据此保守处理。
+// 纯函数，自测直接喂字符串，不用去伪造一个会打印版本的可执行文件。
+qint64 CoreController::coreVersionRank(const QString &versionText)
+{
+    static const QRegularExpression re(QStringLiteral("v(\\d+)\\.(\\d+)\\.(\\d+)"));
+    const QRegularExpressionMatch m = re.match(versionText);
+    if (!m.hasMatch()) {
+        return -1;
+    }
+    return m.captured(1).toLongLong() * 1000000000000LL
+           + m.captured(2).toLongLong() * 1000000LL
+           + m.captured(3).toLongLong();
+}
+
+// 跑一次 `<exe> -v` 拿版本。拿不到（文件损坏、架构不对、被杀软拦下）一律 -1。
+static qint64 coreVersionRankOf(const QString &exe)
+{
+    if (!QFileInfo::exists(exe)) {
+        return -1;
+    }
+    QProcess p;
+    p.start(exe, {QStringLiteral("-v")});
+    if (!p.waitForFinished(5000)) {
+        p.kill();
+        p.waitForFinished(1000);
+        return -1;
+    }
+    return CoreController::coreVersionRank(QString::fromUtf8(p.readAllStandardOutput())
+                                           + QString::fromUtf8(p.readAllStandardError()));
+}
+
 // 打包时集成的内核（Windows/Linux 在可执行文件同目录的 core[.exe]，macOS 在 bundle 的
-// Contents/Resources/core）首次运行落位到 userDir/command。只做「缺了才补」：**绝不覆盖**
-// 已装内核 —— 用户手动升级过（或切了测试版通道）的内核被一次启动静默回滚是最难查的
-// 那种坑。集成只是让全新安装开箱即用，之后的版本管理仍归「设置 → 系统」的下载/更新。
+// Contents/Resources/core）首次运行落位到 userDir/command，**并在集成内核更新时顶掉旧的**。
+//
+// ★ 这里曾经是「缺了才补、绝不覆盖」。理由本身没错（用户手动升级过的内核被一次启动静默
+//   回滚是最难查的那种坑），但它同时意味着**内核更新永远到不了老用户**：装过一次 Coast
+//   的机器会把当初那个内核一直留着，之后无论 App 更新多少次都不换。2026-08-08 实测就是
+//   这么炸的 —— 一台 App 已是最新的 Mac，command/core 还停在 v1.10.4394（早于 tide 支持），
+//   于是核心直接甩 `unsupport proxy type: tide`、REST 返回 400，用户看到的是「最新版还是
+//   用不了 tide」，而 App 版本号、配置、订阅全都是对的，从哪儿都查不出来。
+//
+// 现在按版本号比：**只在集成内核严格更新时才覆盖**。原来的顾虑照样成立 —— 手动装的新内核
+// 版本更高，比较结果就是不动它；版本读不出来（-1）也一律不动，宁可不升也不要降级。
 // 开发构建旁边没有这个文件，安静跳过，行为与从前一致。
 void CoreController::seedBundledCore()
 {
-    if (QFileInfo::exists(m_config.clashExecutable())) {
-        return;
-    }
 #if defined(Q_OS_WIN)
     const QString coreName = QStringLiteral("core.exe");
 #else
@@ -425,19 +462,41 @@ void CoreController::seedBundledCore()
     if (bundled.isEmpty()) {
         return;
     }
+    const QString installed = m_config.clashExecutable();
+    if (QFileInfo::exists(installed)) {
+        const qint64 have = coreVersionRankOf(installed);
+        const qint64 want = coreVersionRankOf(bundled);
+        // 任一边的版本读不出来就不动手 —— 降级的代价（用户刚手动装的新内核被换掉）
+        // 远大于不升级的代价（还能去「设置 → 系统」手动更新）。
+        if (have < 0 || want < 0 || want <= have) {
+            return;
+        }
+        emit logUpdated(tr("集成内核比已装的新，正在覆盖: %1").arg(installed));
+    }
     const QString target = QDir(m_config.userDir).filePath(QStringLiteral("command/") + coreName);
     QDir().mkpath(QFileInfo(target).absolutePath());
-    if (!QFile::copy(bundled, target)) {
+    // ★ 先拷到旁边再换上去，不要「先删后拷」。内核有 40 多 MB，拷贝失败（磁盘满、
+    //   源文件读不了）是真会发生的；先删的话，用户会落得一个**内核都没有**的 Coast——
+    //   而升级这条路是新开的，从前只在「本来就没内核」时才写，删了也没什么可丢。
+    const QString staging = target + QStringLiteral(".new");
+    QFile::remove(staging);
+    if (!QFile::copy(bundled, staging)) {
         emit logUpdated(tr("集成内核落位失败: %1 -> %2").arg(bundled, target));
         return;
     }
     // /opt/coast 下的源文件是 root 属主、对用户只读；副本必须补回属主写（应用内更新要
     // 覆盖它，否则以后每次更新都静默失败）+ 执行位（缺了核心起不来，报错只有「启动失败」）。
-    QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner
-                                      | QFileDevice::ExeOwner | QFileDevice::ReadUser
-                                      | QFileDevice::WriteUser | QFileDevice::ExeUser
-                                      | QFileDevice::ReadGroup | QFileDevice::ExeGroup
-                                      | QFileDevice::ReadOther | QFileDevice::ExeOther);
+    QFile::setPermissions(staging, QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                       | QFileDevice::ExeOwner | QFileDevice::ReadUser
+                                       | QFileDevice::WriteUser | QFileDevice::ExeUser
+                                       | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                       | QFileDevice::ReadOther | QFileDevice::ExeOther);
+    QFile::remove(target);
+    if (!QFile::rename(staging, target)) {
+        QFile::remove(staging);
+        emit logUpdated(tr("集成内核落位失败: %1 -> %2").arg(bundled, target));
+        return;
+    }
     emit logUpdated(tr("已启用打包集成的内核: %1").arg(target));
 }
 
@@ -1298,8 +1357,12 @@ bool CoreController::runBundledCoreSelfTest()
             std::printf("集成内核自测: 造不出占位内核 %s（目录不可写）\n", qUtf8Printable(bundled));
             return false;
         }
-        f.write("#!/bin/sh\nexit 0\n");
+        // 会打印版本号 —— 落位要按版本比大小，不打印版本就测不到「集成内核更新时顶掉旧的」。
+        f.write("#!/bin/sh\necho \"Coast Meta v9.99.9999 selftest\"\nexit 0\n");
         f.close();
+        QFile::setPermissions(bundled, QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                           | QFileDevice::ExeOwner | QFileDevice::ReadUser
+                                           | QFileDevice::ExeUser);
     }
 
     AppConfig cfg;
@@ -1335,7 +1398,49 @@ bool CoreController::runBundledCoreSelfTest()
     const QByteArray body = after.readAll();
     after.close();
     check(body == "USER-INSTALLED",
-          "重复落位不覆盖已装内核（幂等）");
+          "版本读不出来时不覆盖已装内核（宁可不升级也不要降级）");
+
+    // 版本比较本身 —— 就是这个比较把内核更新送到老用户手上。
+    check(coreVersionRank(QStringLiteral("Coast Meta v1.10.4420 darwin arm64 with go1.26.5"))
+              > coreVersionRank(QStringLiteral("Coast Meta v1.10.4394 darwin arm64 with go1.26.5")),
+          "v1.10.4420 比 v1.10.4394 新（4394 早于 tide 支持，正是它让老用户拿到 400）");
+    check(coreVersionRank(QStringLiteral("Coast Meta v1.11.1 x"))
+              > coreVersionRank(QStringLiteral("Coast Meta v1.10.9999 x")),
+          "次版本号优先于构建号（v1.11.1 新于 v1.10.9999）");
+    check(coreVersionRank(QStringLiteral("这里没有版本号")) < 0,
+          "读不出版本返回 -1（调用方据此保守处理，绝不降级）");
+
+#if !defined(Q_OS_WIN)
+    // ★ 端到端：集成内核比已装的新时必须顶掉旧的。
+    //   这一条就是 2026-08-08 那台 Mac 的复现 —— App 已是最新，command/core 却停在
+    //   v1.10.4394，核心甩 `unsupport proxy type: tide`、REST 400，而配置和订阅全是对的。
+    //   Windows 上跳过：假内核只能是 shell 脚本，core.exe 跑不起来，测不了。
+    if (madeFake) {
+        QTemporaryDir up;
+        AppConfig ucfg;
+        ucfg.userDir = up.path();
+        ucfg.configDir = up.path();
+        const QString oldCore = QDir(up.path()).filePath(QStringLiteral("command/") + coreName);
+        QDir().mkpath(QFileInfo(oldCore).absolutePath());
+        QFile old(oldCore);
+        if (old.open(QIODevice::WriteOnly)) {
+            old.write("#!/bin/sh\necho \"Coast Meta v1.10.4394 old\"\nexit 0\n");
+            old.close();
+            QFile::setPermissions(oldCore, QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                               | QFileDevice::ExeOwner | QFileDevice::ReadUser
+                                               | QFileDevice::ExeUser);
+        }
+        CoreController upgrader(ucfg);
+        upgrader.seedBundledCore();
+        QFile now(oldCore);
+        now.open(QIODevice::ReadOnly);
+        const QByteArray nowBody = now.readAll();
+        now.close();
+        check(nowBody.contains("v9.99.9999"),
+              "集成内核更新时顶掉了旧内核 —— 缺了这一条，装过一次 Coast 的机器"
+              "永远停在当初那个内核，之后 App 更新多少次都不换");
+    }
+#endif
 
     if (madeFake)
         QFile::remove(bundled);
