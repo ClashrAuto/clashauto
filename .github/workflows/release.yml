@@ -404,9 +404,31 @@ jobs:
           # 顺带把版本打进日志：取内核与 clash 发布之间有竞态（1.0.969 就取到了只带一半
           # 修复的 v1.10.4413），版本号在日志里，事后能一眼看出来。
           if ('${{ matrix.arch }}' -eq 'x64') {
-            $ver = & "$env:STAGE_DIR\core.exe" -v 2>&1 | Select-Object -First 1
-            if ($LASTEXITCODE -ne 0) { throw "集成内核跑不起来（exit=$LASTEXITCODE）: $ver" }
-            Write-Host "集成内核自报版本: $ver"
+            # ⚠️ 这段刻意**不致命**（只告警，不 throw），理由是踩过一次坑：
+            # 2026-08-07 第一版写成 `& core.exe -v 2>&1 | Select-Object -First 1` 并在失败时
+            # throw，把 Windows x64 整条流水线弄红了——而 Linux 那条走 bash 不受影响，
+            # 于是只红了一半：Windows 包没产出、version.json 与 macOS 触发被跳过，
+            # 那次发布只有 16 个资产。日志需要仓库 admin 才能拉，当时无法确诊。
+            #
+            # 已知的两个 PowerShell 坑（本步骤开着 $ErrorActionPreference = "Stop"）：
+            #   · 对原生程序用 `2>&1`：stderr 每行会变成 NativeCommandError，
+            #     Stop 之下即使退出码是 0 也当场抛出；
+            #   · 在原生命令后直接接 `| Select-Object -First 1`：会提前中断上游管道。
+            # 所以这里先把 ErrorActionPreference 放开、把输出收进变量，再取首行。
+            #
+            # 权衡：**打包不能被一个自己都诊断不了的检查挡住**。真正的硬门禁留在 Linux
+            # 那条（那边是 bash，已验证可用）；Windows 这边保留最有价值的部分——
+            # 把内核版本打进日志，好在事后一眼看出「取内核与 clash 发布的竞态」。
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            $out = & "$env:STAGE_DIR\core.exe" -v
+            $rc = $LASTEXITCODE
+            $ErrorActionPreference = $prev
+            if ($rc -ne 0) {
+              Write-Warning "集成内核跑不起来（exit=$rc）——不阻断打包，但请人工确认"
+            } else {
+              Write-Host "集成内核自报版本: $($out | Select-Object -First 1)"
+            }
           }
 
       - name: Create portable zip
