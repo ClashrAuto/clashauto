@@ -21,7 +21,9 @@ ApplicationWindow {
 
     readonly property bool isMac: Qt.platform.os === "osx"
     readonly property bool isWin: Qt.platform.os === "windows"
-    property int currentPage: 0
+    // 起始页：默认 0（状态页）；`COAST_INITIAL_PAGE=<0..6>` 可指定，见 main_qml.cpp。
+    // 无头逐页验证时用它 —— 侧栏在 offscreen 下点不了，没有这个钩子就只能验第一页。
+    property int currentPage: initialPage
 
     // 记住窗口位置：退出/移动时把 x/y 持久化，下次启动恢复到上一次的位置；无历史位置则落在右下角。
     // 用 QtCore 的 Settings（沿用应用的 组织名/应用名 → 与其它 QSettings 存同一处）。
