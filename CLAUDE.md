@@ -142,5 +142,18 @@ Product is **Coast**; names follow each platform's convention:
   - `master`/`main` → **stable** release, tag `v<version>`, `make_latest: true`.
   - any other branch → **prerelease**, tag `v<version>-beta.<sha7>` (the sha7 only disambiguates two branches landing on the same commit count; `APP_VERSION` itself stays purely numeric because asset filenames and the in-app version compare depend on it), release name `Coast <ver> (beta · <branch>)`, `make_latest: false`. Betas get both macOS DMGs too — `trigger-mac` passes the **target release tag** to schat.build, so a beta's signed DMGs land on the beta release instead of clobbering the stable one. (That clobbering — from an older trigger that pushed a bare empty commit and let the signer guess `master` — is why beta mac packages were disabled for a while.)
   - The app's **`beta` setting** (`config.yaml`, Settings → 程序更新 → 接收测试版, default off) decides whether prereleases are visible: `AboutController::check()` (the update badge) skips them when off, and `UpdateWindow.qml` picks `UpdateController`'s release vs beta channel from it. Note `/releases/latest` excludes prereleases by GitHub's own definition — that's why the check reads the full `/releases` list and filters itself.
+- ★ **改了 `tide` 之后的推送顺序：先推 clash，等它发布出内核，再推父仓库。**
+  «Bundle latest stable core» 取的是**打包那一刻**的最新正式版内核，而 clash 的
+  发布流水线要跑十几分钟。父仓库推早了，打出来的包里就是**旧内核**——
+  2026-08-07 一天之内因此连着栽了三次：1.0.969 取到 v1.10.4413（修复只带一半）、
+  1.0.975 / 1.0.976 取到 v1.10.4415（少了 QUIC 套接字与重发退避两个修复），
+  而每次 CI 都是全绿的，因为"取到的是当时最新的正式版"这句话本身没错。
+  验证办法只有一个——**把包里的内核抠出来跑 `-v`**：
+  `tar xzf Coast-*-linux-x64-portable.tar.gz --wildcards '*/core' -O > core && ./core -v`。
+  打包日志里现在也会打印这个版本号（见 release.yml 的冒烟检查），事后可查。
+  另：clash 的 Build 用了 fail-fast 矩阵，某个 job（实测是 android 的 Setup NDK）
+  一挂就把其余二十几个一起 cancel 掉、当天不发布——**看到"没出新内核"先去看是不是它**，
+  别急着怀疑自己刚推的代码（我就误判过一次）。
+
 - **Self-contained CI** — no Clashr-Auto download/staging; the package is the exe + Qt runtime + a bundled `core[.exe]` (resources embedded in the exe; the "Bundle latest stable core" step downloads the latest **stable** `coast-<os>-<arch>` release asset from `ClashrAuto/clash`, same pick rules as `CoreRelease.h`, and fails the build if it can't). `windeployqt` runs with **`--no-opengl-sw --no-system-d3d-compiler`** to drop ~24 MB of fallback DLLs — still fine after the move to the D3D11 RHI backend: WARP ships with Windows (no `opengl32sw.dll` needed unless Qt falls back to the OpenGL RHI), and Qt Quick's shaders are pre-compiled (no runtime `d3dcompiler_47.dll`). If a GPU-less machine ever fails to start, that pairing is the first thing to re-check.
 - Windows CI = **MSVC (VS 17 2022)**; Linux CI = Ninja + aqt Qt6 (bundled into the package, RPATH `$ORIGIN/lib`); macOS = aqt universal Qt6. ARM64 Windows is a cross-compile (`-DQT_HOST_PATH`).
