@@ -397,6 +397,17 @@ jobs:
           if (-not $exe) { throw "内核 zip 里没有 exe" }
           Copy-Item $exe.FullName "$env:STAGE_DIR\core.exe" -Force
           if (-not (Test-Path "$env:STAGE_DIR\core.exe")) { throw "core.exe 未落到包根" }
+          # ★ 真的把集成内核跑一下（只有 x64 能跑：arm64 是在 x64 上交叉编译的）。
+          # 原先只验「文件在不在」，从没执行过它。下载损坏、架构挑错（普通 amd64 是
+          # GOAMD64=v3，老 CPU/虚拟机直接 0xC0000005）、上游改产物命名，都会一路进发布包，
+          # 而 CI 全绿；用户那边只看到「什么都连不上」。
+          # 顺带把版本打进日志：取内核与 clash 发布之间有竞态（1.0.969 就取到了只带一半
+          # 修复的 v1.10.4413），版本号在日志里，事后能一眼看出来。
+          if ('${{ matrix.arch }}' -eq 'x64') {
+            $ver = & "$env:STAGE_DIR\core.exe" -v 2>&1 | Select-Object -First 1
+            if ($LASTEXITCODE -ne 0) { throw "集成内核跑不起来（exit=$LASTEXITCODE）: $ver" }
+            Write-Host "集成内核自报版本: $ver"
+          }
 
       - name: Create portable zip
         shell: pwsh
@@ -1033,6 +1044,19 @@ jobs:
           curl -fsSL --retry 3 "$url" | gunzip > "$STAGE_DIR/core"
           test -s "$STAGE_DIR/core"
           chmod 755 "$STAGE_DIR/core"
+          # ★ 真的把集成内核跑一下，并把它自报的版本打进日志。
+          #
+          # 原先只验「文件非空」，从头到尾没执行过它。于是一个下载损坏、架构不对、
+          # 或者上游换了产物命名的内核会一路进到发布包里——而 CI 全绿。
+          # 用户装上之后的表现是「什么都连不上」，且日志里只有一句「启动失败」。
+          # 两条 Linux 流水线都是原生 runner（arm64 job 跑在 ubuntu-24.04-arm 上），
+          # 所以两种架构都能真跑。
+          #
+          # 打印版本还有第二个用处：**取内核这一步和 clash 的发布是有竞态的**。
+          # 2026-08-07 就撞上了——Coast 1.0.969 取到 v1.10.4413，而修复的后一半
+          # 在几分钟后才作为 v1.10.4414 发布，于是发布包里的内核只带了一半修复。
+          # 版本号进了日志，这种事至少能在事后一眼看出来。
+          echo "集成内核自报版本: $("$STAGE_DIR/core" -v | head -1)"
 
       - name: Create portable tar.gz
         shell: bash
