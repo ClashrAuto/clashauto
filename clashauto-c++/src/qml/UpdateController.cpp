@@ -1,5 +1,6 @@
 #include "AppConfig.h"
 #include "CoreRelease.h"
+#include "DownloadStats.h"
 #include "UpdateController.h"
 
 #include "../VersionManifest.h"
@@ -57,18 +58,8 @@ bool versionNewer(const QString &remote, const QString &local)
     return false;
 }
 
-// 人类可读字节数（用于下载量/总量/速度显示）：1023 -> "1023 B"，1536 -> "1.5 KB"。
-QString fmtBytes(qint64 v)
-{
-    double n = v < 0 ? 0 : static_cast<double>(v);
-    static const char *u[] = {"B", "KB", "MB", "GB", "TB"};
-    int i = 0;
-    while (n >= 1024.0 && i < 4) {
-        n /= 1024.0;
-        ++i;
-    }
-    return QString::number(n, 'f', i == 0 ? 0 : 1) + QLatin1Char(' ') + QLatin1String(u[i]);
-}
+// 人类可读字节数（下载量/总量/速度）在 `DownloadStats::fmtBytes` —— 程序更新、内核/GeoIP
+// 更新、Npcap 安装器三处共用一份口径，别在这里再抄一份。
 
 #if defined(Q_OS_MACOS)
 // 资源名是否属于 **Qt 这条 mac 产品线**（`…-qt.dmg` / `…-qt-…` / `…qt-…`）。
@@ -500,15 +491,15 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
             setProgress(static_cast<int>(received * 100 / total));
         }
         // 已下载 / 总量文本（总量未知时显示 "?"）。
-        m_downloadedText = fmtBytes(received);
-        m_totalText = total > 0 ? fmtBytes(total) : QString::fromUtf8("?");
+        m_downloadedText = DownloadStats::fmtBytes(received);
+        m_totalText = total > 0 ? DownloadStats::fmtBytes(total) : QString::fromUtf8("?");
         // 速度：每 ≥500ms 采样一次，避免抖动。
         const qint64 nowMs = m_dlTimer.elapsed();
         const qint64 dt = nowMs - m_lastMs;
         if (dt >= 500) {
             const qint64 db = received - m_lastBytes;
             const double bps = db * 1000.0 / static_cast<double>(dt);
-            m_speedText = fmtBytes(static_cast<qint64>(bps)) + QStringLiteral("/s");
+            m_speedText = DownloadStats::fmtBytes(static_cast<qint64>(bps)) + QStringLiteral("/s");
             m_lastMs = nowMs;
             m_lastBytes = received;
         }

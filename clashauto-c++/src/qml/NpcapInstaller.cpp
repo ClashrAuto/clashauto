@@ -1,3 +1,4 @@
+#include "DownloadStats.h"
 #include "NpcapInstaller.h"
 
 #include "CoreController.h"
@@ -46,18 +47,6 @@ constexpr const char *kHomepage = "https://npcap.com/#download";
 QString distUrlFor(const QString &version)
 {
     return QStringLiteral("https://npcap.com/dist/npcap-%1.exe").arg(version);
-}
-
-QString fmtBytes(qint64 v)
-{
-    double n = v < 0 ? 0 : static_cast<double>(v);
-    static const char *u[] = {"B", "KB", "MB", "GB", "TB"};
-    int i = 0;
-    while (n >= 1024.0 && i < 4) {
-        n /= 1024.0;
-        ++i;
-    }
-    return QString::number(n, 'f', i == 0 ? 0 : 1) + QLatin1Char(' ') + QLatin1String(u[i]);
 }
 
 #if defined(Q_OS_WIN)
@@ -386,13 +375,13 @@ void NpcapInstaller::startDownload(const QString &url, const QString &name)
         if (total > 0) {
             setProgress(static_cast<int>(received * 100 / total));
         }
-        m_downloadedText = fmtBytes(received);
-        m_totalText = total > 0 ? fmtBytes(total) : QString::fromUtf8("?");
+        m_downloadedText = DownloadStats::fmtBytes(received);
+        m_totalText = total > 0 ? DownloadStats::fmtBytes(total) : QString::fromUtf8("?");
         const qint64 nowMs = m_dlTimer.elapsed();
         const qint64 dt = nowMs - m_lastMs;
         if (dt >= 500) { // 每 ≥500ms 采一次速，避免数字乱跳
             const double bps = (received - m_lastBytes) * 1000.0 / static_cast<double>(dt);
-            m_speedText = fmtBytes(static_cast<qint64>(bps)) + QStringLiteral("/s");
+            m_speedText = DownloadStats::fmtBytes(static_cast<qint64>(bps)) + QStringLiteral("/s");
             m_lastMs = nowMs;
             m_lastBytes = received;
         }

@@ -537,7 +537,13 @@ Item {
                             CardDivider {}
                             SettingRow { label: qsTr("GeoIP 数据")
                                 PillButton {
-                                    text: settings.geoipUpdating ? settings.geoipStatus : qsTr("更新 GeoIP")
+                                    // 百分比现在是 `geoipProgress`（更新窗的进度条读它），不再拼在
+                                    // 状态串里 —— 这里把它接回按钮文字上，否则这颗按钮从「下载中 45%」
+                                    // 退成一句不动的「下载中...」，看着像卡死了。
+                                    text: settings.geoipUpdating
+                                          ? settings.geoipStatus
+                                            + (settings.geoipProgress > 0 ? " " + settings.geoipProgress + "%" : "")
+                                          : qsTr("更新 GeoIP")
                                     enabled: !settings.geoipUpdating
                                     implicitWidth: 120
                                     onClicked: settings.updateGeoip()
@@ -553,7 +559,11 @@ Item {
                                 ThemedSwitch { id: mirrorCheck; checked: settings.mirror
                                     onToggled: settings.setMirror(checked) }
                                 PillButton {
-                                    text: settings.coreUpdating ? settings.coreUpdateStatus : qsTr("更新内核")
+                                    // 同 GeoIP 那颗：百分比来自 `coreProgress`。
+                                    text: settings.coreUpdating
+                                          ? settings.coreUpdateStatus
+                                            + (settings.coreProgress > 0 ? " " + settings.coreProgress + "%" : "")
+                                          : qsTr("更新内核")
                                     enabled: !settings.coreUpdating
                                     implicitWidth: 120
                                     onClicked: settings.updateCore()

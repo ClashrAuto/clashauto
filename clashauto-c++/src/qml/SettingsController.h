@@ -11,6 +11,7 @@
 // 与 Widgets 版一一对应，但无 QWidget：进度/状态经 Q_PROPERTY(NOTIFY) 回报给 QML。
 
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <QVariantList>
@@ -18,9 +19,12 @@
 #include <QJsonArray>
 #include <QJsonObject>
 
+#include "DownloadStats.h"
+
 class CoreController;
 class ClashService;
 class QNetworkAccessManager;
+class QNetworkReply;
 class QTimer;
 
 class SettingsController final : public QObject
@@ -63,10 +67,22 @@ class SettingsController final : public QObject
     Q_PROPERTY(int areaTotal READ areaTotal NOTIFY areasChanged)
 
     // —— 内核 / GeoIP 更新进度 ——
+    //
+    // 与程序更新（`UpdateController`）**同一套读数**：百分比 + 速度 + 已下载/总量，
+    // 外加一个能中止的入口。更新窗三个页签共用一份版式（进度条 + ✕），缺哪一样
+    // 内核/GeoIP 那两页就只能退回一行「下载中 45%」的文字，和程序页对不上。
     Q_PROPERTY(bool coreUpdating READ coreUpdating NOTIFY coreUpdatingChanged)
     Q_PROPERTY(QString coreUpdateStatus READ coreUpdateStatus NOTIFY coreUpdateStatusChanged)
+    Q_PROPERTY(int coreProgress READ coreProgress NOTIFY coreProgressChanged)
+    Q_PROPERTY(QString coreSpeedText READ coreSpeedText NOTIFY coreProgressChanged)
+    Q_PROPERTY(QString coreDownloadedText READ coreDownloadedText NOTIFY coreProgressChanged)
+    Q_PROPERTY(QString coreTotalText READ coreTotalText NOTIFY coreProgressChanged)
     Q_PROPERTY(bool geoipUpdating READ geoipUpdating NOTIFY geoipUpdatingChanged)
     Q_PROPERTY(QString geoipStatus READ geoipStatus NOTIFY geoipStatusChanged)
+    Q_PROPERTY(int geoipProgress READ geoipProgress NOTIFY geoipProgressChanged)
+    Q_PROPERTY(QString geoipSpeedText READ geoipSpeedText NOTIFY geoipProgressChanged)
+    Q_PROPERTY(QString geoipDownloadedText READ geoipDownloadedText NOTIFY geoipProgressChanged)
+    Q_PROPERTY(QString geoipTotalText READ geoipTotalText NOTIFY geoipProgressChanged)
 
     // —— macOS 免密助手 ——
     Q_PROPERTY(bool macHelperSupported READ macHelperSupported CONSTANT)
@@ -112,8 +128,16 @@ public:
 
     bool coreUpdating() const { return m_coreUpdating; }
     QString coreUpdateStatus() const { return m_coreUpdateStatus; }
+    int coreProgress() const { return m_coreProgress; }
+    QString coreSpeedText() const { return m_coreStats.speedText; }
+    QString coreDownloadedText() const { return m_coreStats.downloadedText; }
+    QString coreTotalText() const { return m_coreStats.totalText; }
     bool geoipUpdating() const { return m_geoipUpdating; }
     QString geoipStatus() const { return m_geoipStatus; }
+    int geoipProgress() const { return m_geoipProgress; }
+    QString geoipSpeedText() const { return m_geoipStats.speedText; }
+    QString geoipDownloadedText() const { return m_geoipStats.downloadedText; }
+    QString geoipTotalText() const { return m_geoipStats.totalText; }
 
     bool macHelperSupported() const;
     QString macHelperStatus() const { return m_macHelperStatus; }
@@ -161,6 +185,10 @@ public:
     // —— 更新 ——
     Q_INVOKABLE void updateCore();   // 从 GitHub 拉最新 mihomo 替换内核（用当前 m_mirror 偏好）
     Q_INVOKABLE void updateGeoip();  // 下载 country.mmdb 到 userDir + bundle
+    // 中止在途的下载（更新窗那颗 ✕）。**只结束这次下载，不关窗**：结束后底栏自己回到
+    // 「更新 / 获取更新」，用户可以直接再来一次。与 UpdateController::cancelDownload 同义。
+    Q_INVOKABLE void cancelCoreUpdate();
+    Q_INVOKABLE void cancelGeoipUpdate();
 
     // —— macOS 免密助手 ——
     Q_INVOKABLE void refreshMacHelperStatus();
@@ -175,8 +203,10 @@ signals:
     void ipv6Changed();
     void coreUpdatingChanged();
     void coreUpdateStatusChanged();
+    void coreProgressChanged();
     void geoipUpdatingChanged();
     void geoipStatusChanged();
+    void geoipProgressChanged();
     void macHelperStatusChanged();
     void messageChanged();
     // 「应用」时语言码变化：main_qml 连到 I18n::setLanguage 做运行时切换（装/卸翻译器 + retranslate）。
@@ -208,6 +238,9 @@ private:
     void setMessage(const QString &msg);
     void setCoreStatus(const QString &msg, bool updating);
     void setGeoipStatus(const QString &msg, bool updating);
+    // 把在途 reply 记下来（供 cancel 用）并复位那一组进度读数。传 nullptr = 这一轮结束了。
+    void trackCoreReply(QNetworkReply *reply);
+    void trackGeoipReply(QNetworkReply *reply);
     void startMacHelperApprovalWatch();
 
     CoreController *m_core = nullptr;
@@ -249,11 +282,20 @@ private:
     int m_ruleTotal = 0;
     QVariantList m_areaRows;
 
-    // 更新进度
+    // 更新进度。`QPointer` 而不是裸指针：reply 走的是 `deleteLater()`，用户点 ✕ 的那一拍
+    // 它可能已经被删了，裸指针在这里就是个悬空指针 + 一次 abort() 崩溃。
     bool m_coreUpdating = false;
     QString m_coreUpdateStatus;
+    int m_coreProgress = 0;
+    DownloadStats m_coreStats;
+    QPointer<QNetworkReply> m_coreReply;
+    bool m_coreCancelled = false;
     bool m_geoipUpdating = false;
     QString m_geoipStatus;
+    int m_geoipProgress = 0;
+    DownloadStats m_geoipStats;
+    QPointer<QNetworkReply> m_geoipReply;
+    bool m_geoipCancelled = false;
 
     QString m_macHelperStatus;
     QString m_lastMessage;

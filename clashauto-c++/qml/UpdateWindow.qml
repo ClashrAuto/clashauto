@@ -48,10 +48,35 @@ ApplicationWindow {
     // 程序更新的**频道**：0=正式版 / 1=测试版(prerelease)。与 currentTab 无关，别混。
     readonly property int channel: settings.receiveBeta ? 1 : 0
 
-    // 当前 tab 的「更新」是否进行中（下载 / 安装）。
+    // 当前 tab 的「更新」是否进行中（下载 / 安装）。底栏据此在「进度条 + ✕」与
+    // 「更新 / 获取更新」之间切换 —— 三个页签**同一套版式**，内核/GeoIP 不再退回一行文字。
     readonly property bool busy: currentTab === 0 ? updater.downloading
                                  : currentTab === 1 ? settings.coreUpdating
                                                     : settings.geoipUpdating
+
+    // 当前 tab 的下载读数。三份 controller 各管各的下载，这里按页签取同一组量。
+    readonly property int progressPct: currentTab === 0 ? updater.progress
+                                       : currentTab === 1 ? settings.coreProgress
+                                                          : settings.geoipProgress
+    readonly property string speedText: currentTab === 0 ? updater.downloadSpeed
+                                        : currentTab === 1 ? settings.coreSpeedText
+                                                           : settings.geoipSpeedText
+    readonly property string downloadedText: currentTab === 0 ? updater.downloadedText
+                                             : currentTab === 1 ? settings.coreDownloadedText
+                                                                : settings.geoipDownloadedText
+    readonly property string totalText: currentTab === 0 ? updater.totalText
+                                        : currentTab === 1 ? settings.coreTotalText
+                                                           : settings.geoipTotalText
+
+    /// ✕：结束**当前页签**这次下载。
+    function cancelCurrent() {
+        if (currentTab === 0)
+            updater.cancelDownload()
+        else if (currentTab === 1)
+            settings.cancelCoreUpdate()
+        else
+            settings.cancelGeoipUpdate()
+    }
 
     // 打开即拉 release 列表 + 内核版本。
     // mac 上还要把标题栏做成透明 + 内容铺满整窗 —— 版本号与三段组就摆在那条带子里
@@ -402,7 +427,7 @@ ApplicationWindow {
             // —— 下载中：进度条 + ✕（结束下载），速度在进度条正下方居中 ——
             ColumnLayout {
                 Layout.alignment: Qt.AlignBottom
-                visible: updater.downloading
+                visible: win.busy
                 spacing: 5
 
                 RowLayout {
@@ -420,7 +445,7 @@ ApplicationWindow {
                                 anchors.left: parent.left
                                 anchors.top: parent.top
                                 anchors.bottom: parent.bottom
-                                width: Math.max(0, parent.width * updater.progress / 100)
+                                width: Math.max(0, parent.width * win.progressPct / 100)
                                 radius: height / 2
                                 color: Theme.accent
                             }
@@ -428,8 +453,12 @@ ApplicationWindow {
                         Text {
                             Layout.preferredWidth: 220
                             horizontalAlignment: Text.AlignHCenter
-                            text: (updater.downloadSpeed.length > 0 ? updater.downloadSpeed : "0 B/s")
-                                  + " (" + updater.downloadedText + " / " + updater.totalText + ")"
+                            // 量还没出来（内核页在「检查中…」阶段就已经是这一态）时不写
+                            // "0 B/s (  /  )" 这种半截读数，留空等第一次进度回调。
+                            text: win.downloadedText.length === 0
+                                  ? ""
+                                  : (win.speedText.length > 0 ? win.speedText : "0 B/s")
+                                    + " (" + win.downloadedText + " / " + win.totalText + ")"
                             font.pixelSize: 11
                             color: Theme.textMuted
                         }
@@ -451,7 +480,7 @@ ApplicationWindow {
                             color: Theme.textPrimary
                         }
                         HoverHandler { id: cancelHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: updater.cancelDownload() }
+                        TapHandler { onTapped: win.cancelCurrent() }
                     }
                 }
             }
@@ -459,18 +488,17 @@ ApplicationWindow {
             // —— 有更新：更新 ——
             PillButton {
                 Layout.alignment: Qt.AlignBottom
-                visible: !updater.downloading && win.hasUpdate
-                label: win.busy ? qsTr("更新中…") : qsTr("更新")
-                disabled: win.busy
+                visible: !win.busy && win.hasUpdate
+                label: qsTr("更新")
                 onClicked: win.doUpdate()
             }
 
             // —— 默认：获取更新 ——
             PillButton {
                 Layout.alignment: Qt.AlignBottom
-                visible: !updater.downloading && !win.hasUpdate
+                visible: !win.busy && !win.hasUpdate
                 label: win.checkingNow ? qsTr("检查中…") : qsTr("获取更新")
-                disabled: win.checkingNow || win.busy
+                disabled: win.checkingNow
                 onClicked: win.doCheck()
             }
         }

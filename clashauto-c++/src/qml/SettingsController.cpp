@@ -215,6 +215,42 @@ void SettingsController::setGeoipStatus(const QString &msg, bool updating)
     if (m_geoipUpdating != updating) { m_geoipUpdating = updating; emit geoipUpdatingChanged(); }
 }
 
+void SettingsController::trackCoreReply(QNetworkReply *reply)
+{
+    m_coreReply = reply;
+    m_coreProgress = 0;
+    m_coreStats.reset();
+    emit coreProgressChanged();
+}
+
+void SettingsController::trackGeoipReply(QNetworkReply *reply)
+{
+    m_geoipReply = reply;
+    m_geoipProgress = 0;
+    m_geoipStats.reset();
+    emit geoipProgressChanged();
+}
+
+void SettingsController::cancelCoreUpdate()
+{
+    if (!m_coreUpdating || m_coreReply.isNull()) {
+        return;
+    }
+    // 先立旗再 abort：abort() 会同步触发 finished，处理函数据此走「已取消」分支
+    // （不删内核、不报失败），否则用户会看到一条自己造成的「内核下载失败」。
+    m_coreCancelled = true;
+    m_coreReply->abort();
+}
+
+void SettingsController::cancelGeoipUpdate()
+{
+    if (!m_geoipUpdating || m_geoipReply.isNull()) {
+        return;
+    }
+    m_geoipCancelled = true;
+    m_geoipReply->abort();
+}
+
 // —————————————————————————— 持久化 ——————————————————————————
 
 void SettingsController::persistConfigScalar(const QString &key, const QString &value)
@@ -1007,6 +1043,7 @@ void SettingsController::updateGeoip()
         return;
     }
     setGeoipStatus(QStringLiteral("下载中..."), true);
+    m_geoipCancelled = false;
     const AppConfig cfg = AppConfigLoader::load();
     auto *nam = new QNetworkAccessManager(this);
     applyDownloadProxy(nam);
@@ -1016,17 +1053,29 @@ void SettingsController::updateGeoip()
     req.setRawHeader("User-Agent", "clashauto-cpp");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = nam->get(req);
+    trackGeoipReply(reply);
+    // 百分比走 `geoipProgress`，不再拼进状态串 —— 更新窗那条进度条读的是数值，
+    // 状态串里再写一遍百分比，同一个数就会在窗里出现两次。
     connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 r, qint64 t) {
-        if (t > 0) {
-            setGeoipStatus(QStringLiteral("下载中 %1%").arg(int(r * 100 / t)), true);
-        }
+        m_geoipProgress = t > 0 ? int(r * 100 / t) : 0;
+        m_geoipStats.update(r, t);
+        emit geoipProgressChanged();
     });
     connect(reply, &QNetworkReply::finished, this, [this, reply, nam, cfg] {
         const bool ok = reply->error() == QNetworkReply::NoError;
         const QByteArray data = reply->readAll();
         const QString err = reply->errorString();
+        const bool cancelled = m_geoipCancelled;
         reply->deleteLater();
         nam->deleteLater();
+        trackGeoipReply(nullptr);
+        // 用户按了 ✕：不当失败处理（下载到一半的字节本来就只在内存里，没有落盘）。
+        if (cancelled) {
+            m_geoipCancelled = false;
+            setGeoipStatus(QStringLiteral("更新 GeoIP"), false);
+            setMessage(QStringLiteral("已取消下载"));
+            return;
+        }
         if (!ok || data.isEmpty()) {
             setGeoipStatus(QStringLiteral("更新 GeoIP"), false);
             setMessage(QStringLiteral("GeoIP 更新失败: %1").arg(err));
@@ -1058,6 +1107,7 @@ void SettingsController::updateCore()
         return;
     }
     setCoreStatus(QStringLiteral("检查中..."), true);
+    m_coreCancelled = false;
     const AppConfig cfg = AppConfigLoader::load();
     const bool useMirror = m_mirror;
     const QString mirror = useMirror ? QStringLiteral("https://ghfast.top/") : QString();
@@ -1069,13 +1119,26 @@ void SettingsController::updateCore()
     req.setRawHeader("Accept", "application/vnd.github+json");
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply *reply = nam->get(req);
+    // 查版本这一步也记进去：它走的是 GitHub API，被限流时能挂十几秒，
+    // 这段时间里 ✕ 一样要能把它掐掉（否则那颗按钮在「检查中…」期间是个死键）。
+    trackCoreReply(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, nam, cfg, mirror] {
         const bool ok = reply->error() == QNetworkReply::NoError;
         const QByteArray body = reply->readAll();
         const QString err = reply->errorString();
+        const bool cancelled = m_coreCancelled;
         reply->deleteLater();
+        if (cancelled) {
+            nam->deleteLater();
+            trackCoreReply(nullptr);
+            m_coreCancelled = false;
+            setCoreStatus(QStringLiteral("更新内核"), false);
+            setMessage(QStringLiteral("已取消下载"));
+            return;
+        }
         if (!ok) {
             nam->deleteLater();
+            trackCoreReply(nullptr);
             setCoreStatus(QStringLiteral("更新内核"), false);
             setMessage(QStringLiteral("内核更新失败: 查询版本出错 %1").arg(err));
             return;
@@ -1087,6 +1150,7 @@ void SettingsController::updateCore()
         const CoreRelease::Pick pick = CoreRelease::pick(releases, wantBeta);
         if (!pick.isValid()) {
             nam->deleteLater();
+            trackCoreReply(nullptr);
             setCoreStatus(QStringLiteral("更新内核"), false);
             setMessage(QStringLiteral("内核更新失败: %1通道里没有 %2/%3 的可用产物")
                            .arg(wantBeta ? QStringLiteral("测试版") : QStringLiteral("正式版"),
@@ -1115,16 +1179,28 @@ void SettingsController::updateCore()
             dlNam->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
         }
         QNetworkReply *dl = dlNam->get(dreq);
+        trackCoreReply(dl);
+        // 百分比走 `coreProgress`，不再拼进状态串（理由同 GeoIP 那处）。
         connect(dl, &QNetworkReply::downloadProgress, this, [this](qint64 r, qint64 t) {
-            if (t > 0) {
-                setCoreStatus(QStringLiteral("下载中 %1%").arg(int(r * 100 / t)), true);
-            }
+            m_coreProgress = t > 0 ? int(r * 100 / t) : 0;
+            m_coreStats.update(r, t);
+            emit coreProgressChanged();
         });
         connect(dl, &QNetworkReply::finished, this, [this, dl, nam, cfg, tag, assetName] {
             const bool ok2 = dl->error() == QNetworkReply::NoError;
             const QByteArray data = dl->readAll();
             const QString err2 = dl->errorString();
+            const bool cancelled2 = m_coreCancelled;
             dl->deleteLater();
+            trackCoreReply(nullptr);
+            // 用户按了 ✕：内核还没被动过（替换发生在下面校验通过之后），直接收摊。
+            if (cancelled2) {
+                nam->deleteLater();
+                m_coreCancelled = false;
+                setCoreStatus(QStringLiteral("更新内核"), false);
+                setMessage(QStringLiteral("已取消下载"));
+                return;
+            }
             if (!ok2 || data.isEmpty()) {
                 nam->deleteLater();
                 setCoreStatus(QStringLiteral("更新内核"), false);
