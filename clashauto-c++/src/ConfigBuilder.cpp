@@ -40,6 +40,21 @@ QString ConfigBuilder::ensureFullConfig(bool tunEnabled, bool ipv6Enabled)
     QString yaml = readText(QFile::exists(defaultPath) ? defaultPath : bundledDefault);
     const QString plugin = readText(QFile::exists(pluginPath) ? pluginPath : bundledPlugin);
 
+    // ★ 把**老默认值** 300 秒的健康检查间隔迁到 60，只认这一个精确值。
+    //
+    // 为什么必须在这里做：default.yaml 只在缺失时才从 qrc 播种，**已装的机器永远不会被覆盖**。
+    // 也就是说改内置模板只对全新安装生效，老用户手里那份仍然写着 interval: 300，
+    // 而 full.yaml 每次都是从它重新生成的——不在这一步纠正，老用户就永远享受不到修复。
+    //
+    // 这一项的实际影响（树莓派实测，真实服务端 docker compose restart，等 healthy 后计数）：
+    //   interval 300 → 节点其实早就恢复了，用户还要再失败约 20 次；interval 60 → 0~1 次。
+    //   卡住的不是代理本身，是 url-test 分组里那份过期的健康状态。
+    //
+    // 只替换恰好等于 300 的那一行：那是我们自己旧模板的值。用户如果有意改成别的数字
+    // （比如 120、600），保持原样不动——迁移旧默认值是好意，覆盖用户的决定不是。
+    yaml.replace(QRegularExpression(QStringLiteral("(?m)^(\\s*)interval:\\s*300\\s*$")),
+                 QStringLiteral("\\1interval: 60"));
+
     yaml = mergePlugin(yaml, plugin);
     yaml = setScalar(yaml, "mixed-port", QString::number(m_config.mixedPort));
     yaml = setScalar(yaml, "external-controller", QString("'%1:%2'").arg(m_config.host).arg(m_config.uiPort));
@@ -1695,6 +1710,27 @@ bool ConfigBuilder::runTideSelfTest()
         sub.close();
     }
 
+    // ★ 造一份**老版本的 default.yaml**（interval: 300）放进 configDir，模拟已装机器。
+    //
+    // 不这么做的话这个自测测不到迁移那条路：configDir 里没有 default.yaml 时，
+    // ensureFullConfig 会回退到 qrc 里的内置模板，而内置模板已经是 60 了——
+    // 于是"迁移旧默认值"这段代码一行都不会被执行，断言却照样绿。
+    // 而 default.yaml 恰恰是**只在缺失时才播种、永不覆盖**的，所以真实世界里
+    // 绝大多数用户手里都是这份老的。
+    {
+        QFile base(QStringLiteral(":/assets/bundle/config/default.yaml"));
+        if (base.open(QIODevice::ReadOnly)) {
+            QString old = QString::fromUtf8(base.readAll());
+            base.close();
+            old.replace(QStringLiteral("interval: 60"), QStringLiteral("interval: 300"));
+            QFile out(QDir(configDir).filePath(QStringLiteral("default.yaml")));
+            if (out.open(QIODevice::WriteOnly)) {
+                out.write(old.toUtf8());
+                out.close();
+            }
+        }
+    }
+
     AppConfig cfg;
     cfg.userDir = configDir;
     cfg.configDir = configDir;
@@ -1728,6 +1764,20 @@ bool ConfigBuilder::runTideSelfTest()
     check(yaml.indexOf(QStringLiteral("proxy-groups:")) >= 0
               && yaml.lastIndexOf(nodeName) > yaml.indexOf(QStringLiteral("proxy-groups:")),
           "节点出现在 proxy-groups 里（不然界面上选不到）");
+
+    // ★ 健康检查间隔必须是 60，且**产物里一个 300 都不许剩**。
+    //
+    // 这条断言存在的理由是它已经骗过我一次：当时只改了 ConfigBuilder 里那三处
+    // `interval: 300`，编译通过、自测全绿，而生成的 full.yaml 里 300 一个没少、60 一个没有——
+    // 因为真正在路由链路上的那个分组（节点选择 → ♻️ 自动选择）定义在内置模板
+    // assets/bundle/config/default.yaml 里，根本不经过那三处代码。
+    // 所以断言要盯**产物**，不能盯代码。
+    //
+    // 300 意味着节点恢复之后分组最坏还要 5 分钟才肯认它。树莓派实测：
+    // interval 300 → 服务端重启后用户还要失败约 20 次；60 → 0~1 次。
+    check(yaml.contains(QStringLiteral("interval: 60")), "健康检查间隔是 60");
+    check(!yaml.contains(QStringLiteral("interval: 300")),
+          "产物里没有残留的 interval: 300（老 default.yaml 也要被迁移过来）");
 
     std::printf("\nfull.yaml: %s\n", qUtf8Printable(path));
     std::printf("拿核心自己判一遍： core -t -f \"%s\" -d \"%s\"\n",
