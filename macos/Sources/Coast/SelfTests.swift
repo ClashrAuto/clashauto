@@ -260,6 +260,20 @@ enum SelfTests {
                   + "  \(device.vendor.isEmpty ? "" : device.vendor)")
         }
 
+        // MAC 必须唯一。`LanBrowser.Device.id` 就是 MAC，重复的 id 交给 SwiftUI 的
+        // `ForEach` 是未定义行为（界面上表现为几行内容串台/闪烁），而邻居表里同一个 MAC
+        // 出现多次**是常态**（169.254 链路本地地址、多网卡各看到一次）——
+        // 也就是说这是个平时就会踩到、却只有肉眼能发现的坑，必须在这儿钉死。
+        var macSeen = Set<String>()
+        let duplicated = scanned.map(\.mac).filter { !macSeen.insert($0).inserted }
+        if !duplicated.isEmpty {
+            print("\n✗ 扫描结果里有重复 MAC（去重没生效）：\(duplicated.joined(separator: ", "))")
+        }
+        // 原始邻居表里有多少重复，顺带打出来 —— 好确认这台机器确实覆盖到了这个场景。
+        var rawSeen = Set<String>()
+        let rawDuplicated = Set(LanBrowser.arpTable().map(\.mac).filter { !rawSeen.insert($0).inserted })
+        print("邻居表原始行里重复的 MAC：\(rawDuplicated.isEmpty ? "无" : rawDuplicated.sorted().joined(separator: ", "))")
+
         store.recordSeen(scanned)
         let purged = store.purgeStale(before: Date().addingTimeInterval(-30 * 24 * 3600))
 
@@ -277,8 +291,8 @@ enum SelfTests {
                   + (record.hasUserIntent ? "  [用户动过]" : ""))
         }
         print("\n在线 \(scanned.count) 行 + 离线 \(kept) 行；丢弃残留 \(dropped) 条；"
-              + "清理过期 \(purged) 条；没有名字的行 \(nameless)")
-        exit(nameless == 0 ? 0 : 1)
+              + "清理过期 \(purged) 条；没有名字的行 \(nameless)；重复 MAC \(duplicated.count)")
+        exit(nameless == 0 && duplicated.isEmpty ? 0 : 1)
     }
 
     /// 自检钩子跑在 GUI 起来之前，没有 async 上下文 —— 用信号量把异步调用等回来。

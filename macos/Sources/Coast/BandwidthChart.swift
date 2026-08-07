@@ -32,9 +32,15 @@ struct BandwidthChart: View {
     }
     var title = ""
     var lineColor: Color = .accentColor
-    /// 采样节拍（`AppState.pollTick`）。每 +1 表示「刚进来一个新点」，
-    /// 曲线据此开始新一轮左滑。
+    /// 采样节拍。每 +1 表示「刚进来一个新点」，曲线据此开始新一轮左滑。
+    ///
+    /// ★ **喂哪个节拍要跟着 `samples` 的来源走。** 状态页的采样是 1Hz 的 `AppState.pollTick`
+    ///   推的，两者同频；而设备详情窗喂的是 `DeviceTraffic` 的历史，它跟的是 `/connections`
+    ///   那条 **2 秒**的轮询 —— 那里必须传 `DeviceTraffic.tick`，传 `pollTick` 的话每两拍里
+    ///   有一拍数据没动、动画却白滑一遍再弹回来，曲线看着一直在回滚。
     var tick: UInt64 = 0
+    /// 一格左滑的时长（秒），默认与 1Hz 的采样对齐。数据源不是 1Hz 时要如实传实测间隔。
+    var slideInterval: Double = 1
     /// 卡片底纹模式。
     var minimal = false
     /// 曲线最高只占本控件高度的这个比例。底纹模式下要给卡片的标题/数值让位。
@@ -85,7 +91,8 @@ struct BandwidthChart: View {
                                  lineWidth: minimal ? 2 : 3,
                                  lineOpacity: minimal ? 0.55 : 0.70,
                                  fill: minimal ? .solid(opacity: 0.16) : .none,
-                                 tick: tick)
+                                 tick: tick,
+                                 slideInterval: slideInterval)
 
                     if minimal {
                         minimalTickLabels(in: geo.size)

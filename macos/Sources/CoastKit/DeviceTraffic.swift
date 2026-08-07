@@ -34,6 +34,20 @@ public struct DeviceTraffic: Sendable {
     /// sourceIP → 采样。
     public private(set) var byIP: [String: Sample] = [:]
 
+    /// 采样节拍：每并入一拍 `/connections` 快照 +1。
+    ///
+    /// ★ **每台设备的曲线必须认这个节拍，不能认 `AppState.pollTick`。** 两者的频率不一样：
+    ///   `pollTick` 是 1Hz 的界面节拍，而这里的历史点只在 `/connections` 快照到达时才推进
+    ///   —— 那条轮询是 **2 秒**一轮。曲线的左滑动画是「一拍之内左移一格」，拿 1Hz 的节拍
+    ///   驱动 0.5Hz 的数据，等于每两次里有一次**数据没动、动画却从头滑了一遍**：
+    ///   滑出去一格，再弹回原位，下一拍才真的往前走。界面上看到的就是曲线**一直在回滚**。
+    ///   （状态页那张图没这个毛病，因为它的数据源 `bandwidthUp/Down` 本来就是每拍推一个点。）
+    public private(set) var tick: UInt64 = 0
+
+    /// 最近两拍之间的**实测**间隔（秒），钳在 [0.5, 5]。曲线用它当左滑一格的时长 ——
+    /// 写死 1 秒的话，2 秒一拍的数据会滑完一格后干等一秒，一顿一顿的。
+    public private(set) var interval: Double = 1
+
     /// 连接 id → 上一拍看到的累计字节。
     private var lastSeen: [String: (up: Int64, down: Int64)] = [:]
     /// 上一拍的时刻。速率要按实测间隔归一化（见 `observe`）。
@@ -96,6 +110,10 @@ public struct DeviceTraffic: Sendable {
         let elapsed = lastObservedAt.map { now.timeIntervalSince($0) } ?? 1
         let seconds = elapsed > 0.05 ? elapsed : 1
         lastObservedAt = now
+        tick &+= 1
+        // 曲线的一格时长。上限 5 秒：核心卡住 / 睡眠唤醒之后那一拍可能隔了几分钟，
+        // 照原样当动画时长的话曲线会以肉眼看不出的速度爬。
+        interval = min(5, max(0.5, seconds))
 
         for (ip, delta) in rates {
             var sample = byIP[ip] ?? Sample()

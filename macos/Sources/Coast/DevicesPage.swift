@@ -465,7 +465,8 @@ struct DevicesPage: View {
                               rejection: rejection(for: row),
                               sample: state.deviceTraffic.sample(ip: row.discovered.ip),
                               lastHost: lastHost(for: row, index: index),
-                              tick: state.pollTick,
+                              tick: state.deviceTraffic.tick,
+                              interval: state.deviceTraffic.interval,
                               contended: contended.contains(row.discovered.ip),
                               onToggleProxy: { enabled in setProxy(row: row, enabled: enabled) },
                               onOpenDetail: { openDetail(row) },
@@ -541,7 +542,11 @@ struct DevicesPage: View {
         // 走统一信号：本页重读快照的同时，历史库的 IP→MAC 映射也跟着更新
         // （原来这里只重读了本页，映射要等下一轮扫描才对得上）。
         state.ledgerDidChange()
-        if enabled { openDetail(row) }   // 刚开启就把详情打开（策略在里面选）
+        // ★ 这里**不开详情窗**。原来是「刚开启就顺手把详情打开（策略在里面选）」——
+        //   Qt 那边没有这个动作（`qml/DevicesPage.qml` 的 `onToggleProxy` 只有
+        //   `devices.setProxyEnabled`，`openFor` 挂在 `onClicked` 上），
+        //   而实际用起来是：想给几台设备依次打开代理，每点一下就弹一个窗挡在前面。
+        //   要改策略的人会点开那一行 —— 那条路一直都在。
         Task { await state.controller.rebuildConfig() }
     }
 
@@ -570,8 +575,11 @@ private struct DeviceRow: View {
     var sample: DeviceTraffic.Sample = .empty
     /// 最后访问的地址（域名，没嗅探到就是目标 IP）。
     var lastHost = ""
-    /// 采样节拍，透传给背景那张流量图做连续左滑。
+    /// 采样节拍，透传给背景那张流量图做连续左滑。**取 `DeviceTraffic.tick`** ——
+    /// 这一页的曲线跟的是 `/connections` 那条 2 秒的轮询，不是 1Hz 的界面节拍。
     var tick: UInt64 = 0
+    /// 两拍之间的实测间隔，同样透传下去当一格的时长。
+    var interval: Double = 1
     /// 这台设备正被**别的机器**也投毒争抢（ArpWatch 检测到）。
     /// 名字旁打红标 + 整行描一圈红框 —— 与 Qt 一致，一眼看出是哪一台。
     var contended = false
@@ -643,17 +651,9 @@ private struct DeviceRow: View {
             // 右侧那几列是定宽的，不收就只能溢出到行外面去。判据与 Qt 相同：行宽 < 250。
             if width >= 250 { speedColumn }
 
-            // 最右一列：**开关和徽章共用同一个 38 宽的槽位**（一台设备要么能开代理、
-            // 要么有一个「为什么不能开」的理由，两者互斥）。槽位宽度写死 = 开关宽度，
-            // 所以整列的左右边缘在每一行都一样齐。
-            ZStack {
-                if rejection == nil || row.proxyEnabled {
-                    proxySwitch
-                } else if showsReasonBadge {
-                    reasonBadge
-                }
-            }
-            .frame(width: 38, height: 20)
+            // 最右一列的**占位**：开关/徽章本身画在整行那颗 Button 的**外面**（见 `body`），
+            // 这里只留出一样宽的槽。槽宽写死 = 开关宽度，所以整列的左右边缘每行都一样齐。
+            Color.clear.frame(width: 38, height: 20)
         }
         .padding(.horizontal, 8)
         .frame(height: 60)                     // Qt: 60（多了「最后访问」一行；**所有行等高**）
@@ -666,7 +666,8 @@ private struct DeviceRow: View {
                 // 画出来永远是一条贴底的 0 线。速率是 0 也照画 —— 那正是
                 // 「已接管、此刻闲着」的样子，不是「没数据」。
                 if row.proxyEnabled {
-                    DeviceTrafficBg(up: sample.upHistory, down: sample.downHistory, tick: tick)
+                    DeviceTrafficBg(up: sample.upHistory, down: sample.downHistory,
+                                    tick: tick, interval: interval)
                 }
             }
         }
@@ -678,7 +679,6 @@ private struct DeviceRow: View {
                     .stroke(Color(hex: 0xE0_53_3D), lineWidth: 1)
             }
         }
-        .opacity(row.online ? 1 : 0.5)         // 离线行整体淡化
         .onHover { hovering = $0 }
     }
 
@@ -689,17 +689,42 @@ private struct DeviceRow: View {
     /// 而且没有任何报错）。Qt 那边同样是给整行单独铺了一个 `MouseArea`，
     /// 它的注释写的理由也是「TapHandler 抢不到」。
     ///
-    /// 行里那颗代理开关自己带手势，嵌在里面**优先吃掉**落在它上面的点击 ——
-    /// 与 Qt「开关的 MouseArea 压在整行的 MouseArea 之上」是同一个效果。
+    /// ★ **开关必须画在这颗 Button 之外**，不能靠嵌在 label 里的 `onTapGesture` 去抢。
+    ///   SwiftUI 的 Button 是把手势装在**整个 label** 上的，嵌在里面的子手势并不能
+    ///   阻止它认下这一下 —— 结果就是点开关的同时详情窗也弹出来。QML 那边「开关的
+    ///   MouseArea 压在整行的 MouseArea 之上」能挡住，是因为 QML 的事件是逐层向上传、
+    ///   子项 `accepted` 之后就到此为止；SwiftUI 没有这个语义。做成 ZStack 的兄弟节点，
+    ///   命中测试自然落在最上面那个上，Button 根本收不到。
     var body: some View {
-        Button(action: onOpenDetail) { rowContent }
-            .buttonStyle(.plain)
-            .contextMenu {
-                Button("查看详情".t, action: onOpenDetail)
-                if !row.proxyEnabled {
-                    Button("忘记此设备".t, action: onForget)
-                }
+        ZStack(alignment: .trailing) {
+            Button(action: onOpenDetail) { rowContent }
+                .buttonStyle(.plain)
+            // 槽位在 `rowContent` 里留着（右内距同为 8），这里贴右缘落回同一个位置。
+            trailingControl
+                .padding(.trailing, 8)
+        }
+        .opacity(row.online ? 1 : 0.5)         // 离线行整体淡化（连同开关）
+        .contextMenu {
+            Button("查看详情".t, action: onOpenDetail)
+            if !row.proxyEnabled {
+                Button("忘记此设备".t, action: onForget)
             }
+        }
+    }
+
+    /// 最右一列的实际内容：**开关和徽章共用同一个 38 宽的槽位** ——
+    /// 一台设备要么能开代理、要么有一个「为什么不能开」的理由，两者互斥。
+    @ViewBuilder
+    private var trailingControl: some View {
+        if rejection == nil || row.proxyEnabled {
+            proxySwitch
+        } else if showsReasonBadge {
+            // 徽章自己得是个能点的东西：它挡在整行那颗 Button 前面，不套一层的话
+            // 这 38×20 会变成一块点了没反应的死区（而它恰恰是最招人点的一块 ——
+            // 「为什么不能开」的完整解释就在详情窗里）。`.help` 的悬停提示也要它是可命中的。
+            Button(action: onOpenDetail) { reasonBadge }
+                .buttonStyle(.plain)
+        }
     }
 
     /// 类型头像 34×34 圆角 8 + 图标 18 + 右下角 11 的在线小圆点（带 2px 描边）。
@@ -826,13 +851,26 @@ private struct DeviceRow: View {
 struct DeviceTrafficBg: View {
     let up: [Double]
     let down: [Double]
-    /// 采样节拍。与 `BandwidthChart` 同理：曲线**连续左滑**，
-    /// 而不是每来一个样本整条跳一格（QML 那份注释专门讲了这件事）。
+    /// 采样节拍。**必须是 `DeviceTraffic.tick`，不是 `AppState.pollTick`** ——
+    /// 这两条的频率不一样，拿错了曲线会一直回滚（原因写在 `DeviceTraffic.tick` 上）。
     var tick: UInt64 = 0
+    /// 一格的时长 = 两拍之间的实测间隔（`DeviceTraffic.interval`）。
+    var interval: Double = 1
 
     /// 量程下限 128 KB/s。
     private static let floorScale = 131_072.0
     private static let headroom = 0.75
+
+    /// 补齐到定长（不足的在**左边**补 0，也就是旧的那一侧），口径同 `BandwidthChart.padded`。
+    ///
+    /// ★ 不补的话，一台设备刚被采到的头几十秒里数组是**边长边画**的：点距 `dx` 每拍都在变，
+    ///   而这期间数据其实**并没有左移**（只是尾部追加），左滑动画照旧滑一格再弹回去 ——
+    ///   又是一处回滚，且只在设备刚出现的那段时间里出现，最难对上原因。
+    private static func padded(_ samples: [Double]) -> [Double] {
+        let tail = samples.suffix(DeviceTraffic.historyLength)
+        guard tail.count < DeviceTraffic.historyLength else { return Array(tail) }
+        return Array(repeating: 0, count: DeviceTraffic.historyLength - tail.count) + tail
+    }
 
     private var scale: Double {
         max(Self.floorScale, (up + down).max() ?? 0)
@@ -851,14 +889,15 @@ struct DeviceTrafficBg: View {
 
     /// 面积曲线：α0.22 → α0.02 的竖直渐变 + α0.55 的 1px 描边（逐值对齐原来的画法）。
     private func curve(_ samples: [Double], color: Color) -> some View {
-        SlidingCurve(samples: samples,
+        SlidingCurve(samples: Self.padded(samples),
                      scale: scale,
                      headroom: Self.headroom,
                      lineColor: color,
                      lineWidth: 1,
                      lineOpacity: 0.55,
                      fill: .gradient(top: 0.22, bottom: 0.02),
-                     tick: tick)
+                     tick: tick,
+                     slideInterval: interval)
     }
 }
 
