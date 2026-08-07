@@ -1,4 +1,6 @@
 {
+  "GeoIP 自动更新:%@": "Tự động cập nhật GeoIP: %@",
+  "GeoIP 自动更新失败:%@": "Tự động cập nhật GeoIP thất bại: %@",
   "状态": "Trạng thái",
   "订阅": "Đăng ký",
   "设置": "Cài đặt",

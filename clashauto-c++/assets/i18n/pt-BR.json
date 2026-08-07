@@ -1,4 +1,6 @@
 {
+  "GeoIP 自动更新:%@": "Atualização automática do GeoIP: %@",
+  "GeoIP 自动更新失败:%@": "Falha na atualização automática do GeoIP: %@",
   "状态": "Status",
   "订阅": "Assinaturas",
   "设置": "Configurações",

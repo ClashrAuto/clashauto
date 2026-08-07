@@ -580,10 +580,11 @@ public final class AppState {
                         proxyPort: self.controller.isCoreRunning ? self.config.mixedPort : nil)
                     do {
                         let note = try await updater.update()
-                        self.append(log: "GeoIP 自动更新:" + note)
+                        self.append(log: String(format: "GeoIP 自动更新:%@".t, note))
                     } catch {
                         // 后台静默：失败就下一轮再试，不打扰用户。
-                        self.append(log: "GeoIP 自动更新失败:\(error.localizedDescription)")
+                        self.append(log: String(format: "GeoIP 自动更新失败:%@".t,
+                                                error.localizedDescription))
                     }
                 }
                 try? await Task.sleep(for: .seconds(6 * 3600))
