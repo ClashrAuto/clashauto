@@ -1389,12 +1389,24 @@ jobs:
           path: dl
       - name: Install runtime deps
         shell: bash
-        # 打好的包自带 Qt 库，但仍依赖系统的 OpenGL/EGL/glib/fontconfig 等。Qt6::Gui 硬链接
-        # libOpenGL.so.0(ELF NEEDED，即便软件后端)，裸 runner 缺它 → coast 无法启动（对齐 .deb 的 libopengl0 依赖）。
+        # ★ 依赖从**下载下来的 .deb 自己**装，不再手抄一份包名清单。
+        #
+        #   原来这里写死六个包（libopengl0 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
+        #   libfreetype6）。Qt 改静态链接之后这份清单当场不够用了：xcb 平台插件被**链进了
+        #   可执行文件**，于是它的共享库依赖从「插件懒加载时才需要」变成主二进制的 ELF
+        #   NEEDED —— 进程一启动就要，哪怕跑的是 offscreen 后端。裸 runner 上 coast 因此
+        #   根本起不来，这个 job 从此常红；而 .deb 的 Depends 早已补全（21 个 xcb/xkb 相关），
+        #   两份清单就这么漂移了。
+        #
+        #   让 apt 按 .deb 声明的 Depends 去解析，漂移在结构上不可能再发生。顺带这一步
+        #   还成了「Depends 声明够不够」的门禁 —— 那恰恰是本仓库反复漏过的东西：漏
+        #   libopengl0 一次，漏 libx11-xcb1 / libsm6 / libice6 / libzstd1 又一次。
+        #   下面的自测仍然跑 **portable 包里那份**二进制：万一 Depends 仍有遗漏，
+        #   apt 装得上（它只认声明）而二进制起不来，照样会被这一步之后的自测抓住。
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libopengl0 libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 libfreetype6
+          sudo apt-get install -y ./dl/Coast-*-linux-x64.deb
       - name: Run headless self-test
         shell: bash
         run: |
