@@ -12,6 +12,28 @@ PASS=0; FAIL=0; SKIP=0
 ok(){   echo "  ✅ $*"; PASS=$((PASS+1)); }
 bad(){  echo "  ❌ $*"; FAIL=$((FAIL+1)); }
 skip(){ echo "  ⏭️  $*"; SKIP=$((SKIP+1)); }
+
+# 「这一趟拿到的产物本来就不全」——下载失败，或 release 还在上传。
+DLFAIL=()          # release 里列了、但没下下来的资产名
+ASSETS_PARTIAL=0   # release 的资产数明显偏少（多半还在上传）
+
+# 产物不见了：**手上东西不全的时候，不能算「产物有问题」**。
+#
+# ★ 2026-08-08 真踩到：跑 harness 的机器连 github 不稳，6 个资产只下来 1 个，于是
+#   Windows / macOS / Linux-x64 三项全报 ❌，汇总打出 "FAIL=3"。那三个 ❌ 长得和
+#   「打包漏了这几个平台」一模一样，而真相是网络。同一个道理，release 的资产是各平台
+#   job 跑完后**陆续**上传的，撞上还在上传的窗口（Windows 静态 Qt 首次编译要 50+ 分钟）
+#   照样会看到一模一样的三个 ❌。
+#
+# 所以：拿不全就报 ⏭️ 并说明原因，别报 ❌。假信号最贵的地方不是错一次，
+# 是它长得像一个该去排查的产品缺陷。
+absent(){
+  if [ ${#DLFAIL[@]} -gt 0 ] || [ "$ASSETS_PARTIAL" = 1 ]; then
+    skip "$* —— 但这一趟产物本来就没拿全，判不了（见汇总）"
+  else
+    bad "$*"
+  fi
+}
 sec(){  echo; echo "════ $* ════"; }
 shopt -s nullglob
 # nullglob-safe「取匹配的第一个文件」：无匹配→空串。不用 `ls glob|head`——无匹配时 nullglob
@@ -30,9 +52,16 @@ VER="${TAG#v}"
 for f in Coast-*; do case "$f" in *"$VER"*) ;; *) rm -f "$f";; esac; done
 
 echo "$J" | jq -r '.assets[] | [.name, .browser_download_url] | @tsv' > assets.tsv
-echo "资产 $(wc -l < assets.tsv) 个，下载中…"
+NASSET=$(wc -l < assets.tsv)
+echo "资产 $NASSET 个，下载中…"
+# 完整的一次发布是 24 个资产（4 平台 × 各自的包 + 每个包一份 .sha256）。明显偏少
+# = 各平台 job 还在陆续上传，此刻做结构检查只会得出「少了几个平台」的假结论。
+if [ "$NASSET" -lt 20 ]; then
+  ASSETS_PARTIAL=1
+  echo "  ⚠️ 资产只有 $NASSET 个（完整发布约 24 个）——这个 release 多半还在上传中"
+fi
 while IFS=$'\t' read -r n u; do
-  [ -f "$n" ] || curl -fsSL --retry 3 -o "$n" "$u" || echo "  ⚠️ 下载失败: $n"
+  [ -f "$n" ] || curl -fsSL --retry 3 -o "$n" "$u" || { echo "  ⚠️ 下载失败: $n"; DLFAIL+=("$n"); }
 done < assets.tsv
 ls -la *.zip *.exe *.dmg *.deb *.tar.gz 2>/dev/null || true
 
@@ -64,7 +93,7 @@ if [ -n "$WZ" ]; then
   [ -z "$STRAY_DIR" ] && ok "包根无任何子目录（platforms/ plugins/ qml/ 都不再需要）" \
                       || { bad "包根仍有子目录："; echo "$STRAY_DIR" | sed 's/^/       /'; }
   [ -f win/core.exe ]              && ok "core.exe 已集成（打包默认带正式版内核）" || bad "缺 core.exe（打包应默认集成内核）"
-else bad "没找到 windows x64 便携 zip"; fi
+else absent "没找到 windows x64 便携 zip"; fi
 
 sec "macOS DMG — Coast.app + com.yuehongsun.coast（best-effort，7z 解 DMG）"
 # release 上有**两个** mac 包，逐个验（结构要求相同）：
@@ -73,7 +102,7 @@ sec "macOS DMG — Coast.app + com.yuehongsun.coast（best-effort，7z 解 DMG�
 # 少一个不判失败：Swift 那个由外部仓库异步上传，本仓库的 run 结束时可能还没到。
 MACDMGS=( Coast-*-macos-*.dmg )
 if [ ${#MACDMGS[@]} -eq 0 ]; then
-  bad "没找到任何 macos dmg"
+  absent "没找到任何 macos dmg"
 else
   case " ${MACDMGS[*]} " in *-qt.dmg*) ;; *) skip "没见到 Qt 版 mac 包（…-macos-universal-qt.dmg）";; esac
 fi
@@ -118,7 +147,7 @@ if [ -n "$DEB" ]; then
   QTLEFT=$(grep -E '/opt/coast/(lib|plugins|qml)/|/opt/coast/qt\.conf' deb-contents.txt | head -5)
   [ -z "$QTLEFT" ] && ok "deb 内无自带 Qt 运行时（lib/ plugins/ qml/ qt.conf 都没了）" \
                    || { bad "deb 里仍有自带 Qt 运行时 —— 静态化没生效："; echo "$QTLEFT" | sed 's/^/       /'; }
-else bad "没找到 linux x86_64 .deb"; fi
+else absent "没找到 linux x86_64 .deb"; fi
 
 sec "Linux 无头运行冒烟（装 .deb + Xvfb 真跑 Coast）"
 if [ -n "$DEB" ]; then
@@ -208,4 +237,25 @@ else skip "没找到 linux x86_64 便携 tar.gz"; fi
 
 sec "汇总"
 echo "PASS=$PASS  FAIL=$FAIL  SKIP=$SKIP   （release $TAG）"
-if [ "$FAIL" = 0 ]; then echo "🎉 全部通过"; exit 0; else echo "⚠️ 有 $FAIL 项未通过——见上方 ❌"; exit 1; fi
+
+# 「这一趟东西没拿全」必须是**第三种结局**，不能混进通过或失败里：
+#   混进失败 → 去查一个不存在的打包缺陷（本会话真发生过，白查一轮）；
+#   混进通过 → 更糟，等于宣布验过了，而其实一大半平台根本没验。
+INCOMPLETE=0
+if [ ${#DLFAIL[@]} -gt 0 ]; then
+  INCOMPLETE=1
+  echo "⚠️ 有 ${#DLFAIL[@]} 个资产没下下来（网络/代理问题，不是产物问题）："
+  printf '     %s\n' "${DLFAIL[@]}"
+fi
+if [ "$ASSETS_PARTIAL" = 1 ]; then
+  INCOMPLETE=1
+  echo "⚠️ 这个 release 只有 $NASSET 个资产（完整约 24 个）——多半还在上传，等各平台 job 跑完再验"
+fi
+
+if [ "$FAIL" != 0 ]; then
+  echo "⚠️ 有 $FAIL 项未通过——见上方 ❌"; exit 1
+elif [ "$INCOMPLETE" = 1 ]; then
+  echo "🟡 结论不完整：拿到的产物没验出问题，但没拿全的那部分**没验过**"; exit 3
+else
+  echo "🎉 全部通过"; exit 0
+fi
