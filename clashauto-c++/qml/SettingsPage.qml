@@ -362,7 +362,7 @@ Item {
                             noteSwitch.checked,
                             mirrorCheck.checked,
                             autoUpdateSpin.value,
-                            themeCombo.currentIndex === 1,   // themeLight
+                            themeCombo.light,                // themeLight：手选值，不是当前生效的明暗
                             autoThemeSwitch.checked,
                             langCombo.langCodes[langCombo.currentIndex],
                             autoLangSwitch.checked,
@@ -457,17 +457,34 @@ Item {
                                 ThemedCombo {
                                     id: themeCombo
                                     implicitWidth: 140
+                                    // 跟随系统时手选无效，置灰（与下面「语言」跟随系统语言时同一套路）。
+                                    // 以前这里没置灰也没拦：跟随开着时照样能选，一选就把界面掰成手选的
+                                    // 那个明暗，而「跟随」还显示为开 —— 直到系统外观下次变化才被打回去。
+                                    enabled: !autoThemeSwitch.checked
                                     model: [qsTr("黑色"), qsTr("白色")]
-                                    currentIndex: Theme.dark ? 0 : 1
+                                    // 记的是**手选**的那份主题（config `theme:`），不是当前生效的明暗 ——
+                                    // 跟随开着时两者可以不一样，绑到生效值的话点一次「应用」就把用户存的
+                                    // 手选主题按当时的系统外观改写了。它是关掉跟随后要回到的那个主题。
+                                    property bool light: settings.themeLight
+                                    currentIndex: light ? 1 : 0
                                     onActivated: {
-                                        Theme.dark = (currentIndex === 0)
-                                        settings.setThemeLight(currentIndex === 1)
+                                        light = (currentIndex === 1)
+                                        Theme.dark = !light
+                                        settings.setThemeLight(light)
                                     }
                                 } }
                             CardDivider {}
                             SettingRow { label: qsTr("跟随系统深浅色")
                                 ThemedSwitch { id: autoThemeSwitch; checked: settings.autoTheme
-                                    onToggled: { settings.setAutoTheme(checked); bridge.setAutoTheme(checked) } } }
+                                    onToggled: {
+                                        settings.setAutoTheme(checked)
+                                        bridge.setAutoTheme(checked) // 开启即刻按当前系统外观换肤
+                                        // 关闭时 bridge 什么都不做（它只管「跟随」这条线），得由这里把界面
+                                        // 收回到手选主题 —— 否则会停在最后一次跟随到的系统外观上，而主题
+                                        // 下拉显示的是手选值，两者对不上。
+                                        if (!checked)
+                                            Theme.dark = !themeCombo.light
+                                    } } }
                             CardDivider {}
                             SettingRow { label: qsTr("跟随系统语言")
                                 ThemedSwitch { id: autoLangSwitch; checked: settings.autoLanguage

@@ -15,6 +15,9 @@ ComboBox {
     implicitWidth: 160
     implicitHeight: 30
     font.pixelSize: 13
+    // 置灰要看得见：background/contentItem 都是自绘的，颜色写死在 Theme 上，`enabled: false`
+    // 本身一点视觉变化都没有 —— 下拉照样长得像能点。压一半透明度（与 Swift 端 ThemedCombo 同）。
+    opacity: enabled ? 1 : 0.5
 
     background: Rectangle {
         radius: 3

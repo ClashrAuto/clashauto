@@ -916,7 +916,14 @@ public final class AppState {
         config = newConfig
         controller.updateConfig(newConfig)
         subscriptions.updateConfig(newConfig)
-        theme.dark = newConfig.theme.lowercased() != "light"
+        // ★ 明暗要按 `autoTheme` 分流，不能一律读 `config.theme`。
+        //   设置页**每一个**开关/下拉/数字框都会走到这里（`bool()`、`persist()`、`apply()`
+        //   最后都调 applyConfig），所以「跟随系统」开着而 config.theme 与当前系统外观相反时
+        //   —— 默认配置就是 `theme: black` + `autoTheme: true`，浅色系统下天然如此 ——
+        //   随便拨一个无关开关（开机自启、增量更新…）就会把界面按回深色。
+        //   这也顺带让「跟随系统」自身的开/关立刻生效：开→按系统外观，关→回到手选主题。
+        theme.dark = newConfig.autoTheme ? Self.systemIsDark()
+                                         : newConfig.theme.lowercased() != "light"
     }
 
     /// 新设备提醒开关。**立即落盘** —— 这是个开关不是草稿，不该等到别处点「应用」。

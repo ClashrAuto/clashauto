@@ -186,11 +186,15 @@ struct SettingsPage: View {
 
                 SettingCard(symbol: "paintbrush", title: "界面与语言".t) {
                     SettingRow(label: "主题".t) {
+                        // 跟随系统时手选无效，置灰（与下面「语言」跟随系统语言时同一套路）。
+                        // 值始终显示**手选**的那份（config `theme:`）—— 跟随开着时它和当前
+                        // 生效的明暗可以不一样，是关掉跟随后要回到的那个主题。
                         ThemedCombo(options: ["黑色".t, "白色".t],
                                     selection: Binding(
                                         get: { state.config.theme.lowercased() == "light" ? 1 : 0 },
                                         set: { setThemeLight($0 == 1) }),
-                                    width: 140)
+                                    width: 140,
+                                    enabled: !state.config.autoTheme)
                     }
                     CardDivider()
                     SettingRow(label: "跟随系统深浅色".t) {
@@ -490,8 +494,9 @@ struct SettingsPage: View {
         AppConfigLoader.persist(key: "theme", raw: light ? "light" : "black")
         var next = state.config
         next.theme = light ? "light" : "black"
+        // 换肤交给 `applyConfig` —— 它按 `autoTheme` 分流。这里再补一句 `theme.dark = !light`
+        // 就会绕过跟随态，把手选值硬套上去（下拉已置灰，但别留这条后门）。
         state.applyConfig(next)
-        theme.dark = !light
     }
 
     private func setLanguage(_ code: String) {
