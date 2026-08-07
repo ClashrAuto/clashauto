@@ -304,8 +304,20 @@ jobs:
                            'COAST_BUNDLEDCORE_SELFTEST')) {
             Set-Item "Env:\$t" '1'
             $out = Join-Path $env:RUNNER_TEMP "$t.out"
-            $p = Start-Process -FilePath $exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out
+            # ★★ 用 WaitForExit(30000) 而不是 -Wait：钩子一旦没被注册（比如被裹进某个平台
+            #   专属的 #ifdef），设了 env 的效果不是"测试失败"，而是**把整个 GUI 正常启动、
+            #   进程永不退出** —— 配上 -Wait 就是这一步一直挂到 job 超时（默认 6 小时），
+            #   日志里什么都没有。2026-08-08 在 Linux 上实测过一次，进程跑满 316 秒仍在 do_poll。
+            #   这些自测本身都是毫秒级的，30 秒到不了必是出事了，不是慢。
+            $p = Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $out
+            $exited = $p.WaitForExit(30000)
             Remove-Item "Env:\$t"
+            if (-not $exited) {
+              try { $p.Kill() } catch {}
+              Write-Host "::error::$t 30 秒未退出 —— 多半是这个钩子没在 main_qml.cpp 里注册"
+              Write-Host "::error::（或被裹进了某个平台专属的 #ifdef），于是设了 env 只是把 GUI 启动起来"
+              exit 1
+            }
             if ($p.ExitCode -ne 0) {
               if (Test-Path $out) { Get-Content $out }
               Write-Host "::error::$t 失败（exit=$($p.ExitCode)）"
@@ -962,9 +974,9 @@ jobs:
         shell: bash
         run: cmake --build "$BUILD_DIR" --parallel
 
-      - name: Pure-logic self-tests (ARP parse / per-NIC egress / TIDE nodes / bundled-core seeding)
+      - name: Pure-logic self-tests (static deps / ARP parse / per-NIC egress / TIDE nodes / bundled-core seeding / rules / proxy cfg / crypto KAT)
         shell: bash
-        # 两个都不碰网络、不需要 root、毫秒级，所以两种架构都跑。
+        # 全都不碰网络、不需要 root、毫秒级，所以两种架构都跑。
         # · ARP 表解析：**三个平台的 arp 输出形态全覆盖** —— 解析器按运行期参数分派而不是 #ifdef，
         #   所以 Windows 那种分段格式在这条 Linux 流水线上一样被测到（以前它连编都不编）。
         #   解析错的表现是「每张网卡的网关 MAC 都为空 → 所有设备都代理不了」，且没有任何报错
@@ -984,15 +996,55 @@ jobs:
           set -euo pipefail
           bin="$BUILD_DIR/coast"
           export QT_QPA_PLATFORM=offscreen
+          # ★★ 每条都套 `timeout`，这不是保险起见，是**本仓库反复踩的那个坑的唯一门禁**：
+          #   自测钩子一旦没被注册（比如被裹进某个平台专属的 #ifdef），设了 env 的效果不是
+          #   "测试失败"，而是**把整个 GUI 正常启动、进程永不退出** —— 在 CI 里就表现为这一步
+          #   一直挂到 job 超时（默认 6 小时），日志里什么都没有。2026-08-08 在 Linux 上实测过
+          #   一次：进程跑满 316 秒仍在 do_poll。套上 timeout 之后，同样的 bug 变成 30 秒内
+          #   一条写明"疑似钩子没注册"的红灯。
+          #   （反过来说：这些自测本身都是毫秒级的，30 秒到不了就一定是出事了，不是慢。）
+          run_selftest() {
+            local name="$1"
+            local out rc
+            set +e
+            out="$(timeout 30 env "$name=1" "$bin" 2>&1)"; rc=$?
+            set -e
+            if [ "$rc" = 0 ]; then
+              echo "PASS  $name"
+              return 0
+            fi
+            printf '%s\n' "$out" | sed 's/^/      /'
+            if [ "$rc" = 124 ]; then
+              echo "::error::$name 30 秒未退出 —— 多半是这个钩子没在 main_qml.cpp 里注册"
+              echo "::error::（或被裹进了某个平台专属的 #ifdef），于是设了 env 只是把 GUI 启动起来"
+            else
+              echo "::error::$name 失败（exit=$rc）"
+            fi
+            return 1
+          }
           # ★ 静态化引入的门禁，也是**这条流水线唯一**能证明"插件真被链进来了"的地方：
           #   TLS 后端 / QSQLITE / 图片格式 / QML 模块漏了都不报编译或链接错误。
           #   顺带说明为什么 CMakeLists 里不敢用 qt_import_plugins 去筛平台插件：
-          #   下面这行 QT_QPA_PLATFORM=offscreen 依赖 qoffscreen，一筛就全灭。
-          COAST_STATICDEPS_SELFTEST=1 "$bin"
-          COAST_ARPPARSE_SELFTEST=1 "$bin"
-          COAST_NICEGRESS_SELFTEST=1 "$bin"
-          COAST_TIDE_SELFTEST=1 "$bin"
-          COAST_BUNDLEDCORE_SELFTEST=1 "$bin"
+          #   上面那行 QT_QPA_PLATFORM=offscreen 依赖 qoffscreen，一筛就全灭。
+          run_selftest COAST_STATICDEPS_SELFTEST
+          run_selftest COAST_ARPPARSE_SELFTEST
+          run_selftest COAST_NICEGRESS_SELFTEST
+          run_selftest COAST_TIDE_SELFTEST
+          run_selftest COAST_BUNDLEDCORE_SELFTEST
+          # ↓ 这三条以前在 Linux 上**根本跑不了**：它们被误裹在 #ifdef COAST_HAVE_RUST_STACK
+          #   里，而那个宏只在 Windows+COAST_RUST 时定义。分流判定（RuleEngine）是三端共用的
+          #   唯一实现，加密 KAT 也一样，却只有 Windows 那条腿能验 —— 现在补上。
+          #   COAST_CRYPTO_SELFTEST 另需 COAST_HAVE_OPENSSL；Linux 装了 libssl-dev，恒为真。
+          #   万一哪天不真了，上面的 timeout 会把它变成一条 30 秒的明确红灯而不是挂死。
+          run_selftest COAST_RULE_SELFTEST
+          run_selftest COAST_PROXYCFG_SELFTEST
+          run_selftest COAST_CRYPTO_SELFTEST
+          # 没加进来的三个，各有原因，别顺手补上：
+          #   · COAST_TUNSERVICE_SELFTEST —— 会**真的接管默认路由**，要 root 且只能在可牺牲
+          #     网络的机器上跑；在 runner 上跑等于把这个 job 的网络掀了。
+          #   · COAST_SELFROUTE_SELFTEST  —— 同类，动的是策略路由。
+          #   · COAST_OUTBOUND_PROBE      —— 要 full.yaml + 节点名才有意义，不带参数时打用法
+          #     退出 2，当断言用只会是一条恒红。
 
       - name: Stage portable app
         shell: bash
