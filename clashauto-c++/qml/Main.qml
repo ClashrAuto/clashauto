@@ -21,9 +21,13 @@ ApplicationWindow {
 
     readonly property bool isMac: Qt.platform.os === "osx"
     readonly property bool isWin: Qt.platform.os === "windows"
-    // 起始页：默认 0（状态页）；`COAST_INITIAL_PAGE=<0..6>` 可指定，见 main_qml.cpp。
-    // 无头逐页验证时用它 —— 侧栏在 offscreen 下点不了，没有这个钩子就只能验第一页。
-    property int currentPage: initialPage
+    // 起始页：默认 0（状态页）。`COAST_INITIAL_PAGE=<0..6>` 可指定 —— 与 Swift 端
+    // `AppState.Page` 那个同名钩子对称，侧栏顺序即页序，两条线取值一致。
+    //
+    // ★ 加它是因为**这条线之前没法做逐页的运行期验证**：侧栏在 offscreen 下点不了，
+    //   Ctrl+1..7 也没人按，于是无头跑只能验到第一页。不是页面有问题，是验不了。
+    //   配合早已对齐的 COAST_DATA_DIR（整体改写数据根），就能在真机上无副作用地逐页跑。
+    property int currentPage: bridge.envInt("COAST_INITIAL_PAGE", 0, 6)
 
     // 记住窗口位置：退出/移动时把 x/y 持久化，下次启动恢复到上一次的位置；无历史位置则落在右下角。
     // 用 QtCore 的 Settings（沿用应用的 组织名/应用名 → 与其它 QSettings 存同一处）。

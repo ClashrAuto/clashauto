@@ -820,6 +820,13 @@ bool QmlBridge::envFlag(const QString &name) const
     return qEnvironmentVariable(name.toLatin1().constData()) == QStringLiteral("1");
 }
 
+int QmlBridge::envInt(const QString &name, int lo, int hi) const
+{
+    bool ok = false;
+    const int v = qEnvironmentVariable(name.toLatin1().constData()).toInt(&ok);
+    return ok ? qBound(lo, v, hi) : lo;
+}
+
 bool QmlBridge::trayAvailable() const
 {
     return QSystemTrayIcon::isSystemTrayAvailable();

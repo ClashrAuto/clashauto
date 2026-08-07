@@ -889,16 +889,6 @@ int main(int argc, char *argv[])
 #endif
 
     QQmlApplicationEngine engine;
-    // 起始页（`COAST_INITIAL_PAGE=<0..6>`）。与 Swift 端 `AppState.Page` 那个同名钩子对称 ——
-    // 侧栏顺序即页序，两条线取值一致。
-    //
-    // ★ 加它的理由是**这条线之前没法做逐页的运行期验证**：Swift 侧有这个钩子，可以
-    //   「起在某一页 → 看进程活着没、配置有没有落地」把七个页面一个个过一遍；Qt 侧只有
-    //   Ctrl+1..7 快捷键，而无头（offscreen）跑的时候没人去按。于是同样的验证在 Qt 线
-    //   一直做不了 —— 不是页面有问题，是**验不了**。配合已有的 COAST_DATA_DIR（整体改写
-    //   数据根，两端同名同语义），就能在真机上无副作用地逐页跑。
-    const int initialPage = qBound(0, qEnvironmentVariableIntValue("COAST_INITIAL_PAGE"), 6);
-    engine.rootContext()->setContextProperty("initialPage", initialPage);
     engine.rootContext()->setContextProperty("bridge", &bridge);
     engine.rootContext()->setContextProperty("nodeModel", bridge.nodeModel());
     engine.rootContext()->setContextProperty("subs", subsController);

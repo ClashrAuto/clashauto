@@ -174,6 +174,12 @@ public:
     /// 版式的唯一入口。正式运行不设就是零影响。
     Q_INVOKABLE bool envFlag(const QString &name) const;
 
+    /// 读一个取整数的环境变量，并夹在 [lo, hi] 内；没设或不是数字则返回 lo。
+    /// 与 `envFlag` 同族 —— QML 读不到环境变量，UI 调试钩子只能经这里过。
+    /// **必须夹范围**：越界值传给 StackLayout 会指向不存在的索引，界面是一片空白，
+    /// 而空白和「这一页坏了」在截图里长得一模一样。
+    Q_INVOKABLE int envInt(const QString &name, int lo, int hi) const;
+
     /// mac：窗口顶部被系统标题栏占掉的高度。QML 用**负的上边距**把内容顶进那条带子里
     /// （理由见 `MacWindow.h` 的 `macTitleBarInset`）。非 mac 恒 0。
     Q_INVOKABLE int macTitleBarInset(QWindow *window) const;
