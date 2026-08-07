@@ -21,6 +21,20 @@ public:
     bool isProxyEnabled() const;
     bool isTunEnabled() const;
     bool isCoreInstalled() const; // 内核二进制是否已就位（不再预装内核，需用户从设置下载）
+
+    /// 打包集成的内核落位（缺了才补，绝不覆盖已装的）。
+    ///
+    /// ★ 必须在 isCoreInstalled() 之前调用一次，否则全新安装**开不了机**：
+    /// autoStartCore() 一上来就用 isCoreInstalled() 挡门，而它查的是
+    /// userDir/command/core —— 全新安装那里是空的，集成内核躺在可执行文件同目录。
+    /// 于是早退 → startCore() 不执行 → 原先只写在 startCore() 里的落位也不执行 →
+    /// 内核永远不落位。用户装完打开，界面起来了，什么也没发生，
+    /// 而一个好端端的内核就在旁边。2026-08-07 在树莓派上用正式发布包实测到：
+    /// 全新安装启动 30s 后既没有 command/ 目录、也没有 full.yaml、更没有核心进程。
+    void seedBundledCore(); // 幂等；重复调用无副作用
+
+    /// 集成内核落位自测（`COAST_BUNDLEDCORE_SELFTEST=1`，见 main_qml.cpp）。
+    static bool runBundledCoreSelfTest();
     bool isHelperCore() const;    // macOS：当前核心是否由特权 helper（root）启动（决定 TUN 是否可用）
 
     // 设置 TUN 标志但不重载（用于核心尚未启动时预置状态，例如提权重启后带 TUN 冷启动）
@@ -77,7 +91,6 @@ private:
     // （rebuildConfig 有 10 处调用点，且 resumeProxies 的设备循环体内也会调，天然会连发）。
     bool m_reloadPending = false;
     void emitStatus();
-    void seedBundledCore(); // 打包集成的内核首次运行落位（缺了才补，绝不覆盖已装的）
     void writeCorePid(qint64 pid) const; // 记下自己拉起的核心 pid，供下次启动收孤儿
     void reapOrphanCore();               // 收掉上次崩溃遗留的核心（否则新核心绑不上端口）
 

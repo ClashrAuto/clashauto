@@ -342,8 +342,14 @@ void QmlBridge::setNodeSwitchNote(bool on)
 
 void QmlBridge::autoStartCore()
 {
+    if (!m_core)
+        return;
+    // ★ 落位必须在 isCoreInstalled() 之前：它查的是 userDir/command/core，而全新安装那里是空的
+    // （集成内核在可执行文件同目录）。原先落位只写在 startCore() 里，于是下面这道门把它自己
+    // 需要的东西挡在了门外：早退 → startCore() 不执行 → 永远不落位 → 全新安装永远起不来。
+    m_core->seedBundledCore();
     // 启动自动拉起核心（对齐 Widgets 版 MainWindow 的 startCore-on-launch）：无内核/已在跑则不动。
-    if (!m_core || !m_core->isCoreInstalled() || m_core->isRunning())
+    if (!m_core->isCoreInstalled() || m_core->isRunning())
         return;
 #if defined(Q_OS_WIN)
     // 恢复上次退出前的增强(TUN)状态（config 的 use:，每次切换即落盘；一键更新自动重启后也走这里）。

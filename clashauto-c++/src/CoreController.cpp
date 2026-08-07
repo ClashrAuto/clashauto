@@ -7,6 +7,8 @@
 #include "MmdbFile.h"
 
 #include <QCoreApplication>
+#include <QTemporaryDir>
+#include <cstdio>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -1249,3 +1251,95 @@ void CoreController::pollCoreLog()
     }
 }
 #endif
+
+// ———————————— 集成内核落位自测（COAST_BUNDLEDCORE_SELFTEST）————————————
+//
+// ★ 复现的是「正式发布包全新安装打不开」这个缺陷（2026-08-07 树莓派实测）：
+//
+//   autoStartCore()  →  if (!isCoreInstalled()) return;   ← 挡在这里
+//   isCoreInstalled() →  查 userDir/command/core          ← 全新安装是空的
+//   seedBundledCore() →  原先**只**写在 startCore() 里    ← 于是永远执行不到
+//
+// 集成内核就躺在可执行文件旁边，而通往它的每一条路都先被这道门挡住：
+// 自动拉起、开启增强、开关代理三处都先问 isCoreInstalled()。
+// 用户装完打开，界面起来了，什么也没发生——而且日志里连一句话都没有。
+//
+// CI 只验包结构（core 在不在包里），而任何开发机都早就下载过内核，
+// userDir/command/core 一直存在，所以谁也碰不到。只有全新安装才会撞上。
+bool CoreController::runBundledCoreSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](bool ok, const char *what) {
+        std::fputs(ok ? "  ok   " : "  FAIL ", stdout);
+        std::fputs(what, stdout);
+        std::fputc('\n', stdout);
+        if (!ok)
+            ++failed;
+    };
+
+    QTemporaryDir tmp;
+    if (!tmp.isValid()) {
+        std::printf("集成内核自测: 建不了临时目录\n");
+        return false;
+    }
+
+#if defined(Q_OS_WIN)
+    const QString coreName = QStringLiteral("core.exe");
+#else
+    const QString coreName = QStringLiteral("core");
+#endif
+    // 可执行文件同目录的集成内核。开发构建通常没有，就造一个占位；
+    // 真发布包里本来就有，那就用真的，且**不删**。
+    const QString bundled = QDir(QCoreApplication::applicationDirPath()).filePath(coreName);
+    const bool madeFake = !QFileInfo::exists(bundled);
+    if (madeFake) {
+        QFile f(bundled);
+        if (!f.open(QIODevice::WriteOnly)) {
+            std::printf("集成内核自测: 造不出占位内核 %s（目录不可写）\n", qUtf8Printable(bundled));
+            return false;
+        }
+        f.write("#!/bin/sh\nexit 0\n");
+        f.close();
+    }
+
+    AppConfig cfg;
+    cfg.userDir = tmp.path();          // 全新安装：userDir 里什么都没有
+    cfg.configDir = tmp.path();
+    CoreController core(cfg);
+
+    check(!core.isCoreInstalled(),
+          "全新安装：落位前 isCoreInstalled() 为假（这正是那道门的判据）");
+
+    core.seedBundledCore();
+
+    check(core.isCoreInstalled(),
+          "落位之后 isCoreInstalled() 转真 —— 缺了这一步，autoStartCore 会早退，"
+          "而落位又只写在 startCore() 里，全新安装永远起不来");
+
+    const QString seeded = QDir(cfg.userDir).filePath(QStringLiteral("command/") + coreName);
+    check(QFileInfo::exists(seeded), "内核落到了 userDir/command/");
+    check(QFileInfo(seeded).isExecutable(),
+          "落位的内核带执行位（缺了核心起不来，而报错只有一句『启动失败』）");
+    check(QFileInfo(seeded).permissions() & QFileDevice::WriteOwner,
+          "落位的内核属主可写（应用内更新要覆盖它，否则以后每次更新都静默失败）");
+
+    // 幂等：绝不覆盖已装内核（用户手动升级过的内核被一次启动静默回滚是最难查的坑）。
+    QFile mark(seeded);
+    if (mark.open(QIODevice::WriteOnly)) {
+        mark.write("USER-INSTALLED");
+        mark.close();
+    }
+    core.seedBundledCore();
+    QFile after(seeded);
+    after.open(QIODevice::ReadOnly);
+    const QByteArray body = after.readAll();
+    after.close();
+    check(body == "USER-INSTALLED",
+          "重复落位不覆盖已装内核（幂等）");
+
+    if (madeFake)
+        QFile::remove(bundled);
+
+    std::printf("\n落位目标: %s\n", qUtf8Printable(seeded));
+    return failed == 0;
+}

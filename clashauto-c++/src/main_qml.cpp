@@ -232,6 +232,10 @@ int main(int argc, char *argv[])
     // 同样放在 Rust 守卫之外：它要在 Linux CI 上跑，而且产物路径会打出来供 `core -t -f` 复核。
     if (qEnvironmentVariableIsSet("COAST_TIDE_SELFTEST"))
         return ConfigBuilder::runTideSelfTest() ? 0 : 1;
+    // 集成内核落位：唯一能挡住「全新安装打不开」的守卫。开发机永远碰不到那个场景
+    // （userDir/command/core 早就下载过了），所以必须由自测在 CI 上盯着。
+    if (qEnvironmentVariableIsSet("COAST_BUNDLEDCORE_SELFTEST"))
+        return CoreController::runBundledCoreSelfTest() ? 0 : 1;
     if (qEnvironmentVariableIsSet("COAST_NICEGRESS_SELFTEST"))
         return ConfigBuilder::runNicEgressSelfTest() ? 0 : 1;
 
@@ -693,6 +697,13 @@ int main(int argc, char *argv[])
     // 与 Widgets 版 MainWindow 相同的后端装配（AppConfigLoader 载入配置；资源已内嵌 qrc，不再找 Clashr-Auto）。
     AppConfig config = AppConfigLoader::load();
     auto *core = new CoreController(config, &app);
+    // ★ 集成内核**在任何人问「装了没」之前**先落位。
+    // isCoreInstalled() 查的是 userDir/command/core，而全新安装那里是空的（集成内核在
+    // 可执行文件同目录）。落位原先只写在 startCore() 里，而通往 startCore() 的每一条路
+    // 都先用 isCoreInstalled() 挡一道 —— 自动拉起、开启增强、开关代理都是。
+    // 于是全新安装：界面起来了，什么也没发生，旁边躺着一个好端端的内核。
+    // 放在这里而不是只放在 autoStartCore 里，是因为用户可能在 600ms 自动拉起之前就点开关。
+    core->seedBundledCore();
     auto *clash = new ClashService(&app);
     auto *subs = new SubscriptionStore(config, &app);
     // TrayController 用 MainWindow* 做 show/raise；QML 版无 MainWindow，传 nullptr，改用它的
