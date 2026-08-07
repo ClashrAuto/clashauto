@@ -18,7 +18,9 @@ ApplicationWindow {
     minimumWidth: 480
     minimumHeight: 320
     title: qsTr("连接")
-    color: Theme.card
+    // 六个窗口统一用壳色。原先这四个子窗用 Theme.card（暗色下是**纯黑**），从主窗口
+    // 点开时背景会从 #222 跳到纯黑，标题栏跟着跳。壳色才是"窗口"的颜色，card 是内容卡的。
+    color: Theme.shell
 
     readonly property bool isWin: Qt.platform.os === "windows"
     // Windows：把系统标题栏染成本窗背景色。不染的话标题栏跟的是**系统**明暗而不是 Coast 的

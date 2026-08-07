@@ -23,7 +23,8 @@ ApplicationWindow {
     minimumWidth: 420
     minimumHeight: 420
     title: qsTr("设备详情") + (win.dev.name ? "  ·  " + win.dev.name : "")
-    color: Theme.card
+    // 统一用壳色（同 ConnectionsWindow，理由见那里）。
+    color: Theme.shell
 
     readonly property bool isWin: Qt.platform.os === "windows"
     // Windows 系统标题栏染成本窗背景色（同 ConnectionsWindow，理由见那里）。
