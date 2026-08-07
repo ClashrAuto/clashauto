@@ -1,7 +1,6 @@
 #include "TrayController.h"
 
 #include <QGuiApplication>
-#include "MainWindow.h"
 
 #include <QAction>
 #include <QApplication>
@@ -66,8 +65,8 @@ static void macCbTun(void *c) { static_cast<TrayController *>(c)->macToggleTun()
 static void macCbQuit(void *c) { static_cast<TrayController *>(c)->macQuit(); }
 #endif
 
-TrayController::TrayController(MainWindow *window, QObject *parent)
-    : QObject(parent), m_window(window)
+TrayController::TrayController(QObject *parent)
+    : QObject(parent)
 {
 #if defined(Q_OS_MACOS)
     // macOS 不用 Qt 托盘：改用原生一项（图标在左、两行速率在右、定宽不抖动 + 原生菜单）。
@@ -95,12 +94,7 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
     m_tray.setToolTip("Coast");
     connect(&m_tray, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
         if (reason == QSystemTrayIcon::Trigger) {
-            emit openWindowRequested(); // QML 版：main_qml 连到 QQuickWindow 重开
-            if (m_window) {
-                m_window->showNormal();
-                m_window->raise();
-                m_window->activateWindow();
-            }
+            emit openWindowRequested(); // main_qml 连到 QQuickWindow 重开
         }
     });
     buildMenu();
@@ -111,12 +105,7 @@ TrayController::TrayController(MainWindow *window, QObject *parent)
 #if defined(Q_OS_MACOS)
 void TrayController::macOpenWindow()
 {
-    emit openWindowRequested(); // QML 版：main_qml 连到 QQuickWindow 重开（mac 菜单栏「控制面板」）
-    if (m_window) {
-        m_window->showNormal();
-        m_window->raise();
-        m_window->activateWindow();
-    }
+    emit openWindowRequested(); // main_qml 连到 QQuickWindow 重开（mac 菜单栏「控制面板」）
 }
 void TrayController::macToggleCore() { emit toggleCoreRequested(); }
 void TrayController::macToggleProxy() { emit toggleProxyRequested(); }
@@ -130,12 +119,7 @@ void TrayController::buildMenu()
     // 此前流量每秒 rebuildMenu()：new QMenu 换给 setContextMenu（它不接管旧菜单
     // 所有权），旧菜单+全部 QAction 每秒泄漏一份；用户正开着菜单时还会被整个换掉。
     m_panelAction = m_menu.addAction(tr("控制面板"), this, [this] {
-        emit openWindowRequested(); // QML 版：main_qml 连到 QQuickWindow 重开
-        if (m_window) {
-            m_window->showNormal();
-            m_window->raise();
-            m_window->activateWindow();
-        }
+        emit openWindowRequested(); // main_qml 连到 QQuickWindow 重开
     });
     m_menu.addSeparator();
     m_upAction = m_menu.addAction(QString("UP: %1").arg(speedText(0)));

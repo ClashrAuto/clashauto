@@ -130,9 +130,9 @@ if(POLICY QTP0001)
 endif()
 
 # ————————————————————————————————————————————————————————————————
-# 复用的既有后端（原样编译进 QML 目标；不含 Widgets 的 MainWindow/main.cpp）。
-# TrayController.cpp 会 #include "MainWindow.h"（仅用其 QWidget 基类方法），故 MainWindow.h
-# 留在源码树里可被包含，但 MainWindow.cpp 不参与本目标的编译/链接。
+# 复用的既有后端（原样编译进 QML 目标）。
+# 早期的 Qt Widgets 版（main.cpp / MainWindow.* / TrafficChart.*）已于 2026-08 删除：
+# 它从来不参与编译，唯一还牵着它的是 TrayController 那个恒为 nullptr 的 MainWindow*。
 # ————————————————————————————————————————————————————————————————
 set(BACKEND_SOURCES
     src/AppConfig.cpp        src/AppConfig.h

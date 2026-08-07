@@ -51,9 +51,10 @@ int runStaticDepsSelfTest()
     // —— 图片格式 ——
     // ico：assets/icon.ico（窗口/托盘图标）。png：Qt Quick 内部与图标合成都要。两者都在 qtbase 里。
     //
-    // ★ **故意不查 svg**，这是查出来的结论不是偷懒：qrc 里那两个 chevron-*.svg 只被
-    //   src/MainWindow.cpp 引用，而那是没有参与编译的 Widgets 遗留界面（见 CLAUDE.md）。
-    //   QML 这边的图标全部是字体（iconfont.ttf / remixicon.ttf），一个 svg 都没用。
+    // ★ **故意不查 svg**，这是查出来的结论不是偷懒：整个仓库一个 .svg 都不用了。
+    //   qrc 里原有两个 chevron-*.svg，只被 Widgets 遗留界面的 src/MainWindow.cpp 引用，
+    //   那一摊已于 2026-08 连同 svg 一起删除。QML 这边的图标全部是字体
+    //   （iconfont.ttf / remixicon.ttf）。
     //   所以静态 Qt 的模块集里**没有 qtsvg** —— 少一个模块、少一份构建时间。
     //   哪天 QML 侧真用上 .svg，这里要把 svg 加回断言，同时把 qtsvg 加回
     //   .github/actions/qt-static 的模块列表，两处缺一不可（只加前者=CI 当场红，

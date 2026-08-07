@@ -5,14 +5,13 @@
 #include <QSystemTrayIcon>
 
 class QAction;
-class MainWindow;
 
 class TrayController final : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit TrayController(MainWindow *window, QObject *parent = nullptr);
+    explicit TrayController(QObject *parent = nullptr);
 
 public slots:
     void setStatus(bool tun, bool proxy, bool core);
@@ -30,7 +29,7 @@ signals:
     void toggleProxyRequested();
     void toggleTunRequested();
     // 请求重开/前置主窗口（托盘单击、「控制面板」菜单、mac 菜单栏「控制面板」都发它）。
-    // QML 版无 MainWindow，由 main_qml 连到 QQuickWindow 的 show/raise；Widgets 版 m_window 亦仍处理。
+    // main_qml 把它连到 QQuickWindow 的 show/raise —— 这是**唯一**的重开路径。
     void openWindowRequested();
 
 #if defined(Q_OS_MACOS)
@@ -52,7 +51,6 @@ private:
     QString speedText(qint64 value) const;        // 菜单里的长文本："2.00 MB"
     QString speedTextCompact(qint64 value) const; // 图标旁的紧凑文本："2.0 MB/s"
 
-    MainWindow *m_window = nullptr;
     QSystemTrayIcon m_tray;
     QMenu m_menu;                    // 常驻托盘菜单（此前每秒 new 一个换给 setContextMenu，旧的全泄漏）
     QAction *m_panelAction = nullptr; // 「控制面板」（静态，语言切换时重刷）

@@ -729,9 +729,8 @@ int main(int argc, char *argv[])
     core->seedBundledCore();
     auto *clash = new ClashService(&app);
     auto *subs = new SubscriptionStore(config, &app);
-    // TrayController 用 MainWindow* 做 show/raise；QML 版无 MainWindow，传 nullptr，改用它的
-    // openWindowRequested 信号重开 QML 主窗（见下方连接）。托盘图标 + 流量 + 三个 toggle 信号仍可用。
-    auto *tray = new TrayController(nullptr, &app);
+    // 托盘重开主窗走 openWindowRequested 信号（见下方连接）。
+    auto *tray = new TrayController(&app);
 
     clash->setEndpoint(config.host, config.uiPort);
     clash->setMixedPort(config.mixedPort);
