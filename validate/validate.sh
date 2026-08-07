@@ -45,16 +45,24 @@ for s in *.sha256; do
   [ "$want" = "$got" ] && ok "sha256 OK: $f" || bad "sha256 不匹配: $f (want ${want:0:12}… got ${got:0:12}…)"
 done
 
-sec "Windows 便携包 — 扁平 / 瘦身(-GL DLL) / 自包含"
+sec "Windows 便携包 — 扁平 / 全静态（包里一个 DLL 都不该有） / 自包含"
 WZ=$(pick 'Coast-*-windows-x64-portable.zip')
 if [ -n "$WZ" ]; then
   echo "  包大小: $(du -h "$WZ" | cut -f1)"
   rm -rf win; mkdir win; unzip -q "$WZ" -d win
   [ -f win/Coast.exe ] && ok "Coast.exe 在包根（扁平，无 clashauto-c++ 子目录）" || bad "Coast.exe 不在根"
   { [ ! -e win/clashauto-c++ ] && [ ! -e win/Clashr-Auto ]; } && ok "无 clashauto-c++ / Clashr-Auto 目录（自包含）" || bad "仍有旧子目录"
-  [ ! -e win/opengl32sw.dll ]      && ok "无 opengl32sw.dll（瘦身 ~20MB 生效）" || bad "opengl32sw.dll 还在（瘦身没生效）"
-  [ ! -e win/d3dcompiler_47.dll ]  && ok "无 d3dcompiler_47.dll（~4MB）"        || bad "d3dcompiler_47.dll 还在"
-  [ -f win/Qt6Quick.dll ]          && ok "Qt6Quick.dll 已部署"                  || bad "缺 Qt6Quick.dll（QML 运行时没打进去）"
+  # ★ 2026-08 起 Qt 是**静态链接**的：包里应当只剩 Coast.exe + core.exe。
+  #   这条断言取代了原来的「Qt6Quick.dll 已部署」——那时缺 DLL 是故障，现在有 DLL 才是故障。
+  #   任何 DLL 出现在这里都说明某一环退回了共享构建，而那种包在装了 VS/Qt 的机器上照跑，
+  #   只有干净的用户机器会 0xC0000135。
+  STRAY_DLL=$(find win -iname '*.dll' | sed 's|^win/||' | sort)
+  [ -z "$STRAY_DLL" ] && ok "包里没有任何 DLL（Qt/MSVC 运行库全部静态进 exe）" \
+                      || { bad "包里仍有 DLL —— 静态化没生效："; echo "$STRAY_DLL" | head -10 | sed 's/^/       /'; }
+  # 目录也该是平的：静态构建没有 platforms/ plugins/ qml/ 这些运行期加载目录。
+  STRAY_DIR=$(find win -mindepth 1 -maxdepth 1 -type d | sed 's|^win/||' | sort)
+  [ -z "$STRAY_DIR" ] && ok "包根无任何子目录（platforms/ plugins/ qml/ 都不再需要）" \
+                      || { bad "包根仍有子目录："; echo "$STRAY_DIR" | sed 's/^/       /'; }
   [ -f win/core.exe ]              && ok "core.exe 已集成（打包默认带正式版内核）" || bad "缺 core.exe（打包应默认集成内核）"
 else bad "没找到 windows x64 便携 zip"; fi
 
@@ -106,6 +114,10 @@ if [ -n "$DEB" ]; then
   grep -q 'clashauto-c++' deb-contents.txt && bad "deb 仍含 clashauto-c++ 子目录" || ok "无 clashauto-c++ 子目录"
   grep -q 'Clashr-Auto'   deb-contents.txt && bad "deb 仍含 Clashr-Auto"        || ok "无 Clashr-Auto"
   grep -q '/opt/coast/core$' deb-contents.txt && ok "/opt/coast/core 内核已集成（打包默认带正式版内核）" || bad "缺 /opt/coast/core（打包应默认集成内核）"
+  # ★ 静态 Qt：/opt/coast 下不该再有自带的 Qt 运行时（原来是 lib/ plugins/ qml/ + qt.conf）。
+  QTLEFT=$(grep -E '/opt/coast/(lib|plugins|qml)/|/opt/coast/qt\.conf' deb-contents.txt | head -5)
+  [ -z "$QTLEFT" ] && ok "deb 内无自带 Qt 运行时（lib/ plugins/ qml/ qt.conf 都没了）" \
+                   || { bad "deb 里仍有自带 Qt 运行时 —— 静态化没生效："; echo "$QTLEFT" | sed 's/^/       /'; }
 else bad "没找到 linux x86_64 .deb"; fi
 
 sec "Linux 无头运行冒烟（装 .deb + Xvfb 真跑 Coast）"
@@ -136,6 +148,20 @@ if [ -n "$DEB" ]; then
   [ -n "$missing" ] && bad "装完 deb 后仍缺:$missing —— Depends 漏写，干净系统上会起不来" \
                     || ok "Depends 已把关键运行时库全部拉入"
   if [ -x /opt/coast/coast ]; then
+    # ★ 在**干净容器**里核实 Qt 真的不在动态依赖里。构建机上有 Qt，这个结论只有在这里才作数。
+    echo "  ── ldd /opt/coast/coast ──"; ldd /opt/coast/coast | sed 's/^/       /'
+    ldd /opt/coast/coast | grep -q 'libQt6' \
+      && bad "coast 仍动态依赖 Qt —— 静态化没生效" \
+      || ok "coast 不依赖任何 libQt6（Qt 已静态进二进制）"
+    # ★ 插件自证。这是**最有价值的一条**：TLS 后端 / QSQLITE / 图片格式 / QML 模块在静态构建下
+    #   靠链接期导入，漏了不报编译或链接错误，只是运行时少一块功能（订阅拉不到、历史不记、
+    #   空窗口）。开发机上这些插件多半从别处也能加载到，只有干净系统才暴露。
+    if QT_QPA_PLATFORM=offscreen HOME=/root COAST_STATICDEPS_SELFTEST=1 \
+         /opt/coast/coast > staticdeps.log 2>&1; then
+      ok "插件自证通过（TLS / QSQLITE / 图片格式 / QML 模块都在二进制里）"
+    else
+      bad "插件自证失败："; sed 's/^/       /' staticdeps.log | head -12
+    fi
     export COAST_NO_AUTOSTART=1   # 跳过「自动下载并启动内核」，只验 UI 起 + 配置种子落地
     export HOME=/root
     rm -rf /root/.local/share/Coast

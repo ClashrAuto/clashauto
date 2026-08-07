@@ -1,0 +1,99 @@
+name: Static Qt
+description: 取一套静态 Qt —— 命中缓存就复用，没命中就从源码编出来并回写缓存
+
+# 为什么需要这个 action：aqtinstall 只发共享构建的 Qt，官方从不提供静态二进制。
+# 「打包全用静态链接库」= 必须自己从源码编 Qt，每套配置 40–110 分钟。
+# 一次编好之后所有分支的推送都复用同一份缓存，正常推送不额外花时间。
+#
+# 缓存键包含本目录下所有文件的哈希：改了配方（模块集、configure flag）会自动换键重编，
+# 不会出现「改了配方却复用了旧 Qt」——那种事本仓库在 Rust 静态库上踩过一次，
+# 表现是两边都绿而链的是上一版产物。
+
+inputs:
+  qt-version:
+    description: Qt 版本（须与 release.yml 的 QT_VERSION 一致）
+    required: true
+  target:
+    description: windows-x64 | windows-arm64 | linux-x64 | linux-arm64 | macos-universal
+    required: true
+  host-qt-path:
+    description: 交叉编译用的同版本宿主 Qt（仅 windows-arm64 需要）
+    required: false
+    default: ''
+  extra-cmake:
+    description: 追加给 configure 的 CMake 参数（如 macOS 的架构/部署目标）
+    required: false
+    default: ''
+
+outputs:
+  qt-root:
+    description: 静态 Qt 的安装前缀，直接喂给 -DCMAKE_PREFIX_PATH
+    value: ${{ steps.paths.outputs.prefix }}
+  cache-hit:
+    description: 是否命中缓存（未命中说明这次真的编了一遍）
+    value: ${{ steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve paths
+      id: paths
+      shell: bash
+      run: |
+        set -euo pipefail
+        # 路径要**跨步骤稳定**且不含空格：缓存按绝对路径存取，Qt 的 .cmake 文件里也会
+        # 记死一部分绝对路径，换目录=缓存作废。
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          prefix='C:/qtstatic'
+          src='C:/qtsrc'
+        else
+          prefix="$HOME/qtstatic"
+          src="$HOME/qtsrc"
+        fi
+        echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+        echo "src=$src"       >> "$GITHUB_OUTPUT"
+
+    - name: Restore static Qt cache
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ steps.paths.outputs.prefix }}
+        # v1 是人工版本位：Qt 版本或配方之外的原因（比如换了 runner 镜像）需要作废缓存时改它。
+        key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ hashFiles('.github/actions/qt-static/**') }}
+
+    - name: Build static Qt (POSIX)
+      if: steps.restore.outputs.cache-hit != 'true' && runner.os != 'Windows'
+      shell: bash
+      env:
+        QT_VERSION: ${{ inputs.qt-version }}
+        QT_PREFIX: ${{ steps.paths.outputs.prefix }}
+        QT_SRC: ${{ steps.paths.outputs.src }}
+        QT_EXTRA_CMAKE: ${{ inputs.extra-cmake }}
+      run: bash "$GITHUB_ACTION_PATH/build-posix.sh"
+
+    - name: Build static Qt (Windows)
+      if: steps.restore.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      shell: pwsh
+      env:
+        QT_VERSION: ${{ inputs.qt-version }}
+        QT_PREFIX: ${{ steps.paths.outputs.prefix }}
+        QT_SRC: ${{ steps.paths.outputs.src }}
+        QT_ARCH: ${{ endsWith(inputs.target, 'arm64') && 'arm64' || 'x64' }}
+        QT_HOST_PATH: ${{ inputs.host-qt-path }}
+      run: pwsh -File "$env:GITHUB_ACTION_PATH/build-windows.ps1"
+
+    - name: Save static Qt cache
+      # 只在真编过时回写。用 cache/save 而不是 cache 的 post 步骤：composite action 里
+      # 显式两段更好读，也免得构建失败时把半份 Qt 存进缓存 —— 那会毒化后续所有构建，
+      # 且表现为"缓存命中但编不过"，比重编一次难查得多。
+      if: steps.restore.outputs.cache-hit != 'true' && success()
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.paths.outputs.prefix }}
+        key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ hashFiles('.github/actions/qt-static/**') }}
+
+    - name: Report
+      shell: bash
+      run: |
+        echo "静态 Qt: ${{ steps.paths.outputs.prefix }} (cache-hit=${{ steps.restore.outputs.cache-hit }})"
+        test -d "${{ steps.paths.outputs.prefix }}/lib" || { echo "::error::静态 Qt 前缀不存在或不完整"; exit 1; }

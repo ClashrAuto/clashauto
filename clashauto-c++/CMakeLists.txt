@@ -30,6 +30,34 @@ set(CMAKE_AUTOUIC ON)
 find_package(QT NAMES Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Qml Quick QuickControls2 Sql)
 
+# ————————————————————————————————————————————————————————————————
+# 静态 Qt：产物是**单个可执行文件**，包里不再躺任何 Qt 库/插件/qml 目录。
+# 静态 Qt 由 .github/actions/qt-static 从源码编出（配方与取舍见那里的注释）；
+# 本地开发照旧用共享 Qt —— 下面每一处分支都是「有就走静态、没有就保持原样」，两种都能编。
+#
+# ★ 判定看**目标类型**而不是 QT6_IS_SHARED_LIBS_BUILD：后者是 Qt 自己的缓存变量，
+#   在部分布局/交叉配置里压根没被定义，而 `if(NOT <未定义>)` 恰好为真 —— 那会让共享构建
+#   走进静态分支，报出一堆莫名其妙的链接错误。Qt6::Core 的 TYPE 是 CMake 算出来的，骗不了人。
+get_target_property(_coast_qtcore_type Qt6::Core TYPE)
+if(_coast_qtcore_type STREQUAL "STATIC_LIBRARY")
+    set(COAST_QT_STATIC ON)
+    message(STATUS "Qt = 静态构建 → 单文件产物，不需要 windeployqt/macdeployqt")
+else()
+    set(COAST_QT_STATIC OFF)
+    message(STATUS "Qt = 共享构建 → 产物仍需随包发 Qt 运行时")
+endif()
+
+# MSVC：静态 Qt 必须配**静态 CRT(/MT)**，否则包里还得躺着 vcruntime140/msvcp140*.dll
+# —— 缺了就是 0xC0000135「双击没反应」，正是本仓库一直要额外拷一份 VC Redist 的原因。
+# ★ 必须在**创建任何目标之前**设：CMAKE_MSVC_RUNTIME_LIBRARY 是按目标创建时的值定下来的，
+#   放到 target_link_libraries 附近就只有一部分目标文件按 /MT 编，链接期 LNK2038 收场。
+# ★ 顺带一个连带效应，是**有意的**：下面 OpenSSL 那个"真链测试"会因此在 /MT 下做，
+#   于是一个 /MD 编出来的 libcrypto 会被正确判为不可用 → 三个协议回退 mihomo，
+#   而不是让整个链接炸掉。CI 那侧因此改用 vcpkg 的 x64-windows-static（/MT）三元组。
+if(COAST_QT_STATIC AND MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 #   结果 **macOS universal 与 Windows arm64 两个 job 直接构建失败**（CI 实测）：
 #     · macOS 要 `-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64` 出通用二进制，而 brew 的 libcrypto 是
 #       **单架构**的 → 即便 find 得到也链不进通用二进制；
@@ -346,16 +374,34 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
             #     比起"改了不重建"，这个代价可以接受。）
             file(GLOB COAST_RUST_SRCS "${COAST_RUST_DIR}/src/*.rs")
 
+            # ★ CRT 必须与 C++ 侧一致，否则链接期 LNK2038。默认(/MD)时 rust 的
+            #   *-pc-windows-msvc 正好也是动态 CRT，什么都不用做；一旦上面把 Qt 判成静态、
+            #   给 CMake 设了 /MT，就必须同步告诉 rustc —— 这条 CMakeLists 里原本只写了
+            #   一句"谁改了 /MT 记得同步"的注释，现在把它变成代码。
+            #   RUSTFLAGS 参与 cargo 的指纹，改这个值会正常触发重编，不会拿到上一版静态库。
+            set(COAST_RUST_ENV)
+            if(COAST_QT_STATIC AND MSVC)
+                set(COAST_RUST_ENV "RUSTFLAGS=-Ctarget-feature=+crt-static")
+            endif()
+            # ★ 光把 RUSTFLAGS 传进去还不够：改了它之后产物路径不变，CMake 看 OUTPUT 比
+            #   DEPENDS 新就直接跳过这条命令 —— 于是链进去的还是**上一种 CRT** 的静态库。
+            #   这和本文件上面记的"只列了 lib.rs/ffi.rs 导致链旧库"是同一类坑，且更隐蔽
+            #   （那次至少改的是 .rs，这次连源文件都没动）。把配方本身做成一个依赖文件：
+            #   file(GENERATE) 只在内容真变了时才改动 mtime，所以平时不会引起无谓重编。
+            set(COAST_RUST_ENVSTAMP "${CMAKE_CURRENT_BINARY_DIR}/generated/rustflags.stamp")
+            file(GENERATE OUTPUT "${COAST_RUST_ENVSTAMP}" CONTENT "${COAST_RUST_ENV}\n")
+
             # --locked：Cargo.lock 已提交，解析结果逐字节可复现（没有 vendor 依赖源码，
             # 理由见 rust/coaststack/README.md）。
             add_custom_command(
                 OUTPUT "${COAST_RUST_OUT}"
-                COMMAND ${CMAKE_COMMAND} -E env cargo build --release --locked
+                COMMAND ${CMAKE_COMMAND} -E env ${COAST_RUST_ENV} cargo build --release --locked
                         --target ${COAST_RUST_TARGET}
                 WORKING_DIRECTORY "${COAST_RUST_DIR}"
                 DEPENDS "${COAST_RUST_DIR}/Cargo.toml" "${COAST_RUST_DIR}/Cargo.lock"
                         ${COAST_RUST_SRCS}
                         "${COAST_RUST_DIR}/.cargo/config.toml"
+                        "${COAST_RUST_ENVSTAMP}"
                 COMMENT "cargo build coaststack (${COAST_RUST_TARGET})"
                 VERBATIM)
             add_custom_target(coaststack_build DEPENDS "${COAST_RUST_OUT}")
@@ -437,6 +483,59 @@ target_link_libraries(clashauto-qml PRIVATE
 if(Qt6DBus_FOUND)
     target_link_libraries(clashauto-qml PRIVATE Qt6::DBus)
     target_compile_definitions(clashauto-qml PRIVATE COAST_HAVE_DBUS)
+endif()
+
+# ————————————————————————————————————————————————————————————————
+# 「插件到底在不在这个二进制里」的运行期守卫（COAST_STATICDEPS_SELFTEST=1）。
+# **两种 Qt 都编**，不要用 COAST_QT_STATIC 把它关掉：静态构建下它验的是链接期导入，
+# 共享构建下它验的是 windeployqt/macdeployqt/手工拷贝有没有把插件带全 —— 后者本仓库
+# 已经栽过（sqldrivers 漏了两次，只留下 CI 里两行 ::warning::，包照发）。
+target_sources(clashauto-qml PRIVATE
+    src/StaticDepsSelfTest.cpp src/StaticDepsSelfTest.h)
+
+# ————————————————————————————————————————————————————————————————
+# 静态 Qt 的收尾：把插件真的**链进来**，以及把 C/C++ 运行时也收进二进制。
+# ————————————————————————————————————————————————————————————————
+if(COAST_QT_STATIC)
+    # QML 插件。共享构建下引擎是运行期从 qml/ 目录 dlopen 的，静态构建下没有任何东西可 open，
+    # 必须在链接期扫描本 app 的 import 并把对应插件静态库链进去。
+    # 漏掉**不会有编译或链接错误**：运行时 loadFromModule("ClashAuto","Main") 失败，一个空窗口。
+    find_package(Qt6 REQUIRED COMPONENTS QmlImportScanner)
+    qt_import_qml_plugins(clashauto-qml)
+
+    # 非 QML 的插件（imageformats / tls / sqldrivers）由 Qt 的默认插件导入带进来。
+    #
+    # ★ **平台插件是例外，只有"主用的那一个"被默认导入**（Linux=xcb / Windows=windows /
+    #   macOS=cocoa），qoffscreen 不在默认集合里。这一条是实测出来的，不是查文档：
+    #   第一版静态二进制跑 QT_QPA_PLATFORM=offscreen 直接 abort，
+    #   "Available platform plugins are: xcb"。
+    #   而 Linux/macOS CI 的**每一条** headless 自测、以及 validate/ 在干净容器里的检查，
+    #   全都跑在 offscreen 上 —— 少了它就是"本地好好的、CI 上每条自测都起不来"。
+    # ★ 必须用 INCLUDE（追加），不能用 INCLUDE_BY_TYPE（那是**替换**该类型的整份清单）：
+    #   写成 INCLUDE_BY_TYPE platforms Qt6::QOffscreenIntegrationPlugin 会把 xcb 顶掉，
+    #   于是自测全绿而真正的 GUI 起不来 —— 比现在这个失败方式糟得多。
+    if(TARGET Qt6::QOffscreenIntegrationPlugin)
+        qt_import_plugins(clashauto-qml INCLUDE Qt6::QOffscreenIntegrationPlugin)
+    else()
+        message(WARNING "静态 Qt 里没有 qoffscreen 插件 —— headless 自测将无法运行")
+    endif()
+    target_compile_definitions(clashauto-qml PRIVATE COAST_QT_STATIC=1)
+
+    if(MSVC)
+        # CRT 已由文件开头的 CMAKE_MSVC_RUNTIME_LIBRARY=/MT 处理（必须在建目标之前设）。
+    elseif(APPLE)
+        # macOS 的 libc++/libSystem 是系统自带且版本稳定，没有"用户机上缺库"这回事；
+        # 系统框架也只能动态链。所以这一端"静态"就到 Qt 为止。
+    else()
+        # Linux：**glibc 不静态链**。静态 glibc 会让 NSS（getaddrinfo/用户名解析）和
+        # dlopen 悄悄失效，而我们的 TLS 后端正是运行期 dlopen libssl.so.3 —— 换句话说
+        # 静态 glibc 会把 HTTPS 整个弄没，且只报"网络不通"。只收 GCC 的两个运行时，
+        # 它们才是"用户机上没有匹配版本就起不来"的那一类。
+        target_link_options(clashauto-qml PRIVATE -static-libgcc -static-libstdc++)
+        if(MINGW)
+            target_link_options(clashauto-qml PRIVATE -static)  # 连 libwinpthread 一起收进来
+        endif()
+    endif()
 endif()
 
 target_compile_options(clashauto-qml PRIVATE

@@ -28,10 +28,14 @@ docker run --rm -e https_proxy=http://host.docker.internal:7890 -e http_proxy=ht
 | 平台 | 检查 |
 |---|---|
 | **全部** | 资产齐全 + `sha256` 边车校验 |
-| **Windows** | 扁平（`Coast.exe` 在包根、无 `clashauto-c++`/`Clashr-Auto`）、瘦身（**无** `opengl32sw.dll`/`d3dcompiler_47.dll`）、`Qt6Quick.dll` 已部署 |
+| **Windows** | 扁平（`Coast.exe` 在包根、无 `clashauto-c++`/`Clashr-Auto`）、**全静态**：包里一个 `.dll` 都没有、一个子目录都没有（Qt 与 MSVC 运行库全进 exe） |
 | **macOS** | `Coast.app`、`Info.plist` bundle id = `com.yuehongsun.coast`、`MacOS/Coast` + `com.yuehongsun.coast.helper`、无 `Contents/Clashr-Auto`（DMG 用 7z 解，best-effort） |
-| **Linux .deb** | 扁平装到 `/opt/Coast/Coast` + `/usr/bin/coast` + `coast.desktop`、无旧子目录 |
-| **Linux 运行** | 装 `.deb` → `Xvfb` 无头跑 `Coast`（软件后端）：**能启动不崩** + **内嵌配置从 qrc 落地到 `~/.local/share/Coast/config/`**（验证自包含种子 + 只读补权） |
+| **Linux .deb** | 扁平装到 `/opt/coast/coast` + `/usr/bin/coast` + `coast.desktop`、无旧子目录、**无自带 Qt 运行时**（`lib/` `plugins/` `qml/` `qt.conf` 都不该在） |
+| **Linux 运行** | 装 `.deb` → `ldd` 断言**不依赖任何 `libQt6`** → `COAST_STATICDEPS_SELFTEST` 验插件真在二进制里 → `Xvfb` 无头跑两遍（默认 RHI / `QT_QUICK_BACKEND=software`）：**能启动不崩** + **内嵌配置从 qrc 落地到 `~/.local/share/Coast/config/`**（验证自包含种子 + 只读补权） |
+
+> ★ 静态 Qt 之后，「插件在不在」这件事在**干净容器**里验才有意义：开发机上 TLS 后端 / QSQLITE /
+> 图片格式插件多半从别处也能加载到，只有这里能暴露。而它们缺失时**不会崩**，只是订阅拉不到、
+> 上网历史不记、窗口空白 —— 所以专门有 `COAST_STATICDEPS_SELFTEST` 这条断言，退出码即结论。
 
 `COAST_NO_AUTOSTART=1` 跳过「自动下载并启动 mihomo 内核」，只验 UI 启动 + 配置落地。
 

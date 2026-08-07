@@ -1,0 +1,77 @@
+name: Warm static Qt cache
+
+# 「打包全用静态链接库」的前置：aqtinstall 只发共享构建的 Qt，静态版必须自己从源码编。
+# 这个 workflow 把五套配置各编一遍并写进 Actions 缓存，之后 release.yml 每次推送直接复用。
+#
+# 什么时候要手动跑它：
+#   · 抬 Qt 版本之后（缓存键含版本号，旧键不会被命中）
+#   · 改了 .github/actions/qt-static/ 里的配方（键含该目录哈希，同样会换键）
+#   · release.yml 的某个 job 日志里出现 cache-hit=false 且编了一个多小时（说明缓存被淘汰了）
+#
+# 不跑它也不会坏：release.yml 用的是同一个 composite action，没命中就地编，只是那次慢。
+# 定时任务的唯一作用是**续命** —— GitHub 的缓存 7 天不被访问就淘汰，周期性访问能保住它。
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 每周一 03:17 UTC。错开整点，避开 GitHub 的定时任务高峰（整点排队常常几十分钟起）。
+    - cron: '17 3 * * 1'
+
+env:
+  QT_VERSION: 6.8.3
+
+jobs:
+  warm:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    # 一套挂了不该拖累其余四套：五套之间没有任何依赖，各自独立进缓存。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-2022
+          - target: windows-arm64
+            runner: windows-2022
+          - target: linux-x64
+            runner: ubuntu-22.04
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: macos-universal
+            runner: macos-14
+    # 交叉编 Qt 自己 + 通用二进制（等于编两遍）都很慢，默认 360 分钟够用但别更短。
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host Qt (windows-arm64 交叉编译用)
+        # 交叉编 Qt 需要一份**同版本**的宿主 Qt 提供 moc/rcc/qmlcachegen 等工具。
+        # 用 aqt 的共享构建即可 —— 宿主工具是编译期用的，静不静态无所谓。
+        if: matrix.target == 'windows-arm64'
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install aqtinstall
+          for ($i = 1; $i -le 3; $i++) {
+            python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -O C:\Qt
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($i -eq 3) { throw "aqt 三次均失败" }
+            Start-Sleep -Seconds 10
+          }
+          $host_root = Get-ChildItem "C:\Qt\$env:QT_VERSION" -Directory |
+            Where-Object { $_.Name -notlike '*arm64*' -and (Test-Path (Join-Path $_.FullName 'bin\moc.exe')) } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $host_root) { throw "装上的宿主 Qt 里找不到 moc.exe" }
+          "QT_HOST_ROOT=$host_root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build / restore static Qt
+        uses: ./.github/actions/qt-static
+        with:
+          qt-version: ${{ env.QT_VERSION }}
+          target: ${{ matrix.target }}
+          host-qt-path: ${{ matrix.target == 'windows-arm64' && env.QT_HOST_ROOT || '' }}
+          # macOS 的 Qt 本身也必须是通用二进制，否则 app 那侧的 -DCMAKE_OSX_ARCHITECTURES
+          # 会因为链到单架构静态库而失败（本仓库在 brew 的 libcrypto 上正是这么栽的，
+          # CMakeLists 顶部那段注释记着）。部署目标要与 release.yml 的 macos job 一致。
+          extra-cmake: ${{ matrix.target == 'macos-universal' && '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0' || '' }}

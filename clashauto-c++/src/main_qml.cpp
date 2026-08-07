@@ -11,6 +11,7 @@
 #include "CoreController.h"
 #include "DeviceStore.h"
 #include "HistoryStore.h" // 上网历史库（SQLite）
+#include "StaticDepsSelfTest.h" // COAST_STATICDEPS_SELFTEST：插件有没有真被链进/部署进来
 #include "LanScanner.h"   // COAST_SCAN_SELFTEST 的扫描耗时自检
 #include "net/TproxyRules.h" // COAST_TPROXY_SELFTEST 的规则层自测
 #include "net/PfRules.h"
@@ -153,6 +154,12 @@ int main(int argc, char *argv[])
     // 可跑），Linux 侧 .deb 已 Depends libgl1/libopengl0/libegl1（Mesa llvmpipe 软件 GL）。
     // 真遇到起不来的环境，仍可用环境变量退回：QT_QUICK_BACKEND=software（不再被代码覆盖）。
     //
+    // 插件自证（COAST_STATICDEPS_SELFTEST=1）：TLS 后端 / QSQLITE / svg·ico·png / QML 模块
+    // 是不是真的在这个二进制里。静态 Qt 下它们靠链接期导入，漏了**不报任何编译或链接错误**；
+    // 共享 Qt 下则验部署有没有把插件带全。两种构建都要跑，所以不加 #ifdef。
+    // ★ 放在单实例守卫**之前** —— 守卫遇到已有实例会 return 0，和"自测通过"撞车。
+    if (qEnvironmentVariableIsSet("COAST_STATICDEPS_SELFTEST"))
+        return runStaticDepsSelfTest();
 #ifdef COAST_HAVE_RUST_STACK
     // Rust(smoltcp) 数据面的**链接 + ABI 自证**（COAST_RUSTSTACK_SELFTEST=1）。
     // 纯 FFI 往返，不碰网络/不需要 root/毫秒级。存在的意义：Phase 1 的库运行时还没接进
