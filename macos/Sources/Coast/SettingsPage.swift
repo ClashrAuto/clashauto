@@ -1,29 +1,30 @@
 import CoastKit
 import SwiftUI
 
-/// 设置页。**逐元素对齐** `qml/SettingsPage.qml`：顶部 4 个标签（系统 / 过滤 / 区域 / 规则）
+/// 设置页。**逐元素对齐** `qml/SettingsPage.qml`：顶部 3 个标签（系统 / 区域 / 规则）
 /// + 右上「应用」，下面是各标签的内容。
 ///
 /// 这一版把原来那张「一列 section 从上滚到底」的表整个换掉了 —— Qt 是**分标签**的，
-/// 而且系统页是四张分组卡、每行固定 40 高、标签靠左控件靠右。原来那张表既没有标签，
+/// 而且系统页是几张分组卡、每行固定 40 高、标签靠左控件靠右。原来那张表既没有标签，
 /// 也没有卡，控件全是系统原生的（高度随 macOS 版本变，尺寸对不上）。
 ///
 /// 落盘语义也按 Qt 分成两类，不再是「全部等点应用」：
-///   • **开关 / 下拉即时生效**（系统页、界面与语言页里的每一项）；
+///   • **开关 / 下拉即时生效**（系统页里的每一项开关）；
 ///   • **Host / 端口 / 过滤正则等文本输入等「应用」**（改一半的中间值直接生效会打断核心：
 ///     用户把 7890 改成 1080，输到 "108" 时就已经重启过一次核心了）。
-///   Qt 的「应用」按钮也只在系统 / 过滤两个标签上出现，区域 / 规则是改完即生效。
+///   Qt 的「应用」按钮也只在系统标签上出现，区域 / 规则是改完即生效。
 struct SettingsPage: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
 
+    /// 「过滤」原本是独立的第二个标签，现在并进系统页的「节点过滤」卡 —— 它总共就四行，
+    /// 撑不起一个标签页，而那四行本来就属于「节点与订阅」这一类设置。Qt 端同步照做。
     enum Tab: Int, CaseIterable, Identifiable {
-        case system, filter, area, rule
+        case system, area, rule
         var id: Int { rawValue }
         @MainActor var title: String {
             switch self {
             case .system: return "系统".t
-            case .filter: return "过滤".t
             case .area: return "区域".t
             case .rule: return "规则".t
             }
@@ -72,7 +73,6 @@ struct SettingsPage: View {
 
             switch tab {
             case .system: systemTab
-            case .filter: filterTab
             case .area: areaTab
             case .rule: ruleTab
             }
@@ -124,14 +124,14 @@ struct SettingsPage: View {
                 }
                 .buttonStyle(.plain)
                 .glassCapsule()
-                .disabled(!(tab == .system || tab == .filter))
-                .opacity(tab == .system || tab == .filter ? 1 : 0)
+                .disabled(tab != .system)
+                .opacity(tab == .system ? 1 : 0)
             } else {
                 PillButton(title: "应用".t, primary: true, width: 82,
-                           enabled: tab == .system || tab == .filter) {
+                           enabled: tab == .system) {
                     Task { await apply() }
                 }
-                .opacity(tab == .system || tab == .filter ? 1 : 0)
+                .opacity(tab == .system ? 1 : 0)
             }
         }
         .padding(.top, 10)
@@ -181,6 +181,27 @@ struct SettingsPage: View {
                             set: { persist(key: "autoUpdate", int: $0, apply: { $0.autoUpdateMinutes = $1 }) }
                         ), width: 140)
                         Text("分钟".t).font(.system(size: 12)).foregroundStyle(theme.textMuted).lineLimit(1)
+                    }
+                }
+
+                // 原「过滤」标签页的四行。两个开关即时落盘，两条正则是**草稿**、等右上
+                // 「应用」一起写 —— 正则改到一半就生效的话，每敲一个字符都会按半截表达式
+                // 重筛一次节点表（同 Host/端口，见 `apply()`）。
+                SettingCard(symbol: "line.3.horizontal.decrease", title: "节点过滤".t) {
+                    SettingRow(label: "启用允许规则".t) {
+                        ThemedSwitch(isOn: bool(\.allowRuleEnabled, section: "use_rule", key: "allowUse"))
+                    }
+                    CardDivider()
+                    SettingRow(label: "允许规则(正则)".t) {
+                        ThemedEditCombo(text: $allowRule, options: allowPresets, width: 300)
+                    }
+                    CardDivider()
+                    SettingRow(label: "启用排除规则".t) {
+                        ThemedSwitch(isOn: bool(\.noAllowRuleEnabled, section: "use_rule", key: "noallowUse"))
+                    }
+                    CardDivider()
+                    SettingRow(label: "排除规则(正则)".t) {
+                        ThemedEditCombo(text: $noAllowRule, options: noAllowPresets, width: 300)
                     }
                 }
 
@@ -281,45 +302,7 @@ struct SettingsPage: View {
         }
     }
 
-    // MARK: TAB 1 过滤
-
-    private var filterTab: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 0) {
-                rowLabel("启用允许规则".t)
-                ThemedSwitch(isOn: bool(\.allowRuleEnabled, section: "use_rule", key: "allowUse"))
-                Spacer(minLength: 0)
-            }
-            HStack(spacing: 0) {
-                rowLabel("允许规则(正则)".t)
-                ThemedEditCombo(text: $allowRule, options: allowPresets)
-                Spacer(minLength: 0)
-            }
-            HStack(spacing: 0) {
-                rowLabel("启用排除规则".t)
-                ThemedSwitch(isOn: bool(\.noAllowRuleEnabled, section: "use_rule", key: "noallowUse"))
-                Spacer(minLength: 0)
-            }
-            HStack(spacing: 0) {
-                rowLabel("排除规则(正则)".t)
-                ThemedEditCombo(text: $noAllowRule, options: noAllowPresets)
-                Spacer(minLength: 0)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.trailing, 10)
-        .padding(.leading, pageLeadingInset)
-        .padding(.bottom, 10)
-    }
-
-    private func rowLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 13))
-            .foregroundStyle(theme.textSecondary)
-            .frame(width: 150, alignment: .leading)
-    }
-
-    // MARK: TAB 2 区域
+    // MARK: TAB 1 区域
 
     private var areaTab: some View {
         VStack(spacing: 8) {
@@ -360,7 +343,7 @@ struct SettingsPage: View {
         }
     }
 
-    // MARK: TAB 3 规则
+    // MARK: TAB 2 规则
 
     private var ruleTab: some View {
         VStack(spacing: 8) {

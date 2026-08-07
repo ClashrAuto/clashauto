@@ -4,9 +4,12 @@ import QtQuick.Controls.Basic
 import QtQuick.Layouts
 import ClashAuto
 
-// 设置页：TabBar(系统/过滤/区域/规则) + 表单，复刻 Widgets buildSettingsPage()。
-// 后端经 context 属性 `settings`（SettingsController）。系统/过滤 tab 由右上「应用」按钮整表落盘；
+// 设置页：TabBar(系统/区域/规则) + 表单，复刻 Widgets buildSettingsPage()。
+// 后端经 context 属性 `settings`（SettingsController）。系统 tab 由右上「应用」按钮整表落盘；
 // 区域/规则 tab 是可编辑表（增/改/删），改动即时重建配置。样式全部走 Theme 令牌（深/浅）。
+//
+// 「过滤」原本是独立的第二个标签，现在并进系统 tab 的「节点过滤」卡 —— 它总共就四行，
+// 撑不起一个标签页，而那四行本来就属于「节点与订阅」这一类设置。
 Item {
     id: page
 
@@ -74,12 +77,6 @@ Item {
         implicitHeight: 1
         color: Theme.divider
         opacity: 0.6
-    }
-
-    component RowLabel: Label {
-        Layout.preferredWidth: 150
-        color: Theme.textSecondary
-        font.pixelSize: 13
     }
 
     // 主题化开关
@@ -334,7 +331,6 @@ Item {
                     background: Rectangle { color: "transparent" }
 
                     SettingTab { text: qsTr("系统") }
-                    SettingTab { text: qsTr("过滤") }
                     SettingTab { text: qsTr("区域") }
                     SettingTab { text: qsTr("规则") }
                 }
@@ -345,7 +341,7 @@ Item {
                     implicitWidth: 82
                     // 区域/规则 tab 无「应用」：透明占位而非隐藏（visible:false 会被布局移除，
                     // TabBar 随之变宽导致切 tab 时布局跳动）
-                    readonly property bool active: tabs.currentIndex === 0 || tabs.currentIndex === 1
+                    readonly property bool active: tabs.currentIndex === 0
                     opacity: active ? 1 : 0
                     enabled: active
                     onClicked: {
@@ -447,6 +443,36 @@ Item {
                                     value: settings.autoUpdateMinutes
                                     onValueModified: settings.setAutoUpdateMinutes(value) }
                                 Label { text: qsTr("分钟"); color: Theme.textMuted; font.pixelSize: 12 } }
+                        }
+
+                        // 原「过滤」标签页的四行。两个开关和两条正则都是**草稿**，
+                        // 等右上「应用」一起落盘 —— 正则改到一半就生效的话，每敲一个字符
+                        // 都会按半截表达式重筛一次节点表（同 Host/端口，见顶栏那颗按钮）。
+                        SettingCard {
+                            icon: "\uED27"
+                            title: qsTr("节点过滤")
+
+                            SettingRow { label: qsTr("启用允许规则")
+                                ThemedSwitch { id: allowSwitch; checked: settings.allowRuleEnabled } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("允许规则(正则)")
+                                ThemedEditCombo {
+                                    id: allowCombo
+                                    implicitWidth: 300
+                                    model: settings.allowRulePresets
+                                    editText: settings.allowRule
+                                } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("启用排除规则")
+                                ThemedSwitch { id: blockSwitch; checked: settings.noAllowRuleEnabled } }
+                            CardDivider {}
+                            SettingRow { label: qsTr("排除规则(正则)")
+                                ThemedEditCombo {
+                                    id: blockCombo
+                                    implicitWidth: 300
+                                    model: settings.noAllowRulePresets
+                                    editText: settings.noAllowRule
+                                } }
                         }
 
                         SettingCard {
@@ -581,44 +607,7 @@ Item {
                     }
                 }
 
-                // ============================ TAB 1：过滤（内容左右内缩 10、距底 10）============================
-                Item {
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 10
-                        anchors.rightMargin: 10
-                        anchors.bottomMargin: 10
-                        spacing: 10
-
-                        RowLayout {
-                            RowLabel { text: qsTr("启用允许规则") }
-                            ThemedSwitch { id: allowSwitch; checked: settings.allowRuleEnabled }
-                        }
-                        RowLayout {
-                            RowLabel { text: qsTr("允许规则(正则)") }
-                            ThemedEditCombo {
-                                id: allowCombo
-                                model: settings.allowRulePresets
-                                editText: settings.allowRule
-                            }
-                        }
-                        RowLayout {
-                            RowLabel { text: qsTr("启用排除规则") }
-                            ThemedSwitch { id: blockSwitch; checked: settings.noAllowRuleEnabled }
-                        }
-                        RowLayout {
-                            RowLabel { text: qsTr("排除规则(正则)") }
-                            ThemedEditCombo {
-                                id: blockCombo
-                                model: settings.noAllowRulePresets
-                                editText: settings.noAllowRule
-                            }
-                        }
-                        Item { Layout.fillHeight: true }
-                    }
-                }
-
-                // ============================ TAB 2：区域 ============================
+                // ============================ TAB 1：区域 ============================
                 ColumnLayout {
                     spacing: 8
 
@@ -683,7 +672,7 @@ Item {
                     }
                 }
 
-                // ============================ TAB 3：规则 ============================
+                // ============================ TAB 2：规则 ============================
                 ColumnLayout {
                     spacing: 8
 
