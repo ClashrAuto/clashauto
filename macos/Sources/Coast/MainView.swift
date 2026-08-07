@@ -96,10 +96,10 @@ struct MainView: View {
             versionRow
                 .padding(.bottom, 5)
         }
-        // 与右边的主内容列同样**越过标题栏安全区**、顶到窗顶（顶距 0）。不越过的话系统会先
-        // 塞进一个 50 的安全区（空 toolbar 把标题栏抬到了那个高度），侧栏起点被推到 50 开外，
-        // 而主内容列是 0 —— 两列起跑线对不上，侧栏看着像整块沉下去。
-        .ignoresSafeArea(.container, edges: .top)
+        // ★ 侧栏**留在顶部安全区里**（不加 `ignoresSafeArea`）：起点落在标题栏那条带子
+        //   下面（空 toolbar 把它抬到了 50），logo 因此不会钻到红绿灯底下。
+        //   右边的主内容列是越过安全区的（见 `body`）—— 两列本来就该不一样：
+        //   那一列顶上是各页自己的顶栏，与红绿灯同处一条带子；这一列顶上是 logo。
     }
 
     private var logo: some View {
