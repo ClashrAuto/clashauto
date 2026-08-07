@@ -395,46 +395,26 @@ struct PillButton: View {
     }
 }
 
-/// 设置页顶部的标签按钮：84×32、14px，选中时文字转品牌色并在底部画一条 2px 的条。
+/// 设置页顶部的标签按钮：按钮组里的一段（玻璃由**外层的组**统一上，见 SettingsPage.header）。
+/// 配色全交给系统：文字 primary/secondary，选中底衬用系统 tint。
 struct SettingTab: View {
-    @Environment(Theme.self) private var theme
     let title: String
     let isCurrent: Bool
     let action: () -> Void
 
     var body: some View {
-        if #available(macOS 26.0, *) {
-            // 26：按钮组里的一段（玻璃由**外层的组**统一上，见 SettingsPage.header）。
-            // 配色全交给系统：文字 primary/secondary，选中底衬用系统 tint。
-            Button(action: action) {
-                Text(title)
-                    .font(.system(size: 13))
-                    .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(width: 84, height: 28)
-                    .background {
-                        if isCurrent { Capsule().fill(.tint.opacity(0.35)) }
-                    }
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        } else {
-            Button(action: action) {
-                Text(title)
-                    .font(.system(size: 14))
-                    .foregroundStyle(isCurrent ? theme.accent : theme.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(width: 84, height: 32)
-                    .overlay(alignment: .bottom) {
-                        Rectangle()
-                            .fill(isCurrent ? theme.accent : .clear)
-                            .frame(height: 2)
-                    }
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 84, height: 28)
+                .background {
+                    if isCurrent { Capsule().fill(.tint.opacity(0.35)) }
+                }
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 }

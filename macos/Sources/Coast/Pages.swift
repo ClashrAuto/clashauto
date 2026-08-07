@@ -84,20 +84,18 @@ struct StatusPage: View {
             }
             // 页面内距对齐 Qt：左/上/下 10，**右边不留** —— 滚动条要贴页面右缘，
             // 而不是悬在离边 10 的空中；内容列自己收窄 10 补回来。
-            // （26 上左缘贴边：pageLeadingInset = 0。）
+            // （左缘贴边：pageLeadingInset = 0。）
             .padding(.leading, pageLeadingInset)
             .padding(.vertical, 10)
             .padding(.trailing, 10)
         }
-        // 状态页没有顶栏。26 上其他页的顶栏都经 `pageHeaderBar` 抬成了顶部导航条，
+        // 状态页没有顶栏。其他页的顶栏都经 `pageHeaderBar` 抬成了顶部导航条，
         // 这里放一条**不可见** bar 顶替：没有它，滚动内容在顶边就是硬截断
         // （全透明 Color.clear 会被当成没有 bar，见 MainView 页脚旁的注释）。
-        .pageHeaderBar(spacing: 0) {
-            if #available(macOS 26.0, *) {
-                Color.black.opacity(0.001)
-                    .frame(height: 24)
-                    .allowsHitTesting(false)
-            }
+        .pageHeaderBar {
+            Color.black.opacity(0.001)
+                .frame(height: 24)
+                .allowsHitTesting(false)
         }
     }
 }
@@ -133,7 +131,7 @@ struct NodesPage: View {
             //   滚动区跟着内缩，**滚动条就悬在离窗缘 10 的空中**，与状态页对不齐
             //   （状态页一直是把内距加在滚动内容上的，见 `StatusPage.body`）。
             //   内容的右内距不变，变的只是滚动条落点：贴住窗口右缘。
-            .pageHeaderBar(spacing: 8) { topBar }
+            .pageHeaderBar { topBar }
     }
 
     /// 顶栏固定 30 高（搜索框 28，展开时不撑高整行）、间距 6 —— 与 Qt 逐项一致。
@@ -180,7 +178,6 @@ struct NodesPage: View {
                 } else {
                     Button { searchShown = true } label: {
                         Image(systemName: "magnifyingglass").font(.system(size: 16))
-                            .legacyTint(theme.textMuted)
                     }
                     .buttonStyle(.plain)
                     .topBarGlass()
@@ -196,7 +193,6 @@ struct NodesPage: View {
                     CASpinner(active: state.clash.speedTesting, scheme: theme.dark ? .dark : .light) {
                         Text("\u{F064}") // refresh-line
                             .font(.custom(IconFont.remix, size: 15))
-                            .legacyTint(theme.accent)
                     }
                 }
                 .buttonStyle(.plain)
@@ -212,7 +208,6 @@ struct NodesPage: View {
                 } label: {
                     Image(systemName: "questionmark.circle.fill")
                         .font(.system(size: 18))
-                        .legacyTint(theme.textMuted)
                 }
                 .buttonStyle(.plain)
                 .topBarGlass()
@@ -256,7 +251,7 @@ struct NodesPage: View {
                 //   `contentMargins(.horizontal, 0)` 都清不掉它 —— 而这一页的左右内距
                 //   要能自己说了算（左 0、右 10，见 `body`）。LazyVStack 一样是按需构建行。
                 //
-                // ★ 滚动区**直达窗底**，一点内距都不能加在它外面：26 上页脚是
+                // ★ 滚动区**直达窗底**，一点内距都不能加在它外面：页脚是
                 //   `safeAreaBar`，列表要从它底下穿过去再由系统边缘效果渐隐。
                 //   外面垫 10 的话，列表在离页脚 10 的地方被自己的边界**硬切**一刀
                 //   （截图里最后一行被拦腰截断，下面是一条空带）。收尾的留白改成
@@ -392,7 +387,6 @@ struct NodeRow: View {
 /// 只有 tail 那条能回灌，而让两条路径行为不一致比空几秒更难解释。
 struct LogsPage: View {
     @Environment(AppState.self) private var state
-    @Environment(Theme.self) private var theme
 
     /// 0 = 主日志，1 = Clash 内核。与 QML 的 `TabBar.currentIndex` 同义。
     @State private var tab = 0
@@ -401,19 +395,14 @@ struct LogsPage: View {
         LogTimeline(entries: tab == 0 ? state.logs : state.coreLogs)
             // ★ 右边那 10 加在**滚动内容里**（见 `LogTimeline`），不加在这里 ——
             //   加在这里整个滚动区跟着内缩，滚动条就悬在离窗缘 10 的空中，与状态页对不齐。
-            .pageHeaderBar(spacing: 8) {
+            .pageHeaderBar {
                 HStack(spacing: 6) {
-                    if #available(macOS 26.0, *) {
-                        // 26：两个标签并成一颗连体玻璃按钮组（设置页同款）。
-                        HStack(spacing: 0) {
-                            LogTab(title: "主日志".t, isCurrent: tab == 0) { tab = 0 }
-                            LogTab(title: "Clash 内核".t, isCurrent: tab == 1) { tab = 1 }
-                        }
-                        .glassCapsule()
-                    } else {
+                    // 两个标签并成一颗连体玻璃按钮组（设置页同款）。
+                    HStack(spacing: 0) {
                         LogTab(title: "主日志".t, isCurrent: tab == 0) { tab = 0 }
                         LogTab(title: "Clash 内核".t, isCurrent: tab == 1) { tab = 1 }
                     }
+                    .glassCapsule()
                     Spacer(minLength: 0)
                 }
                 .padding(.top, 10)
@@ -431,54 +420,25 @@ struct LogsPage: View {
 /// 日志页的标签按钮。对齐 QML 里那个 `component LogTab: TabButton`：
 /// 选中态是「卡底 + 强调色文字 + 底部一条 2px 强调条」，未选中悬停给一层浅底。
 private struct LogTab: View {
-    @Environment(Theme.self) private var theme
     let title: String
     let isCurrent: Bool
     let action: () -> Void
 
-    @State private var hovering = false
-
     var body: some View {
-        if #available(macOS 26.0, *) {
-            // 26：按钮组里的一段（玻璃由外层的组统一上，见 LogsPage）。
-            // 配色全交给系统：文字 primary/secondary，选中底衬用系统 tint。
-            Button(action: action) {
-                Text(title)
-                    .font(.system(size: 13))
-                    .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                    .padding(.horizontal, 16)
-                    .frame(height: 28)
-                    .background {
-                        if isCurrent { Capsule().fill(.tint.opacity(0.35)) }
-                    }
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        } else {
-            Button(action: action) {
-                Text(title)
-                    .font(.system(size: 13))
-                    .foregroundStyle(isCurrent ? theme.accentStrong : theme.textSecondary)
-                    .padding(.horizontal, 16)
-                    .frame(height: 30)
-                    .background {
-                        RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
-                            .fill(isCurrent ? theme.card : (hovering ? theme.hover : .clear))
-                    }
-                    // 底部强调条：QML 里宽度是 `parent.width - 20`，即左右各让 10。
-                    .overlay(alignment: .bottom) {
-                        if isCurrent {
-                            RoundedRectangle(cornerRadius: 1, style: .continuous)
-                                .fill(theme.accent)
-                                .frame(height: 2)
-                                .padding(.horizontal, 10)
-                        }
-                    }
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
+        // 按钮组里的一段（玻璃由外层的组统一上，见 LogsPage）。
+        // 配色全交给系统：文字 primary/secondary，选中底衬用系统 tint。
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13))
+                .foregroundStyle(isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .padding(.horizontal, 16)
+                .frame(height: 28)
+                .background {
+                    if isCurrent { Capsule().fill(.tint.opacity(0.35)) }
+                }
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 }
 

@@ -74,25 +74,23 @@ struct WindowConfigurator: NSViewRepresentable {
         // 窗口边缘会糊在桌面上，看不出这是一个独立的窗。
         window.hasShadow = true
 
-        if #available(macOS 26.0, *) {
-            // 26：标题栏加高到与页面顶栏同高。做法是挂一个**空的** NSToolbar ——
-            // 这是把标题栏抬到统一工具栏高度、让红绿灯在其中垂直居中的受支持写法；
-            // transparent 保证不画任何工具栏底。
-            window.titlebarAppearsTransparent = true
-            guard unifiesTitleBar else { return }
-            if window.toolbar == nil {
-                let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
-                toolbar.showsBaselineSeparator = false
-                window.toolbar = toolbar
-            }
-            window.toolbarStyle = .unified
-            // ★ 每次都按当前状态摆正，而不是只在通知里翻。通知是「转场开始/结束」的
-            //   一次性事件，漏一次（或者被转场本身覆盖掉）带子就回不来了 ——
-            //   实测退出全屏后标题栏停在标准 28，而我们的顶栏还是 50，红绿灯中心 14、
-            //   顶栏中心 24，差 10 明显错位。`configure` 每轮布局都跑，能自愈。
-            window.toolbar?.isVisible = !window.styleMask.contains(.fullScreen)
-            observeFullScreen(window, coordinator)
+        // 标题栏加高到与页面顶栏同高。做法是挂一个**空的** NSToolbar ——
+        // 这是把标题栏抬到统一工具栏高度、让红绿灯在其中垂直居中的受支持写法；
+        // transparent 保证不画任何工具栏底。
+        window.titlebarAppearsTransparent = true
+        guard unifiesTitleBar else { return }
+        if window.toolbar == nil {
+            let toolbar = NSToolbar(identifier: "coast.titlebar.spacer")
+            toolbar.showsBaselineSeparator = false
+            window.toolbar = toolbar
         }
+        window.toolbarStyle = .unified
+        // ★ 每次都按当前状态摆正，而不是只在通知里翻。通知是「转场开始/结束」的
+        //   一次性事件，漏一次（或者被转场本身覆盖掉）带子就回不来了 ——
+        //   实测退出全屏后标题栏停在标准 28，而我们的顶栏还是 50，红绿灯中心 14、
+        //   顶栏中心 24，差 10 明显错位。`configure` 每轮布局都跑，能自愈。
+        window.toolbar?.isVisible = !window.styleMask.contains(.fullScreen)
+        observeFullScreen(window, coordinator)
     }
 
     /// ★ **不收起的话全屏后窗口顶上是一条纯白的空带**。窗口模式下这个 toolbar 是空的没关系
@@ -105,7 +103,6 @@ struct WindowConfigurator: NSViewRepresentable {
     ///   也正是全屏该有的样子（那 50 本来就是为了让红绿灯有地方待，全屏没有红绿灯）。
     /// ★ 收的时机用 `willEnter`（转场前就藏掉，全屏动画里不会闪一下白带），
     ///   放的时机必须用 **`didExit`** —— `willExit` 太早，转场过程本身会把它又摁回去。
-    @available(macOS 26.0, *)
     private func observeFullScreen(_ window: NSWindow, _ coordinator: Coordinator) {
         guard coordinator.tokens.isEmpty else { return }
         let center = NotificationCenter.default
@@ -196,44 +193,36 @@ extension View {
     }
 }
 
-/// 液态玻璃按钮样式（macOS 26+），旧系统自动回落。
-///
-/// Apple 在 macOS 26 把控件外观整体换成了 Liquid Glass；`.buttonStyle(.glass)` 是官方入口。
-/// 这里包一层是因为工程的部署目标是 macOS 14 —— 直接写 `.glass` 会编译失败，
-/// 而用 `#available` 分支又要在每个调用点重复一遍。
+/// 液态玻璃按钮样式。`.buttonStyle(.glass)` 是 Liquid Glass 的官方入口，
+/// 这里包一层只是为了把「胶囊形」这个约定收在一处。
 struct GlassButtonModifier: ViewModifier {
     var prominent = false
     /// 圆形（给只有一个图标的按钮用，比如「结束下载」那颗 ✕）。默认是胶囊。
     var circle = false
 
     func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            // 全圆角（胶囊）。Liquid Glass 的默认形状是圆角矩形，
-            // 而胶囊才是这套材质在系统各处的常见形态 —— 玻璃的高光沿着连续曲率走，
-            // 直角处会把高光切断，看起来像贴了一层膜而不是一块玻璃。
-            Group {
-                if prominent {
-                    content.buttonStyle(.glassProminent)
-                } else {
-                    content.buttonStyle(.glass)
-                }
+        // 全圆角（胶囊）。Liquid Glass 的默认形状是圆角矩形，
+        // 而胶囊才是这套材质在系统各处的常见形态 —— 玻璃的高光沿着连续曲率走，
+        // 直角处会把高光切断，看起来像贴了一层膜而不是一块玻璃。
+        Group {
+            if prominent {
+                content.buttonStyle(.glassProminent)
+            } else {
+                content.buttonStyle(.glass)
             }
-            .buttonBorderShape(circle ? .circle : .capsule)
-        } else {
-            // 旧系统回落到 bordered —— 观感最接近，也不会显得突兀。
-            content.buttonStyle(.bordered).buttonBorderShape(circle ? .circle : .capsule)
         }
+        .buttonBorderShape(circle ? .circle : .capsule)
     }
 }
 
 extension View {
-    /// 液态玻璃按钮；macOS 26 以下回落 `.bordered`。
+    /// 液态玻璃按钮。
     func glassButton(prominent: Bool = false, circle: Bool = false) -> some View {
         modifier(GlassButtonModifier(prominent: prominent, circle: circle))
     }
 }
 
-/// 一组互相融合的液态玻璃按钮（macOS 26+；旧系统回落成普通胶囊按钮）。
+/// 一组互相融合的液态玻璃按钮。
 ///
 /// `GlassEffectContainer` 会让**间距小于 spacing** 的相邻玻璃互相融合、连成一片 ——
 /// 这正是「一组、三选一」与「三颗各自独立的按钮」的区别所在：不靠高亮去暗示，
@@ -243,11 +232,7 @@ struct GlassGroup<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: spacing) {
-                HStack(spacing: spacing) { content() }
-            }
-        } else {
+        GlassEffectContainer(spacing: spacing) {
             HStack(spacing: spacing) { content() }
         }
     }
@@ -257,42 +242,17 @@ extension View {
     /// 给单个视图上液态玻璃（胶囊形）。`tinted` 时带主题色 —— 用来标出组里的当前项。
     @ViewBuilder
     func glassCapsule(tinted: Color? = nil) -> some View {
-        if #available(macOS 26.0, *) {
-            if let tinted {
-                glassEffect(.regular.tint(tinted), in: .capsule)
-            } else {
-                glassEffect(.regular, in: .capsule)
-            }
+        if let tinted {
+            glassEffect(.regular.tint(tinted), in: .capsule)
         } else {
-            // 旧系统：手画一个近似的胶囊底，形状一致、只是没有玻璃折射。
-            background(Capsule().fill(tinted ?? Color.gray.opacity(0.25)))
-        }
-    }
-}
-
-extension View {
-    /// 26 上用系统默认前景色（玻璃按钮的配色交给系统）；26 以下沿用传入的
-    /// 旧配色（Qt 对齐的那套灰/蓝）。
-    @ViewBuilder
-    func legacyTint(_ color: Color) -> some View {
-        if #available(macOS 26.0, *) {
-            self
-        } else {
-            foregroundStyle(color)
+            glassEffect(.regular, in: .capsule)
         }
     }
 
-    /// 顶栏图标钮的液态玻璃底：26 上定尺寸 + 系统 glassEffect 胶囊；
-    /// 26 以下**什么都不加** —— 玻璃是 26 的设计语言，旧系统保持 Qt 的裸图标。
-    /// （区别于 `glassCapsule`：那个在旧系统会手画一个灰胶囊底。）
-    @ViewBuilder
+    /// 顶栏图标钮的液态玻璃底：定尺寸 + 系统 glassEffect 胶囊。
     func topBarGlass(size: CGFloat = 28, tinted: Color? = nil) -> some View {
-        if #available(macOS 26.0, *) {
-            frame(width: size, height: size)
-                .glassCapsule(tinted: tinted)
-        } else {
-            self
-        }
+        frame(width: size, height: size)
+            .glassCapsule(tinted: tinted)
     }
 }
 

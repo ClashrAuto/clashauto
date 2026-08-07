@@ -2,55 +2,26 @@ import SwiftUI
 
 /// 内容卡：浮在毛玻璃上的不透明圆角面。对齐 `qml/Card.qml`。
 struct Card<Content: View>: View {
-    @Environment(Theme.self) private var theme
     @ViewBuilder var content: Content
 
     var body: some View {
-        if #available(macOS 26.0, *) {
-            // macOS 26：整窗都是玻璃、主内容不垫底（见 MainView），残留一块面板的
-            // 只剩日志时间线和关于页 —— 一并去掉，内容直接浮在玻璃上；
-            // 里面的滚动列表自然接上页面顶栏/页脚的系统边缘渐隐。
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // 内容卡半透：整窗玻璃的关键一层。
-                //
-                // 原来是实底 `theme.card`，于是只有侧栏和页脚透、中间一大块是死的 ——
-                // 「整个窗口的毛玻璃」其实只做了个边。这里压到 0.55 而不是全透：
-                // 全透的话卡片上的正文会直接压在桌面壁纸上，深色壁纸尚可，
-                // 亮色壁纸下小字基本读不了。
-                .background(theme.card.opacity(0.55))
-                .clipShape(RoundedRectangle(cornerRadius: theme.radius, style: .continuous))
-        }
+        // 整窗都是玻璃、主内容不垫底（见 MainView），残留一块面板的只剩日志时间线和
+        // 关于页 —— 一并去掉，内容直接浮在玻璃上；里面的滚动列表自然接上页面顶栏/页脚
+        // 的系统边缘渐隐。
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-/// 26 上主内容（中间那一片）左缘**贴住侧栏边**（0）；26 以下保留 Qt 的 10。
+/// 主内容（中间那一片）左缘**贴住侧栏边**。
 /// 页脚不适用 —— 它保留右侧 5 的列边距（见 MainView）。
-var pageLeadingInset: CGFloat {
-    if #available(macOS 26.0, *) { 0 } else { 10 }
-}
+let pageLeadingInset: CGFloat = 0
 
 extension View {
-    /// 页面顶栏的挂载方式。
-    ///
-    /// macOS 26：顶栏抬成钉在**最顶部**的系统导航栏（`safeAreaBar(edge: .top)`）——
-    /// 滚动内容从它底下穿过，由系统 scroll edge effect 渐隐（与 MainView 的页脚
-    /// 同一机制）；26 以下：按原布局插回内容列顶部（与 Qt 一致），观感不变。
-    /// `spacing` 只作用于 26 以下那条路径（= 原来 VStack 的行距）。
-    @ViewBuilder
-    func pageHeaderBar<Header: View>(spacing: CGFloat = 8,
-                                     @ViewBuilder header: () -> Header) -> some View {
-        if #available(macOS 26.0, *) {
-            safeAreaBar(edge: .top, spacing: 0) { header() }
-        } else {
-            VStack(spacing: spacing) {
-                header()
-                self
-            }
-        }
+    /// 页面顶栏的挂载方式：抬成钉在**最顶部**的系统导航栏（`safeAreaBar(edge: .top)`）——
+    /// 滚动内容从它底下穿过，由系统 scroll edge effect 渐隐（与 MainView 的页脚同一机制）。
+    func pageHeaderBar<Header: View>(@ViewBuilder header: () -> Header) -> some View {
+        safeAreaBar(edge: .top, spacing: 0) { header() }
     }
 }
 
@@ -92,24 +63,10 @@ struct NavButton: View {
             }
             .frame(height: 40)
             .background {
-                let fill = isCurrent ? theme.card : (hovering ? theme.hover : .clear)
-                if #available(macOS 26.0, *) {
-                    // macOS 26 上主内容**没有卡**（页面直接浮在玻璃上，见 MainView），
-                    // 「右侧直角贴卡」的理由不存在了 —— 高亮就是一颗独立的圆角块，
-                    // 四角都圆。
-                    RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
-                        .fill(fill)
-                } else {
-                    // 右侧直角、只有左侧圆角：Qt 用「多铺一个圆角再让内容卡盖住」实现同一
-                    // 效果，但 mac 的内容卡是半透明的（0.55），压不住 —— 负内距伸进去的
-                    // 那条会透出来，看着就是高亮块越进了内容区。改成本来就不越界的不对称圆角。
-                    UnevenRoundedRectangle(topLeadingRadius: theme.radius,
-                                           bottomLeadingRadius: theme.radius,
-                                           bottomTrailingRadius: 0,
-                                           topTrailingRadius: 0,
-                                           style: .continuous)
-                        .fill(fill)
-                }
+                // 主内容**没有卡**（页面直接浮在玻璃上，见 MainView），Qt 那个
+                // 「右侧直角贴卡」的理由不存在了 —— 高亮就是一颗独立的圆角块，四角都圆。
+                RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
+                    .fill(isCurrent ? theme.card : (hovering ? theme.hover : .clear))
             }
             .contentShape(Rectangle())
         }

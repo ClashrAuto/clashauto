@@ -23,40 +23,26 @@ struct MainView: View {
             sidebar
                 .frame(width: theme.sidebarWidth)
 
-            if #available(macOS 26.0, *) {
-                // macOS 26（Liquid Glass）：主内容**不再是一块带底的卡**，改用系统应用
-                // 的条形层级 —— 页脚是 `safeAreaBar` 压在滚动区之上，各页自己的顶栏
-                // 经 `pageHeaderBar` 抬成钉在最顶部的导航栏（无顶栏的状态页放一条
-                // 不可见 bar）；页面里的 ScrollView 把内容滚进这些条**底下**，
-                // 系统 scroll edge effect（`.soft`）把穿过去的内容渐进淡出。
-                //
-                // ★ 必须是 `safeAreaBar` 而不是 `safeAreaInset`：只有 bar 会让其内的
-                //   滚动视图自动挂上边缘效果 —— 用 inset 时内容照样从页脚底下穿过，
-                //   但没有任何淡出，footer 的字直接叠在内容的字上（实测截图看得一清二楚）。
-                page
-                    .safeAreaBar(edge: .bottom, spacing: 0) {
-                        // 页脚成了「底部条」：内容从它底下穿过，本体仍旧透玻璃。
-                        // 右侧留 7（列边距 5 再收 2）—— 只给页脚，
-                        // **中间的主内容**占满整个内容区宽度，不跟着让。
-                        footer.frame(height: theme.footerHeight)
-                            .padding(.trailing, theme.inset + 2)
-                    }
-                    .scrollEdgeEffectStyle(.soft, for: .all)
-                    // 主内容列**越过标题栏安全区**、顶到窗顶（距离 0）——
-                    // 红绿灯在左边压着侧栏，各页顶部导航栏与它同一条带。
-                    .ignoresSafeArea(.container, edges: .top)
-            } else {
-                VStack(spacing: 0) {
-                    Card { page }
-                        .padding(.top, theme.inset)
-                        .padding(.trailing, theme.inset)
-                    footer
-                        .frame(height: theme.footerHeight)
-                        // 页脚右侧同样让出 5（它和内容卡在同一列里，Qt 那边这 5 是加在整列上的）。
-                        // 左侧**不留内距** —— Qt 的注释写着「底部状态栏左侧内容贴左对齐」。
-                        .padding(.trailing, theme.inset)
+            // 主内容**不是一块带底的卡**，走系统应用的条形层级 —— 页脚是 `safeAreaBar`
+            // 压在滚动区之上，各页自己的顶栏经 `pageHeaderBar` 抬成钉在最顶部的导航栏
+            //（无顶栏的状态页放一条不可见 bar）；页面里的 ScrollView 把内容滚进这些条
+            // **底下**，系统 scroll edge effect（`.soft`）把穿过去的内容渐进淡出。
+            //
+            // ★ 必须是 `safeAreaBar` 而不是 `safeAreaInset`：只有 bar 会让其内的
+            //   滚动视图自动挂上边缘效果 —— 用 inset 时内容照样从页脚底下穿过，
+            //   但没有任何淡出，footer 的字直接叠在内容的字上（实测截图看得一清二楚）。
+            page
+                .safeAreaBar(edge: .bottom, spacing: 0) {
+                    // 页脚成了「底部条」：内容从它底下穿过，本体仍旧透玻璃。
+                    // 右侧留 7（列边距 5 再收 2）—— 只给页脚，
+                    // **中间的主内容**占满整个内容区宽度，不跟着让。
+                    footer.frame(height: theme.footerHeight)
+                        .padding(.trailing, theme.inset + 2)
                 }
-            }
+                .scrollEdgeEffectStyle(.soft, for: .all)
+                // 主内容列**越过标题栏安全区**、顶到窗顶（距离 0）——
+                // 红绿灯在左边压着侧栏，各页顶部导航栏与它同一条带。
+                .ignoresSafeArea(.container, edges: .top)
         }
         // mac 上窗体本身透明、露出毛玻璃（见 CoastApp 的 .windowGlass(.sidebar)）
         .background(.clear)
@@ -73,15 +59,9 @@ struct MainView: View {
 
     // MARK: 侧栏
 
-    /// 26 上导航项右侧的留白（与左侧 20 对称）；26 以下贴内容卡、不留。
-    private var navTrailingInset: CGFloat {
-        if #available(macOS 26.0, *) { 20 } else { 0 }
-    }
-
-    /// 侧栏整列的顶距：Qt 是 16；26 上标题栏加高后减 10。
-    private var sidebarTopInset: CGFloat {
-        if #available(macOS 26.0, *) { 6 } else { 16 }
-    }
+    /// 导航项右侧的留白，与左侧 20 对称 —— 高亮是四角全圆的独立胶囊（见 `NavButton`），
+    /// 两侧等距才像悬浮的一颗。
+    private let navTrailingInset: CGFloat = 20
 
     /// `Page` → ⌘数字。顺序与侧栏一致（`Page.allCases`）。
     private func shortcutKey(for page: AppState.Page) -> KeyEquivalent {
@@ -108,8 +88,6 @@ struct MainView: View {
                 // 窗口控制按钮），没有快捷键就没法在脚本里切页。
                 .keyboardShortcut(shortcutKey(for: page), modifiers: .command)
                 .padding(.leading, 20)
-                // 26：右侧留和左侧一样的 20 —— 高亮是四角全圆的独立胶囊（见
-                // NavButton），两侧等距才像悬浮的一颗；26 以下右缘要贴内容卡，不留。
                 .padding(.trailing, navTrailingInset)
                 .padding(.top, page == .status ? 0 : 5)
             }
@@ -118,8 +96,10 @@ struct MainView: View {
             versionRow
                 .padding(.bottom, 5)
         }
-        // 26：logo 顶距在 Qt 的 16 基础上减 10（标题栏加高后原值显得空）。
-        .padding(.top, sidebarTopInset)
+        // 与右边的主内容列同样**越过标题栏安全区**、顶到窗顶（顶距 0）。不越过的话系统会先
+        // 塞进一个 50 的安全区（空 toolbar 把标题栏抬到了那个高度），侧栏起点被推到 50 开外，
+        // 而主内容列是 0 —— 两列起跑线对不上，侧栏看着像整块沉下去。
+        .ignoresSafeArea(.container, edges: .top)
     }
 
     private var logo: some View {

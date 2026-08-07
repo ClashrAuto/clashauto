@@ -151,9 +151,9 @@ struct DevicesPage: View {
         //   整个滚动区跟着内缩，滚动条就悬在离窗缘 10 的空中，与状态页对不齐。
         //   行的几何不变（照旧右让 10），变的只是滚动条落点：贴住窗口右缘。
         // 安全告警横幅在**最上面**（Qt 的顺序：告警 → 概览条 → 列表）——
-        // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。26 上它和概览条
+        // 有人正在冒充网关时，那条「已接管 N 台」远没它要紧。它和概览条
         // 一起进顶部导航栏（告警钉着不随滚动走，只会更醒目）。
-        .pageHeaderBar(spacing: 10) {
+        .pageHeaderBar {
             VStack(spacing: 10) {
                 securityBanner
                 header
@@ -201,7 +201,7 @@ struct DevicesPage: View {
             searchControls
         }
         // 右内距在这一行自己补（设备列表仍铺到页面最右缘，滚动条贴窗口右侧）。
-        // 26 上左缘贴边（pageLeadingInset = 0）。
+        // 左缘贴边（pageLeadingInset = 0）。
         .padding(.leading, pageLeadingInset)
         .padding(.trailing, 10)
         .padding(.top, 10)
@@ -212,44 +212,29 @@ struct DevicesPage: View {
 
     /// 搜索 + 仅在线 + 重扫。
     ///
-    /// 26：整组放进 `GlassEffectContainer`，搜索钮和展开的搜索框共享同一个
+    /// 整组放进 `GlassEffectContainer`，搜索钮和展开的搜索框共享同一个
     /// `glassEffectID` —— 点击时是**同一块玻璃**从按钮形态向左拉伸成输入框
     /// （系统 Liquid Glass 形变），输入框本身也是玻璃，没有「藏按钮、换控件」。
-    /// 26 以下：按钮/输入框互换 + 平面输入底（旧系统没有这套形变）。
-    @ViewBuilder
     private var searchControls: some View {
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 2) {
-                HStack(spacing: 6) {
-                    Group {
-                        if searchShown {
-                            glassSearchField
-                                .glassEffect(.regular, in: .capsule)
-                                .glassEffectID("search", in: searchNS)
-                        } else {
-                            glassSearchButton
-                                .glassEffect(.regular, in: .capsule)
-                                .glassEffectID("search", in: searchNS)
-                        }
-                    }
-                    glassScanGroup
-                }
-            }
-        } else {
+        GlassEffectContainer(spacing: 2) {
             HStack(spacing: 6) {
-                if searchShown {
-                    legacySearchField
-                } else {
-                    SquareToggle(symbol: "magnifyingglass", on: false) {
-                        withAnimation(.snappy(duration: 0.22)) { searchShown = true }
+                Group {
+                    if searchShown {
+                        glassSearchField
+                            .glassEffect(.regular, in: .capsule)
+                            .glassEffectID("search", in: searchNS)
+                    } else {
+                        glassSearchButton
+                            .glassEffect(.regular, in: .capsule)
+                            .glassEffectID("search", in: searchNS)
                     }
                 }
-                scanToggles
+                glassScanGroup
             }
         }
     }
 
-    /// 26：玻璃胶囊里的搜索框（220×28），✕ 清空并收回按钮形态。
+    /// 玻璃胶囊里的搜索框（220×28），✕ 清空并收回按钮形态。
     private var glassSearchField: some View {
         ZStack(alignment: .trailing) {
             TextField("搜索设备 / IP / 厂商".t, text: $search)
@@ -270,7 +255,7 @@ struct DevicesPage: View {
         .frame(width: 220, height: 28)
     }
 
-    /// 26：收起态的放大镜钮（28×28，与旁边一组同尺寸）。图标用系统默认前景色。
+    /// 收起态的放大镜钮（28×28，与旁边一组同尺寸）。图标用系统默认前景色。
     private var glassSearchButton: some View {
         Button {
             withAnimation(.snappy(duration: 0.28)) { searchShown = true }
@@ -282,7 +267,7 @@ struct DevicesPage: View {
         .buttonStyle(.plain)
     }
 
-    /// 26：「仅在线 + 重扫」连体液态玻璃按钮组 —— 两段共一层玻璃、只有外侧是圆的
+    /// 「仅在线 + 重扫」连体液态玻璃按钮组 —— 两段共一层玻璃、只有外侧是圆的
     /// （页脚模式组同款画法），「仅在线」开启时段内衬品牌色。图标用系统默认前景色。
     private var glassScanGroup: some View {
         HStack(spacing: 0) {
@@ -314,46 +299,6 @@ struct DevicesPage: View {
             .help("重新扫描".t)
         }
         .glassCapsule()
-    }
-
-    /// 26 以下的平面搜索框（220×28，inputBg + 描边）。
-    private var legacySearchField: some View {
-        ZStack(alignment: .trailing) {
-            TextField("搜索设备 / IP / 厂商".t, text: $search)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .foregroundStyle(theme.textPrimary)
-                .padding(.leading, 8)
-                .padding(.trailing, 24)
-                .frame(width: 220, height: 28)
-                .background {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous).fill(theme.inputBg)
-                }
-                .overlay {
-                    RoundedRectangle(cornerRadius: 3, style: .continuous)
-                        .stroke(theme.inputBorder, lineWidth: 1)
-                }
-            Button {
-                search = ""
-                withAnimation(.snappy(duration: 0.22)) { searchShown = false }
-            } label: {
-                Image(systemName: "xmark").font(.system(size: 14))
-                    .foregroundStyle(theme.textMuted)
-            }
-            .buttonStyle(.plain)
-            .padding(.trailing, 7)
-        }
-    }
-
-    /// 「仅在线」圆点 + 重扫，两个分支共用。
-    @ViewBuilder
-    private var scanToggles: some View {
-        SquareToggle(symbol: "circle.fill", on: onlineOnly) { onlineOnly.toggle() }
-        SquareToggle(symbol: "arrow.clockwise", remixGlyph: "\u{F064}",
-                     on: false, accent: true, spinning: scanning) {
-            Task { await state.rescanDevices() }
-        }
-        .disabled(scanning)
     }
 
     /// 选中并打开详情窗。窗口已经开着时只是换内容（`selectedDevice` 一变它就跟着重画）。
@@ -921,68 +866,6 @@ struct SmallSwitch: View {
         .animation(.easeInOut(duration: 0.12), value: isOn)
         .contentShape(Rectangle())
         .onTapGesture(perform: action)
-    }
-}
-
-/// 搜索行右侧那两颗 28×28 的方钮（仅在线 / 重扫）。
-struct SquareToggle: View {
-    @Environment(Theme.self) private var theme
-    let symbol: String
-    /// 走 remixicon 字体的码点，给了就**优先于** `symbol` —— 刷新钮要与
-    /// 状态页延迟卡用同一枚 refresh-line 字形。
-    var remixGlyph: String?
-    let on: Bool
-    var accent = false
-    var spinning = false
-    let action: () -> Void
-
-    @State private var hovering = false
-
-    /// 图标本体（remix 字形优先，否则 SF），两个版本分支共用。
-    private var icon: some View {
-        Group {
-            if let remixGlyph {
-                Text(remixGlyph).font(.custom(IconFont.remix, size: accent ? 15 : 12))
-            } else {
-                Image(systemName: symbol).font(.system(size: accent ? 15 : 12))
-            }
-        }
-        .rotationEffect(.degrees(spinning ? 360 : 0))
-        .animation(spinning ? .linear(duration: 0.9).repeatForever(autoreverses: false)
-                   : .default, value: spinning)
-        .frame(width: 28, height: 28)
-    }
-
-    var body: some View {
-        if #available(macOS 26.0, *) {
-            // 26：液态玻璃圆钮，开启态是品牌色 tint 的玻璃（不再手画方角底+描边）。
-            Button(action: action) {
-                icon
-                    // 开启底衬在玻璃**里面**（glassEffect 的 .tint 实测发白看不出来）。
-                    .background {
-                        if on { Capsule().fill(theme.accent.opacity(0.8)) }
-                    }
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .glassCapsule()
-        } else {
-            Button(action: action) {
-                icon
-                    .foregroundStyle(on ? .white : (accent ? theme.accent : theme.textMuted))
-                    .background {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(on ? theme.accent : (hovering ? theme.hover : theme.inputBg))
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .stroke(on ? theme.accent : theme.inputBorder, lineWidth: 1)
-                    }
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
-        }
     }
 }
 

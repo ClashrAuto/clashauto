@@ -87,7 +87,7 @@ struct SubscriptionsPage: View {
                     .padding(.bottom, 6)
             }
         }
-        .pageHeaderBar(spacing: 8) { toolbar }
+        .pageHeaderBar { toolbar }
         .task { reload() }
         .sheet(item: $editing) { draft in
             SubscriptionEditor(draft: draft) { saved in apply(saved) }
@@ -121,19 +121,19 @@ struct SubscriptionsPage: View {
                 .padding(.bottom, 3)
             Spacer(minLength: 0)
 
-            TextBtn(label: "添加订阅".t, glyph: RemixGlyph.plus, primary: false) {
+            TextBtn(label: "添加订阅".t, glyph: RemixGlyph.plus) {
                 editing = EditingSubscription()
             }
             // 「应用」= 拿当前订阅重建一次配置。Qt 有这颗按钮，Swift 侧一直没有 ——
             // 用户手改过 subscribe.yaml 或想强制重来时没有任何入口。
-            TextBtn(label: "应用".t, glyph: RemixGlyph.check, primary: false) {
+            TextBtn(label: "应用".t, glyph: RemixGlyph.check) {
                 Task {
                     message = "正在应用…".t
                     await state.controller.rebuildConfig()
                     message = "已应用".t
                 }
             }
-            TextBtn(label: "更新全部".t, glyph: RemixGlyph.refresh, primary: true) {
+            TextBtn(label: "更新全部".t, glyph: RemixGlyph.refresh) {
                 Task { await updateAll() }
             }
             .disabled(busy || summaries.isEmpty)
@@ -314,58 +314,33 @@ struct CircleBtn: View {
     }
 }
 
-/// 文字按钮（可带前置图标）：高 30、半径 `Theme.radius`、最小宽 84。
+/// 文字按钮（可带前置图标）：液态玻璃胶囊、最小高 28。
 /// 前置图标是 15 号 Remix 字形（对齐 Qt 的 `TextBtn`）。
+///
+/// 没有 `primary` 这一档：主/次在 Liquid Glass 里不靠底色区分，配色整体交给系统。
 struct TextBtn: View {
-    @Environment(Theme.self) private var theme
     let label: String
     /// Remix 码点（见 `RemixGlyph`），不是 SF Symbol 名。
     var glyph: String?
-    var primary = true
     let action: () -> Void
 
-    @State private var hovering = false
-
     var body: some View {
-        if #available(macOS 26.0, *) {
-            // 26：液态玻璃胶囊按钮，配色交给系统（默认前景色、无自定义底）——
-            // 顶栏统一系统语言，主/次按钮不再靠底色区分。
-            Button(action: action) {
-                HStack(spacing: 6) {
-                    if let glyph {
-                        Text(glyph).font(.custom(IconFont.remix, size: 15))
-                    }
-                    Text(label).font(.system(size: 13))
+        // 液态玻璃胶囊按钮，配色交给系统（默认前景色、无自定义底）——
+        // 顶栏统一系统语言，主/次按钮不靠底色区分。
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let glyph {
+                    Text(glyph).font(.custom(IconFont.remix, size: 15))
                 }
-                .fixedSize()
-                .padding(.horizontal, 12)
-                .frame(minHeight: 28)
-                .contentShape(Capsule())
+                Text(label).font(.system(size: 13))
             }
-            .buttonStyle(.plain)
-            .glassCapsule()
-        } else {
-            Button(action: action) {
-                HStack(spacing: 6) {
-                    if let glyph {
-                        Text(glyph).font(.custom(IconFont.remix, size: 15))
-                    }
-                    Text(label).font(.system(size: 13))
-                }
-                .foregroundStyle(primary ? .white : theme.textSecondary)
-                .fixedSize()
-                .padding(.horizontal, 12)
-                .frame(minWidth: 84, minHeight: 30)
-                .background {
-                    RoundedRectangle(cornerRadius: theme.radius, style: .continuous)
-                        .fill(primary ? (hovering ? theme.accentStrong : theme.accent)
-                              : (hovering ? theme.hover : theme.metricBg))
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .onHover { hovering = $0 }
+            .fixedSize()
+            .padding(.horizontal, 12)
+            .frame(minHeight: 28)
+            .contentShape(Capsule())
         }
+        .buttonStyle(.plain)
+        .glassCapsule()
     }
 }
 
@@ -426,8 +401,8 @@ private struct SubscriptionEditor: View {
 
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
-                TextBtn(label: "取消".t, primary: false) { dismiss() }
-                TextBtn(label: "保存".t, primary: true) { save() }
+                TextBtn(label: "取消".t) { dismiss() }
+                TextBtn(label: "保存".t) { save() }
             }
             .padding(.top, 4)
             .padding(.bottom, 14)
@@ -483,7 +458,7 @@ private struct DeleteConfirmSheet: View {
 
             HStack(spacing: 8) {
                 Spacer(minLength: 0)
-                TextBtn(label: "取消".t, primary: false) { dismiss() }
+                TextBtn(label: "取消".t) { dismiss() }
                 Button {
                     onConfirm()
                     dismiss()
@@ -557,10 +532,10 @@ private struct SubscriptionNodesSheet: View {
             }
 
             HStack(spacing: 8) {
-                TextBtn(label: "全选".t, primary: false) { setAll(true) }
-                TextBtn(label: "全不选".t, primary: false) { setAll(false) }
+                TextBtn(label: "全选".t) { setAll(true) }
+                TextBtn(label: "全不选".t) { setAll(false) }
                 Spacer(minLength: 0)
-                TextBtn(label: "关闭".t, primary: true) { dismiss() }
+                TextBtn(label: "关闭".t) { dismiss() }
             }
             .padding(.bottom, 12)
         }

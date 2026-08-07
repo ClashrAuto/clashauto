@@ -23,8 +23,6 @@ final class HelperService: NSObject, CoastHelperProtocol, NSXPCListenerDelegate 
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         // ★ 这道校验是本 helper 唯一的门。少了它，任何本机进程都能驱动一个 root 服务。
-        //   macOS 13+ 才有；更早的系统上我们干脆拒绝连接，而不是降级放行。
-        guard #available(macOS 13.0, *) else { return false }
         connection.setCodeSigningRequirement(HelperConstants.clientCodeRequirement)
 
         connection.exportedInterface = NSXPCInterface(with: CoastHelperProtocol.self)

@@ -94,7 +94,7 @@ struct SettingsPage: View {
             case .rule: ruleTab
             }
         }
-        .pageHeaderBar(spacing: 8) { header }
+        .pageHeaderBar { header }
         .task { reload() }
         .sheet(item: $editingRule) { draft in
             RuleEditorSheet(draft: draft) { saved in save(rule: saved) }
@@ -110,46 +110,32 @@ struct SettingsPage: View {
 
     private var header: some View {
         HStack(spacing: 4) {
-            if #available(macOS 26.0, *) {
-                // 26：左侧标签并成**一颗连体玻璃按钮组**（设备页 ●⟳ 同款）——
-                // 段与段紧挨、共一层玻璃，选中段由段内的系统 tint 底衬表达。
-                HStack(spacing: 0) {
-                    ForEach(Tab.allCases) { item in
-                        SettingTab(title: item.title, isCurrent: tab == item) { tab = item }
-                    }
-                }
-                .glassCapsule()
-            } else {
+            // 左侧标签并成**一颗连体玻璃按钮组**（设备页 ●⟳ 同款）——
+            // 段与段紧挨、共一层玻璃，选中段由段内的系统 tint 底衬表达。
+            HStack(spacing: 0) {
                 ForEach(Tab.allCases) { item in
                     SettingTab(title: item.title, isCurrent: tab == item) { tab = item }
                 }
             }
+            .glassCapsule()
             Spacer(minLength: 0)
 
             // 区域 / 规则页没有「应用」。QML 用的是**透明占位**而不是隐藏 ——
             // 隐藏会让它被布局移除、标签栏随之变宽，切标签时整条顶栏跳一下。
-            if #available(macOS 26.0, *) {
-                // 26：中性液态玻璃按钮，配色交给系统（无自定义底色）。
-                Button {
-                    Task { await apply() }
-                } label: {
-                    Text("应用".t)
-                        .font(.system(size: 13))
-                        .lineLimit(1)
-                        .frame(width: 66, height: 28)
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .glassCapsule()
-                .disabled(tab != .system)
-                .opacity(tab == .system ? 1 : 0)
-            } else {
-                PillButton(title: "应用".t, primary: true, width: 82,
-                           enabled: tab == .system) {
-                    Task { await apply() }
-                }
-                .opacity(tab == .system ? 1 : 0)
+            // 中性液态玻璃按钮，配色交给系统（无自定义底色）。
+            Button {
+                Task { await apply() }
+            } label: {
+                Text("应用".t)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .frame(width: 66, height: 28)
+                    .contentShape(Capsule())
             }
+            .buttonStyle(.plain)
+            .glassCapsule()
+            .disabled(tab != .system)
+            .opacity(tab == .system ? 1 : 0)
         }
         .padding(.top, 10)
         .padding(.trailing, 10)

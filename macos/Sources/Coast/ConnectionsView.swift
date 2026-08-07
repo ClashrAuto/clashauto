@@ -6,10 +6,9 @@ import SwiftUI
 /// Online(N)/Offline(N) 两个独立开关 + 搜索、卡片列表（● 圆点 + `[type] host` +
 /// 进程/出口链/下载/上传四枚徽标 + ✕ 删除 + 右键「添加规则」）。
 ///
-/// **观感则按 mac 来，不照抄 Qt 的画法**（26 起）：顶栏钉进标题栏那条带子、
-/// 分段与搜索是液态玻璃、整窗透玻璃、行是浮在上面的材质卡片。Qt 那套
-/// 「蓝灰实色方块 + Search 前缀标签 + 1px 竖线」是 web 时代的样子，在 mac 上很扎眼。
-/// 26 以下没有这套材质，仍走原来的 Qt 画法（见各处的 `legacy*`）。
+/// **观感则按 mac 来，不照抄 Qt 的画法**：顶栏钉进标题栏那条带子、分段与搜索是液态玻璃、
+/// 整窗透玻璃、行是浮在上面的材质卡片。Qt 那套「蓝灰实色方块 + Search 前缀标签 + 1px 竖线」
+/// 是 web 时代的样子，在 mac 上很扎眼。
 ///
 /// **独立顶层窗**，与 Qt 一致（720×480，最小 480×320）。做成 sheet 的话主窗被拖到
 /// 最小宽（640）时它会横向溢出 —— 实测左边的「Online (0)」被切掉半截。
@@ -29,13 +28,10 @@ struct ConnectionsView: View {
     /// 本窗是否在全屏。两处要用：全屏不显示标题，以及顶部安全区要不要越过（见 `content`）。
     @State private var isFullScreen = false
 
-    /// 顶栏控件高度：分段按钮与搜索框一致。26 以下沿用 Qt 的 26。
-    ///
-    /// 26 上是 **24**：带子高 50（见 `bandHeight`），控件在里面垂直居中。
-    /// 早先那版是带子 54 + 顶栏另占 44，480 高的窗顶上先去掉 98 —— 现在这两条合成一条。
-    private var toolbarHeight: CGFloat {
-        if #available(macOS 26.0, *) { 24 } else { 26 }
-    }
+    /// 顶栏控件高度：分段按钮与搜索框一致。带子高 50（见 `bandHeight`），
+    /// 控件在里面垂直居中。早先那版是带子 54 + 顶栏另占 44，480 高的窗顶上先去掉 98 ——
+    /// 现在这两条合成一条。
+    private let toolbarHeight: CGFloat = 24
 
     private var rows: [ConnectionLedger.Entry] {
         state.connectionLedger.filtered(online: showOnline, offline: showOffline, query: query)
@@ -65,61 +61,47 @@ struct ConnectionsView: View {
         (note.object as? NSWindow)?.identifier?.rawValue == ConnectionsWindowID.value
     }
 
-    @ViewBuilder
     private var content: some View {
-        if #available(macOS 26.0, *) {
-            // 26：顶栏钉进标题栏那条带子（`safeAreaBar` + 整列越过顶部安全区），
-            // 列表从它底下穿过、由系统 scroll edge effect 渐隐。
-            //
-            // ★ 顶栏**必须右对齐**。带子是 macOS 唯一的拖动区，早先那版从左边排起、
-            //   把整条占满，结果**窗口拖不动了**（附属窗没有主窗那个
-            //   `isMovableByWindowBackground`，见 `WindowRestore`，只能靠系统窗口菜单挪）。
-            //   靠右之后左半条是空的：红绿灯 + 一段留白，按住那儿就能拖 ——
-            //   系统自带的窗口也都是这么排的。
-            //
-            // ★ 带子抬到 `Self.bandHeight`（空 toolbar，`unifiesTitleBar: true`）——
-            //   红绿灯由系统在这条带子里垂直居中，顶栏给同样的定高、内容也居中，
-            //   两边就在一条水平线上。
-            //   全屏时系统把标题栏整个收走，安全区归零，这一条也就跟着没了 ——
-            //   顶栏直接顶到屏幕上沿，不留空带。
-            Group {
-                if isFullScreen {
-                    // ★ 全屏走**竖排**，不用 `safeAreaBar`。
-                    //
-                    //   全屏时 `safeAreaBar` 给滚动区留的内距对不上顶栏的实高：顶栏占
-                    //   0…50，而首行卡片的顶边实测落在 **29** —— 上面 21 整个钻到顶栏
-                    //   底下去了（窗口模式下是正好 50，没问题）。追这个内距是在跟
-                    //   SwiftUI 的安全区算术较劲，而全屏本来就没有标题栏要盖 ——
-                    //   顶栏和列表直接上下排就行，位置是确定的。
-                    //   代价只是全屏时列表不再从顶栏底下穿过渐隐。
-                    VStack(spacing: 0) {
-                        header
-                        list
-                    }
-                } else {
+        // 顶栏钉进标题栏那条带子（`safeAreaBar` + 整列越过顶部安全区），
+        // 列表从它底下穿过、由系统 scroll edge effect 渐隐。
+        //
+        // ★ 顶栏**必须右对齐**。带子是 macOS 唯一的拖动区，早先那版从左边排起、
+        //   把整条占满，结果**窗口拖不动了**（附属窗没有主窗那个
+        //   `isMovableByWindowBackground`，见 `WindowRestore`，只能靠系统窗口菜单挪）。
+        //   靠右之后左半条是空的：红绿灯 + 一段留白，按住那儿就能拖 ——
+        //   系统自带的窗口也都是这么排的。
+        //
+        // ★ 带子抬到 `Self.bandHeight`（空 toolbar，`unifiesTitleBar: true`）——
+        //   红绿灯由系统在这条带子里垂直居中，顶栏给同样的定高、内容也居中，
+        //   两边就在一条水平线上。
+        //   全屏时系统把标题栏整个收走，安全区归零，这一条也就跟着没了 ——
+        //   顶栏直接顶到屏幕上沿，不留空带。
+        Group {
+            if isFullScreen {
+                // ★ 全屏走**竖排**，不用 `safeAreaBar`。
+                //
+                //   全屏时 `safeAreaBar` 给滚动区留的内距对不上顶栏的实高：顶栏占
+                //   0…50，而首行卡片的顶边实测落在 **29** —— 上面 21 整个钻到顶栏
+                //   底下去了（窗口模式下是正好 50，没问题）。追这个内距是在跟
+                //   SwiftUI 的安全区算术较劲，而全屏本来就没有标题栏要盖 ——
+                //   顶栏和列表直接上下排就行，位置是确定的。
+                //   代价只是全屏时列表不再从顶栏底下穿过渐隐。
+                VStack(spacing: 0) {
+                    header
                     list
-                        .safeAreaBar(edge: .top, spacing: 0) { header }
-                        .ignoresSafeArea(.container, edges: .top)
                 }
-            }
-            .scrollEdgeEffectStyle(.soft, for: .all)
-            // 附属窗默认进不了全屏，得自己把 collectionBehavior 换成 primary。
-            .allowsFullScreen()
-            // 整窗玻璃，和主窗同一层材质；行自带一层 `.regularMaterial`（见 `row`），
-            // 两层材质叠出「卡片浮在玻璃上」的分层。
-            .windowGlass(.sidebar)
-        } else {
-            VStack(spacing: 5) {
-                HStack(spacing: 10) {
-                    segmentedToggles
-                    legacySearchBox
-                }
-                .padding(.top, 5)
-                .padding(.horizontal, 5)
+            } else {
                 list
+                    .safeAreaBar(edge: .top, spacing: 0) { header }
+                    .ignoresSafeArea(.container, edges: .top)
             }
-            .background(theme.card)
         }
+        .scrollEdgeEffectStyle(.soft, for: .all)
+        // 附属窗默认进不了全屏，得自己把 collectionBehavior 换成 primary。
+        .allowsFullScreen()
+        // 整窗玻璃，和主窗同一层材质；行自带一层 `.regularMaterial`（见 `row`），
+        // 两层材质叠出「卡片浮在玻璃上」的分层。
+        .windowGlass(.sidebar)
     }
 
     // MARK: 顶栏
@@ -163,34 +145,28 @@ struct ConnectionsView: View {
     private static let titleLeadingInset: CGFloat = 78 + 12
 
     /// Online / Offline 两个筛选开关。两段各自独立（可以同时开），不是二选一。
-    @ViewBuilder
     private var segmentedToggles: some View {
-        if #available(macOS 26.0, *) {
-            // **一颗玻璃胶囊，里面两个按钮**：`glassCapsule()` 罩整组，段自己什么底都不画。
-            //
-            // ★ 开/关只用**文字颜色**表达，不加底色。玻璃本身就是这一组的形，再往里塞
-            //   一块色底等于在玻璃上贴纸 —— 折射、高光全被那块不透明的底盖掉，
-            //   液态玻璃的质感就没了。关态压到 `.secondary`（浅一档），开态 `.primary`。
-            //
-            // ★ 也别再试 `.buttonStyle(.glass)`（不管外面套 `GlassEffectContainer` 还是
-            //   `ControlGroup`）：那个样式**每颗自己画一个胶囊**，谁也拼不到一起，
-            //   渲染出来永远是「中间带缝的两颗独立胶囊」。两条都走过了。
-            //
-            //   两段各是独立开关（可以同时开、也可以同时关），不是三选一。
-            HStack(spacing: 0) {
-                filterSegment(title: "Online (\(state.connectionLedger.onlineCount))",
-                              on: showOnline) { showOnline.toggle() }
-                filterSegment(title: "Offline (\(state.connectionLedger.offlineCount))",
-                              on: showOffline) { showOffline.toggle() }
-            }
-            .glassCapsule()
-        } else {
-            legacySegmentedToggles
+        // **一颗玻璃胶囊，里面两个按钮**：`glassCapsule()` 罩整组，段自己什么底都不画。
+        //
+        // ★ 开/关只用**文字颜色**表达，不加底色。玻璃本身就是这一组的形，再往里塞
+        //   一块色底等于在玻璃上贴纸 —— 折射、高光全被那块不透明的底盖掉，
+        //   液态玻璃的质感就没了。关态压到 `.secondary`（浅一档），开态 `.primary`。
+        //
+        // ★ 也别再试 `.buttonStyle(.glass)`（不管外面套 `GlassEffectContainer` 还是
+        //   `ControlGroup`）：那个样式**每颗自己画一个胶囊**，谁也拼不到一起，
+        //   渲染出来永远是「中间带缝的两颗独立胶囊」。两条都走过了。
+        //
+        //   两段各是独立开关（可以同时开、也可以同时关），不是三选一。
+        HStack(spacing: 0) {
+            filterSegment(title: "Online (\(state.connectionLedger.onlineCount))",
+                          on: showOnline) { showOnline.toggle() }
+            filterSegment(title: "Offline (\(state.connectionLedger.offlineCount))",
+                          on: showOffline) { showOffline.toggle() }
         }
+        .glassCapsule()
     }
 
     /// 组里的一段：只有文字，开态 `.primary`、关态 `.secondary`。
-    @available(macOS 26.0, *)
     private func filterSegment(title: String, on: Bool,
                                action: @escaping () -> Void) -> some View {
         Button(action: action) {
@@ -205,75 +181,31 @@ struct ConnectionsView: View {
         .buttonStyle(.plain)
     }
 
-    /// 26 以下沿用 Qt 的画法：离线段左端**塞到在线段底下 3px**，中间无缝、只外侧圆角。
-    ///
-    /// ★ 用 `HStack(spacing: -3)` 让两段**自己量自己**，不要去算文字宽度。
-    ///   先前的写法是用 `NSString.size(withAttributes:)` 量一遍再把和式写死给 `ZStack`，
-    ///   结果量出来比 SwiftUI 实际排版**偏窄** —— 截图上「Offline (0)」的计数被裁掉了，
-    ///   只剩「Offline」。负间距 + `zIndex` 就能同时拿到「重叠 3px」和「在线段盖在上面」，
-    ///   一个数都不用量。
-    private var legacySegmentedToggles: some View {
-        HStack(spacing: -3) {
-            segment(title: "Online (\(state.connectionLedger.onlineCount))",
-                    on: showOnline, extraWidth: 24)
-                .zIndex(1)                       // 在上：盖住离线段的左端圆角
-                .onTapGesture { showOnline.toggle() }
-
-            segment(title: "Offline (\(state.connectionLedger.offlineCount))",
-                    on: showOffline, extraWidth: 27)
-                .zIndex(0)
-                .onTapGesture { showOffline.toggle() }
-        }
-        .fixedSize()
-    }
-
-    /// 一段的样子。开 = 品牌蓝，关 = 灰；两个颜色都是 QML 里的字面量，不走主题令牌
-    /// （那边也是写死的）。
-    private func segment(title: String, on: Bool, extraWidth: CGFloat) -> some View {
-        Text(title)
-            .font(.system(size: 12))
-            .foregroundStyle(.white)
-            .fixedSize()
-            .padding(.horizontal, extraWidth / 2)
-            .frame(height: toolbarHeight)
-            .background {
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                    .fill(on ? Color(hex: 0x48_98_F8) : Color(hex: 0x90_93_99))
-            }
-            .contentShape(Rectangle())
-    }
-
     /// 搜索：默认只有一颗放大镜钮，点开才拉成 200 宽的输入框。
     ///
-    /// 26 上钮和输入框共享同一个 `glassEffectID` —— 点击时是**同一块玻璃**从钮的形状
+    /// 钮和输入框共享同一个 `glassEffectID` —— 点击时是**同一块玻璃**从钮的形状
     /// 拉长成输入框（系统 Liquid Glass 形变），不是「藏一个、显另一个」。
     /// 设备页、节点页是同一套做法。
     ///
     /// 为什么不常驻一个输入框：这条带子左半边要留给拖动（见 `content`），
     /// 常驻一个 200 的框会把可拖区挤没。
-    @ViewBuilder
     private var searchControls: some View {
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 2) {
-                Group {
-                    if searchShown {
-                        glassSearchField
-                            .glassEffect(.regular, in: .capsule)
-                            .glassEffectID("search", in: searchNS)
-                    } else {
-                        glassSearchButton
-                            .glassEffect(.regular, in: .capsule)
-                            .glassEffectID("search", in: searchNS)
-                    }
+        GlassEffectContainer(spacing: 2) {
+            Group {
+                if searchShown {
+                    glassSearchField
+                        .glassEffect(.regular, in: .capsule)
+                        .glassEffectID("search", in: searchNS)
+                } else {
+                    glassSearchButton
+                        .glassEffect(.regular, in: .capsule)
+                        .glassEffectID("search", in: searchNS)
                 }
             }
-        } else {
-            legacySearchBox
         }
     }
 
     /// 展开态：200 宽的输入框，右侧 ✕ 清空并收回钮形态。
-    @available(macOS 26.0, *)
     private var glassSearchField: some View {
         ZStack(alignment: .trailing) {
             TextField("Search", text: $query)   // i18n-ignore: 与 Qt 一致保留英文
@@ -295,7 +227,6 @@ struct ConnectionsView: View {
     }
 
     /// 收起态：一颗与分段同高的放大镜钮。
-    @available(macOS 26.0, *)
     private var glassSearchButton: some View {
         Button {
             withAnimation(.snappy(duration: 0.28)) { searchShown = true }
@@ -307,39 +238,9 @@ struct ConnectionsView: View {
         .buttonStyle(.plain)
     }
 
-    /// Search：整块圆角，左侧「Search」前缀标签 + 一条 1px 竖线 + 输入框。
-    private var legacySearchBox: some View {
-        HStack(spacing: 0) {
-            Text("Search")
-                .font(.system(size: 12))
-                .foregroundStyle(theme.dark ? .white : Color(hex: 0x33_33_33))
-                .padding(.horizontal, 10)
-                .frame(maxHeight: .infinity)
-
-            Rectangle()
-                .fill(theme.dark ? Color(hex: 0x33_33_33) : Color(hex: 0xCC_CC_CC))
-                .frame(width: 1)
-
-            TextField("", text: $query)
-                .textFieldStyle(.plain)
-                .font(.system(size: 12))
-                .foregroundStyle(theme.dark ? .white : Color(hex: 0x33_33_33))
-                .padding(.leading, 8)
-        }
-        .frame(height: toolbarHeight)
-        .background {
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .fill(theme.dark ? Color(hex: 0x44_44_44) : Color(hex: 0xEA_EA_EA))
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 3, style: .continuous)
-                .stroke(theme.dark ? Color(hex: 0x33_33_33) : Color(hex: 0xCC_CC_CC), lineWidth: 1)
-        }
-    }
-
     // MARK: 列表
 
-    /// ★ 内距全部加在**滚动内容**上，不加在 `ScrollView` 外面：26 上顶栏是
+    /// ★ 内距全部加在**滚动内容**上，不加在 `ScrollView` 外面：顶栏是
     ///   `safeAreaBar`，列表要从它底下穿过去再由系统边缘效果渐隐。外面垫一圈的话，
     ///   列表会在离顶栏还有一段的地方被自己的边界硬切一刀（节点页踩过同一个坑）。
     private var list: some View {
@@ -400,15 +301,10 @@ struct ConnectionsView: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 42)
-        // 26：行浮在整窗玻璃上，得自己有一层材质才立得住 —— Qt 那个 `#eeeeee`
+        // 行浮在整窗玻璃上，得自己有一层材质才立得住 —— Qt 那个 `#eeeeee`
         // 压在浅色玻璃上几乎看不见（实测：行和背景糊成一片，只剩几枚徽标在飘）。
-        // 26 以下窗口本来就是实底卡片色，沿用 Qt 的两个字面量。
         .background {
-            if #available(macOS 26.0, *) {
-                RoundedRectangle(cornerRadius: 5, style: .continuous).fill(.regularMaterial)
-            } else {
-                (theme.dark ? Color(hex: 0x22_22_22) : Color(hex: 0xEE_EE_EE))
-            }
+            RoundedRectangle(cornerRadius: 5, style: .continuous).fill(.regularMaterial)
         }
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         // 右键：拿本行的东西预填一条规则，再交给编辑器（类型/出口都还能改）。
