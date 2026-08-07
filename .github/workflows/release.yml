@@ -304,8 +304,20 @@ jobs:
                            'COAST_BUNDLEDCORE_SELFTEST')) {
             Set-Item "Env:\$t" '1'
             $out = Join-Path $env:RUNNER_TEMP "$t.out"
-            $p = Start-Process -FilePath $exe -Wait -PassThru -NoNewWindow -RedirectStandardOutput $out
+            # ★★ 用 WaitForExit(30000) 而不是 -Wait：钩子一旦没被注册（比如被裹进某个平台
+            #   专属的 #ifdef），设了 env 的效果不是"测试失败"，而是**把整个 GUI 正常启动、
+            #   进程永不退出** —— 配上 -Wait 就是这一步一直挂到 job 超时（默认 6 小时），
+            #   日志里什么都没有。2026-08-08 在 Linux 上实测过一次，进程跑满 316 秒仍在 do_poll。
+            #   这些自测本身都是毫秒级的，30 秒到不了必是出事了，不是慢。
+            $p = Start-Process -FilePath $exe -PassThru -NoNewWindow -RedirectStandardOutput $out
+            $exited = $p.WaitForExit(30000)
             Remove-Item "Env:\$t"
+            if (-not $exited) {
+              try { $p.Kill() } catch {}
+              Write-Host "::error::$t 30 秒未退出 —— 多半是这个钩子没在 main_qml.cpp 里注册"
+              Write-Host "::error::（或被裹进了某个平台专属的 #ifdef），于是设了 env 只是把 GUI 启动起来"
+              exit 1
+            }
             if ($p.ExitCode -ne 0) {
               if (Test-Path $out) { Get-Content $out }
               Write-Host "::error::$t 失败（exit=$($p.ExitCode)）"
@@ -962,9 +974,9 @@ jobs:
         shell: bash
         run: cmake --build "$BUILD_DIR" --parallel
 
-      - name: Pure-logic self-tests (ARP parse / per-NIC egress / TIDE nodes / bundled-core seeding)
+      - name: Pure-logic self-tests (static deps / ARP parse / per-NIC egress / TIDE nodes / bundled-core seeding / rules / proxy cfg / crypto KAT)
         shell: bash
-        # 两个都不碰网络、不需要 root、毫秒级，所以两种架构都跑。
+        # 全都不碰网络、不需要 root、毫秒级，所以两种架构都跑。
         # · ARP 表解析：**三个平台的 arp 输出形态全覆盖** —— 解析器按运行期参数分派而不是 #ifdef，
         #   所以 Windows 那种分段格式在这条 Linux 流水线上一样被测到（以前它连编都不编）。
         #   解析错的表现是「每张网卡的网关 MAC 都为空 → 所有设备都代理不了」，且没有任何报错
@@ -984,15 +996,55 @@ jobs:
           set -euo pipefail
           bin="$BUILD_DIR/coast"
           export QT_QPA_PLATFORM=offscreen
+          # ★★ 每条都套 `timeout`，这不是保险起见，是**本仓库反复踩的那个坑的唯一门禁**：
+          #   自测钩子一旦没被注册（比如被裹进某个平台专属的 #ifdef），设了 env 的效果不是
+          #   "测试失败"，而是**把整个 GUI 正常启动、进程永不退出** —— 在 CI 里就表现为这一步
+          #   一直挂到 job 超时（默认 6 小时），日志里什么都没有。2026-08-08 在 Linux 上实测过
+          #   一次：进程跑满 316 秒仍在 do_poll。套上 timeout 之后，同样的 bug 变成 30 秒内
+          #   一条写明"疑似钩子没注册"的红灯。
+          #   （反过来说：这些自测本身都是毫秒级的，30 秒到不了就一定是出事了，不是慢。）
+          run_selftest() {
+            local name="$1"
+            local out rc
+            set +e
+            out="$(timeout 30 env "$name=1" "$bin" 2>&1)"; rc=$?
+            set -e
+            if [ "$rc" = 0 ]; then
+              echo "PASS  $name"
+              return 0
+            fi
+            printf '%s\n' "$out" | sed 's/^/      /'
+            if [ "$rc" = 124 ]; then
+              echo "::error::$name 30 秒未退出 —— 多半是这个钩子没在 main_qml.cpp 里注册"
+              echo "::error::（或被裹进了某个平台专属的 #ifdef），于是设了 env 只是把 GUI 启动起来"
+            else
+              echo "::error::$name 失败（exit=$rc）"
+            fi
+            return 1
+          }
           # ★ 静态化引入的门禁，也是**这条流水线唯一**能证明"插件真被链进来了"的地方：
           #   TLS 后端 / QSQLITE / 图片格式 / QML 模块漏了都不报编译或链接错误。
           #   顺带说明为什么 CMakeLists 里不敢用 qt_import_plugins 去筛平台插件：
-          #   下面这行 QT_QPA_PLATFORM=offscreen 依赖 qoffscreen，一筛就全灭。
-          COAST_STATICDEPS_SELFTEST=1 "$bin"
-          COAST_ARPPARSE_SELFTEST=1 "$bin"
-          COAST_NICEGRESS_SELFTEST=1 "$bin"
-          COAST_TIDE_SELFTEST=1 "$bin"
-          COAST_BUNDLEDCORE_SELFTEST=1 "$bin"
+          #   上面那行 QT_QPA_PLATFORM=offscreen 依赖 qoffscreen，一筛就全灭。
+          run_selftest COAST_STATICDEPS_SELFTEST
+          run_selftest COAST_ARPPARSE_SELFTEST
+          run_selftest COAST_NICEGRESS_SELFTEST
+          run_selftest COAST_TIDE_SELFTEST
+          run_selftest COAST_BUNDLEDCORE_SELFTEST
+          # ↓ 这三条以前在 Linux 上**根本跑不了**：它们被误裹在 #ifdef COAST_HAVE_RUST_STACK
+          #   里，而那个宏只在 Windows+COAST_RUST 时定义。分流判定（RuleEngine）是三端共用的
+          #   唯一实现，加密 KAT 也一样，却只有 Windows 那条腿能验 —— 现在补上。
+          #   COAST_CRYPTO_SELFTEST 另需 COAST_HAVE_OPENSSL；Linux 装了 libssl-dev，恒为真。
+          #   万一哪天不真了，上面的 timeout 会把它变成一条 30 秒的明确红灯而不是挂死。
+          run_selftest COAST_RULE_SELFTEST
+          run_selftest COAST_PROXYCFG_SELFTEST
+          run_selftest COAST_CRYPTO_SELFTEST
+          # 没加进来的三个，各有原因，别顺手补上：
+          #   · COAST_TUNSERVICE_SELFTEST —— 会**真的接管默认路由**，要 root 且只能在可牺牲
+          #     网络的机器上跑；在 runner 上跑等于把这个 job 的网络掀了。
+          #   · COAST_SELFROUTE_SELFTEST  —— 同类，动的是策略路由。
+          #   · COAST_OUTBOUND_PROBE      —— 要 full.yaml + 节点名才有意义，不带参数时打用法
+          #     退出 2，当断言用只会是一条恒红。
 
       - name: Stage portable app
         shell: bash
@@ -1116,22 +1168,45 @@ jobs:
           # ⚠️ 有一项**永远查不出来**，必须手写死：libssl3。TLS 后端编的是 -openssl-runtime，
           #    运行期 dlopen libssl.so.3，而 dlopen 的库不进 NEEDED 表。少了它订阅和更新全废，
           #    任何基于 NEEDED 的自动核对都不会提醒你。
-          DEB_DEPENDS="libc6, libgl1, libglx0, libopengl0, libegl1, libdbus-1-3, libfontconfig1, libfreetype6, zlib1g, libzstd1, libssl3 | libssl3t64, libx11-6, libx11-xcb1, libsm6, libice6, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcb-glx0, libxcb-util1, libxkbcommon0, libxkbcommon-x11-0"
+          DEB_DEPENDS="libc6, libgl1, libglx0, libopengl0, libegl1, libdbus-1-3, libfontconfig1, libfreetype6, libbrotli1, zlib1g, libzstd1, libssl3 | libssl3t64, libx11-6, libx11-xcb1, libsm6, libice6, libxcb1, libxcb-cursor0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1, libxcb-xfixes0, libxcb-xkb1, libxcb-glx0, libxcb-util1, libxkbcommon0, libxkbcommon-x11-0"
+          # libbrotli1 是**静态 Qt 带来的新直接依赖**：静态链系统 freetype 之后，freetype
+          # 自己那份 libbrotlidec.so.1 被提到了主程序的 NEEDED 表上（objdump 实测确有一条）。
+          # 靠 libfreetype6 间接带入是能work，但「反正有别的包会带」正是本仓库当年漏掉
+          # libopengl0 的那个假设 —— 直接依赖就直接写。
           # 相对静态化之前去掉了三项，每一项都有明确理由（不是"看着没用就删"）：
           #   libstdc++6 / libgcc-s1 → 已被 -static-libstdc++ -static-libgcc 收进二进制
           #   libglib2.0-0           → 静态 Qt 用 -no-glib 编，这条依赖不复存在
           # 删错了不会没人知道：下面的反查会把它列进 uncovered。
+          # ★★ 整段套 `set +e` / `|| true`：这是一条**诊断**，它本身绝不该有能力挡住打包。
+          #   第一版没做到，当场把 Linux 两条腿都弄红了（1.0.9xx，Create deb package 退出 1，
+          #   而 Qt/编译/自测/装包全是绿的）。根因很典型：NEEDED 表的第一项是动态链接器
+          #   ld-linux-<arch>.so.*，它在 ldd 输出里**没有 `=>` 路径**，于是 path 为空、
+          #   `dpkg -S ""` 退出 1；而这一步开着 `set -euo pipefail`，pipefail 把管道的失败
+          #   传出来、set -e 就地中止 —— 整个 .deb 都没生成。
+          #   （同类的还有 linux-vdso.so.1，内核提供，根本不属于任何包。）
           echo "—— NEEDED → 包名 反查 ——"
           uncovered=""
-          for so in $(objdump -p "$install_root/coast" | awk '/NEEDED/{print $2}' | sort -u); do
-            path="$(ldd "$install_root/coast" | awk -v s="$so" '$1==s{print $3}')"
-            pkg="$(dpkg -S "$path" 2>/dev/null | head -1 | cut -d: -f1)"
-            printf '  %-26s %-42s %s\n' "$so" "${path:-?}" "${pkg:-?}"
+          set +e
+          for so in $(objdump -p "$install_root/coast" 2>/dev/null | awk '/NEEDED/{print $2}' | sort -u); do
+            path="$(ldd "$install_root/coast" 2>/dev/null | awk -v s="$so" '$1==s{print $3}')"
+            if [ -z "$path" ]; then
+              # 动态链接器 / vdso：没有实体路径可查，也无需声明（libc6 已经带着它）。
+              printf '  %-26s %-42s %s\n' "$so" "(无路径)" "(链接器/vdso，跳过)"
+              continue
+            fi
+            # ★ 必须 readlink -f 之后再查。merged-/usr 的系统上 ldd 给的是 /lib/... 而
+            #   dpkg 数据库里记的是 /usr/lib/...（且带完整版本号后缀），直接拿 ldd 的路径查
+            #   **每一条都查不到** —— 那样这段反查会安安静静地把所有包都报成 "?"、uncovered
+            #   永远为空，看起来一切正常，实际什么都没验。第一版就是这样，白跑一轮。
+            real="$(readlink -f "$path" 2>/dev/null)"
+            pkg="$(dpkg -S "${real:-$path}" 2>/dev/null | head -1 | cut -d: -f1)"
+            printf '  %-26s %-42s %s\n' "$so" "$path" "${pkg:-?}"
             base="${pkg%t64}"   # t64 过渡期同一个库有两个包名，去后缀再比，免得误报
             if [ -n "$pkg" ]; then
               case "$DEB_DEPENDS" in *"$base"*) ;; *) uncovered="$uncovered $pkg";; esac
             fi
           done
+          set -e
           # 只告警不阻断：dpkg -S 在 t64/多架构布局下偶有认不出的情况，为此挡住整条发布线
           # 不划算。但结果必须**出现在日志里** —— 只在注释里写"请手动核对"等于没查。
           [ -z "$uncovered" ] || echo "::warning::这些 NEEDED 的包没写进 Depends:$uncovered"

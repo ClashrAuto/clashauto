@@ -52,6 +52,7 @@
 #include <QFontDatabase>
 #include <QIcon>
 #include <QQmlApplicationEngine>
+#include <QProcessEnvironment> // 守卫命中时扫出所有 COAST_*SELFTEST，避免维护写死的名单
 #include <QQmlContext>
 #include <QQuickStyle>
 #include <QQuickWindow>
@@ -161,6 +162,10 @@ int main(int argc, char *argv[])
     if (qEnvironmentVariableIsSet("COAST_STATICDEPS_SELFTEST"))
         return runStaticDepsSelfTest();
 #ifdef COAST_HAVE_RUST_STACK
+    // ★ 这个守卫里**只放实现体在 src/net/RustStackSelfTest.cpp 里的钩子**（那个文件只在
+    //   CMakeLists 的 if(WIN32)+COAST_RUST 分支编）。新增钩子前先看实现在哪个 .cpp —— 放错了
+    //   在 Linux/mac 上就是「设了 env 只把 GUI 启动、进程永不退出」，理由详见本块 #endif 之后。
+    //
     // Rust(smoltcp) 数据面的**链接 + ABI 自证**（COAST_RUSTSTACK_SELFTEST=1）。
     // 纯 FFI 往返，不碰网络/不需要 root/毫秒级。存在的意义：Phase 1 的库运行时还没接进
     // NetStack，没有这条的话「库编出来了」和「库真能被调用、ABI 对得上」在 CI 绿灯里分不清。
@@ -188,14 +193,31 @@ int main(int argc, char *argv[])
     // CoastCore 进程内出站端到端自测：证明那五个移植阶段的代码真的会被执行。
     if (qEnvironmentVariableIsSet("COAST_GW_COASTCORE_SELFTEST"))
         return runCoastCoreOutboundSelfTest();
-    // 自身流量排除的自测（随 CoastCore 引擎一起移植进来）。
-    // ★ 必须在这里注册：不注册的话设了这个 env 只是把 GUI 正常启动，进程不退出 ——
-    //   自测"挂住"而不是"失败"，比失败更难查。
-    // ★ 移植进来的自测钩子**必须逐个注册**。不注册的后果不是"跑不了"，而是
-    //   「设了 env 只是把 GUI 正常启动、进程永不退出」—— 自测挂住而不是失败，比失败难查得多。
-    //   这个坑本轮踩了两次（SELFROUTE、CRYPTO），所以这里一次把已编入的全部接上。
+    // 真网卡版：真 Npcap + 真机帧（需管理员）。不投毒，靠靶机静态路由导流。
+    if (qEnvironmentVariableIsSet("COAST_SMOLGW_REALNIC_SELFTEST"))
+        return runSmolGatewayRealNicSelfTest();
+#endif // COAST_HAVE_RUST_STACK
+
+    // ————————————————————————————————————————————————————————————————
+    // 以下是**与平台无关**的自测钩子，一律放在上面那个 Rust 守卫**之外**。
+    //
+    // ★ 它们曾经被误裹在 #ifdef COAST_HAVE_RUST_STACK 里，而那个宏只在 Windows + COAST_RUST=ON
+    //   时定义 —— 于是在 Linux/macOS 上设这些 env 根本不是"跑测试"，而是**把整个 GUI 正常启动、
+    //   进程永不退出**。自测挂住比自测失败难查得多：2026-08-08 在 Linux 上实测，进程跑满 316 秒
+    //   仍在 do_poll、10 个线程、还占着 logind 的 inhibit 锁，最后是读 /proc/<pid>/environ
+    //   才确认设的到底是哪个 env。同一条自测在 Windows 上是瞬间打印 PASS 并退出的。
+    //   本文件为同一个坑已经记过三次（SELFROUTE、CRYPTO，以及下面 ARPPARSE 那条注释）。
+    //
+    // ★ 判据不是"它跟网关/内核有没有关系"，而是**实现体在哪个 .cpp 里**：
+    //     · 在 src/net/RustStackSelfTest.cpp 里 → 必须留在守卫内（该文件只在 if(WIN32)+COAST_RUST
+    //       分支编，Linux/mac 上连符号都没有，移出去就是链接期缺符号）。上面那八个全属此类，
+    //       **包括 COAST_GW_THROUGHPUT 和 COAST_GW_COASTCORE_SELFTEST** —— 这两个名字看着
+    //       与 Rust 无关，实现却也在那个文件里，别被名字骗了。
+    //     · 在 BACKEND_SOURCES 里（三端都编）→ 必须放在守卫外，就是下面这几个。
+    // ————————————————————————————————————————————————————————————————
 #ifdef COAST_HAVE_OPENSSL
-    // 加密层已知答案测试：AEAD(AES-GCM/ChaCha20-Poly1305) + HKDF。缺 OpenSSL 时这块根本没编入。
+    // 加密层已知答案测试：AEAD(AES-GCM/ChaCha20-Poly1305) + HKDF。
+    // 这一层 #ifdef 是**对的**：缺 OpenSSL 时 CryptoSelfTest.cpp 整个不编入。
     if (qEnvironmentVariableIsSet("COAST_CRYPTO_SELFTEST"))
         return coastcore::runCryptoSelfTest();
 #endif
@@ -208,7 +230,6 @@ int main(int argc, char *argv[])
 
     // 进程内 TUN 的两个钩子。★ 注册它们不代表默认启用 —— TUN 只有点「增强」/自测才会跑，
     //   而 selfTest 会**真的接管默认路由**，只能在容器/虚机那种可牺牲网络的地方跑，且要 root。
-    //   （不注册的话设了 env 只是把 GUI 启动、进程不退出 —— 本轮已经栽过三次，不再犯。）
     if (qEnvironmentVariableIsSet("COAST_TUNSERVICE_SELFTEST"))
         return LocalTunService::selfTest();
     // 出站探针：**不碰 TUN**，只验「这个节点经进程内出站通不通」。
@@ -222,10 +243,6 @@ int main(int argc, char *argv[])
         std::fprintf(stderr, "%s\n", qUtf8Printable(report));
         return ok ? 0 : 1;
     }
-    // 真网卡版：真 Npcap + 真机帧（需管理员）。不投毒，靠靶机静态路由导流。
-    if (qEnvironmentVariableIsSet("COAST_SMOLGW_REALNIC_SELFTEST"))
-        return runSmolGatewayRealNicSelfTest();
-#endif
 
     // 系统 ARP 表解析自测（纯文本，不碰网络、不需要权限、毫秒级）。
     // ★ 必须放在 `#ifdef COAST_HAVE_RUST_STACK` 之**外**：那个宏只在 Windows + COAST_RUST=ON
@@ -295,18 +312,28 @@ int main(int argc, char *argv[])
     //    走探测会连上它并把自己当成二次启动退出 —— 增强就永远开不起来。
     if (!app.arguments().contains(QStringLiteral("--tun-elevated"))
         && SingleInstance::notifyExistingAndQuit()) {
-        // ★ 剩下的 TPROXY / pf 规则层自测**必须**留在守卫之后：它们会往内核里真装 nft/pf 规则，
-        //   与正在跑的生产实例并存是危险的。但"守卫命中就 return 0"和"自测通过"撞车 ——
-        //   于是在这里把它区分开：请求了自测却被守卫挡下，一律报失败。
-        //   这个坑真骗过我一次（断言故意改坏，退出码仍是 0），别再让它重演。
-        for (const char *hook : {"COAST_TPROXY_SELFTEST", "COAST_PF_SELFTEST"}) {
-            if (qEnvironmentVariableIsSet(hook)) {
-                std::fprintf(stderr,
-                             "SELFTEST: %s 被单实例守卫挡下（本机已有 Coast 在跑）——"
-                             "报失败而不是静默返回 0。请先退出那个实例。\n",
-                             hook);
-                return 3;
+        // ★ 有九个自测排在守卫之后（规则层的 TPROXY/pf 会往内核真装 nft/pf 规则，与正在跑的
+        //   生产实例并存很危险；其余几个依赖守卫之后才建好的东西）。但"守卫命中就 return 0"
+        //   和"自测通过"撞车 —— 请求了自测却被守卫挡下，必须报失败而不是静默返回 0。
+        //
+        // ★★ 这里原本是一份**写死的两项名单**（TPROXY/PF），旁边还写着"这个坑真骗过我一次
+        //    （断言故意改坏，退出码仍是 0），别再让它重演"。它重演了：后来又加了七个守卫后的
+        //    自测（QUIT/SCAN/HISTORY/DEVICEDB/SUBS/SETTINGS/CONNSTATS），名单没跟上，于是
+        //    它们在"本机已有 Coast 在跑"时全部走到下面那句 return 0。2026-08-08 在 Windows
+        //    正式包上实测：这七个清一色 rc=0、零输出 —— 外部看就是七个通过。
+        //    所以别再维护名单了，直接扫环境：凡 COAST_*SELFTEST 被设过就报失败，
+        //    以后新增的自测自动覆盖，不会再有"忘了加进名单"这回事。
+        const QStringList envKeys = QProcessEnvironment::systemEnvironment().keys();
+        for (const QString &key : envKeys) {
+            if (!key.startsWith(QLatin1String("COAST_"))
+                || !key.endsWith(QLatin1String("SELFTEST"))) {
+                continue;
             }
+            std::fprintf(stderr,
+                         "SELFTEST: %s 被单实例守卫挡下（本机已有 Coast 在跑）——"
+                         "报失败而不是静默返回 0。请先退出那个实例。\n",
+                         qUtf8Printable(key));
+            return 3;
         }
         return 0;
     }
