@@ -1,6 +1,24 @@
 import CoastKit
 import SwiftUI
 
+/// 这一页用到的 Remix Icon 码点，与 `qml/SubscriptionsPage.qml` 顶部那张 `ic` 表
+/// **逐个对应**（改一边必须改另一边）。
+///
+/// ★ 这里**不能用 SF Symbols**：`checkmark`/`eye`/`square.and.pencil`/
+///   `arrow.clockwise`/`trash` 各自的视觉尺寸和字宽差得很远 —— 同样 `size: 16`，
+///   一排五颗按钮里勾显得小、垃圾桶显得大、刷新又更大一圈，圆底一样大而里面的
+///   图形参差，正是「大小不一致」的来源；形状也和 Qt 端对不上（Qt 全程 Remix）。
+///   Remix 是统一 em 方格，同一字号下每个字形一样大。同样的理由见 `IconFont` 与
+///   `NavButton` 的注释。
+private enum RemixGlyph {
+    static let check = "\u{EB7B}"    // check-line
+    static let eye = "\u{ECB5}"      // eye-line
+    static let pencil = "\u{EC86}"   // edit-line
+    static let refresh = "\u{F064}"  // refresh-line
+    static let trash = "\u{EC2A}"    // delete-bin-line
+    static let plus = "\u{EA13}"     // add-line
+}
+
 /// 订阅页。**逐元素对齐** `qml/SubscriptionsPage.qml`：单列 108 高的订阅卡
 /// （类型徽章 + 名称 + URL + 元信息 + 五颗圆形动作按钮），节点在**弹窗**里看，
 /// 添加/编辑与删除确认各自一个弹窗。
@@ -103,19 +121,19 @@ struct SubscriptionsPage: View {
                 .padding(.bottom, 3)
             Spacer(minLength: 0)
 
-            TextBtn(label: "添加订阅".t, symbol: "plus", primary: false) {
+            TextBtn(label: "添加订阅".t, glyph: RemixGlyph.plus, primary: false) {
                 editing = EditingSubscription()
             }
             // 「应用」= 拿当前订阅重建一次配置。Qt 有这颗按钮，Swift 侧一直没有 ——
             // 用户手改过 subscribe.yaml 或想强制重来时没有任何入口。
-            TextBtn(label: "应用".t, symbol: "checkmark", primary: false) {
+            TextBtn(label: "应用".t, glyph: RemixGlyph.check, primary: false) {
                 Task {
                     message = "正在应用…".t
                     await state.controller.rebuildConfig()
                     message = "已应用".t
                 }
             }
-            TextBtn(label: "更新全部".t, symbol: "arrow.clockwise", primary: true) {
+            TextBtn(label: "更新全部".t, glyph: RemixGlyph.refresh, primary: true) {
                 Task { await updateAll() }
             }
             .disabled(busy || summaries.isEmpty)
@@ -161,7 +179,7 @@ struct SubscriptionsPage: View {
             Spacer(minLength: 0)
 
             HStack(spacing: 4) {
-                CircleBtn(symbol: "checkmark", help: "启用/停用".t, on: summary.use) {
+                CircleBtn(glyph: RemixGlyph.check, help: "启用/停用".t, on: summary.use) {
                     // 失败要出声:下面的 reload() 会把开关弹回原状,不解释一句的话
                     // 用户只会以为没点到、反复点(Qt 端同一处也是这么漏的)。
                     if !state.subscriptions.setSubscriptionEnabled(at: index, !summary.use) {
@@ -170,21 +188,21 @@ struct SubscriptionsPage: View {
                     reload()
                     Task { await state.controller.rebuildConfig() }
                 }
-                CircleBtn(symbol: "eye", help: "查看节点".t) {
+                CircleBtn(glyph: RemixGlyph.eye, help: "查看节点".t) {
                     viewingNodes = NodesTarget(index: index, name: summary.name)
                 }
-                CircleBtn(symbol: "square.and.pencil", help: "编辑".t) {
+                CircleBtn(glyph: RemixGlyph.pencil, help: "编辑".t) {
                     editing = EditingSubscription(index: index, name: summary.name,
                                                   url: summary.url, type: summary.type,
                                                   updateTime: summary.updateTime)
                 }
-                CircleBtn(symbol: "arrow.clockwise", help: "更新".t) {
+                CircleBtn(glyph: RemixGlyph.refresh, help: "更新".t) {
                     Task { await update(index: index) }
                 }
                 Spacer(minLength: 0)
                 // 删除**不可撤销**（连同它下面所有节点的启用状态一起没），而这一行其余动作
                 // 都是可逆的 —— 长得一样、代价差一个量级，必须拦一道。
-                CircleBtn(symbol: "trash", help: "删除".t, danger: true) {
+                CircleBtn(glyph: RemixGlyph.trash, help: "删除".t, danger: true) {
                     pendingDelete = PendingDelete(index: index, name: summary.name)
                 }
             }
@@ -257,10 +275,12 @@ struct SubscriptionsPage: View {
 
 // MARK: - 复用控件
 
-/// 圆形图标按钮：28×28、半径 14。选中态品牌色底白图标，危险态红字 + 淡红底。
+/// 圆形图标按钮：28×28、半径 14，内嵌 16 号 Remix 字形（对齐 Qt 的 `CircleBtn`）。
+/// 选中态品牌色底白图标，危险态红字 + 淡红底。
 struct CircleBtn: View {
     @Environment(Theme.self) private var theme
-    let symbol: String
+    /// Remix 码点（见 `RemixGlyph`），不是 SF Symbol 名。
+    let glyph: String
     let help: String
     var on = false
     var danger = false
@@ -270,8 +290,8 @@ struct CircleBtn: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 16))
+            Text(glyph)
+                .font(.custom(IconFont.remix, size: 16))
                 .foregroundStyle(on ? .white : (danger ? theme.danger : theme.textSecondary))
                 .frame(width: 28, height: 28)
                 .background {
@@ -295,10 +315,12 @@ struct CircleBtn: View {
 }
 
 /// 文字按钮（可带前置图标）：高 30、半径 `Theme.radius`、最小宽 84。
+/// 前置图标是 15 号 Remix 字形（对齐 Qt 的 `TextBtn`）。
 struct TextBtn: View {
     @Environment(Theme.self) private var theme
     let label: String
-    var symbol: String?
+    /// Remix 码点（见 `RemixGlyph`），不是 SF Symbol 名。
+    var glyph: String?
     var primary = true
     let action: () -> Void
 
@@ -310,8 +332,8 @@ struct TextBtn: View {
             // 顶栏统一系统语言，主/次按钮不再靠底色区分。
             Button(action: action) {
                 HStack(spacing: 6) {
-                    if let symbol {
-                        Image(systemName: symbol).font(.system(size: 15))
+                    if let glyph {
+                        Text(glyph).font(.custom(IconFont.remix, size: 15))
                     }
                     Text(label).font(.system(size: 13))
                 }
@@ -325,8 +347,8 @@ struct TextBtn: View {
         } else {
             Button(action: action) {
                 HStack(spacing: 6) {
-                    if let symbol {
-                        Image(systemName: symbol).font(.system(size: 15))
+                    if let glyph {
+                        Text(glyph).font(.custom(IconFont.remix, size: 15))
                     }
                     Text(label).font(.system(size: 13))
                 }
