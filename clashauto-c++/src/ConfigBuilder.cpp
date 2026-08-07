@@ -461,7 +461,14 @@ QString ConfigBuilder::applyCustomRules(QString yaml) const
         groupBlock += QString("    type: %1\n").arg(type);
         if (type != "select") {
             groupBlock += "    url: 'http://www.gstatic.com/generate_204'\n";
-            groupBlock += "    interval: 300\n";
+            // ★ 60 而不是 300：这个间隔决定了「节点恢复之后，分组还要多久才认它」。
+            // 2026-08-07 树莓派实测（同一台真实服务端 docker compose restart，等 healthy 后才计数）：
+            //   interval 300 → 恢复要先失败 20 次；interval 60 → 0 次；
+            //   把 MATCH 直接指向节点、绕开所有分组 → 也是 0 次。
+            // 也就是说底层（tide 会话）早就恢复了，用户却还在失败——卡住的是 url-test 分组里
+            // 那份过期的健康状态。30 也测过是 0，但 60 已经够，健康检查流量只有 30 的一半；
+            // 且 lazy 默认 true，分组没被用到时根本不测，代价有限。
+            groupBlock += "    interval: 60\n";
             // 不写 lazy（默认 true，对齐旧项目 clash.js）：lazy:false 会在启动时同步健康检查，
             // 节点不可达时会卡住核心启动、REST API 迟迟不监听。延迟改由应用启动后异步测速填充。
         }
@@ -1103,7 +1110,7 @@ QString ConfigBuilder::appendSubscriptionGroups(QString yaml, const QVector<Subs
         groups += QString("  - name: %1\n").arg(yamlQuote(QString("%1 订阅").arg(subscription.name)));
         groups += "    type: url-test\n";
         groups += "    url: 'http://www.gstatic.com/generate_204'\n";
-        groups += "    interval: 300\n";
+        groups += "    interval: 60\n"; // 60 vs 300 的实测理由见本文件上方那处同名注释
         // 不写 lazy（默认 true，对齐旧项目）：避免启动时同步健康检查卡住核心，延迟改由应用异步测速填充。
         groups += "    proxies:\n";
         for (const SubscriptionNode &node : subscription.nodes) {
@@ -1131,7 +1138,7 @@ QString ConfigBuilder::appendSubscriptionGroups(QString yaml, const QVector<Subs
         groups += QString("  - name: %1\n").arg(yamlQuote(it.key()));
         groups += "    type: url-test\n";
         groups += "    url: 'http://www.gstatic.com/generate_204'\n";
-        groups += "    interval: 300\n";
+        groups += "    interval: 60\n"; // 60 vs 300 的实测理由见本文件上方那处同名注释
         // 不写 lazy（默认 true，对齐旧项目）：避免启动时同步健康检查卡住核心，延迟改由应用异步测速填充。
         groups += "    proxies:\n";
         for (const QString &nodeName : it.value()) {
