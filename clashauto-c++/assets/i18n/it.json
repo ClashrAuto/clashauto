@@ -465,5 +465,10 @@
   "退出": "Esci",
   "订阅启停失败，配置未能写入": "Impossibile attivare/disattivare l'abbonamento — impostazioni non salvate",
   "节点启停失败，配置未能写入": "Impossibile attivare/disattivare il nodo — impostazioni non salvate",
-  "批量启停失败，配置未能写入": "Attivazione/disattivazione in blocco non riuscita — impostazioni non salvate"
+  "批量启停失败，配置未能写入": "Attivazione/disattivazione in blocco non riuscita — impostazioni non salvate",
+  "不自动更新": "Mai",
+  "每天": "Ogni giorno",
+  "每周": "Ogni settimana",
+  "每月": "Ogni mese",
+  "这份 GeoIP 数据库的构建日期": "Data di build di questo database GeoIP"
 }

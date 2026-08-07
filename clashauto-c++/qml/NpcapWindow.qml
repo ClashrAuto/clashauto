@@ -188,7 +188,8 @@ ApplicationWindow {
             Layout.fillWidth: true
             spacing: 10
 
-            // 这里没有「国内代理下载」勾选框：ghfast.top 只代理 GitHub，而安装包来自 npcap.com。
+            // 这里没有「国内加速」：安装包来自 npcap.com，本来就不在 GitHub 镜像的覆盖范围内
+            //（而镜像那条路径整个已经撤掉了，见 UpdateWindow.qml 开头）。
             // 核心在跑时下载会自动走本地混合端口，这是唯一（也够用）的绕行路径。
             Text {
                 text: qsTr("下载源：npcap.com（官方）")

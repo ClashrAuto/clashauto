@@ -465,5 +465,10 @@
   "退出": "Çık",
   "订阅启停失败，配置未能写入": "Abonelik açılıp kapatılamadı — ayarlar kaydedilmedi",
   "节点启停失败，配置未能写入": "Düğüm açılıp kapatılamadı — ayarlar kaydedilmedi",
-  "批量启停失败，配置未能写入": "Toplu açma/kapatma başarısız — ayarlar kaydedilmedi"
+  "批量启停失败，配置未能写入": "Toplu açma/kapatma başarısız — ayarlar kaydedilmedi",
+  "不自动更新": "Asla",
+  "每天": "Günlük",
+  "每周": "Haftalık",
+  "每月": "Aylık",
+  "这份 GeoIP 数据库的构建日期": "Bu GeoIP veritabanının derlenme tarihi"
 }

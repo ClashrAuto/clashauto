@@ -41,10 +41,6 @@ struct SettingsPage: View {
     @State private var noAllowRule = ""
 
     @State private var message = ""
-    @State private var coreStatus = ""
-    @State private var geoipStatus = ""
-    @State private var coreBusy = false
-    @State private var geoipBusy = false
     @State private var helperStatus = ""
 
     // 区域 / 规则表
@@ -53,6 +49,27 @@ struct SettingsPage: View {
     @State private var ruleFilter = ""
     @State private var editingRule: RuleDraft?
     @State private var editingArea: AreaDraft?
+
+    /// GeoIP 自动更新周期下拉。两个数组一一对应、顺序一致（同 Qt 那边的 `daysModel`）。
+    /// 「不自动更新」而不是「关闭」：后者在别处是「关窗」那个动词，共用一个词条会让某些
+    /// 语言翻出个按钮名来。
+    @MainActor static var geoipPeriodTitles: [String] { ["不自动更新".t, "每天".t, "每周".t, "每月".t] }
+    static let geoipPeriodDays = [0, 1, 7, 30]
+
+    /// 本地 Country.mmdb 的构建日期。读的是**暂存的那份优先** —— 下载成功后新库只写到
+    /// `.new`，要等下次起核心才换上去（见 `MmdbFile`）。只看线上那份的话，用户刚更新完
+    /// GeoIP 日期却纹丝不动，看着像更新没生效。
+    private var geoipBuildDate: String? {
+        let target = AppPaths.userDir.appendingPathComponent("Country.mmdb")
+        let date = MmdbFile.buildDate(of: MmdbFile.stagedURL(for: target))
+            ?? MmdbFile.buildDate(of: target)
+        guard let date else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
 
     /// Qt 的 `allowRulePresets` / `noAllowRulePresets`，逐条相同。
     private let allowPresets = [#"\[0\.[0-9]+\]"#]
@@ -259,25 +276,32 @@ struct SettingsPage: View {
                             }))
                     }
                     CardDivider()
-                    SettingRow(label: "GeoIP 数据".t) {
-                        PillButton(title: geoipBusy ? geoipStatus : "更新 GeoIP".t,
-                                   width: 120, enabled: !geoipBusy) {
-                            Task { await updateGeoIP() }
-                        }
-                    }
-                    CardDivider()
                     SettingRow(label: "程序更新".t) {
                         Text("接收测试版".t).font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
                         ThemedSwitch(isOn: bool(\.receiveBeta, key: "beta"))
                     }
                     CardDivider()
-                    SettingRow(label: "mihomo 内核".t) {
-                        Text("国内加速".t).font(.system(size: 13)).foregroundStyle(theme.textSecondary).lineLimit(1)
-                        ThemedSwitch(isOn: bool(\.mirror, key: "mirror"))
-                        PillButton(title: coreBusy ? coreStatus : "更新内核".t,
-                                   width: 120, enabled: !coreBusy) {
-                            Task { await updateCore() }
-                        }
+                    // GeoIP 这一行只管**自动化和现状**：多久自动更新一次，以及手上这份是哪天的库。
+                    // 手动「立即更新」在更新窗的 GeoIP 页（那里有进度条和取消），不在设置页放第二个入口。
+                    SettingRow(label: "GeoIP 数据".t) {
+                        ThemedCombo(options: Self.geoipPeriodTitles,
+                                    selection: Binding(
+                                        get: { max(0, Self.geoipPeriodDays
+                                                     .firstIndex(of: state.config.geoipUpdateDays) ?? 0) },
+                                        set: { index in
+                                            persist(key: "geoipUpdate", int: Self.geoipPeriodDays[index]) {
+                                                $0.geoipUpdateDays = $1
+                                            }
+                                        }),
+                                    width: 120)
+                        // 库的**构建日期**（mmdb metadata 里的 build_epoch），不是文件时间 ——
+                        // 文件时间只说明我们哪天下载的，重装换机都会把它刷成今天。
+                        Text(geoipBuildDate ?? "未安装".t)
+                            .font(.system(size: 12))
+                            .foregroundStyle(theme.textMuted)
+                            .lineLimit(1).truncationMode(.tail)
+                            .frame(width: 90, alignment: .trailing)
+                            .help("这份 GeoIP 数据库的构建日期".t)
                     }
                     CardDivider()
                     SettingRow(label: "免密助手".t) {
@@ -538,8 +562,6 @@ struct SettingsPage: View {
         uiPort = String(state.config.uiPort)
         allowRule = state.config.allowRule
         noAllowRule = state.config.noAllowRule
-        coreStatus = "更新内核".t
-        geoipStatus = "更新 GeoIP".t
         let loaded = RulesStore().load()
         rules = loaded.rules
         areas = loaded.areas
@@ -575,63 +597,9 @@ struct SettingsPage: View {
         }
     }
 
-    // MARK: 内核 / GeoIP 更新
-
-    /// 下载来的字节先过结构校验、只写暂存，**绝不原地覆盖线上库** —— 核心把它 mmap 着且
-    /// 只加载一次，原地换根本不会生效，唯一效果是有概率毁掉好文件（Qt 版真机上为此坏过一次）。
-    private func updateGeoIP() async {
-        geoipBusy = true
-        defer { geoipBusy = false; geoipStatus = "更新 GeoIP".t }
-        let updater = GeoIPUpdater(useMirror: state.config.mirror,
-                                   proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
-        do {
-            message = try await updater.update { step in
-                Task { @MainActor in
-                    switch step {
-                    case let .downloading(percent, _, _): geoipStatus = String(format: "下载中 %d%%".t, percent)
-                    case .validating: geoipStatus = "校验中…".t
-                    }
-                }
-            }
-        } catch {
-            message = error.localizedDescription
-        }
-    }
-
-    private func updateCore() async {
-        coreBusy = true
-        defer { coreBusy = false; coreStatus = "更新内核".t }
-        let wasRunning = state.controller.isCoreRunning
-        // ★ 查询/下载阶段**不停核心**（用户的网还靠它跑着；下载本身不走代理，
-        //   只有「国内加速」镜像开关）。拿到产物后才停核 → 替换 → 重启。
-        let downloader = CoreDownloader(useMirror: state.config.mirror,
-                                        includePrerelease: state.config.receiveBeta)
-        do {
-            let downloaded = try await downloader.fetchAndExtract { step in
-                Task { @MainActor in
-                    switch step {
-                    case .checking: coreStatus = "检查中…".t
-                    case let .downloading(percent, _, _): coreStatus = String(format: "下载中 %d%%".t, percent)
-                    case .installing: coreStatus = "安装中…".t
-                    case .done, .failed: coreStatus = "更新内核".t
-                    }
-                }
-            }
-            coreStatus = "安装中…".t
-            if wasRunning { await state.controller.stopCore() }
-            let installResult = Result { try CoreDownloader.finishInstall(downloaded) }
-            // 核心是停了才装的，所以**装失败也要拉回来** —— 别让一次更新失败断了网。
-            if wasRunning { await state.controller.startCore() }
-            try installResult.get()
-            message = String(format: "内核已更新到 %@".t, downloaded.version)
-            // 换内核有**两个**入口（这里和更新窗的内核页），两处都得重判侧栏那颗
-            // "core" 角标 —— 少一处，从那个入口更新完角标就一直红着。
-            await state.refreshCoreUpdateBadge()
-        } catch {
-            message = String(format: "内核更新失败：%@".t, "\(error)")
-        }
-    }
-
+    // 内核更新与 GeoIP 的「立即更新」都在**更新窗**（`UpdateView` 的内核 / GeoIP 页），
+    // 设置页不再有第二份入口 —— 那边有进度条、速度和取消，这边只有一颗会变字的按钮，
+    // 同一件事两个入口两种观感。设置页这一侧只留自动化配置（GeoIP 周期）与现状（构建日期）。
 }
 
 /// 规则编辑草稿。`Identifiable` 是为了直接喂给 `.sheet(item:)` —— 用

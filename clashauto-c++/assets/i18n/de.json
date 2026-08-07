@@ -465,5 +465,10 @@
   "退出": "Beenden",
   "订阅启停失败，配置未能写入": "Abonnement konnte nicht aktiviert/deaktiviert werden — Einstellungen nicht gespeichert",
   "节点启停失败，配置未能写入": "Knoten konnte nicht aktiviert/deaktiviert werden — Einstellungen nicht gespeichert",
-  "批量启停失败，配置未能写入": "Massenaktivierung/-deaktivierung fehlgeschlagen — Einstellungen nicht gespeichert"
+  "批量启停失败，配置未能写入": "Massenaktivierung/-deaktivierung fehlgeschlagen — Einstellungen nicht gespeichert",
+  "不自动更新": "Nie",
+  "每天": "Täglich",
+  "每周": "Wöchentlich",
+  "每月": "Monatlich",
+  "这份 GeoIP 数据库的构建日期": "Erstellungsdatum dieser GeoIP-Datenbank"
 }

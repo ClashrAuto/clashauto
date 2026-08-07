@@ -29,20 +29,16 @@ public struct CoreDownloader: Sendable {
         case installFailed
     }
 
-    /// 国内加速:下载走 ghfast.top 镜像。
-    ///
-    /// ⚠️ 注意它**只镜像下载,不镜像 GitHub API**(实测 ghfast.top 不代理 api.github.com)。
-    /// 内核下载**不做任何显式代理**(这是产品决定:出不出得去网由系统环境说了算,
-    /// 应用只提供这一个镜像开关);系统级代理(若开着)会被 URLSession 自然沿用。
-    public var useMirror: Bool
-
     /// 是否走测试版通道。对齐 Qt:读的是 config.yaml 的 beta 开关(接收测试版)。
     /// 测试版是 fork 的滚动 prerelease,tag 形如 `Prerelease-<分支>` —— 版本号
     /// 不在 tag 里而在产物名里,所以 `Downloaded.version` 从产物名剥。
+    ///
+    /// 内核下载**不做任何显式代理**(这是产品决定:出不出得去网由系统环境说了算);
+    /// 系统级代理(若开着)会被 URLSession 自然沿用。原来还有个 ghfast.top 镜像开关,
+    /// 已整条撤掉。
     public var includePrerelease: Bool
 
-    public init(useMirror: Bool = false, includePrerelease: Bool = false) {
-        self.useMirror = useMirror
+    public init(includePrerelease: Bool = false) {
         self.includePrerelease = includePrerelease
     }
 
@@ -196,8 +192,7 @@ public struct CoreDownloader: Sendable {
     }
 
     private func download(urlString: String, onProgress: @Sendable @escaping (Progress) -> Void) async throws -> Data {
-        let finalURL = useMirror ? "https://ghfast.top/" + urlString : urlString
-        guard let url = URL(string: finalURL) else { throw DownloadError.downloadFailed("URL 非法") }
+        guard let url = URL(string: urlString) else { throw DownloadError.downloadFailed("URL 非法") }
         var request = URLRequest(url: url)
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 30

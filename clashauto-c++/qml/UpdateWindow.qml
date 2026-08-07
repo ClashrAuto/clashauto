@@ -19,8 +19,9 @@ import ClashAuto
 //     客户区左上角，就是 Windows 应用菜单栏的长相；窗口标题仍旧由系统标题栏显示。
 //   · **Linux**：窗口标题交给系统标题栏（各家 WM 自己画），三段组**悬浮在标题栏下面、居左**。
 //
-// 「国内加速」不在这一页 —— 它是设置页里的**同一个** `settings.mirror`，
-// 两处各放一份只会让人以为是两个开关。
+// 下载一律直连 GitHub。原来有个「国内加速」开关会给下载链接套 ghfast.top 前缀，
+// 现在整条镜像路径都拿掉了 —— 墙内用户先把核心跑起来，下载会经代理走
+//（`applyDownloadProxy`）。
 ApplicationWindow {
     id: win
     // 独立顶层窗（去掉隐式 transientParent）：Win/Linux 任务栏显示独立图标，方便切换窗口。
@@ -177,7 +178,7 @@ ApplicationWindow {
         if (currentTab === 0) {
             var i = updater.recommendedIndex(win.channel) // 该频道里自动选安装器/便携包
             if (i >= 0)
-                updater.oneClickUpdate(win.channel, i, settings.mirror)
+                updater.oneClickUpdate(win.channel, i)
         } else if (currentTab === 1) {
             settings.updateCore()
         } else {

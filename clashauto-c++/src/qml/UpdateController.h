@@ -9,8 +9,8 @@
 // 端点与 Widgets 版完全一致：
 //   - https://api.github.com/repos/ClashrAuto/clashauto/releases        （正式/测试版列表）
 //   - https://api.github.com/repos/ClashrAuto/clash/releases/tags/Prerelease-master （内核，滚动 prerelease）
-//   - 下载资源 browser_download_url（勾国内代理时前缀 https://ghfast.top/）
-//   - 校验用同名 <资源名>.sha256 边车（永远官方直连，不加镜像）
+//   - 下载资源 browser_download_url
+//   - 校验用同名 <资源名>.sha256 边车
 #include "AppConfig.h"
 
 #include <QElapsedTimer>
@@ -81,8 +81,8 @@ public:
     // 静默返回 -1 的话点「更新」是毫无反应，用户只会以为程序坏了。
     Q_INVOKABLE int recommendedIndex(int tab);
     // 「一键更新」：下载所选资源 → 校验 sha256 → 静默安装并自动重启。
-    // tab: 0=正式 1=测试；index=资源下标；useMirror=国内代理下载（ghfast.top 直连）。
-    Q_INVOKABLE void oneClickUpdate(int tab, int index, bool useMirror);
+    // tab: 0=正式 1=测试；index=资源下标。
+    Q_INVOKABLE void oneClickUpdate(int tab, int index);
     // 记住「不再提示」当前正式版版本号（对齐 update/skipTag）。
     Q_INVOKABLE void skipCurrentRelease();
     // 取消当前下载：abort reply，finished 里按 m_cancelled 走「已取消」而非「失败」。

@@ -465,5 +465,10 @@
   "退出": "Salir",
   "订阅启停失败，配置未能写入": "No se pudo activar/desactivar la suscripción: ajustes no guardados",
   "节点启停失败，配置未能写入": "No se pudo activar/desactivar el nodo: ajustes no guardados",
-  "批量启停失败，配置未能写入": "Error al activar/desactivar en lote: ajustes no guardados"
+  "批量启停失败，配置未能写入": "Error al activar/desactivar en lote: ajustes no guardados",
+  "不自动更新": "Nunca",
+  "每天": "Diariamente",
+  "每周": "Semanalmente",
+  "每月": "Mensualmente",
+  "这份 GeoIP 数据库的构建日期": "Fecha de compilación de esta base de datos GeoIP"
 }

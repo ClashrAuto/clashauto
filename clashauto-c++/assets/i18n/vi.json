@@ -465,5 +465,10 @@
   "退出": "Thoát",
   "订阅启停失败，配置未能写入": "Không thể bật/tắt thuê bao — chưa lưu được cấu hình",
   "节点启停失败，配置未能写入": "Không thể bật/tắt nút — chưa lưu được cấu hình",
-  "批量启停失败，配置未能写入": "Bật/tắt hàng loạt thất bại — chưa lưu được cấu hình"
+  "批量启停失败，配置未能写入": "Bật/tắt hàng loạt thất bại — chưa lưu được cấu hình",
+  "不自动更新": "Không tự động",
+  "每天": "Hằng ngày",
+  "每周": "Hằng tuần",
+  "每月": "Hằng tháng",
+  "这份 GeoIP 数据库的构建日期": "Ngày dựng cơ sở dữ liệu GeoIP này"
 }

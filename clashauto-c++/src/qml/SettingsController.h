@@ -42,7 +42,10 @@ class SettingsController final : public QObject
     Q_PROPERTY(bool closeToTray READ closeToTray CONSTANT)
     Q_PROPERTY(bool autoStart READ autoStart CONSTANT)
     Q_PROPERTY(bool nodeSwitchNote READ nodeSwitchNote CONSTANT)
-    Q_PROPERTY(bool mirror READ mirror NOTIFY mirrorChanged)
+    Q_PROPERTY(int geoipUpdateDays READ geoipUpdateDays NOTIFY geoipUpdateDaysChanged)
+    // 本地 Country.mmdb 的**构建日期**（metadata 里的 build_epoch，已格成 yyyy-MM-dd）。
+    // 读不出来就是空串。随 GeoIP 更新成功刷新。
+    Q_PROPERTY(QString geoipBuildDate READ geoipBuildDate NOTIFY geoipBuildDateChanged)
     Q_PROPERTY(bool receiveBeta READ receiveBeta NOTIFY receiveBetaChanged)
     Q_PROPERTY(bool ipv6 READ ipv6 NOTIFY ipv6Changed)
     Q_PROPERTY(int autoUpdateMinutes READ autoUpdateMinutes CONSTANT)
@@ -105,7 +108,8 @@ public:
     bool closeToTray() const { return m_closeToTray; }
     bool autoStart() const { return m_autoStart; }
     bool nodeSwitchNote() const { return m_nodeNote; }
-    bool mirror() const { return m_mirror; }
+    int geoipUpdateDays() const { return m_geoipUpdateDays; }
+    QString geoipBuildDate() const { return m_geoipBuildDate; }
     bool receiveBeta() const { return m_receiveBeta; }
     bool ipv6() const { return m_ipv6; }
     int autoUpdateMinutes() const { return m_autoUpdate; }
@@ -147,14 +151,14 @@ public:
     // themeLight 由 QML 依当前 Theme.dark 传入；主题即时换肤在 QML 侧完成。
     Q_INVOKABLE void apply(const QString &host, int uiPort, int mixedPort, bool webProxy,
                            bool nodeOnly, bool clearConnections, bool increment, bool closeToTray,
-                           bool autoStart, bool nodeNote, bool mirror, int autoUpdate,
+                           bool autoStart, bool nodeNote, int autoUpdate,
                            bool themeLight, bool autoTheme, const QString &language, bool autoLanguage,
                            const QString &allowRule, bool allowUse,
                            const QString &noAllowRule, bool noAllowUse);
 
     // 即时落盘（无需点「应用」，对齐 Widgets 的 toggled 即时持久化）
     Q_INVOKABLE void setNodeOnly(bool on);
-    Q_INVOKABLE void setMirror(bool on);
+    Q_INVOKABLE void setGeoipUpdateDays(int days); // geoipUpdate：GeoIP 自动更新周期（天，0=关）
     Q_INVOKABLE void setReceiveBeta(bool on);
     Q_INVOKABLE void setIpv6(bool on);
 
@@ -183,12 +187,16 @@ public:
     Q_INVOKABLE QStringList processChoices(bool wantPath) const; // PROCESS-NAME/PATH 值下拉
 
     // —— 更新 ——
-    Q_INVOKABLE void updateCore();   // 从 GitHub 拉最新 mihomo 替换内核（用当前 m_mirror 偏好）
+    // 从 GitHub 拉最新 mihomo 替换内核。入口只在**更新窗的内核页**（设置页那颗按钮已撤）。
+    Q_INVOKABLE void updateCore();
     Q_INVOKABLE void updateGeoip();  // 下载 country.mmdb 到 userDir + bundle
     // 中止在途的下载（更新窗那颗 ✕）。**只结束这次下载，不关窗**：结束后底栏自己回到
     // 「更新 / 获取更新」，用户可以直接再来一次。与 UpdateController::cancelDownload 同义。
     Q_INVOKABLE void cancelCoreUpdate();
     Q_INVOKABLE void cancelGeoipUpdate();
+    // 从磁盘上那份 mmdb 重读 build_epoch。设置页进页时叫一次 ——
+    // 后台那条静默下载（AboutController::checkGeoip）不经本类，不重读就看不到它拉下来的那份。
+    Q_INVOKABLE void refreshGeoipBuildDate();
 
     // —— macOS 免密助手 ——
     Q_INVOKABLE void refreshMacHelperStatus();
@@ -198,7 +206,8 @@ public:
 signals:
     void rulesChanged();
     void areasChanged();
-    void mirrorChanged();
+    void geoipUpdateDaysChanged();
+    void geoipBuildDateChanged();
     void receiveBetaChanged();
     void ipv6Changed();
     void coreUpdatingChanged();
@@ -262,7 +271,8 @@ private:
     bool m_closeToTray = false; // 默认关（实际值由 config 覆盖）
     bool m_autoStart = false;
     bool m_nodeNote = true;
-    bool m_mirror = false;
+    int m_geoipUpdateDays = 1;
+    QString m_geoipBuildDate;
     bool m_receiveBeta = false;
     bool m_ipv6 = false;
     int m_autoUpdate = 0;

@@ -452,6 +452,7 @@ public final class AppState {
         applySystemAppearanceIfNeeded()   // 启动时若跟随系统,先对齐一次
         startSystemAppearanceObserver()   // 之后系统外观变了也跟上
         startSubscriptionAutoUpdate()     // 定时自动更新订阅
+        startGeoIPAutoUpdate()            // 按设置页选的周期自动更新 GeoIP 库
         startArpWatch()                   // 盯着有没有别人在做 ARP 欺骗
         startDeviceDiscovery()            // 局域网设备发现（常驻：新设备通知靠它）
         startLatencyMonitor()             // 直连 / 到路由 / DNS / 代理 四个延迟
@@ -559,6 +560,44 @@ public final class AppState {
                 }
             }
         }
+    }
+
+    /// GeoIP 自动更新。周期由设置页那个下拉决定（`config.geoipUpdateDays`，0 = 关）。
+    ///
+    /// ★ 判据是**库自己的构建日期**，不是「上次检查时间」：后者存在偏好里，重装、换机、
+    ///   清偏好都会归零，于是每次都白下一遍；而 build_epoch 跟着文件走，问的正是
+    ///   「我手上这份旧了没有」。库不存在时 `buildDate` 为 nil —— 那就是该下的。
+    ///
+    /// 起一次查一次，之后每 6 小时回来看一眼（周期最短是「每天」，6 小时的粒度足够，
+    /// 又不会让一台连开几天的机器错过换日）。
+    private func startGeoIPAutoUpdate() {
+        Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                let days = self.config.geoipUpdateDays
+                if days > 0, self.geoipIsStale(days: days) {
+                    let updater = GeoIPUpdater(
+                        proxyPort: self.controller.isCoreRunning ? self.config.mixedPort : nil)
+                    do {
+                        let note = try await updater.update()
+                        self.append(log: "GeoIP 自动更新:" + note)
+                    } catch {
+                        // 后台静默：失败就下一轮再试，不打扰用户。
+                        self.append(log: "GeoIP 自动更新失败:\(error.localizedDescription)")
+                    }
+                }
+                try? await Task.sleep(for: .seconds(6 * 3600))
+            }
+        }
+    }
+
+    /// 本地 GeoIP 是否已经旧过了 `days` 天。暂存的那份也算数（它就是下次要用的）。
+    private func geoipIsStale(days: Int) -> Bool {
+        let target = AppPaths.userDir.appendingPathComponent("Country.mmdb")
+        let built = MmdbFile.buildDate(of: MmdbFile.stagedURL(for: target))
+            ?? MmdbFile.buildDate(of: target)
+        guard let built else { return true } // 没有库 / 读不出来 → 该下
+        return Date().timeIntervalSince(built) > TimeInterval(days) * 86400
     }
 
     /// 「延迟」卡：喂给它网关与当前节点，然后让它自己按 10 秒一轮跑。

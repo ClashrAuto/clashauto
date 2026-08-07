@@ -45,6 +45,13 @@ bool validate(const QByteArray &data, QString *why = nullptr);
 // 给「起核心前体检线上 Country.mmdb」用（见 CoreController::start 的自愈分支）。
 bool validateFile(const QString &path, QString *why = nullptr);
 
+// 库的构建时刻（metadata 里的 build_epoch，Unix 秒）。读不出来返回 0。
+//
+// GeoIP 没有版本号，「你手上这份是哪天的」就是全部信息 —— 而这个问题**只能**问 build_epoch：
+// 文件 mtime 说的是我们哪天把它写到盘上的，重装、换机、甚至一次失败重下都会把它刷成今天，
+// 库本身却还是原来那份。设置页「GeoIP 数据」那一行显示的就是它。
+qint64 buildEpoch(const QString &path);
+
 // 校验 + 原子写到 <target>.new（QSaveFile：先写临时文件，commit 时才改名）。
 // **不动 target 本身**——它可能正被运行中的核心 mmap 着。失败置 *why。
 bool stage(const QByteArray &data, const QString &target, QString *why = nullptr);

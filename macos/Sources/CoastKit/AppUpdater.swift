@@ -16,18 +16,15 @@ import Foundation
 ///
 /// ## sha256
 ///
-/// CI 给每个产物都发了 `<name>.sha256`。有镜像（ghfast.top）这一环，校验不是洁癖：
-/// 镜像是第三方，内容对不上就得当被篡改处理，宁可失败也不装。
-/// 找不到 .sha256 资产时跳过校验（老版本的发布没有它）。
+/// CI 给每个产物都发了 `<name>.sha256`，下载完就地比对；找不到 .sha256 资产时跳过校验
+///（老版本的发布没有它）。
 public struct AppUpdater: Sendable {
 
-    /// 走镜像下载（`https://ghfast.top/` 前缀，与 `CoreDownloader` 同一个）。
-    public var useMirror: Bool
     /// 走本机代理的端口。直连 github 释出的 CDN 在部分网络下极慢，核心在跑时让它代出去。
+    /// 「国内加速」（ghfast.top 镜像前缀）已整条撤掉 —— 墙内先把核心跑起来，走这条。
     public var proxyPort: Int?
 
-    public init(useMirror: Bool = false, proxyPort: Int? = nil) {
-        self.useMirror = useMirror
+    public init(proxyPort: Int? = nil) {
         self.proxyPort = proxyPort
     }
 
@@ -178,8 +175,7 @@ public struct AppUpdater: Sendable {
 
     private func download(urlString: String,
                           onProgress: @Sendable @escaping (Int, Int64, Int64) -> Void) async throws -> Data {
-        let finalURL = useMirror ? "https://ghfast.top/" + urlString : urlString
-        guard let url = URL(string: finalURL) else { throw UpdateError.downloadFailed("URL 非法") }
+        guard let url = URL(string: urlString) else { throw UpdateError.downloadFailed("URL 非法") }
         var request = URLRequest(url: url)
         request.setValue("coast-macos", forHTTPHeaderField: "User-Agent")
         request.timeoutInterval = 60

@@ -28,7 +28,9 @@ struct AppConfig {
     QString theme = "black";
     bool autoTheme = false;
     bool autoLanguage = true; // 跟随系统语言（默认开）：按系统区域自动选 zh-CN/en-US，忽略 language 手选；关则用 language
-    bool mirror = false;               // 「国内加速 / 国内代理下载」共用：下载走国内镜像(ghfast.top)
+    // GeoIP 数据库自动更新周期（天）。0 = 关。设置页「GeoIP 数据」那一行的下拉。
+    // 以前是每小时的后台 checkAll 里无条件跟着查一次（用户没有任何开关），现在由它节流。
+    int geoipUpdateDays = 1;
     // 接收测试版：更新检查与「一键更新」改用 prerelease 频道。CI 对**非主分支**的每次推送都会发
     // 一个 prerelease（tag 带 -beta.<sha>），主分支才发正式版。默认关 —— 普通用户不该被卷进测试流。
     bool receiveBeta = false;

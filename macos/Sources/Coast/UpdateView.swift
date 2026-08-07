@@ -17,8 +17,8 @@ import SwiftUI
 ///   macOS 上唯一的拖动区 —— 附属窗又没有主窗那个自动拖动（见 `WindowRestore`），
 ///   不开这一位窗口就**拖不动**（连接窗当初正是踩了这个，才把它的顶栏整条靠右排）。
 ///
-/// 「国内加速」不在这一页了 —— 它是**设置页里的同一个 config 键**（`mirror`），
-/// 两处各放一份只会让人以为是两个开关。
+/// 下载一律直连 GitHub。原来有个「国内加速」开关会给下载链接套 ghfast.top 前缀，
+/// 现在整条镜像路径都拿掉了 —— 墙内用户先把核心跑起来，下载会经代理走。
 struct UpdateView: View {
     @Environment(AppState.self) private var state
     @Environment(Theme.self) private var theme
@@ -241,9 +241,14 @@ struct UpdateView: View {
     }
 
     /// 本地 Country.mmdb 的日期。GeoIP 没有版本号，「你手上这份是哪天的」就是全部信息。
+    ///
+    /// ★ 用库自己的 `build_epoch`，不是文件 mtime。mtime 说的是我们哪天写的盘 ——
+    ///   重装、换机、甚至一次失败重下都会把它刷成今天，而库还是原来那份，
+    ///   于是这一行会理直气壮地报一个假日期。暂存的那份优先（它就是下次要用的）。
     private var localMmdbDate: String? {
         let url = AppPaths.userDir.appendingPathComponent("Country.mmdb")
-        guard let date = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        guard let date = MmdbFile.buildDate(of: MmdbFile.stagedURL(for: url))
+            ?? MmdbFile.buildDate(of: url)
         else { return nil }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -390,8 +395,7 @@ struct UpdateView: View {
         }
         busy = true
         defer { busy = false; resetTransfer() }
-        let updater = AppUpdater(useMirror: state.config.mirror,
-                                 proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
+        let updater = AppUpdater(proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
         do {
             let staged = try await updater.stage(release: release) { step in
                 Task { @MainActor in
@@ -423,11 +427,10 @@ struct UpdateView: View {
     private func runCoreUpdate() async {
         busy = true
         defer { busy = false; resetTransfer() }
-        // ★ 查询/下载阶段**不停核心**（用户的网还靠它跑着；下载本身不走代理，
-        //   只有「国内加速」镜像开关）。拿到产物后才停核 → 替换 → 重启。
+        // ★ 查询/下载阶段**不停核心**（用户的网还靠它跑着；内核下载不走显式代理）。
+        //   拿到产物后才停核 → 替换 → 重启。
         let wasRunning = state.controller.isCoreRunning
-        let downloader = CoreDownloader(useMirror: state.config.mirror,
-                                        includePrerelease: state.config.receiveBeta)
+        let downloader = CoreDownloader(includePrerelease: state.config.receiveBeta)
         do {
             let downloaded = try await downloader.fetchAndExtract { step in
                 Task { @MainActor in apply(step) }
@@ -451,8 +454,7 @@ struct UpdateView: View {
     private func runGeoIPUpdate() async {
         busy = true
         defer { busy = false; resetTransfer() }
-        let updater = GeoIPUpdater(useMirror: state.config.mirror,
-                                   proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
+        let updater = GeoIPUpdater(proxyPort: state.controller.isCoreRunning ? state.config.mixedPort : nil)
         do {
             status = try await updater.update { step in
                 Task { @MainActor in

@@ -29,14 +29,11 @@ public struct GeoIPUpdater: Sendable {
 
     private static let releaseURL =
         "https://github.com/MetaCubeX/meta-rules-dat/releases/latest/download/country.mmdb"
-    private static let mirrorPrefix = "https://ghfast.top/"
-
-    public var useMirror: Bool
-    /// 走本机代理下载（核心在跑时）。GitHub 直连不通的网络里这是唯一能成的路径。
+    /// 走本机代理下载（核心在跑时）。GitHub 直连不通的网络里这是唯一能成的路径 ——
+    /// 原来还有个 ghfast.top 镜像开关做备选，已整条撤掉。
     public var proxyPort: Int?
 
-    public init(useMirror: Bool = false, proxyPort: Int? = nil) {
-        self.useMirror = useMirror
+    public init(proxyPort: Int? = nil) {
         self.proxyPort = proxyPort
     }
 
@@ -45,8 +42,7 @@ public struct GeoIPUpdater: Sendable {
     public func update(target: URL = AppPaths.userDir.appendingPathComponent("Country.mmdb"),
                        onProgress: @Sendable @escaping (Progress) -> Void = { _ in })
         async throws -> String {
-        let raw = useMirror ? Self.mirrorPrefix + Self.releaseURL : Self.releaseURL
-        guard let url = URL(string: raw) else { throw UpdateError.network("URL 不合法") }
+        guard let url = URL(string: Self.releaseURL) else { throw UpdateError.network("URL 不合法") }
 
         let configuration = URLSessionConfiguration.ephemeral
         if let port = proxyPort {

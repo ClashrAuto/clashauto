@@ -35,6 +35,8 @@ public enum MmdbFile {
         public var recordSize: Int
         public var ipVersion: Int
         public var majorVersion: Int
+        /// 库的**构建时刻**（Unix 秒），上游写在 metadata 里。缺这个键时为 0。
+        public var buildEpoch: Int = 0
         /// 每个节点的字节数 = 两条记录。
         public var nodeSize: Int { recordSize * 2 / 8 }
         public var treeSize: Int { nodeCount * nodeSize }
@@ -139,7 +141,27 @@ public enum MmdbFile {
               let ipVersion = map["ip_version"] as? Int,
               let major = map["binary_format_major_version"] as? Int else { return nil }
         return Metadata(nodeCount: nodeCount, recordSize: recordSize,
-                        ipVersion: ipVersion, majorVersion: major)
+                        ipVersion: ipVersion, majorVersion: major,
+                        buildEpoch: map["build_epoch"] as? Int ?? 0)
+    }
+
+    /// 这份库的**构建日期**。读不出来返回 nil。
+    ///
+    /// ★ 不要拿文件 mtime 当这个用：mtime 说的是我们哪天把它写到盘上的，重装、换机、
+    ///   甚至一次失败重下都会把它刷成今天，而库本身还是原来那份。GeoIP 没有版本号，
+    ///   build_epoch 是「你手上这份是哪天的」唯一可信的答案。
+    ///
+    /// 只读末尾 128 KiB —— metadata 按规范就在那儿，为一个时间戳把五六 MB 全读进来没道理
+    /// （设置页每次进页都会叫到它）。
+    public static func buildDate(of url: URL) -> Date? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let total = (try? handle.seekToEnd()).map(Int64.init) ?? 0
+        let window: Int64 = 128 * 1024
+        try? handle.seek(toOffset: UInt64(max(0, total - window)))
+        guard let tail = try? handle.readToEnd(), !tail.isEmpty else { return nil }
+        guard let meta = parseMetadata(tail), meta.buildEpoch > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(meta.buildEpoch))
     }
 
     /// 解一个 MaxMind 数据段的 map（只支持校验用得到的类型）。

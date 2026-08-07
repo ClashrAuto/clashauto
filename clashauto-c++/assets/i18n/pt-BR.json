@@ -465,5 +465,10 @@
   "退出": "Sair",
   "订阅启停失败，配置未能写入": "Não foi possível ativar/desativar a assinatura — configurações não salvas",
   "节点启停失败，配置未能写入": "Não foi possível ativar/desativar o nó — configurações não salvas",
-  "批量启停失败，配置未能写入": "Falha ao ativar/desativar em lote — configurações não salvas"
+  "批量启停失败，配置未能写入": "Falha ao ativar/desativar em lote — configurações não salvas",
+  "不自动更新": "Nunca",
+  "每天": "Diariamente",
+  "每周": "Semanalmente",
+  "每月": "Mensalmente",
+  "这份 GeoIP 数据库的构建日期": "Data de compilação deste banco de dados GeoIP"
 }

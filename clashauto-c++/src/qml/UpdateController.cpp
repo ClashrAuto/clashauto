@@ -418,7 +418,7 @@ void UpdateController::fetchCore()
     });
 }
 
-void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
+void UpdateController::oneClickUpdate(int tab, int index)
 {
     if (m_downloading) {
         return;
@@ -438,13 +438,8 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
 
     const QString name = asset.name;
     const QString sidecarUrl = asset.sha256Url;
-    // 国内代理下载：给下载链接加国内镜像前缀，并用「直连」的 QNAM 下载（镜像国内可直达，绝不套节点代理）。
-    const QString downloadUrl = useMirror ? QStringLiteral("https://ghfast.top/") + asset.url : asset.url;
+    const QString downloadUrl = asset.url;
     QNetworkAccessManager *dlNam = m_nam;
-    if (useMirror) {
-        dlNam = new QNetworkAccessManager(this);
-        dlNam->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
-    }
 
     QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
     if (dir.isEmpty()) {
@@ -484,7 +479,7 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
     }
     setDownloading(true);
     setProgress(0);
-    setStatus(QString::fromUtf8("开始下载: %1%2").arg(name, useMirror ? QString::fromUtf8("（国内代理）") : QString()));
+    setStatus(QString::fromUtf8("开始下载: %1").arg(name));
 
     connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
         if (total > 0) {
@@ -509,7 +504,7 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
         out->write(reply->readAll());
     });
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, out, savePath, name, sidecarUrl, useMirror] {
+            [this, reply, out, savePath, name, sidecarUrl] {
         out->write(reply->readAll());
         out->close();
         const bool ok = reply->error() == QNetworkReply::NoError;
@@ -530,21 +525,16 @@ void UpdateController::oneClickUpdate(int tab, int index, bool useMirror)
             QFile::remove(savePath);
             setDownloading(false);
             setStatus(QString::fromUtf8("下载失败: %1 (%2)").arg(name, err));
-            emit failed(QString::fromUtf8("下载失败：%1\n\n若在墙内，可勾选「国内代理下载」走国内镜像，或启动核心以经代理下载后重试。").arg(err));
+            emit failed(QString::fromUtf8("下载失败：%1\n\n若在墙内，可先启动核心 —— 下载会经代理走。").arg(err));
             return;
         }
         setProgress(100);
 
-        // 边车缺失 / 取不到校验文件时的处置：镜像下载不可信 → 拒绝清理；直连老版本可能本就没边车 → 跳过校验。
-        auto onSidecarUnavailable = [this, savePath, name, useMirror] {
-            if (useMirror) {
-                QFile::remove(savePath);
-                setDownloading(false);
-                setStatus(QString::fromUtf8("更新已取消: 经镜像下载但未取到校验文件（.sha256），无法校验完整性"));
-                emit failed(QString::fromUtf8("无法校验完整性（未取到校验文件），经镜像下载已取消，请关闭「国内代理下载」后重试。"));
-                return;
-            }
-            setStatus(QString::fromUtf8("未取到校验文件，跳过完整性校验（直连）"));
+        // 边车缺失：老版本的发布可能本就没传 .sha256 —— 跳过校验直接装。
+        // （原来这里还有一条「经镜像下载但没拿到边车 → 拒绝安装」的分支，
+        //   镜像已经没有了，直连 GitHub 的产物与边车同源，那条分支随之消失。）
+        auto onSidecarUnavailable = [this, savePath, name] {
+            setStatus(QString::fromUtf8("未取到校验文件，跳过完整性校验"));
             doExecute(savePath, name);
         };
 

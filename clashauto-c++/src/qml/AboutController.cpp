@@ -6,6 +6,7 @@
 #include "MmdbFile.h"
 #include "Version.h" // APP_VERSION（由 CMake configure_file 生成，QmlBridge.cpp 同款包含）
 
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -242,6 +243,23 @@ void AboutController::checkCore()
 
 void AboutController::checkGeoip()
 {
+    // 用户在设置页选的自动更新周期（天）。0 = 关，一次都不查。
+    //
+    // ★ 以前这里没有任何节流：checkAll 每小时跑一次，就跟着问一次清单，用户没有
+    //   任何开关能关掉它。周期由 config.yaml 的 `geoipUpdate` 决定，节流点放在
+    //   **发请求之前** —— 放在「有没有新版」之后的话，周期设成一个月也照样每小时联一次网。
+    const int days = AppConfigLoader::load().geoipUpdateDays;
+    if (days <= 0) {
+        return;
+    }
+    QSettings throttle;
+    const QDateTime lastCheck =
+        throttle.value(QStringLiteral("geoip/lastCheck")).toDateTime();
+    if (lastCheck.isValid() && lastCheck.secsTo(QDateTime::currentDateTime()) < qint64(days) * 86400) {
+        return;
+    }
+    throttle.setValue(QStringLiteral("geoip/lastCheck"), QDateTime::currentDateTime());
+
     if (!m_nam) {
         m_nam = new QNetworkAccessManager(this);
     }

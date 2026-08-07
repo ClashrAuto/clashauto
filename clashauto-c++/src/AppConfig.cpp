@@ -140,7 +140,7 @@ AppConfig AppConfigLoader::load()
     config.theme = valueFromYaml(yaml, "theme", config.theme);
     config.autoTheme = boolFromYaml(yaml, "autoTheme", config.autoTheme);
     config.autoLanguage = boolFromYaml(yaml, "autoLanguage", config.autoLanguage);
-    config.mirror = boolFromYaml(yaml, "mirror", config.mirror);
+    config.geoipUpdateDays = intFromYaml(yaml, "geoipUpdate", config.geoipUpdateDays);
     config.receiveBeta = boolFromYaml(yaml, "beta", config.receiveBeta);
     config.ipv6 = boolFromYaml(yaml, "ipv6", config.ipv6);
     config.coastcore = boolFromYaml(yaml, "coastcore", config.coastcore); // 进程内出站（默认关）

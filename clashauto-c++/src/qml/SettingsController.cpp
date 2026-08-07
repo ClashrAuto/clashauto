@@ -9,6 +9,7 @@
 #include "MmdbFile.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -163,7 +164,7 @@ void SettingsController::loadInitialValues()
     m_closeToTray = c.closeToTray;
     m_autoStart = c.autoStart;
     m_nodeNote = c.nodeSwitchNote;
-    m_mirror = c.mirror;
+    m_geoipUpdateDays = c.geoipUpdateDays;
     m_receiveBeta = c.receiveBeta;
     m_ipv6 = c.ipv6;
     m_autoUpdate = c.autoUpdateMinutes;
@@ -229,6 +230,26 @@ void SettingsController::trackGeoipReply(QNetworkReply *reply)
     m_geoipProgress = 0;
     m_geoipStats.reset();
     emit geoipProgressChanged();
+}
+
+void SettingsController::refreshGeoipBuildDate()
+{
+    // ★ 读的是 `<userDir>/Country.mmdb` **加上暂存的那份**：下载成功后新库只写到
+    //   `.new`，要等下次起核心才换上去（见 MmdbFile 开头那段）。只看线上那份的话，
+    //   用户刚更新完 GeoIP，日期却纹丝不动 —— 看着像更新没生效。
+    const AppConfig cfg = AppConfigLoader::load();
+    const QString target = QDir(cfg.userDir).filePath(QStringLiteral("Country.mmdb"));
+    qint64 epoch = MmdbFile::buildEpoch(target + QLatin1String(".new"));
+    if (epoch <= 0) {
+        epoch = MmdbFile::buildEpoch(target);
+    }
+    const QString text = epoch > 0
+        ? QDateTime::fromSecsSinceEpoch(epoch).toLocalTime().toString(QStringLiteral("yyyy-MM-dd"))
+        : QString();
+    if (m_geoipBuildDate != text) {
+        m_geoipBuildDate = text;
+        emit geoipBuildDateChanged();
+    }
 }
 
 void SettingsController::cancelCoreUpdate()
@@ -307,14 +328,14 @@ void SettingsController::setNodeOnly(bool on)
     // QmlBridge/NodeListModel 拥有，本适配层不改 bridge，故仅落盘，下次刷新/重启核心生效。
 }
 
-void SettingsController::setMirror(bool on)
+void SettingsController::setGeoipUpdateDays(int days)
 {
-    if (m_mirror == on) {
+    if (m_geoipUpdateDays == days) {
         return;
     }
-    m_mirror = on;
-    persistConfigBool(QStringLiteral("mirror"), on);
-    emit mirrorChanged();
+    m_geoipUpdateDays = days;
+    persistConfigScalar(QStringLiteral("geoipUpdate"), QString::number(days));
+    emit geoipUpdateDaysChanged();
 }
 
 // 接收测试版。只落 config.yaml 的 beta 键，没有别的副作用——读它的两处（更新窗选频道、
@@ -451,7 +472,7 @@ void SettingsController::applyAutoStart(bool enabled)
 
 void SettingsController::apply(const QString &host, int uiPort, int mixedPort, bool webProxy,
                                bool nodeOnly, bool clearConnections, bool increment, bool closeToTray,
-                               bool autoStart, bool nodeNote, bool mirror, int autoUpdate,
+                               bool autoStart, bool nodeNote, int autoUpdate,
                                bool themeLight, bool autoTheme, const QString &language, bool autoLanguage,
                                const QString &allowRule, bool allowUse,
                                const QString &noAllowRule, bool noAllowUse)
@@ -477,8 +498,17 @@ void SettingsController::apply(const QString &host, int uiPort, int mixedPort, b
         out << "mini: " << (closeToTray ? "true" : "false") << "\n";
         out << "sys: " << (autoStart ? "true" : "false") << "\n";
         out << "note: " << (nodeNote ? "true" : "false") << "\n";
-        out << "mirror: " << (mirror ? "true" : "false") << "\n";
         out << "autoUpdate: " << QString::number(autoUpdate) << "\n";
+        // ★ 这是**整表覆写**：没写进来的键在这一刻就没了，下次加载回默认值。
+        //   下面三个是设置页自己那些「即时落盘」控件写的（接收测试版 / 启用 IPv6 /
+        //   GeoIP 周期），它们不进「应用」的参数表 —— 不在这里按当前内存值补一遍的话，
+        //   用户拨完开关再点一次「应用」，开关就被自己这一页悄悄打回默认。
+        //   （config.yaml 里还有几个键连本类都不持有：gatewayPf / gatewayTproxy /
+        //    secret / coastcore*，它们至今仍会被这次覆写抹掉 —— 那是另一个问题，
+        //    要修得把 apply() 换成逐键 persist，不在本次范围。）
+        out << "beta: " << (m_receiveBeta ? "true" : "false") << "\n";
+        out << "ipv6: " << (m_ipv6 ? "true" : "false") << "\n";
+        out << "geoipUpdate: " << QString::number(m_geoipUpdateDays) << "\n";
         out << "theme: " << (themeLight ? "light" : "black") << "\n";
         out << "autoTheme: " << (autoTheme ? "true" : "false") << "\n";
         out << "autoLanguage: " << (autoLanguage ? "true" : "false") << "\n";
@@ -503,8 +533,6 @@ void SettingsController::apply(const QString &host, int uiPort, int mixedPort, b
     // autoUpdate：Widgets 版仅记录全局默认周期（主定时器 1 分钟节拍）；QML 版无此定时器逻辑，落盘即可。
 
     // 即时同步本地缓存值
-    m_mirror = mirror;
-    emit mirrorChanged();
     m_nodeOnly = nodeOnly;
 
     // 语言切换：实际生效语言 = 跟随系统时用系统语言、否则用手选 language。生效码变了才发信号，
@@ -1094,6 +1122,7 @@ void SettingsController::updateGeoip()
             return;
         }
         setGeoipStatus(QStringLiteral("更新 GeoIP"), false);
+        refreshGeoipBuildDate(); // 设置页那行日期立刻跟上（读的是刚写下的 .new）
         // 说「重启核心生效」不是甩锅：mmdb 在核心里是启动时一次性加载的，原地换掉也不会被重读，
         // 所以这里只暂存，由 CoreController 在下次启核心之前换上去（MmdbFile::applyStaged）。
         setMessage(QStringLiteral("GeoIP 已下载并校验通过（%1 KB），重启核心生效")
@@ -1109,8 +1138,6 @@ void SettingsController::updateCore()
     setCoreStatus(QStringLiteral("检查中..."), true);
     m_coreCancelled = false;
     const AppConfig cfg = AppConfigLoader::load();
-    const bool useMirror = m_mirror;
-    const QString mirror = useMirror ? QStringLiteral("https://ghfast.top/") : QString();
 
     auto *nam = new QNetworkAccessManager(this);
     applyDownloadProxy(nam);
@@ -1122,7 +1149,7 @@ void SettingsController::updateCore()
     // 查版本这一步也记进去：它走的是 GitHub API，被限流时能挂十几秒，
     // 这段时间里 ✕ 一样要能把它掐掉（否则那颗按钮在「检查中…」期间是个死键）。
     trackCoreReply(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, nam, cfg, mirror] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, nam, cfg] {
         const bool ok = reply->error() == QNetworkReply::NoError;
         const QByteArray body = reply->readAll();
         const QString err = reply->errorString();
@@ -1162,23 +1189,16 @@ void SettingsController::updateCore()
         const QString tag = pick.version;
 
         setCoreStatus(QStringLiteral("下载中..."), true);
-        setMessage(QStringLiteral("下载内核 %1（%2）...%3")
-                       .arg(tag, pick.beta ? QStringLiteral("测试版") : QStringLiteral("正式版"),
-                            mirror.isEmpty() ? QString() : QStringLiteral("（国内加速）")));
-        QNetworkRequest dreq{QUrl(mirror + url)};
+        setMessage(QStringLiteral("下载内核 %1（%2）...")
+                       .arg(tag, pick.beta ? QStringLiteral("测试版") : QStringLiteral("正式版")));
+        QNetworkRequest dreq{QUrl(url)};
         dreq.setRawHeader("User-Agent", "clashauto-cpp");
         dreq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         dreq.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 #if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
         dreq.setTransferTimeout(30000);
 #endif
-        // 国内加速时直连镜像下载（不套节点代理）；挂在 nam 名下随之销毁
-        QNetworkAccessManager *dlNam = nam;
-        if (!mirror.isEmpty()) {
-            dlNam = new QNetworkAccessManager(nam);
-            dlNam->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
-        }
-        QNetworkReply *dl = dlNam->get(dreq);
+        QNetworkReply *dl = nam->get(dreq);
         trackCoreReply(dl);
         // 百分比走 `coreProgress`，不再拼进状态串（理由同 GeoIP 那处）。
         connect(dl, &QNetworkReply::downloadProgress, this, [this](qint64 r, qint64 t) {

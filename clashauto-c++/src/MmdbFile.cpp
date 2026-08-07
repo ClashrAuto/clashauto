@@ -157,6 +157,10 @@ struct Meta {
     quint64 recordSize = 0;
     quint64 ipVersion = 0;
     quint64 majorVersion = 0;
+    // 库的**构建时刻**（Unix 秒），由上游写在 metadata 里。这是「这份 GeoIP 是哪天的」
+    // 唯一可信的答案 —— 文件 mtime 只说明我们哪天下载的，跟数据新旧无关（重装/换机
+    // 都会把 mtime 刷成今天，而库还是半年前那份）。
+    quint64 buildEpoch = 0;
     bool ok = false;
 };
 
@@ -185,6 +189,7 @@ Meta parseMeta(const uchar *base, qint64 size)
         else if (key.str == "record_size") m.recordSize = val.num;
         else if (key.str == "ip_version") m.ipVersion = val.num;
         else if (key.str == "binary_format_major_version") m.majorVersion = val.num;
+        else if (key.str == "build_epoch") m.buildEpoch = val.num;
     }
     m.ok = !c.bad;
     return m;
@@ -321,6 +326,29 @@ bool MmdbFile::validate(const QByteArray &data, QString *why)
     }
 
     return true;
+}
+
+qint64 MmdbFile::buildEpoch(const QString &path)
+{
+    QFile in(path);
+    if (!in.open(QIODevice::ReadOnly))
+        return 0;
+    // 只读末尾那一段：metadata 按规范就在文件尾部 128 KiB 内，为了一个时间戳把
+    // 五六 MB 全读进来没道理（这个函数在设置页每次显示时都可能被叫到）。
+    const qint64 total = in.size();
+    const qint64 from = qMax<qint64>(0, total - kMetadataSearchWindow);
+    if (!in.seek(from))
+        return 0;
+    const QByteArray tail = in.readAll();
+    in.close();
+
+    const qsizetype markerPos = tail.lastIndexOf(QByteArray(kMarker, kMarkerLen));
+    if (markerPos < 0)
+        return 0;
+    const uchar *base = reinterpret_cast<const uchar *>(tail.constData());
+    const qint64 metaStart = markerPos + kMarkerLen;
+    const Meta m = parseMeta(base + metaStart, tail.size() - metaStart);
+    return m.ok ? qint64(m.buildEpoch) : 0;
 }
 
 bool MmdbFile::validateFile(const QString &path, QString *why)

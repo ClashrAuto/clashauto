@@ -298,7 +298,11 @@ Item {
     // 区域编辑对话框的目标索引（-1 = 新增）；规则编辑已移入 RuleEditorWindow 自管。
     property int editAreaIndex: -1
 
-    Component.onCompleted: settings.refreshMacHelperStatus()
+    Component.onCompleted: {
+        settings.refreshMacHelperStatus()
+        // 后台那条静默下载不经 SettingsController，不重读就看不到它拉下来的那份。
+        settings.refreshGeoipBuildDate()
+    }
 
     // 点击页面任意空白处：把焦点收回页面根，输入框（Host/端口/搜索等）随即失焦。
     // 开关/下拉/按钮自身点击会拿走焦点，无需单独处理。
@@ -356,7 +360,6 @@ Item {
                             traySwitch.checked,
                             autoStartSwitch.checked,
                             noteSwitch.checked,
-                            mirrorCheck.checked,
                             autoUpdateSpin.value,
                             themeCombo.light,                // themeLight：手选值，不是当前生效的明暗
                             autoThemeSwitch.checked,
@@ -561,38 +564,36 @@ Item {
                                     ToolTip.text: qsTr("开启后核心才会解析 AAAA 并使用 IPv6 出站；关闭时完全禁用 IPv6")
                                     onToggled: settings.setIpv6(checked) } }
                             CardDivider {}
-                            SettingRow { label: qsTr("GeoIP 数据")
-                                PillButton {
-                                    // 百分比现在是 `geoipProgress`（更新窗的进度条读它），不再拼在
-                                    // 状态串里 —— 这里把它接回按钮文字上，否则这颗按钮从「下载中 45%」
-                                    // 退成一句不动的「下载中...」，看着像卡死了。
-                                    text: settings.geoipUpdating
-                                          ? settings.geoipStatus
-                                            + (settings.geoipProgress > 0 ? " " + settings.geoipProgress + "%" : "")
-                                          : qsTr("更新 GeoIP")
-                                    enabled: !settings.geoipUpdating
-                                    implicitWidth: 120
-                                    onClicked: settings.updateGeoip()
-                                } }
-                            CardDivider {}
                             SettingRow { label: qsTr("程序更新")
                                 Label { text: qsTr("接收测试版"); color: Theme.textSecondary; font.pixelSize: 13 }
                                 ThemedSwitch { id: betaCheck; checked: settings.receiveBeta
                                     onToggled: settings.setReceiveBeta(checked) } }
                             CardDivider {}
-                            SettingRow { label: qsTr("mihomo 内核")
-                                Label { text: qsTr("国内加速"); color: Theme.textSecondary; font.pixelSize: 13 }
-                                ThemedSwitch { id: mirrorCheck; checked: settings.mirror
-                                    onToggled: settings.setMirror(checked) }
-                                PillButton {
-                                    // 同 GeoIP 那颗：百分比来自 `coreProgress`。
-                                    text: settings.coreUpdating
-                                          ? settings.coreUpdateStatus
-                                            + (settings.coreProgress > 0 ? " " + settings.coreProgress + "%" : "")
-                                          : qsTr("更新内核")
-                                    enabled: !settings.coreUpdating
+                            // GeoIP 这一行只管**自动化和现状**：多久自动更新一次，以及手上这份是哪天的库。
+                            // 手动「立即更新」在更新窗的 GeoIP 页（那里有进度条和 ✕），不在设置页放第二个入口。
+                            SettingRow { label: qsTr("GeoIP 数据")
+                                ThemedCombo {
+                                    id: geoipPeriod
                                     implicitWidth: 120
-                                    onClicked: settings.updateCore()
+                                    // 与 daysModel 一一对应、顺序一致（同「语言」下拉那套写法）。
+                                    readonly property var daysModel: [0, 1, 7, 30]
+                                    // 「不自动更新」而不是「关闭」：后者在别处是「关窗」那个动词，
+                                    // 共用一个词条会让某些语言翻出个按钮名来。
+                                    model: [qsTr("不自动更新"), qsTr("每天"), qsTr("每周"), qsTr("每月")]
+                                    currentIndex: Math.max(0, daysModel.indexOf(settings.geoipUpdateDays))
+                                    onActivated: settings.setGeoipUpdateDays(daysModel[currentIndex])
+                                }
+                                // 库的**构建日期**（mmdb metadata 里的 build_epoch），不是文件时间 ——
+                                // 文件时间只说明我们哪天下载的，重装换机都会把它刷成今天。
+                                Label {
+                                    text: settings.geoipBuildDate.length > 0
+                                          ? settings.geoipBuildDate : qsTr("未安装")
+                                    color: Theme.textMuted
+                                    font.pixelSize: 12
+                                    Layout.preferredWidth: 90
+                                    horizontalAlignment: Text.AlignRight
+                                    elide: Text.ElideRight
+                                    ToolTip.text: qsTr("这份 GeoIP 数据库的构建日期")
                                 } }
                             CardDivider { visible: settings.macHelperSupported }
                             SettingRow { visible: settings.macHelperSupported

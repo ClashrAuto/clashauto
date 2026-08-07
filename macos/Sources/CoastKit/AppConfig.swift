@@ -36,7 +36,8 @@ public struct AppConfig: Sendable, Equatable {
     public var language = "zh-CN"
 
     // MARK: 更新
-    public var mirror = false           // 下载走国内镜像（ghfast.top）
+    /// GeoIP 数据库自动更新周期（天）。0 = 关。YAML: `geoipUpdate`。设置页「GeoIP 数据」那行的下拉。
+    public var geoipUpdateDays = 1
     public var receiveBeta = false      // YAML: beta —— 更新检查是否看 prerelease
     /// 局域网出现没见过的设备时弹通知。YAML: `newDevice`。
     ///
@@ -99,7 +100,7 @@ public enum AppConfigLoader {
         config.theme = YAMLText.value(yaml, key: "theme", default: config.theme)!
         config.autoTheme = YAMLText.bool(yaml, key: "autoTheme", default: config.autoTheme)
         config.autoLanguage = YAMLText.bool(yaml, key: "autoLanguage", default: config.autoLanguage)
-        config.mirror = YAMLText.bool(yaml, key: "mirror", default: config.mirror)
+        config.geoipUpdateDays = YAMLText.int(yaml, key: "geoipUpdate", default: config.geoipUpdateDays)
         config.receiveBeta = YAMLText.bool(yaml, key: "beta", default: config.receiveBeta)
         config.newDeviceAlert = YAMLText.bool(yaml, key: "newDevice", default: config.newDeviceAlert)
         config.language = YAMLText.value(yaml, key: "language", default: config.language)!

@@ -35,6 +35,33 @@ struct MmdbFileTests {
         #expect(meta.treeSize < data.count, "搜索树比整个文件还大")
     }
 
+    /// 设置页「GeoIP 数据」那一行、更新窗 GeoIP 页的「当前」、以及自动更新的**过期判据**
+    /// 全都读这个值。它要是恒为 nil，界面只会显示「未安装」、自动更新则每轮都重下一遍 ——
+    /// 两种表现都不像坏了，所以得有测试盯着。
+    @Test("★ 能读出 build_epoch，且是个像样的日期")
+    func buildDateIsReadable() throws {
+        guard let data = seed, let url = Resources.seed("Country.mmdb") else { return }
+        let meta = try #require(MmdbFile.parseMetadata(data))
+        #expect(meta.buildEpoch > 0, "metadata 里没解出 build_epoch")
+
+        let date = try #require(MmdbFile.buildDate(of: url), "buildDate 读不出内置库的构建日期")
+        // 只读末尾 128 KiB 的那条路径必须与整文件解析出的值一致。
+        #expect(Int(date.timeIntervalSince1970) == meta.buildEpoch)
+        // 2020 年之后、且不在未来 —— 挡住「把某个偏移当成时间戳读出来」这类跑偏。
+        #expect(date > Date(timeIntervalSince1970: 1_577_836_800))
+        #expect(date <= Date().addingTimeInterval(86_400))
+    }
+
+    @Test("读不出来时返回 nil，不编一个日期")
+    func buildDateNilForGarbage() throws {
+        let junk = FileManager.default.temporaryDirectory
+            .appendingPathComponent("coast-not-an-mmdb-\(UUID().uuidString)")
+        try Data(repeating: 0x41, count: 4096).write(to: junk)
+        defer { try? FileManager.default.removeItem(at: junk) }
+        #expect(MmdbFile.buildDate(of: junk) == nil)
+        #expect(MmdbFile.buildDate(of: junk.appendingPathExtension("missing")) == nil)
+    }
+
     @Test("★ HTML 错误页当成数据库写下去 —— 必须拦住")
     func rejectsHTML() {
         let html = Data(String(repeating: "<html>error</html>", count: 100).utf8)

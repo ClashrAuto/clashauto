@@ -466,5 +466,10 @@
   "退出": "Quit",
   "订阅启停失败，配置未能写入": "Couldn't enable/disable subscription — settings not saved",
   "节点启停失败，配置未能写入": "Couldn't enable/disable node — settings not saved",
-  "批量启停失败，配置未能写入": "Couldn't enable/disable all nodes — settings not saved"
+  "批量启停失败，配置未能写入": "Couldn't enable/disable all nodes — settings not saved",
+  "不自动更新": "Never",
+  "每天": "Daily",
+  "每周": "Weekly",
+  "每月": "Monthly",
+  "这份 GeoIP 数据库的构建日期": "Build date of this GeoIP database"
 }
