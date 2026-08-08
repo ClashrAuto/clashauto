@@ -5,9 +5,10 @@ description: 取一套静态 Qt —— 命中缓存就复用，没命中就从�
 # 「打包全用静态链接库」= 必须自己从源码编 Qt，每套配置 40–110 分钟。
 # 一次编好之后所有分支的推送都复用同一份缓存，正常推送不额外花时间。
 #
-# 缓存键包含本目录下所有文件的哈希：改了配方（模块集、configure flag）会自动换键重编，
+# 缓存键含**本平台那份配方脚本**的哈希：改了配方（模块集、configure flag）会自动换键重编，
 # 不会出现「改了配方却复用了旧 Qt」——那种事本仓库在 Rust 静态库上踩过一次，
-# 表现是两边都绿而链的是上一版产物。
+# 表现是两边都绿而链的是上一版产物。只哈希本平台那一份（而不是整个目录）是有意的，
+# 理由见下面 Resolve paths 里的注释。
 
 inputs:
   qt-version:
@@ -46,12 +47,19 @@ runs:
         if [ "$RUNNER_OS" = "Windows" ]; then
           prefix='C:/qtstatic'
           src='C:/qtsrc'
+          recipe="$GITHUB_ACTION_PATH/build-windows.ps1"
         else
           prefix="$HOME/qtstatic"
           src="$HOME/qtsrc"
+          recipe="$GITHUB_ACTION_PATH/build-posix.sh"
         fi
         echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
         echo "src=$src"       >> "$GITHUB_OUTPUT"
+        # ★ 缓存键只哈希**本平台那一份配方**，不哈希整个目录。
+        #   用 hashFiles('.github/actions/qt-static/**') 的话，改一行 Windows 脚本会把
+        #   Linux 与 macOS 已经编好的缓存一起作废 —— 那是白扔一个多小时的机时，而且
+        #   会诱使人「为了保住缓存而不敢改脚本」，正好把这个目录变成没人敢碰的地方。
+        echo "recipe=$(sha256sum "$recipe" | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
     - name: Restore static Qt cache
       id: restore
@@ -59,7 +67,7 @@ runs:
       with:
         path: ${{ steps.paths.outputs.prefix }}
         # v1 是人工版本位：Qt 版本或配方之外的原因（比如换了 runner 镜像）需要作废缓存时改它。
-        key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ hashFiles('.github/actions/qt-static/**') }}
+        key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}
 
     - name: Build static Qt (POSIX)
       if: steps.restore.outputs.cache-hit != 'true' && runner.os != 'Windows'
@@ -90,7 +98,7 @@ runs:
       uses: actions/cache/save@v4
       with:
         path: ${{ steps.paths.outputs.prefix }}
-        key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ hashFiles('.github/actions/qt-static/**') }}
+        key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}
 
     - name: Report
       shell: bash
