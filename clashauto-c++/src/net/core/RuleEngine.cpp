@@ -1,6 +1,11 @@
 #include "RuleEngine.h"
 
 #include <QFile>
+// ★ QHash 必须**显式**包含。Qt 6.11 起头文件瘦身，QString/QStringList 不再传递带进
+//   <QHash>，于是这里的 QHash<QString, Hit> 只剩前向声明，MSVC 报的是
+//       error C2079: uses undefined class 'QHash<QString,RuleSnapshot::Hit>'
+//   —— 看着像模板用法出了问题，其实只是少了一行 include。6.8 上能编过纯属搭了便车。
+#include <QHash>
 #include <QStringList>
 #include <QtGlobal>
 
