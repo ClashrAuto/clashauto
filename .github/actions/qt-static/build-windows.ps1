@@ -79,12 +79,30 @@ function Report-Stage([string]$stage, [Diagnostics.Stopwatch]$sw) {
 
 # Windows Defender 实时扫描会挨个扫过每一个 .obj，在 GH runner 上是数倍的开销。
 # 装 Qt 这种几万个目标文件的构建尤其明显。失败不阻断（权限不够就算了）。
-try {
-    Add-MpPreference -ExclusionPath $env:QT_SRC, $env:QT_PREFIX -ErrorAction Stop
-    Write-Host "已给 $env:QT_SRC / $env:QT_PREFIX 加 Defender 排除项"
-} catch {
-    Write-Host "::warning::加不上 Defender 排除项（$($_.Exception.Message)）——构建会慢一些"
+#
+# ★★ 必须带**硬超时**，不能只 try/catch。Add-MpPreference 在 Defender 正在更新特征库时
+#    会挂住不返回 —— 那不是异常，catch 接不到，脚本就停在这里，一直停到 GitHub 的 6 小时
+#    上限把整个 job 掐掉。2026-08-08 实测：`静态 Qt 构建环境: ninja=...` 这条注解打出来了，
+#    而它**之后**的每一条（包括第三道闸那条生成器断言）一条都没有 —— 六小时里连 qtbase 的
+#    configure 都没跑到。这一句正是那两条注解之间的第一件事。
+#    真挂住了就放弃排除项继续走（只是慢一点），绝不拿整个 job 陪葬。
+$swStage = [Diagnostics.Stopwatch]::StartNew()
+$mp = Start-Job -ScriptBlock {
+    param($src, $prefix)
+    Add-MpPreference -ExclusionPath $src, $prefix -ErrorAction Stop
+} -ArgumentList $env:QT_SRC, $env:QT_PREFIX
+if (Wait-Job $mp -Timeout 60) {
+    if ($mp.State -eq 'Completed') {
+        Write-Host "已给 $env:QT_SRC / $env:QT_PREFIX 加 Defender 排除项"
+    } else {
+        Write-Host "::warning::加不上 Defender 排除项（$($mp.ChildJobs[0].JobStateInfo.Reason)）——构建会慢一些"
+    }
+} else {
+    Stop-Job $mp -ErrorAction SilentlyContinue
+    Write-Host "::warning::Add-MpPreference 60 秒没返回，已放弃排除项继续构建（构建会慢一些）"
 }
+Remove-Job $mp -Force -ErrorAction SilentlyContinue
+Report-Stage 'Defender 排除项' $swStage
 
 Write-Host "::group::[qt-static] 取源码"
 New-Item -ItemType Directory -Force $env:QT_SRC | Out-Null
@@ -95,23 +113,36 @@ $mirrors = @(
     "https://qt-mirror.dannhauer.de/archive/qt/$qtmm/$env:QT_VERSION/submodules"
 )
 foreach ($m in $modules) {
+    $swStage = [Diagnostics.Stopwatch]::StartNew()
     $tb = "$m-everywhere-src-$env:QT_VERSION.tar.xz"
     if (-not (Test-Path $tb)) {
         $ok = $false
         foreach ($base in $mirrors) {
             Write-Host "  $tb  <-  $base"
-            try {
-                Invoke-WebRequest -Uri "$base/$tb" -OutFile "$tb.part" -TimeoutSec 600
+            # ★ 用 curl.exe（Win10+ 自带）而不是 Invoke-WebRequest：这里要的是「卡住就换下一家」，
+            #   而 IWR 的 -TimeoutSec 只管**每次读操作**，一条一直涓流的连接可以拖到天亮，脚本
+            #   就停在这一句上 —— 与上面 Add-MpPreference 同一类失败：不是异常，catch 接不到。
+            #   --speed-limit/--speed-time 是关键那对：连续 60 秒低于 10 KB/s 就判死并返回非零。
+            #   --max-time 20 分钟兜底（qtbase 源码包 ~50MB，正常一两分钟）。
+            & curl.exe -fSL --connect-timeout 30 --max-time 1200 `
+                --speed-limit 10240 --speed-time 60 --retry 2 --retry-delay 5 `
+                -o "$tb.part" "$base/$tb"
+            if ($LASTEXITCODE -eq 0 -and (Test-Path "$tb.part")) {
                 Move-Item "$tb.part" $tb -Force; $ok = $true; break
-            } catch { Write-Host "    失败: $($_.Exception.Message)" }
+            }
+            Write-Host "    失败 (curl exit=$LASTEXITCODE)"
+            Remove-Item "$tb.part" -Force -ErrorAction SilentlyContinue
         }
         if (-not $ok) { Write-Host "::error::$tb 所有镜像均下载失败"; exit 1 }
     }
+    Report-Stage "下载 $m" $swStage
     if (-not (Test-Path $m)) {
+        $swStage = [Diagnostics.Stopwatch]::StartNew()
         New-Item -ItemType Directory -Force $m | Out-Null
         # Windows 10+ 自带 bsdtar，认 .tar.xz
         tar -xf $tb -C $m --strip-components=1
         if ($LASTEXITCODE -ne 0) { throw "解压 $tb 失败" }
+        Report-Stage "解压 $m" $swStage
     }
 }
 Write-Host "::endgroup::"
@@ -153,6 +184,9 @@ Set-Location $b
 $sw = [Diagnostics.Stopwatch]::StartNew()
 & "$env:QT_SRC\qtbase\configure.bat" @common -- -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw "qtbase configure 失败 (exit=$LASTEXITCODE)" }
+# configure 单独计一段。它和上面每一段都有自己的注解 —— 注解是公开可读的，日志要 admin，
+# 所以下次再撞 6 小时上限时，「最后一条注解是哪一段」就直接指出卡在哪儿。
+Report-Stage 'qtbase configure' $sw
 
 # ★★ 第三道闸，也是最重要的一道：**从 CMakeCache.txt 核对真正选中的生成器**。
 #   前两道（PATH 上有 ninja、-cmake-generator Ninja）都是"输入侧"的保证，这一道查的是
