@@ -70,7 +70,11 @@ public:
     //   地址映射到问题名。只认应答(QR=1)、RCODE=0；解析不了/无 fake-ip 记录就静默忽略。
     //   只记 fake-ip（不记真实 IP）：表小、语义紧——真实 IP 的连接本就该照原样直连，不需要改写。
     //   注：核心的 fake-ip 池是 v4 的，故这里只看 A 记录；AAAA 返回的是真地址，不属本机制。
-    void learnFromDnsResponse(const QByteArray &wire);
+    //
+    // 返回**本次真正记下的映射条数**（0 = 这份应答里没有 fake-ip / 报文读不动）。★ 返回值不是
+    // 装饰：调用方拿它记账才能区分「旁听这条路根本没接上」（恒 0）和「接上了但核心答的是真 IP」
+    // ——两者的处置完全相反，只统计「喂了多少份应答」是分不出来的。
+    int learnFromDnsResponse(const QByteArray &wire);
     // 旁听学到的 fake-ip → 域名；未学到/非 v4 返回空。
     QString domainForLearnedIp(const QHostAddress &ip) const;
 

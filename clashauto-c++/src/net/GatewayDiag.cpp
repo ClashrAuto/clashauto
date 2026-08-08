@@ -308,9 +308,12 @@ void GatewayDiag::sample(const QString &extra)
         const qint64 fr = d(c.dnsFakeIpResolved, g_prev.dnsFakeIpResolved);
         const qint64 lf = d(c.dnsLocalFake, g_prev.dnsLocalFake);
         const qint64 lw = d(c.dnsLocalForward, g_prev.dnsLocalForward);
-        if (cc || f1 || f2 || f3 || f4 || f5 || fr || lf || lw) {
-            line += QStringLiteral(" cc=%1/%2/%3/%4/%5/%6 fakeipResolved=%7 dnsLocal=%8/%9")
-                        .arg(cc).arg(f1).arg(f2).arg(f3).arg(f4).arg(f5).arg(fr).arg(lf).arg(lw);
+        const qint64 ln = d(c.dnsLearned, g_prev.dnsLearned);
+        if (cc || f1 || f2 || f3 || f4 || f5 || fr || lf || lw || ln) {
+            line += QStringLiteral(" cc=%1/%2/%3/%4/%5/%6 fakeipLearned=%7 fakeipResolved=%8"
+                                   " dnsLocal=%9/%10")
+                        .arg(cc).arg(f1).arg(f2).arg(f3).arg(f4).arg(f5)
+                        .arg(ln).arg(fr).arg(lf).arg(lw);
         }
     }
     line += QStringLiteral(" pump=%1 late=%2 maxLagMs=%3")

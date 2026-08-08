@@ -2128,6 +2128,15 @@ void NetStack::onDnsResponse()
             continue; // 迟到的重复应答 / 已被超时回收：丢掉即可
         const Impl::DnsPending p = it.value();
         d->dnsPending.erase(d->dnsPending.find(id));
+        // ★ 旁听：这份应答是**核心**答的，域名→fake-ip 那张表只在核心手里。回封给设备之前
+        //   顺手记下来，进程内出站才可能把 fake-ip 目的地还原成域名去拨（见 DnsResolver.h
+        //   「为什么需要它」那段：不记的话域名类流量拿着 198.18.x.x 出站，节点侧必然 i/o
+        //   timeout）。学不动就返回 0，静默忽略——这条路不能因为一份怪报文而影响回封。
+        //   放在 txid 还原之前/之后都一样：解析只看 QR/RCODE/问题名/A 记录，不看事务 ID。
+        if (d->dnsLearner) {
+            if (const int learned = d->dnsLearner->learnFromDnsResponse(resp); learned > 0)
+                GatewayDiag::c.dnsLearned += learned;
+        }
         // 还原设备自己的事务 ID —— 否则设备的解析器认不出这是它那条查询的应答。
         resp[0] = char((p.origId >> 8) & 0xFF);
         resp[1] = char(p.origId & 0xFF);

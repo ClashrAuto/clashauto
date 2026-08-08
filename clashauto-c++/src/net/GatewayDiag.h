@@ -171,6 +171,11 @@ public:
         qint64 dnsFakeIpResolved;
         qint64 dnsLocalFake;     // 本地当场合成 fake-ip 应答的查询数（含给 AAAA 回 NODATA）
         qint64 dnsLocalForward;  // 本地看不懂/不该 fake → 转发给上游的查询数
+        // 从**核心答的** DNS 应答里旁听到并记下的「fake-ip → 域名」映射条数（见 NetStack::
+        // onDnsResponse）。★ 与 dnsFakeIpResolved 成对读：本栏是「学到了多少」，那栏是「用上了
+        // 多少」。本栏恒 0 而 dnsHijacked 不为 0 = 旁听那条路没接上（这正是它曾经的状态：
+        // learnFromDnsResponse 写好了却没有任何调用点），域名类流量只能一直回退核心。
+        qint64 dnsLearned;
         // —— 定时器泵健康度（**单线程饱和度**的直接指标）——
         // 泵是 25ms 一拍的固定周期。它迟到就说明工作线程上一拍还没跑完——数据面被自己堵住了。
         // 这是回答「到底是链路丢包还是本机算不过来」的关键一栏，其它计数都替代不了。

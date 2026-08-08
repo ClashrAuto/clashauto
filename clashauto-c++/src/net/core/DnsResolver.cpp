@@ -161,55 +161,55 @@ QString DnsResolver::domainForFake(const QHostAddress &ip) const
 
 // ============ 旁听核心分配的 fake-ip（见头文件那段「为什么需要它」） ============
 
-void DnsResolver::learnFromDnsResponse(const QByteArray &wire)
+int DnsResolver::learnFromDnsResponse(const QByteArray &wire)
 {
     if (wire.size() < 12) {
-        return; // 连报文头都不够
+        return 0; // 连报文头都不够
     }
     const auto be16 = [&wire](int off) -> quint16 {
         return quint16((quint16(quint8(wire.at(off))) << 8) | quint16(quint8(wire.at(off + 1))));
     };
     const quint16 flags = be16(2);
     if ((flags & 0x8000) == 0) {
-        return; // QR=0：这是查询不是应答
+        return 0; // QR=0：这是查询不是应答
     }
     if ((flags & 0x000F) != 0) {
-        return; // RCODE != 0：错误应答，没有可信记录
+        return 0; // RCODE != 0：错误应答，没有可信记录
     }
     const int qd = int(be16(4));
     const int an = int(be16(6));
     if (qd < 1 || an < 1) {
-        return;
+        return 0;
     }
 
     int pos = 12;
     QString qname;
     if (!readDnsName(wire, pos, &qname) || pos + 4 > wire.size()) {
-        return;
+        return 0;
     }
     pos += 4; // QTYPE + QCLASS
     for (int i = 1; i < qd; ++i) { // 正常只有 1 个问题；多的照规矩跳过
         if (!readDnsName(wire, pos, nullptr) || pos + 4 > wire.size()) {
-            return;
+            return 0;
         }
         pos += 4;
     }
     const QString domain = qname.trimmed().toLower();
     if (domain.isEmpty()) {
-        return;
+        return 0;
     }
 
     // 扫应答段，挑出「A 记录 且 落在 fake-ip 段」的地址（CNAME 等一律跳过，只按 RDLENGTH 前进）。
     QVector<quint32> fakes;
     for (int i = 0; i < an; ++i) {
         if (!readDnsName(wire, pos, nullptr) || pos + 10 > wire.size()) {
-            return;
+            return 0;
         }
         const quint16 type = be16(pos);
         const quint16 rdlen = be16(pos + 8);
         pos += 10;
         if (pos + int(rdlen) > wire.size()) {
-            return;
+            return 0;
         }
         if (type == 1 && rdlen == 4) { // A
             const quint32 v = (quint32(quint8(wire.at(pos))) << 24)
@@ -223,7 +223,7 @@ void DnsResolver::learnFromDnsResponse(const QByteArray &wire)
         pos += int(rdlen);
     }
     if (fakes.isEmpty()) {
-        return; // 这条应答里没有 fake-ip（真实 IP 不记，见头文件说明）
+        return 0; // 这条应答里没有 fake-ip（真实 IP 不记，见头文件说明）
     }
 
     QMutexLocker lock(&m_mutex);
@@ -233,6 +233,7 @@ void DnsResolver::learnFromDnsResponse(const QByteArray &wire)
     for (const quint32 v : fakes) {
         m_learnedFake.insert(v, domain);
     }
+    return fakes.size();
 }
 
 QString DnsResolver::domainForLearnedIp(const QHostAddress &ip) const
