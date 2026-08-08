@@ -481,5 +481,6 @@
   "有新版": "Mise à jour disponible",
   "未检测到 mihomo 内核，代理无法启动 · ": "Noyau mihomo introuvable — le proxy ne peut pas démarrer · ",
   "策略组": "Groupe de règles",
-  "设备「%1」正被 %2 争抢": "L'appareil « %1 » est disputé par %2"
+  "设备「%1」正被 %2 争抢": "L'appareil « %1 » est disputé par %2",
+  "\n建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "\nActivez « Démarrer au démarrage » dans les Réglages pour que le proxy reprenne automatiquement après un redémarrage."
 }

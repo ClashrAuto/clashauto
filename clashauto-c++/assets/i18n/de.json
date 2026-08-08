@@ -481,5 +481,6 @@
   "有新版": "Update verfügbar",
   "未检测到 mihomo 内核，代理无法启动 · ": "mihomo-Kern nicht gefunden – der Proxy kann nicht starten · ",
   "策略组": "Richtliniengruppe",
-  "设备「%1」正被 %2 争抢": "Gerät „%1“ wird von %2 beansprucht"
+  "设备「%1」正被 %2 争抢": "Gerät „%1“ wird von %2 beansprucht",
+  "\n建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "\nAktiviere „Beim Systemstart starten“ in den Einstellungen, damit das Proxying nach einem Neustart automatisch fortgesetzt wird."
 }

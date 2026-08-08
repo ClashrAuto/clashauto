@@ -481,5 +481,6 @@
   "有新版": "Hay una actualización",
   "未检测到 mihomo 内核，代理无法启动 · ": "No se encontró el núcleo mihomo; el proxy no puede iniciarse · ",
   "策略组": "Grupo de políticas",
-  "设备「%1」正被 %2 争抢": "El dispositivo «%1» está siendo disputado por %2"
+  "设备「%1」正被 %2 争抢": "El dispositivo «%1» está siendo disputado por %2",
+  "\n建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "\nActiva «Iniciar al arrancar» en Ajustes para que el proxy se reanude automáticamente tras reiniciar."
 }

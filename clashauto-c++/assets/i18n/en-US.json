@@ -482,5 +482,6 @@
   "有新版": "Update available",
   "未检测到 mihomo 内核，代理无法启动 · ": "mihomo core not found — the proxy cannot start · ",
   "策略组": "Policy group",
-  "设备「%1」正被 %2 争抢": "Device \"%1\" is being contended by %2"
+  "设备「%1」正被 %2 争抢": "Device \"%1\" is being contended by %2",
+  "\n建议在「设置」里打开「开机自启」，重启后才能自动接着代理。": "\nTurn on \"Start on boot\" in Settings so proxying resumes automatically after a restart."
 }
