@@ -122,10 +122,6 @@ public enum YAMLText {
         return text.replacingCharacters(in: blockRange, with: "  \(key): \(value)\n" + block)
     }
 
-    public static func setNestedBool(_ text: String, section: String, key: String, value: Bool) -> String {
-        setNestedValue(text, section: section, key: key, value: value ? "true" : "false")
-    }
-
     public static func setBool(_ text: String, key: String, value: Bool) -> String {
         setValue(text, key: key, value: value ? "true" : "false")
     }

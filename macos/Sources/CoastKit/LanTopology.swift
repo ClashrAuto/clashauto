@@ -122,19 +122,6 @@ public enum LanTopology {
         return table
     }
 
-    /// 从 `arp -n <ip>` 查 MAC。复用 LanBrowser 的行解析（同一套「不补零」的坑）。
-    /// ⚠️ **不分接口**：只在「明确只关心某一个 IP、且不在乎它挂在哪张卡上」时用。
-    /// 网关 MAC 请走 arpTableByInterface（理由见 allGateways）。
-    static func arpLookup(ip: String) -> String? {
-        guard let output = run("/usr/sbin/arp", ["-n", ip]) else { return nil }
-        for line in output.split(separator: "\n") {
-            if let device = LanBrowser.parseARPLine(String(line)), device.ip == ip {
-                return device.mac
-            }
-        }
-        return nil
-    }
-
     // MARK: - IPv6 拓扑
 
     /// v6 默认路由器 = `netstat -rn -f inet6` 的默认路由下一跳(链路本地) + 从 `ndp -an` 查它的 MAC。

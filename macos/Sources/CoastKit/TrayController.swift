@@ -313,11 +313,6 @@ public final class TrayController {
         return (image, total)
     }
 
-    /// 系统通知。首次调用会请求授权 —— 被拒绝就静默跳过，通知不是关键路径。
-    public func notify(title: String, message: String) {
-        Notifier.post(title: title, body: message)
-    }
-
     // MARK: - 动作
 
     @objc private func showPanel() { onShowPanel?() }

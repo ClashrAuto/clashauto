@@ -439,10 +439,6 @@ public final class ClashService {
         }
     }
 
-    public func fetchConnections() async -> [[String: Any]] {
-        (try? await api.connections().connections) ?? []
-    }
-
     public func refreshNodes() { Task { await pollNodes() } }
 
     // MARK: - 延迟测速
