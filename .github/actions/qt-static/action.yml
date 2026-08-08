@@ -132,7 +132,15 @@ runs:
         asset="qtstatic-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}.tar.gz"
         url="https://github.com/ClashrAuto/qt-static/releases/download/qt-${{ inputs.qt-version }}/$asset"
         echo "找预编产物: $url"
+        # ★ 临时文件路径必须转成 POSIX 形式再交给 tar。Windows runner 上 RUNNER_TEMP 是
+        #   D:\a\_temp —— GNU tar 见到 `-f D:\a\_temp\x.tar.gz`，按 `host:path` 的老规矩
+        #   （冒号出现在第一个斜杠之前）判定这是**远程归档**，于是去连接名为 D 的主机：
+        #       tar (child): Cannot connect to D: resolve failed
+        #   资产已经下下来了，偏偏死在解压这一步，而上一行日志刚打印完正确的 URL，
+        #   看着极像"下载失败"。--force-local 能治，但那是 GNU 独有的 flag，
+        #   macOS 的 bsdtar 见了会直接报错 —— 这一段三个平台共用，所以改路径而不是加 flag。
         tmp="$RUNNER_TEMP/qtstatic-prebuilt.tar.gz"
+        command -v cygpath >/dev/null 2>&1 && tmp="$(cygpath -u "$RUNNER_TEMP")/qtstatic-prebuilt.tar.gz"
         # --speed-limit/--speed-time：涓流连接直接判死，别把这一级变成新的挂点。
         if curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 \
                 --speed-limit 10240 --speed-time 60 -o "$tmp" "$url"; then
@@ -180,7 +188,9 @@ runs:
         asset="qtstatic-${{ inputs.qt-version }}-windows-x64-${{ steps.paths.outputs.recipe }}.tar.gz"
         url="https://github.com/ClashrAuto/qt-static/releases/download/qt-${{ inputs.qt-version }}/$asset"
         echo "取宿主 Qt: $url"
+        # 同上：GNU tar 会把 D:\... 当成远程主机，路径先转 POSIX（见 Try prebuilt 那段注释）。
         tmp="$RUNNER_TEMP/qthost.tar.gz"
+        command -v cygpath >/dev/null 2>&1 && tmp="$(cygpath -u "$RUNNER_TEMP")/qthost.tar.gz"
         mkdir -p "$root"
         if ! curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 \
                   --speed-limit 10240 --speed-time 60 -o "$tmp" "$url"; then
