@@ -78,10 +78,20 @@ runs:
         #   于是安静地产出一个**空哈希**。后果正是这个哈希本来要防的那件事：
         #   资产名变成 qtstatic-6.8.3-macos-universal-.tar.gz，配方改了名字却不变，
         #   下游继续下载旧 Qt。实测发生过一次，白发一个 264MB 的错名资产。
+        # ★ 两个都必须做，否则 Windows 这条腿永远拿不到预编产物：
+        #   · **从 stdin 喂**，不要把文件名交给 sha256sum。coreutils 遇到含反斜杠的文件名会
+        #     走转义输出：整行前面多一个 '\'。Windows runner 上 recipe 是
+        #     D:\a\clashauto\clashauto\./.github/... —— 于是 cut -c1-16 切出来的是
+        #     '\d12a05fef286f97'，正好被上面那道非空/十六进制断言拦下，Windows 两个 job
+        #     在 Resolve paths 就红。2026-08-08 实测发生过。
+        #   · **按 LF 归一**（tr -d '\r'）。Windows runner 的 checkout 是 CRLF，同一份配方
+        #     在 Windows 上算出的哈希与 Linux/macOS 不是一个值（实测 d12a05fe… vs 8ef3fa80…）。
+        #     哈希本来的意思是「配方的身份」，那就不该随 checkout 的换行风格变。POSIX 侧本来
+        #     就没有 \r，归一后哈希不变 —— 已经发布的 linux 资产继续有效。
         if command -v sha256sum >/dev/null 2>&1; then
-          h="$(sha256sum "$recipe" | cut -c1-16)"
+          h="$(tr -d '\r' < "$recipe" | sha256sum | cut -c1-16)"
         else
-          h="$(shasum -a 256 "$recipe" | cut -c1-16)"
+          h="$(tr -d '\r' < "$recipe" | shasum -a 256 | cut -c1-16)"
         fi
         # 空哈希必须当场失败：它不会让任何一步报错，只会让「配方变了就换资产」这条保证失效。
         case "$h" in
