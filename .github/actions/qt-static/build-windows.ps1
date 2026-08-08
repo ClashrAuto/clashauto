@@ -141,6 +141,20 @@ if (Wait-Job $mp -Timeout 60) {
 Remove-Job $mp -Force -ErrorAction SilentlyContinue
 Report-Stage 'Defender 排除项' $swStage
 
+# ★★ deadline 检查必须排在**下载之前**，这一段是 2026-08-08 实测出来的。
+#   发布流水线传 build-deadline-min: 0，本意是「一个模块都不编，缓存没就绪就当场失败（约 2 分钟）」。
+#   但第一处 deadline 检查原本在下载**之后**，于是那两个 Windows 发布 job 照样去拉三个源码包，
+#   在 `Static Qt` 这一步耗了两个多小时**一行代码都没编**就退出 —— 恰恰是这个设计要避免的浪费。
+#   源码不在缓存路径里（缓存只存 QT_PREFIX，源码在 QT_SRC），所以每次缓存未命中都要重下：
+#   curl 每镜像 --max-time 1200，三镜像 × 三模块，最坏 180 分钟。
+$allStages = @('qtbase', 'qtshadertools', 'qtdeclarative')
+if ($env:QT_ARCH -ne 'arm64') { $allStages += 'openssl' }
+$firstPending = @($allStages | Where-Object { -not (Stage-IsDone $_) })[0]
+if ($firstPending -and (Stage-OutOfTime $firstPending)) { exit 0 }
+
+if (-not $firstPending) {
+    Write-Host "[qt-static] 所有模块都已在断点缓存里，无需取源码"
+} else {
 Write-Host "::group::[qt-static] 取源码"
 New-Item -ItemType Directory -Force $env:QT_SRC | Out-Null
 Set-Location $env:QT_SRC
@@ -183,6 +197,7 @@ foreach ($m in $modules) {
     }
 }
 Write-Host "::endgroup::"
+}
 
 if (Stage-IsDone 'qtbase') {
     Write-Host "[qt-static] qtbase 已在断点缓存里，跳过"

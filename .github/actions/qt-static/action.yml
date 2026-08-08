@@ -41,6 +41,12 @@ outputs:
   cache-hit:
     description: 是否命中缓存（未命中说明这次真的编了一遍）
     value: ${{ steps.restore.outputs.cache-hit }}
+  recipe:
+    description: 本平台配方脚本的短哈希，用于拼预编产物的资产名
+    value: ${{ steps.paths.outputs.recipe }}
+  complete:
+    description: 这一轮结束时这套 Qt 是否完整可用
+    value: ${{ steps.state.outputs.complete }}
 
 runs:
   using: composite
@@ -69,8 +75,51 @@ runs:
         #   会诱使人「为了保住缓存而不敢改脚本」，正好把这个目录变成没人敢碰的地方。
         echo "recipe=$(sha256sum "$recipe" | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
+    - name: Try prebuilt static Qt
+      id: prebuilt
+      shell: bash
+      run: |
+        set -uo pipefail
+        # ★★ 第一级：从 ClashrAuto/qt-static 取**预先编好**的产物。
+        #
+        #   为什么不用本仓库的 release：app 的更新列表读的是 /releases 全量，而
+        #   UpdateController::fetchReleases 取的是列表里第一个非 prerelease 的 release，
+        #   **不管它有没有可用资产** —— 一个 qt-static-6.8.3 的 tag 会被当成「最新版本」，
+        #   而它的 tag 不是版本号，版本比较会乱套。已经装出去的老客户端改不了，所以只能另立仓库。
+        #
+        #   相对 Actions 缓存的三个实打实的好处：
+        #     · 缓存**按分支隔离** —— 在功能分支上编好的，合并回 master 用不上，得重编一遍；
+        #     · 缓存 7 天不访问就淘汰，仓库总配额还只有 10 GB；
+        #     · 缓存**跨不了仓库** —— 外部签名仓库 schat.build 只能自己从头编。
+        #   换成公开仓库的 release 资产，这三条一起消失，而且下载不需要任何凭据。
+        #
+        #   取不到不是错误：下面还有缓存和源码构建两级兜底。仓库还没建、资产还没传、
+        #   配方刚改过（哈希变了）—— 都会走到这里，一律安静回退。
+        prefix='${{ steps.paths.outputs.prefix }}'
+        asset="qtstatic-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}.tar.gz"
+        url="https://github.com/ClashrAuto/qt-static/releases/download/qt-${{ inputs.qt-version }}/$asset"
+        echo "找预编产物: $url"
+        tmp="$RUNNER_TEMP/qtstatic-prebuilt.tar.gz"
+        # --speed-limit/--speed-time：涓流连接直接判死，别把这一级变成新的挂点。
+        if curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 \
+                --speed-limit 10240 --speed-time 60 -o "$tmp" "$url"; then
+          mkdir -p "$prefix"
+          if tar -xzf "$tmp" -C "$prefix"; then
+            rm -f "$tmp"
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "✅ 用上了预编静态 Qt（$asset），跳过缓存与源码构建"
+            exit 0
+          fi
+          echo "::warning::预编产物解压失败，回退到缓存/源码构建"
+          rm -rf "$prefix"; rm -f "$tmp"
+        else
+          echo "没有预编产物（curl exit=$?），回退到缓存/源码构建"
+        fi
+        echo "hit=false" >> "$GITHUB_OUTPUT"
+
     - name: Restore static Qt cache
       id: restore
+      if: steps.prebuilt.outputs.hit != 'true'
       uses: actions/cache/restore@v4
       with:
         path: ${{ steps.paths.outputs.prefix }}
@@ -84,7 +133,7 @@ runs:
           qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}-wip-
 
     - name: Build static Qt (POSIX)
-      if: steps.restore.outputs.cache-hit != 'true' && runner.os != 'Windows'
+      if: steps.prebuilt.outputs.hit != 'true' && steps.restore.outputs.cache-hit != 'true' && runner.os != 'Windows'
       shell: bash
       env:
         QT_VERSION: ${{ inputs.qt-version }}
@@ -94,7 +143,7 @@ runs:
       run: bash "$GITHUB_ACTION_PATH/build-posix.sh"
 
     - name: Build static Qt (Windows)
-      if: steps.restore.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      if: steps.prebuilt.outputs.hit != 'true' && steps.restore.outputs.cache-hit != 'true' && runner.os == 'Windows'
       shell: pwsh
       env:
         QT_VERSION: ${{ inputs.qt-version }}
@@ -116,7 +165,10 @@ runs:
         if [ "$RUNNER_OS" != "Windows" ]; then
           echo "complete=true" >> "$GITHUB_OUTPUT"; echo "done=0" >> "$GITHUB_OUTPUT"; exit 0
         fi
-        if [ "${{ steps.restore.outputs.cache-hit }}" = "true" ] || [ -f "$prefix/.qtstatic-complete" ]; then
+        # 预编产物是从**完整**前缀打的包，里面就带着 .qtstatic-complete；这里显式再认一次，
+        # 免得将来谁改了打包方式（比如漏掉点文件）时，一份好 Qt 被判成"没编完"又去重编。
+        if [ "${{ steps.prebuilt.outputs.hit }}" = "true" ] \
+           || [ "${{ steps.restore.outputs.cache-hit }}" = "true" ] || [ -f "$prefix/.qtstatic-complete" ]; then
           echo "complete=true" >> "$GITHUB_OUTPUT"
         else
           echo "complete=false" >> "$GITHUB_OUTPUT"
@@ -129,7 +181,7 @@ runs:
       # 只在**真的编完**时回写最终键。用 cache/save 而不是 cache 的 post 步骤：composite action 里
       # 显式两段更好读，也免得构建失败时把半份 Qt 存进缓存 —— 那会毒化后续所有构建，
       # 且表现为"缓存命中但编不过"，比重编一次难查得多。
-      if: steps.restore.outputs.cache-hit != 'true' && steps.state.outputs.complete == 'true' && success()
+      if: steps.prebuilt.outputs.hit != 'true' && steps.restore.outputs.cache-hit != 'true' && steps.state.outputs.complete == 'true' && success()
       uses: actions/cache/save@v4
       with:
         path: ${{ steps.paths.outputs.prefix }}
@@ -139,7 +191,7 @@ runs:
       # 没编完就把**进度**存起来，键里带已完成模块数。用「模块数」而不是 run_id 做后缀，
       # 是为了把条目数**钉死在模块数量级**（每套最多 4 条）——用 run_id 的话每跑一轮多一条，
       # 几 GB 的半份 Qt 很快会把 10GB 仓库配额挤爆，进而把 Linux/macOS 那两份好缓存挤掉。
-      if: always() && runner.os == 'Windows' && steps.state.outputs.complete != 'true' && steps.state.outputs.done != '0'
+      if: always() && steps.prebuilt.outputs.hit != 'true' && runner.os == 'Windows' && steps.state.outputs.complete != 'true' && steps.state.outputs.done != '0'
       uses: actions/cache/save@v4
       with:
         path: ${{ steps.paths.outputs.prefix }}
