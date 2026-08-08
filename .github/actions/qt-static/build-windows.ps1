@@ -77,6 +77,43 @@ function Report-Stage([string]$stage, [Diagnostics.Stopwatch]$sw) {
         $stage, $sw.Elapsed.TotalMinutes, $swAll.Elapsed.TotalMinutes)
 }
 
+# ———————————————————————— 断点续编 ————————————————————————
+#
+# ★★ 这是 Windows 这套配置**能不能编出来**的关键，不是优化。★★
+#
+# 现状是个死循环：整套静态 Qt 在 4 核 runner 上编不完 GitHub 的 6 小时上限 → job 被掐 →
+# 缓存永远写不进去 → 下一轮从头再编 → 再被掐。Linux/macOS 之所以没事，是它们**第一次就编完了**，
+# 之后一直吃缓存（实测今天 Linux 33–45 分钟、macOS 通用二进制 47 分钟，那都是命中缓存的数）。
+# Windows 从来没有过那个"第一次"，于是每一轮发布都在烧 2 个 runner × 6 小时，
+# 而 manifest job（needs windows）永远被 skip —— version.json 因此停在 v1.0.994 不动。
+#
+# 破法：让这套构建**可以分几轮编完**。
+#   · 每个模块装完就在前缀里落一个 .qtstatic-<模块>.done 标记；
+#   · 开工前先看标记，已完成的整段跳过；
+#   · 每段开始前check软上限（默认 280 分钟，留足余量给缓存回写），超了就干净收工、exit 0，
+#     由 action 把**已完成的那部分**写进断点缓存（键与最终键分开，见 action.yml）；
+#   · 三个模块 + OpenSSL 全齐了才写 .qtstatic-complete —— action 只认这个标记才回写最终键。
+# 于是跑几轮 Warm static Qt cache 就能把它推完，之后永远是秒级命中。
+$doneDir = $env:QT_PREFIX
+function Stage-IsDone([string]$name) {
+    return (Test-Path (Join-Path $doneDir ".qtstatic-$name.done"))
+}
+function Stage-MarkDone([string]$name) {
+    New-Item -ItemType Directory -Force $doneDir | Out-Null
+    Set-Content -Path (Join-Path $doneDir ".qtstatic-$name.done") -Value (Get-Date -Format o)
+}
+$deadlineMin = 280
+if ($env:QT_BUILD_DEADLINE_MIN) { $deadlineMin = [int]$env:QT_BUILD_DEADLINE_MIN }
+# 返回 $true = 时间不够开下一段了，调用方应当 exit 0（不是失败，是"这一轮到此为止"）。
+function Stage-OutOfTime([string]$next) {
+    if ($swAll.Elapsed.TotalMinutes -lt $deadlineMin) { return $false }
+    Write-Host ("::warning::[qt-static] 已用 {0:N0} 分钟，达到软上限 {1} —— 在开始「{2}」之前收工。" -f `
+        $swAll.Elapsed.TotalMinutes, $deadlineMin, $next)
+    Write-Host "::warning::[qt-static] 已完成的部分会写进**断点缓存**，再跑一次 Warm static Qt cache 就从这里接着编。"
+    Set-Content -Path (Join-Path $doneDir '.qtstatic-partial') -Value $next
+    return $true
+}
+
 # Windows Defender 实时扫描会挨个扫过每一个 .obj，在 GH runner 上是数倍的开销。
 # 装 Qt 这种几万个目标文件的构建尤其明显。失败不阻断（权限不够就算了）。
 #
@@ -147,6 +184,11 @@ foreach ($m in $modules) {
 }
 Write-Host "::endgroup::"
 
+if (Stage-IsDone 'qtbase') {
+    Write-Host "[qt-static] qtbase 已在断点缓存里，跳过"
+} elseif (Stage-OutOfTime 'qtbase') {
+    exit 0
+} else {
 Write-Host "::group::[qt-static] configure + build qtbase"
 # 关键 flag：
 #   -static -static-runtime  Qt 出 .lib，且链**静态 CRT(/MT)** —— 后者决定包里还要不要
@@ -212,10 +254,14 @@ cmake --build . --parallel $cores
 if ($LASTEXITCODE -ne 0) { throw "qtbase 构建失败" }
 cmake --install .
 if ($LASTEXITCODE -ne 0) { throw "qtbase 安装失败" }
+Stage-MarkDone 'qtbase'
 Report-Stage 'qtbase' $sw
 Write-Host "::endgroup::"
+}
 
 foreach ($m in @('qtshadertools', 'qtdeclarative')) {
+    if (Stage-IsDone $m) { Write-Host "[qt-static] $m 已在断点缓存里，跳过"; continue }
+    if (Stage-OutOfTime $m) { exit 0 }
     Write-Host "::group::[qt-static] $m"
     $bm = Join-Path $env:QT_SRC "b-$m"
     Remove-Item -Recurse -Force $bm -ErrorAction SilentlyContinue
@@ -228,11 +274,13 @@ foreach ($m in @('qtshadertools', 'qtdeclarative')) {
     if ($LASTEXITCODE -ne 0) { throw "$m 构建失败" }
     cmake --install .
     if ($LASTEXITCODE -ne 0) { throw "$m 安装失败" }
+    Stage-MarkDone $m
     Report-Stage $m $swm
     Write-Host "::endgroup::"
 }
 
-if ($env:QT_ARCH -ne 'arm64') {
+if ($env:QT_ARCH -ne 'arm64' -and -not (Stage-IsDone 'openssl')) {
+    if (Stage-OutOfTime 'openssl') { exit 0 }
     Write-Host "::group::[qt-static] OpenSSL (静态 /MT)"
     # ★ 为什么静态 Qt 会牵连出这一步：切到 /MT 之后，runner 自带的那份 OpenSSL
     #   （C:\Program Files\OpenSSL，用 /MD 编的）会在 CMakeLists 的"真链测试"里链不上，
@@ -250,8 +298,22 @@ if ($env:QT_ARCH -ne 'arm64') {
     $lib = Join-Path $sslRoot 'x64-windows-static\lib\libcrypto.lib'
     if (-not (Test-Path $lib)) { throw "没找到 $lib —— vcpkg 布局变了？" }
     Write-Host "静态 libcrypto: $lib"
+    Stage-MarkDone 'openssl'
     Write-Host "::endgroup::"
 }
+
+# 全齐了才算这套配置真的编好。action.yml 只在看到 .qtstatic-complete 时才回写**最终键**；
+# 没有它就只写断点键 —— 半份 Qt 混进最终键会毒化后续所有构建，且表现为「缓存命中但编不过」。
+$need = @('qtbase', 'qtshadertools', 'qtdeclarative')
+if ($env:QT_ARCH -ne 'arm64') { $need += 'openssl' }
+$missing = @($need | Where-Object { -not (Stage-IsDone $_) })
+if ($missing.Count -gt 0) {
+    Write-Host "::warning::[qt-static] 本轮未编完，还差：$($missing -join ', ')（已完成的会进断点缓存）"
+    exit 0
+}
+Remove-Item (Join-Path $doneDir '.qtstatic-partial') -Force -ErrorAction SilentlyContinue
+Set-Content -Path (Join-Path $doneDir '.qtstatic-complete') -Value (Get-Date -Format o)
+Write-Host ("::warning::[qt-static] 全部编完，累计 {0:N0} 分钟" -f $swAll.Elapsed.TotalMinutes)
 
 Write-Host "[qt-static] 产物概览"
 $libs = Get-ChildItem "$env:QT_PREFIX\lib" -Filter *.lib -ErrorAction SilentlyContinue

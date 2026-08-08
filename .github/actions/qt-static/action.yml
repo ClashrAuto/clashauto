@@ -68,6 +68,12 @@ runs:
         path: ${{ steps.paths.outputs.prefix }}
         # v1 是人工版本位：Qt 版本或配方之外的原因（比如换了 runner 镜像）需要作废缓存时改它。
         key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}
+        # ★ 退一步认**断点缓存**（-wip-N）。Windows 那套编不完 6 小时上限，只能分几轮推进：
+        #   每轮把已完成的模块存进 -wip-<已完成数>，下一轮按前缀取最新那份接着编。
+        #   注意 restore-keys 命中时 cache-hit 仍是 false —— 正是我们要的：文件恢复了，
+        #   构建步骤照样跑，脚本按 .done 标记跳过已完成的部分。
+        restore-keys: |
+          qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}-wip-
 
     - name: Build static Qt (POSIX)
       if: steps.restore.outputs.cache-hit != 'true' && runner.os != 'Windows'
@@ -90,18 +96,55 @@ runs:
         QT_HOST_PATH: ${{ inputs.host-qt-path }}
       run: pwsh -File "$env:GITHUB_ACTION_PATH/build-windows.ps1"
 
+    - name: Inspect build state
+      id: state
+      if: always()
+      shell: bash
+      run: |
+        set -uo pipefail
+        prefix='${{ steps.paths.outputs.prefix }}'
+        # POSIX 那两套一次就能编完，脚本不落标记 —— 一律当作已完成，行为与加断点续编之前一致。
+        if [ "$RUNNER_OS" != "Windows" ]; then
+          echo "complete=true" >> "$GITHUB_OUTPUT"; echo "done=0" >> "$GITHUB_OUTPUT"; exit 0
+        fi
+        if [ "${{ steps.restore.outputs.cache-hit }}" = "true" ] || [ -f "$prefix/.qtstatic-complete" ]; then
+          echo "complete=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "complete=false" >> "$GITHUB_OUTPUT"
+        fi
+        n=$(ls -1 "$prefix"/.qtstatic-*.done 2>/dev/null | wc -l | tr -d ' ')
+        echo "done=$n" >> "$GITHUB_OUTPUT"
+        echo "断点状态: 已完成模块=$n  complete=$( [ -f "$prefix/.qtstatic-complete" ] && echo yes || echo no )"
+
     - name: Save static Qt cache
-      # 只在真编过时回写。用 cache/save 而不是 cache 的 post 步骤：composite action 里
+      # 只在**真的编完**时回写最终键。用 cache/save 而不是 cache 的 post 步骤：composite action 里
       # 显式两段更好读，也免得构建失败时把半份 Qt 存进缓存 —— 那会毒化后续所有构建，
       # 且表现为"缓存命中但编不过"，比重编一次难查得多。
-      if: steps.restore.outputs.cache-hit != 'true' && success()
+      if: steps.restore.outputs.cache-hit != 'true' && steps.state.outputs.complete == 'true' && success()
       uses: actions/cache/save@v4
       with:
         path: ${{ steps.paths.outputs.prefix }}
         key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}
 
+    - name: Save static Qt progress cache
+      # 没编完就把**进度**存起来，键里带已完成模块数。用「模块数」而不是 run_id 做后缀，
+      # 是为了把条目数**钉死在模块数量级**（每套最多 4 条）——用 run_id 的话每跑一轮多一条，
+      # 几 GB 的半份 Qt 很快会把 10GB 仓库配额挤爆，进而把 Linux/macOS 那两份好缓存挤掉。
+      if: always() && runner.os == 'Windows' && steps.state.outputs.complete != 'true' && steps.state.outputs.done != '0'
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ steps.paths.outputs.prefix }}
+        key: qtstatic-v1-${{ inputs.qt-version }}-${{ inputs.target }}-${{ steps.paths.outputs.recipe }}-wip-${{ steps.state.outputs.done }}
+
     - name: Report
       shell: bash
       run: |
-        echo "静态 Qt: ${{ steps.paths.outputs.prefix }} (cache-hit=${{ steps.restore.outputs.cache-hit }})"
+        echo "静态 Qt: ${{ steps.paths.outputs.prefix }} (cache-hit=${{ steps.restore.outputs.cache-hit }}, complete=${{ steps.state.outputs.complete }})"
+        if [ "${{ steps.state.outputs.complete }}" != "true" ]; then
+          echo "::error::静态 Qt 这套配置还没编完（已完成 ${{ steps.state.outputs.done }} 个模块，进度已存进断点缓存）。"
+          echo "::error::再跑一次 Warm static Qt cache 就从断点接着编；编完之后本 job 会秒级命中。"
+          echo "::error::★ 现在**当场失败**是有意的：以前这里会一路跑到 6 小时上限被掐，"
+          echo "::error::  两个 Windows runner 各烧 6 小时、manifest job 被 skip、version.json 因此不动。"
+          exit 1
+        fi
         test -d "${{ steps.paths.outputs.prefix }}/lib" || { echo "::error::静态 Qt 前缀不存在或不完整"; exit 1; }
