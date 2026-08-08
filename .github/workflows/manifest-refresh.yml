@@ -6,15 +6,20 @@ name: Refresh version.json
 # **异步**追加到同一个 release 上，晚几分钟到几小时都正常。release.yml 里的 manifest job
 # 跑在它们到达之前，所以清单里那两条会先沿用上一版。
 #
-# GitHub **不会**为「往已有 release 传资源」发事件（release 事件只在创建/编辑 release 本身
-# 时触发），所以只能定时来看一眼。每次就三个 API 调用，成本可以忽略。
+# ★ 由**打包方在传完包之后当场触发**（2026-08-09 起）。GitHub 不会为「往已有 release 传
+#   资源」发事件（release 事件只在创建/编辑 release 本身时触发），所以这一步只能由知道
+#   「我刚传完」的那一方发起 —— 也就是 schat.build 的 clashauto-mac.yml /
+#   clashauto-mac-qt.yml，它们在 gh release upload 之后 workflow_dispatch 本工作流。
 #
-# ⚠️ schedule 只认**默认分支**上的工作流文件。这个文件合进 master 之前，定时任务不会跑；
-#    在分支上可以用 workflow_dispatch 手动触发来验证。
+#   原来这里挂的是 `*/30 * * * *`：无论有没有新包，一天 48 次空转，而清单真正需要更新的
+#   时刻一年也没几次；代价还不止是机时 —— 每半小时一条 workflow run，把这个仓库的
+#   Actions 历史刷成噪声，真正的发布轮次淹在里面。轮询能换来的只有「晚最多 30 分钟」，
+#   而触发式是**秒级**且精确。
+#
+# ⚠️ workflow_dispatch 只认**默认分支**上的工作流文件。改动合进 master 之前，
+#    外部触发会以 404 收场。
 
 on:
-  schedule:
-    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 permissions:

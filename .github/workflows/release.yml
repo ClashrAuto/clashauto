@@ -1307,7 +1307,9 @@ jobs:
   #
   # ★ **needs 只挂 windows + linux，不挂 macos**：mac 的两个 DMG 由外部签名仓库异步追加，
   #   等它等不到。清单是**逐个包合并**的（脚本里 packages_from_release），mac 那两条会沿用
-  #   上一版的条目、各带各的版本号，等下面的 manifest-refresh 定时任务把它们补上。
+  #   上一版的条目、各带各的版本号；等 schat.build 传完 DMG 之后，由**它**回头
+  #   workflow_dispatch 一次 manifest-refresh.yml 把那两条补上（不再是定时轮询，
+  #   理由见那个文件顶部）。
   manifest:
     name: Update version.json manifest
     needs: [windows, linux]
