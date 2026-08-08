@@ -77,46 +77,10 @@ jobs:
           # CMakeLists 顶部那段注释记着）。部署目标要与 release.yml 的 macos job 一致。
           extra-cmake: ${{ matrix.target == 'macos-universal' && '-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.0' || '' }}
 
-      - name: Publish prebuilt static Qt
-        # ★★ 这一步才是「以后不用再编」的兑现处。
-        #
-        #   Actions 缓存有三个绕不过去的限制：**按分支隔离**（功能分支上编好的，合并回
-        #   master 用不上）、7 天不访问就淘汰、**跨不了仓库**（schat.build 只能自己从头编）。
-        #   把产物发成公开仓库 ClashrAuto/qt-static 的 release 资产，这三条一起消失，
-        #   而且下载端不需要任何凭据 —— action 里那一级 curl 就是取这个。
-        #
-        #   为什么另立仓库而不是发在 clashauto 自己的 release 上：app 的更新列表读 /releases
-        #   全量，UpdateController::fetchReleases 取列表里第一个非 prerelease 的 release，
-        #   **不看它有没有可用资产**。一个 qt-static-* 的 tag 会被当成「最新版本」，
-        #   而它的 tag 不是版本号，版本比较会乱套。已装出去的老客户端改不了。
-        #
-        #   只在**这一轮真的把它编完**时发布（complete=true）。半份 Qt 传上去比没有更糟：
-        #   下游会当成好东西下下来，然后在链接期以一堆缺符号收场。
-        #
-        #   QT_STATIC_TOKEN：对 ClashrAuto/qt-static 有 contents:write 的 PAT。
-        #   没配这个 secret 时安静跳过 —— 缓存那条路照旧能用，不该因为少个 secret 就让预热失败。
-        if: always() && steps.qt.outputs.complete == 'true'
+      - name: 指向真正的发布方
         shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.QT_STATIC_TOKEN }}
-          QT_ROOT: ${{ steps.qt.outputs.qt-root }}
-          RECIPE: ${{ steps.qt.outputs.recipe }}
         run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::没有 QT_STATIC_TOKEN，跳过发布（本轮结果只进 Actions 缓存）"
-            exit 0
-          fi
-          asset="qtstatic-${QT_VERSION}-${{ matrix.target }}-${RECIPE}.tar.gz"
-          # -C "$QT_ROOT" . ：把**前缀内容**打进包（含 .qtstatic-complete 这类点文件），
-          # 解包端才能直接 tar -xzf 到前缀里，不多一层目录。
-          tar -czf "$RUNNER_TEMP/$asset" -C "$QT_ROOT" .
-          ls -lh "$RUNNER_TEMP/$asset"
-          tag="qt-${QT_VERSION}"
-          # release 不存在就建（幂等）；--clobber 允许重传同名资产（配方哈希变了会是新名字）。
-          gh release view "$tag" --repo ClashrAuto/qt-static >/dev/null 2>&1 \
-            || gh release create "$tag" --repo ClashrAuto/qt-static \
-                 --title "Prebuilt static Qt $QT_VERSION" \
-                 --notes "由 clashauto 的 qt-static.yml 自动发布。资产名里的短哈希 = 对应平台配方脚本的 sha256 前 16 位，配方一改就是新资产。"
-          gh release upload "$tag" "$RUNNER_TEMP/$asset" --repo ClashrAuto/qt-static --clobber
-          echo "已发布 $asset → ClashrAuto/qt-static@$tag"
+          echo "本 workflow 只把结果放进 **Actions 缓存**（按分支隔离、7 天淘汰、跨不了仓库）。"
+          echo "对外可复用的预编产物由 ClashrAuto/qt-static 的 Build static Qt 发布 ——"
+          echo "那边用自己仓库的 GITHUB_TOKEN 发自己的 release，不需要任何 PAT 或 secret。"
+          echo "要补/更新预编产物，去那边手动跑一次，别在这里找。"
