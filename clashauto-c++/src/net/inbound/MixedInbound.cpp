@@ -403,7 +403,6 @@ void MixedInbound::startDial(Session *s, const QString &host, quint16 port,
     out->connectTo(host, port, m_user);
     // 契约允许（也要求）write() 早于/紧随 connectTo：早到的上行字节必须原样补发，
     // 绝不能丢——真机上「隧道建起来却一个字节不发」就是这么来的（见 IOutbound.h 的长注释）。
-    ++m_totalSessions;
     if (!early.isEmpty()) {
         m_bytesUp += quint64(early.size());
         out->write(early);
@@ -472,7 +471,6 @@ void MixedInbound::startUdpAssociate(Session *s)
     appendSocksAddr(reply, QHostAddress(QHostAddress::LocalHost), relayPort);
     s->client->write(reply);
     s->dialed = true; // 之后 TCP 上不再有请求；它只用来维持关联的生命周期
-    ++m_totalSessions;
     emit connectionOpened(QStringLiteral("udp:%1").arg(relayPort));
 }
 

@@ -41,8 +41,6 @@ public:
     // —— 各方法的尺寸参数（字节）——
     // keySize：密钥长度（AES-128=16，AES-256/ChaCha20=32）。Invalid 返回 0。
     static int keySize(Method m);
-    // saltSize：Shadowsocks-AEAD 的 per-connection salt 长度 == keySize（SS 规范如此定义）。
-    static int saltSize(Method m) { return keySize(m); }
     // nonceSize：恒 12（三种方法都是 96-bit nonce）。
     static int nonceSize() { return 12; }
     // tagSize：恒 16（Poly1305 / GCM 的认证标签都是 128-bit）。

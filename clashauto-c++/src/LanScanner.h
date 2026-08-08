@@ -41,7 +41,6 @@ public:
     void scanFull();
     // 轻量在线态刷新：只重读 ARP 表 + 定向探测传入的已知 IP，更新在线/IP，不做名称解析。
     void refreshLiveness(const QStringList &knownIps);
-    bool isScanning() const { return m_scanning; }
 
     // 当前本机网段信息（供 UI 展示 / 网关保护）。这些是「主网卡」的——即挑出来做二层劫持的那张
     // 物理网卡；TUN(Meta/utun/wintun)、Hyper-V/WSL/VMware 网桥等虚拟网卡一律不参选（见 isVirtualIface）。
@@ -50,15 +49,8 @@ public:
     QString gatewayIp() const { return m_gatewayIp; }
     // 主网卡的网关 MAC（本轮 ARP 表里，**只认主网卡那张表**——见 m_arpByIf 的说明）。
     QString gatewayMac() const;
-    QString interfaceName() const { return m_ifaceName; }
-    // 主网卡子网掩码（点分，如 "255.255.255.0"）；未知返回空。供网关做「同网段直连旁路」。
-    QString localNetmask() const;
     // 本机所有网卡 MAC（含虚拟网卡）——用来判定「这台设备就是本机」，不受主网卡选择影响。
     const QSet<QString> &localMacs() const { return m_localMacs; }
-    // 所有默认路由的网关 IP（多网卡各一个）——用来判定「这台设备是某个网络的路由器」。
-    const QSet<QString> &gatewayIps() const { return m_gatewayIps; }
-    // 该 IP 是否在主网卡子网内（只有同网段设备能被 ARP 劫持）。
-    bool inPrimarySubnet(const QString &ip) const;
     // 该 IP 是否在**任意一张**物理网卡的子网内。有线接 A 路由、WiFi 接 B 路由时两个网段都算——
     // 透明网关每张卡各有一套端点/ArpSpoofer，两边设备都能劫持（见 LanGateway::NicSpec）。
     bool inAnyLanSubnet(const QString &ip) const;
@@ -130,7 +122,6 @@ private:
     // 空 IP 不再被连 10 次，/24 的作业量从 2530 降到约 330。
     void runProbes(QVector<QPair<quint32, quint16>> jobs, std::function<void()> onDone);
     void startFingerprintPhase();
-    void probePort(quint32 ip, quint16 port);
 
     // —— ARP 表 ——
     // onDone 在输出解析完（或进程起不来）后回调，用来串起两阶段探测。
@@ -206,8 +197,11 @@ private:
     void detectIpv6Topology();
 
     bool m_scanning = false;
-    QString m_localIp, m_localMac, m_gatewayIp, m_ifaceName; // 主网卡
-    quint32 m_netBase = 0, m_netMask = 0; // 主网卡网段（主机序）
+    QString m_localIp, m_localMac, m_gatewayIp; // 主网卡
+    // ★ 这里**不再**留「主网卡网段」的副本（原 m_netBase/m_netMask + interfaceName/localNetmask/
+    //   inPrimarySubnet）。多网卡支持落地后，网段判定一律走 m_physIfaces 里每张卡自己那份
+    //   （inAnyLanSubnet / NicSpec.netmask）；再留一份只描述主网卡的副本，等于给「有线接 A 路由、
+    //   WiFi 接 B 路由」这类场景埋一个只对其中一张卡成立的判据。
     QVector<LocalIface> m_physIfaces;     // 全部物理网卡（第 0 个即主网卡）
     QSet<QString> m_localMacs;            // 本机全部网卡 MAC（含虚拟网卡）
     QSet<QString> m_gatewayIps;           // 全部默认路由网关 IP

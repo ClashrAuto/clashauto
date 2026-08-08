@@ -59,12 +59,11 @@ public:
     quint64 upThrottleHits() const { return m_upThrottleHits; }   // 客户端→出站：卡住客户端读
     quint64 downPauseHits() const { return m_downPauseHits; }     // 出站→客户端：暂停从上游读
 
-    // —— 流量/连接计数 ——
-    // ★ 存在的理由：接了本机入站之后，这部分流量在 UI 上**完全不可见**——连接列表和流量图都来自
-    //   mihomo 的 REST，而本机入站压根不经过它。于是「开了这个开关反而看不到自己的流量」，
-    //   是个体验倒退。这几个计数就是给 UI 用的最小可见性。
-    int activeSessions() const { return m_sessions.size(); }
-    quint64 totalSessions() const { return m_totalSessions; } // 累计建立过的连接数
+    // —— 流量计数（**独立于** InprocTelemetry 的第二套实现）——
+    // ★ 存在的理由不是给 UI 看：UI 那份可见性由 InprocTelemetry 提供（连接列表/流量卡/日志都读
+    //   它）。这两个计数是入站自己数的，用来跟 telemetry 做**交叉核对**——两套独立实现的量级
+    //   对不上，就说明登记点漏了（见 LocalTunService 的出站探针，它同时打印两边的数）。
+    //   连接数不再在这里重复数一遍：telemetry 的 totalConns/activeCount 才是那份口径。
     quint64 bytesUp() const { return m_bytesUp; }             // 客户端 → 出站
     quint64 bytesDown() const { return m_bytesDown; }         // 出站 → 客户端
 
@@ -93,7 +92,6 @@ private:
     QSet<Session *> m_sessions;
     quint64 m_upThrottleHits = 0;
     quint64 m_downPauseHits = 0;
-    quint64 m_totalSessions = 0;
     quint64 m_bytesUp = 0;
     quint64 m_bytesDown = 0;
 };

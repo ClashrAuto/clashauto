@@ -333,8 +333,6 @@ void LanScanner::detectLocalTopology()
 {
     m_localIp.clear();
     m_localMac.clear();
-    m_ifaceName.clear();
-    m_netBase = m_netMask = 0;
     m_physIfaces.clear();
     m_localMacs.clear();
     m_gatewayIps.clear();
@@ -420,9 +418,6 @@ void LanScanner::detectLocalTopology()
         const LocalIface &f = m_physIfaces.constFirst();
         m_localIp = f.ip;
         m_localMac = f.mac;
-        m_ifaceName = f.name;
-        m_netBase = f.base;
-        m_netMask = f.mask;
     }
 
     // 4) **每张**物理网卡各自的网关（网关劫持要用，多网卡时每张卡都得有）：
@@ -975,22 +970,6 @@ QSet<QString> LanScanner::gatewayMacs() const
     return macs;
 }
 
-QString LanScanner::localNetmask() const
-{
-    // m_netMask 为主机序 quint32（0=未知）；QHostAddress(quint32) 按主机序解读 → 点分掩码。
-    return m_netMask ? QHostAddress(m_netMask).toString() : QString();
-}
-
-bool LanScanner::inPrimarySubnet(const QString &ip) const
-{
-    if (ip.isEmpty() || !m_netBase || !m_netMask)
-        return false;
-    const QHostAddress a(ip);
-    if (a.protocol() != QAbstractSocket::IPv4Protocol)
-        return false;
-    return (a.toIPv4Address() & m_netMask) == m_netBase;
-}
-
 // 落在**任意一张**物理网卡的网段里即可被劫持（有线接 A 路由、WiFi 接 B 路由 → 两边都能代理）。
 bool LanScanner::inAnyLanSubnet(const QString &ip) const
 {
@@ -1199,13 +1178,6 @@ void LanScanner::startFingerprintPhase()
         // 起静默计时器等 mDNS/SSDP/NBNS 的名称回包，到点 assemble。
         readArpTable([this] { m_settleTimer->start(kSettleMs); });
     });
-}
-
-void LanScanner::probePort(quint32 ip, quint16 port)
-{
-    Q_UNUSED(ip);
-    Q_UNUSED(port);
-    // 预留（refreshLiveness 用定向单端口探测已在下方内联实现）。
 }
 
 // ———————————————————————————— ARP 表 ————————————————————————————
