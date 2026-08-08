@@ -56,8 +56,6 @@ public:
     void setDevices(const QVector<DeviceRecord> &devices);
     // 过滤：搜索子串 + 仅在线。
     Q_INVOKABLE void setFilter(const QString &query, bool onlineOnly);
-    // 行 → MAC（详情选择用）。
-    Q_INVOKABLE QString macAt(int row) const;
 
     // 由 DevicesController 喂入「当前被别的电脑争抢」的 MAC 集合（ArpWatch 检测，带 TTL）。
     // 只影响 ContendedRole，不进台账、不参与排序/过滤。变化的行发 dataChanged。

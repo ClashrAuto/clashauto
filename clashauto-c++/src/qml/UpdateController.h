@@ -83,8 +83,6 @@ public:
     // 「一键更新」：下载所选资源 → 校验 sha256 → 静默安装并自动重启。
     // tab: 0=正式 1=测试；index=资源下标。
     Q_INVOKABLE void oneClickUpdate(int tab, int index);
-    // 记住「不再提示」当前正式版版本号（对齐 update/skipTag）。
-    Q_INVOKABLE void skipCurrentRelease();
     // 取消当前下载：abort reply，finished 里按 m_cancelled 走「已取消」而非「失败」。
     Q_INVOKABLE void cancelDownload();
 

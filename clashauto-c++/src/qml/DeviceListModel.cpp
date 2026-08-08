@@ -88,11 +88,6 @@ DeviceListModel::Row DeviceListModel::toRow(const DeviceRecord &d)
     return r;
 }
 
-QString DeviceListModel::macAt(int row) const
-{
-    return (row >= 0 && row < m_rows.size()) ? m_rows.at(row).mac : QString();
-}
-
 void DeviceListModel::setContended(const QSet<QString> &macs)
 {
     if (macs == m_contended)

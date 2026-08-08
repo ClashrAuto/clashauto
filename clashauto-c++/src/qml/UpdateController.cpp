@@ -625,15 +625,6 @@ bool UpdateController::verifySha256(const QString &filePath, const QString &expe
     return QString::fromLatin1(h.result().toHex()).compare(expected, Qt::CaseInsensitive) == 0;
 }
 
-void UpdateController::skipCurrentRelease()
-{
-    const QString t = m_releaseVersion;
-    const QString tag = t.startsWith(QStringLiteral("VERSION: ")) ? t.mid(9).trimmed() : QString();
-    if (!tag.isEmpty() && tag != QStringLiteral("-")) {
-        QSettings().setValue(QStringLiteral("update/skipTag"), tag);
-    }
-}
-
 void UpdateController::cancelDownload()
 {
     if (!m_downloading || !m_dlReply) {
