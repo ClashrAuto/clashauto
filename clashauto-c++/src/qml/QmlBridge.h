@@ -32,6 +32,10 @@ class QmlBridge final : public QObject
     Q_OBJECT
     // —— 状态灯（真值以 CoreController 为准，见 .cpp 注释）——
     Q_PROPERTY(bool coreRunning READ coreRunning NOTIFY statusChanged)
+    // 内核二进制找不到时的路径（空 = 正常）。★ 这条**不能**只写进日志：内核缺失时整个 app 什么
+    //   都干不了，而日志页是要用户自己翻的。CoreController 早就为此发了 coreMissing 信号，只是
+    //   一直没有任何接收方——于是开发构建/首启下载失败的用户看到的只是一个不亮的状态灯。
+    Q_PROPERTY(QString coreMissingPath READ coreMissingPath NOTIFY coreMissingChanged)
     Q_PROPERTY(bool proxyEnabled READ proxyEnabled NOTIFY statusChanged)
     Q_PROPERTY(bool tunEnabled READ tunEnabled NOTIFY statusChanged)
     // —— 流量 / 连接 指标（StatusPage 流量卡）——
@@ -88,6 +92,7 @@ public:
               SubscriptionStore *subs, QObject *parent = nullptr);
 
     bool coreRunning() const { return m_coreRunning; }
+    QString coreMissingPath() const { return m_coreMissingPath; }
     bool proxyEnabled() const { return m_proxyEnabled; }
     bool tunEnabled() const { return m_tunEnabled; }
     QString upText() const { return m_upText; }
@@ -233,6 +238,7 @@ signals:
     /// DevicesController::setUiVisible —— 这里只负责「看得见没有」，各家自己决定停什么。
     void uiVisibleChanged(bool visible);
     void statusChanged();
+    void coreMissingChanged();
     void trafficChanged();
     void connectionsChanged();
     void trafficStatsChanged();
@@ -285,6 +291,7 @@ private:
     NodeListModel m_nodeModel;
 
     bool m_coreRunning = false;
+    QString m_coreMissingPath; // 见 coreMissingPath 属性；内核起来后清空
     bool m_proxyEnabled = false;
     bool m_tunEnabled = false;
     QString m_upText = QStringLiteral("0.00 B");

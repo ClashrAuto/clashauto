@@ -347,6 +347,43 @@ ApplicationWindow {
             Layout.bottomMargin: 0
             spacing: 0
 
+            // 「找不到内核」横幅。★ 只在真的缺内核时占位（visible=false 时高度归 0，不留空隙）。
+            //   缺内核 = 整个 app 一个功能都用不了，所以横幅是全局的、跨页面常驻的，而不是塞在
+            //   某一页里：状态灯不亮 + 日志里一行字，用户是看不出该去哪儿的。点它直接跳设置页。
+            Rectangle {
+                id: coreMissingBanner
+                Layout.fillWidth: true
+                Layout.bottomMargin: visible ? 5 : 0
+                visible: bridge.coreMissingPath !== ""
+                implicitHeight: visible ? 34 : 0
+                radius: Theme.radius
+                color: Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.14)
+                border.width: 1
+                border.color: Qt.rgba(Theme.danger.r, Theme.danger.g, Theme.danger.b, 0.45)
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 8
+                    spacing: 8
+                    Text {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        elide: Text.ElideMiddle
+                        font.pixelSize: 12
+                        color: Theme.textPrimary
+                        // 路径也给出来：用户自己拷一个内核过去也能救活，不必只能走下载。
+                        text: qsTr("未检测到 mihomo 内核，代理无法启动 · ") + bridge.coreMissingPath
+                    }
+                    Button {
+                        text: qsTr("去下载")
+                        font.pixelSize: 12
+                        implicitHeight: 24
+                        onClicked: window.currentPage = 4 // 设置页（与侧栏顺序 1:1，见上面的导航）
+                    }
+                }
+            }
+
             // 内容卡（不透明，浮在玻璃上）
             Card {
                 Layout.fillWidth: true

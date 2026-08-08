@@ -160,8 +160,20 @@ QmlBridge::QmlBridge(AppConfig *config, CoreController *core, ClashService *clas
     connect(m_clash, &ClashService::statusUpdated, this, [this](bool, bool, bool) {
         refreshStatusFromCore();
     });
-    connect(m_core, &CoreController::statusChanged, this, [this](bool, bool, bool) {
+    connect(m_core, &CoreController::statusChanged, this, [this](bool running, bool, bool) {
+        // 内核真的跑起来了 → 撤掉「找不到内核」的横幅。放在这里而不是等下一次 startCore：
+        // 用户在设置页下完内核、核心自己起来的那一刻，横幅就该消失，不该要求他再点一次。
+        if (running && !m_coreMissingPath.isEmpty()) {
+            m_coreMissingPath.clear();
+            emit coreMissingChanged();
+        }
         refreshStatusFromCore();
+    });
+    connect(m_core, &CoreController::coreMissing, this, [this](const QString &path) {
+        if (m_coreMissingPath == path)
+            return;
+        m_coreMissingPath = path;
+        emit coreMissingChanged();
     });
 
     // —— 日志（页脚 + 后续 LogsPage）——
