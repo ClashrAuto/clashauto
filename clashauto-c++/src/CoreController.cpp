@@ -371,6 +371,15 @@ bool CoreController::isRunning() const
     return m_core.state() != QProcess::NotRunning;
 }
 
+void CoreController::reportMissingCore()
+{
+    const QString exe = m_config.clashExecutable();
+    if (QFileInfo::exists(exe))
+        return;
+    emit logUpdated(tr("未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1").arg(exe));
+    emit coreMissing(exe);
+}
+
 bool CoreController::isHelperCore() const
 {
 #if defined(Q_OS_MACOS)
@@ -519,8 +528,7 @@ void CoreController::startCore()
     const QString cfg = m_fullConfigPath.isEmpty() ? m_config.clashConfig() : m_fullConfigPath;
     if (!QFileInfo::exists(exe)) {
         // 包里未集成内核（开发构建/--no-core）且用户也没下载过：提示去「设置 → 系统」下载，而不是静默失败
-        emit logUpdated(tr("未检测到 mihomo 内核，请在「设置 → 系统」中下载: %1").arg(exe));
-        emit coreMissing(exe);
+        reportMissingCore();
         emitStatus();
         return;
     }

@@ -361,7 +361,15 @@ void QmlBridge::autoStartCore()
     // 需要的东西挡在了门外：早退 → startCore() 不执行 → 永远不落位 → 全新安装永远起不来。
     m_core->seedBundledCore();
     // 启动自动拉起核心（对齐 Widgets 版 MainWindow 的 startCore-on-launch）：无内核/已在跑则不动。
-    if (!m_core->isCoreInstalled() || m_core->isRunning())
+    if (!m_core->isCoreInstalled()) {
+        // ★ 不能只是 return。coreMissing 原先只在 startCore() 里发，而这道门恰恰把
+        //   startCore() 挡在外面 —— 于是「没有内核」这个**唯一需要提示的场景**，提示
+        //   反而永远不出现：用户打开 app 只看到一个不亮的状态灯，没有任何解释。
+        //   （与上面那条落位的教训同一个形状：守卫把它自己要报的东西挡在了门外。）
+        m_core->reportMissingCore();
+        return;
+    }
+    if (m_core->isRunning())
         return;
 #if defined(Q_OS_WIN)
     // 恢复上次退出前的增强(TUN)状态（config 的 use:，每次切换即落盘；一键更新自动重启后也走这里）。

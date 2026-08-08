@@ -65,6 +65,15 @@ public:
 public slots:
     void startCore();
     void stopCore();
+
+    /// 内核二进制不在时报一次（日志 + coreMissing 信号）；在就什么都不做。幂等。
+    ///
+    /// ★ 单独抽出来是因为 **自动拉起那条路根本走不到 startCore()**：
+    /// `QmlBridge::autoStartCore()` 用 `isCoreInstalled()` 挡门，没内核就早退 ——
+    /// 而 coreMissing 原先只在 startCore() 里发。结果是「没有内核」这个**唯一需要提示
+    /// 的场景**，提示反而永远不出现：用户打开 app，状态灯不亮，界面上没有任何解释。
+    /// 两条路（自动拉起的早退处、startCore 的存在性检查处）都调它，口径才一致。
+    void reportMissingCore();
     void toggleCore();
     void toggleProxy();
     void toggleTun();
