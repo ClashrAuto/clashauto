@@ -147,6 +147,13 @@ jobs:
           qt-version: ${{ env.QT_VERSION }}
           target: windows-${{ matrix.arch }}
           host-qt-path: ${{ matrix.arch == 'arm64' && env.QT_HOST_ROOT || '' }}
+          # ★ 发布流水线**一个模块都不编**：缓存没就绪就当场失败（约 2 分钟），
+          #   而不是编到 6 小时上限被掐。理由是这两件事凑一起会互相抵消：
+          #   本 workflow 有并发组（同分支只留最新那轮），而被取消的 job 跑不到
+          #   回写缓存那一步 —— 于是"边编边被下一次推送取消"= 每次都白烧、进度永远存不下来。
+          #   真正的编译交给 Warm static Qt cache：那个 workflow 没有并发组，
+          #   跑几轮断点续编就能把缓存推完，之后这里秒级命中。
+          build-deadline-min: '0'
 
       - name: Export Qt root
         shell: bash

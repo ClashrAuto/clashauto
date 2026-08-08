@@ -25,6 +25,14 @@ inputs:
     description: 追加给 configure 的 CMake 参数（如 macOS 的架构/部署目标）
     required: false
     default: ''
+  build-deadline-min:
+    description: >-
+      本轮最多花多少分钟编 Qt（Windows 断点续编用）。传 0 = **一个模块都不开**，
+      缓存没就绪就立刻失败。发布流水线该传 0：它的 run 会被下一次推送的并发组取消，
+      而取消掉的 job 跑不到回写缓存那一步 —— 边编边被取消 = 永远白烧。
+      真正的编译交给 Warm static Qt cache（那个 workflow 没有并发组，不会被顶掉）。
+    required: false
+    default: '280'
 
 outputs:
   qt-root:
@@ -94,6 +102,7 @@ runs:
         QT_SRC: ${{ steps.paths.outputs.src }}
         QT_ARCH: ${{ endsWith(inputs.target, 'arm64') && 'arm64' || 'x64' }}
         QT_HOST_PATH: ${{ inputs.host-qt-path }}
+        QT_BUILD_DEADLINE_MIN: ${{ inputs.build-deadline-min }}
       run: pwsh -File "$env:GITHUB_ACTION_PATH/build-windows.ps1"
 
     - name: Inspect build state
