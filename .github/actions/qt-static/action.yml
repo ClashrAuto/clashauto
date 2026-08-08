@@ -44,6 +44,11 @@ outputs:
   cache-hit:
     description: 是否命中缓存（未命中说明这次真的编了一遍）
     value: ${{ steps.restore.outputs.cache-hit }}
+  prebuilt:
+    description: >-
+      是否直接用上了 ClashrAuto/qt-static 的预编产物。发布方拿它跳过「原样重传一遍」——
+      重传出来的包内容一样但字节不同（tar 时间戳），sha256 会变，等于让下游平白重下一次。
+    value: ${{ steps.prebuilt.outputs.hit }}
   recipe:
     description: 本平台配方脚本的短哈希，用于拼预编产物的资产名
     value: ${{ steps.paths.outputs.recipe }}
@@ -148,7 +153,12 @@ runs:
           if tar -xzf "$tmp" -C "$prefix"; then
             rm -f "$tmp"
             echo "hit=true" >> "$GITHUB_OUTPUT"
-            echo "✅ 用上了预编静态 Qt（$asset），跳过缓存与源码构建"
+            # ★ 变量后面紧挨着全角括号时**必须加花括号**。macOS 自带的是 bash 3.2，
+            #   它的变量名扫描会把多字节字符的首字节也吃进名字里，于是 `$asset）`
+            #   被当成一个从未赋值的变量，set -u 当场毙掉整步：
+            #       line 37: asset<?>: unbound variable
+            #   这行埋了很久没炸，只是因为 mac 那边一直没有预编产物 —— 它从来没执行过。
+            echo "✅ 用上了预编静态 Qt（${asset}），跳过缓存与源码构建"
             exit 0
           fi
           echo "::warning::预编产物解压失败，回退到缓存/源码构建"
@@ -194,7 +204,7 @@ runs:
         mkdir -p "$root"
         if ! curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 \
                   --speed-limit 10240 --speed-time 60 -o "$tmp" "$url"; then
-          echo "::error::取不到宿主 Qt（$asset）。arm64 是交叉编译，没有同版本宿主 Qt 就无从谈起。"
+          echo "::error::取不到宿主 Qt（${asset}）。arm64 是交叉编译，没有同版本宿主 Qt 就无从谈起。"
           echo "::error::先把 windows-x64 那套编出来并发到 ClashrAuto/qt-static 的 qt-${{ inputs.qt-version }} 上。"
           exit 1
         fi
@@ -204,7 +214,7 @@ runs:
         # "QT_HOST_PATH not set"，离真正的错因隔着一整段日志。
         test -f "$root/bin/moc.exe" || { echo "::error::解出来的宿主 Qt 里没有 bin/moc.exe"; exit 1; }
         echo "path=$root" >> "$GITHUB_OUTPUT"
-        echo "宿主 Qt: $root（= 同版本同配方的 windows-x64 静态 Qt）"
+        echo "宿主 Qt: ${root}（= 同版本同配方的 windows-x64 静态 Qt）"
 
     - name: Restore static Qt cache
       id: restore
