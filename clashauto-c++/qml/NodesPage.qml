@@ -91,6 +91,30 @@ Item {
             }
             Item { Layout.fillWidth: true; visible: !page.searchShown }
 
+            // 策略组切换。★ 只在**真有得选**（≥2 个）时出现：订阅只给一个选择组时，一个
+            //   永远只有一项的下拉纯属噪音。清单由 ClashService 过滤成只含 Selector 组 ——
+            //   见那里的说明：自动选择/故障转移这类组核心不接受手动指定。
+            //   在此之前主组完全是启发式自动挑的（名字里带「节点/选择/代理/Proxy」），
+            //   订阅里的流媒体分流、广告拦截等策略组用户根本碰不到。
+            ThemedCombo {
+                id: groupCombo
+                visible: bridge.groups.length > 1
+                Layout.alignment: Qt.AlignVCenter
+                Layout.preferredWidth: Math.min(200, Math.max(120, implicitContentWidth + 32))
+                implicitHeight: 28
+                font.pixelSize: 12
+                model: bridge.groups
+                // 跟着后端走，而不是自己记一份：切模式/换订阅时主组会被后端重挑，
+                // 本地状态那份会跟真值悄悄分叉。indexOf 返回 -1 时 ComboBox 显示空，正确。
+                currentIndex: bridge.groups.indexOf(bridge.selectedGroup)
+                // 用 onActivated（**只有用户操作才触发**）而不是 onCurrentIndexChanged ——
+                // 后者在上面那条绑定刷新时也会触发，等于把后端刚下发的值再回写一遍，
+                // 轮询一次抖一次。
+                onActivated: bridge.selectGroup(bridge.groups[currentIndex])
+                ToolTip.visible: hovered && !popup.visible
+                ToolTip.text: qsTr("策略组")
+            }
+
             // 测速：空闲 refresh-line、测速中 loader-4-line 旋转（对齐旧项目 refresh-right / loading）
             Text {
                 id: spdIcon

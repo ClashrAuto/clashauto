@@ -185,6 +185,27 @@ struct NodesPage: View {
                     Spacer(minLength: 0)
                 }
 
+                // 策略组切换。★ 只在**真有得选**（≥2 个）时出现：订阅只给一个选择组时，
+                //   一个永远只有一项的下拉纯属噪音。清单已在 ClashService 过滤成只含
+                //   Selector 组（自动选择/故障转移这类核心不接受手动指定）。
+                //   在此之前主组完全由 `pickPrimaryGroup` 的启发式自动挑（名字里带
+                //   「节点/选择/代理/Proxy」），订阅里的流媒体分流、广告拦截等策略组
+                //   用户根本碰不到 —— `setSelectedGroup` 写好了却没有任何调用点。
+                if state.clash.groups.count > 1 {
+                    ThemedCombo(options: state.clash.groups,
+                                selection: Binding(
+                                    // 索引从后端的 selectedGroup 现算，不另存一份 @State ——
+                                    // 切模式/换订阅时后端会重挑主组，本地那份会悄悄分叉。
+                                    get: { state.clash.groups.firstIndex(of: state.clash.selectedGroup) ?? -1 },
+                                    set: { index in
+                                        guard state.clash.groups.indices.contains(index) else { return }
+                                        state.clash.setSelectedGroup(state.clash.groups[index])
+                                    }),
+                                width: 150)
+                        .frame(height: 28)
+                        .help("策略组".t)
+                }
+
                 // 测速：refresh-line 字形（与状态页延迟卡的刷新同一枚），
                 // 测速中持续旋转。
                 Button { state.clash.startSpeedTestForValidNodes() } label: {

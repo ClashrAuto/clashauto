@@ -237,8 +237,14 @@ public final class ClashService {
         let resolver = ProxyTree(proxies: proxies)
 
         // 所有「有 all 数组」的都是策略组。
+        // 供 UI 切换的策略组清单。★ 只收 **Selector**：URLTest / Fallback / LoadBalance 的
+        // 成员是核心按延迟自己挑的，对它们 PUT /proxies/<组> 会被拒。列进可切换清单等于给
+        // 用户一个点了必然没反应的入口 —— 比不给更糟。（它们仍会作为节点行出现在所属
+        // Selector 组里。）与 Qt 的 ClashService::pollNodes 同一判据。
         var discoveredGroups: [String] = []
-        for (name, object) in proxies where !((object["all"] as? [Any])?.isEmpty ?? true) {
+        for (name, object) in proxies
+        where (object["type"] as? String) == "Selector"
+            && !((object["all"] as? [Any])?.isEmpty ?? true) {
             discoveredGroups.append(name)
         }
         discoveredGroups.sort()

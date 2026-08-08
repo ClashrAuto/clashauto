@@ -464,10 +464,15 @@ void ClashService::pollNodes()
 
         QString groupName = m_selectedGroup;
         QJsonObject group = proxies.value(groupName).toObject();
+        // 供 UI 切换的策略组清单。★ 只收 **Selector**：URLTest / Fallback / LoadBalance 这些
+        // 组的成员是核心自己按延迟挑的，对它们 PUT /proxies/<组> 会被核心拒掉。把它们列进
+        // 可切换清单，用户点进去挑一个节点、界面没有任何反应 —— 提供一个必然静默失败的入口
+        // 比不提供更糟。（它们仍会作为**节点行**出现在所属 Selector 组里，看得到，只是不能选。）
         QStringList groups;
         for (auto it = proxies.begin(); it != proxies.end(); ++it) {
             const QJsonObject candidate = it.value().toObject();
-            if (!candidate.value("all").toArray().isEmpty()) {
+            if (candidate.value("type").toString() == QLatin1String("Selector")
+                && !candidate.value("all").toArray().isEmpty()) {
                 groups.push_back(it.key());
             }
         }
