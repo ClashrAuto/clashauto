@@ -500,6 +500,22 @@ if(COAST_QT_STATIC)
     # QML 插件。共享构建下引擎是运行期从 qml/ 目录 dlopen 的，静态构建下没有任何东西可 open，
     # 必须在链接期扫描本 app 的 import 并把对应插件静态库链进去。
     # 漏掉**不会有编译或链接错误**：运行时 loadFromModule("ClashAuto","Main") 失败，一个空窗口。
+    #
+    # ★ 交叉编译（Windows arm64）时这个包**不在目标前缀里**，得去宿主那份找。
+    #   QmlImportScanner 包装的是 qmlimportscanner 这个**宿主可执行文件**，所以 Qt 只把它装进
+    #   宿主构建；交叉编出来的 arm64 前缀里 Qt6QmlImportScanner/ 和 Qt6QmlTools/ 都没有
+    #   （实测对照过两份前缀的 lib/cmake）。不指路的话 find_package 只看目标前缀，报
+    #       Failed to find required Qt component "QmlImportScanner"
+    #   ——像是 Qt 编漏了，其实是找错了地方。
+    #   ★ 判据是"宿主那份有没有"，不是 CMAKE_CROSSCOMPILING —— 后者只有显式设了
+    #     CMAKE_SYSTEM_NAME 才为真，而 MSVC 这边是靠 vcvarsall x64_arm64 换目标架构的，
+    #     CMake 全程认为自己在做本机构建（实测：加了 CROSSCOMPILING 判断等于没加）。
+    #     本机构建下 QT_HOST_PATH 是空的，这段自然不生效。
+    if(NOT Qt6QmlImportScanner_DIR AND QT_HOST_PATH
+       AND EXISTS "${QT_HOST_PATH}/lib/cmake/Qt6QmlImportScanner/Qt6QmlImportScannerConfig.cmake")
+        set(Qt6QmlImportScanner_DIR "${QT_HOST_PATH}/lib/cmake/Qt6QmlImportScanner"
+            CACHE PATH "交叉编译时 QmlImportScanner 来自宿主 Qt")
+    endif()
     find_package(Qt6 REQUIRED COMPONENTS QmlImportScanner)
     qt_import_qml_plugins(clashauto-qml)
 
