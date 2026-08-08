@@ -472,5 +472,14 @@
   "每天": "Hằng ngày",
   "每周": "Hằng tuần",
   "每月": "Hằng tháng",
-  "这份 GeoIP 数据库的构建日期": "Ngày dựng cơ sở dữ liệu GeoIP này"
+  "这份 GeoIP 数据库的构建日期": "Ngày dựng cơ sở dữ liệu GeoIP này",
+  "%1 正在冒充网关或本机，可能在监听/代理本机流量": "%1 đang giả mạo cổng kết nối hoặc máy này — có thể đang nghe lén hoặc chuyển tiếp lưu lượng cục bộ",
+  "去下载": "Tải xuống",
+  "已是最新": "Đã mới nhất",
+  "当前 ": "Hiện tại ",
+  "最新 ": "Mới nhất ",
+  "有新版": "Có bản mới",
+  "未检测到 mihomo 内核，代理无法启动 · ": "Không tìm thấy lõi mihomo — không thể khởi động proxy · ",
+  "策略组": "Nhóm chính sách",
+  "设备「%1」正被 %2 争抢": "Thiết bị «%1» đang bị %2 tranh giành"
 }

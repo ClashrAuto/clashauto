@@ -472,5 +472,14 @@
   "每天": "Günlük",
   "每周": "Haftalık",
   "每月": "Aylık",
-  "这份 GeoIP 数据库的构建日期": "Bu GeoIP veritabanının derlenme tarihi"
+  "这份 GeoIP 数据库的构建日期": "Bu GeoIP veritabanının derlenme tarihi",
+  "%1 正在冒充网关或本机，可能在监听/代理本机流量": "%1 ağ geçidini veya bu bilgisayarı taklit ediyor — yerel trafiği dinliyor ya da yönlendiriyor olabilir",
+  "去下载": "İndir",
+  "已是最新": "Güncel",
+  "当前 ": "Geçerli ",
+  "最新 ": "En son ",
+  "有新版": "Güncelleme var",
+  "未检测到 mihomo 内核，代理无法启动 · ": "mihomo çekirdeği bulunamadı — proxy başlatılamıyor · ",
+  "策略组": "İlke grubu",
+  "设备「%1」正被 %2 争抢": "\"%1\" cihazı %2 tarafından ele geçirilmeye çalışılıyor"
 }

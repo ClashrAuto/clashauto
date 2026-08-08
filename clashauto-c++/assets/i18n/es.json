@@ -472,5 +472,14 @@
   "每天": "Diariamente",
   "每周": "Semanalmente",
   "每月": "Mensualmente",
-  "这份 GeoIP 数据库的构建日期": "Fecha de compilación de esta base de datos GeoIP"
+  "这份 GeoIP 数据库的构建日期": "Fecha de compilación de esta base de datos GeoIP",
+  "%1 正在冒充网关或本机，可能在监听/代理本机流量": "%1 está suplantando a la puerta de enlace o a este equipo; podría interceptar o retransmitir el tráfico local",
+  "去下载": "Descargar",
+  "已是最新": "Actualizado",
+  "当前 ": "Actual ",
+  "最新 ": "Última ",
+  "有新版": "Hay una actualización",
+  "未检测到 mihomo 内核，代理无法启动 · ": "No se encontró el núcleo mihomo; el proxy no puede iniciarse · ",
+  "策略组": "Grupo de políticas",
+  "设备「%1」正被 %2 争抢": "El dispositivo «%1» está siendo disputado por %2"
 }
