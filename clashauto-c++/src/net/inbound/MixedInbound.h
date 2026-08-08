@@ -72,9 +72,6 @@ public:
     // 由 COAST_INBOUND_SELFTEST=1 触发（见 main_qml.cpp），无需任何节点或网络。
     static bool selfTest();
 
-signals:
-    void connectionOpened(const QString &target); // 供上层记账/展示
-
 private:
     struct Session;
     void onNewConnection();

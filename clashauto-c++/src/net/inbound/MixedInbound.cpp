@@ -362,7 +362,6 @@ void MixedInbound::startDial(Session *s, const QString &host, quint16 port,
         s->established = true;
         if (!s->successReply.isEmpty() && s->client)
             s->client->write(s->successReply); // SOCKS5 / CONNECT 的成功应答只在此刻发
-        emit connectionOpened(s->target);
     });
     connect(out, &IOutboundTcp::dataReceived, this, [this, s](const QByteArray &d) {
         if (s->gone || !s->client)
@@ -471,7 +470,6 @@ void MixedInbound::startUdpAssociate(Session *s)
     appendSocksAddr(reply, QHostAddress(QHostAddress::LocalHost), relayPort);
     s->client->write(reply);
     s->dialed = true; // 之后 TCP 上不再有请求；它只用来维持关联的生命周期
-    emit connectionOpened(QStringLiteral("udp:%1").arg(relayPort));
 }
 
 void MixedInbound::onUdpReadable(Session *s)
