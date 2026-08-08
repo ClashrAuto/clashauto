@@ -73,7 +73,22 @@ runs:
         #   用 hashFiles('.github/actions/qt-static/**') 的话，改一行 Windows 脚本会把
         #   Linux 与 macOS 已经编好的缓存一起作废 —— 那是白扔一个多小时的机时，而且
         #   会诱使人「为了保住缓存而不敢改脚本」，正好把这个目录变成没人敢碰的地方。
-        echo "recipe=$(sha256sum "$recipe" | cut -c1-16)" >> "$GITHUB_OUTPUT"
+        # ★ macOS 上**没有 sha256sum**（那边叫 shasum -a 256）。第一版只写了 sha256sum，
+        #   而失败发生在命令替换 $(...) 里 —— echo 本身仍然成功，`set -e` 抓不到，
+        #   于是安静地产出一个**空哈希**。后果正是这个哈希本来要防的那件事：
+        #   资产名变成 qtstatic-6.8.3-macos-universal-.tar.gz，配方改了名字却不变，
+        #   下游继续下载旧 Qt。实测发生过一次，白发一个 264MB 的错名资产。
+        if command -v sha256sum >/dev/null 2>&1; then
+          h="$(sha256sum "$recipe" | cut -c1-16)"
+        else
+          h="$(shasum -a 256 "$recipe" | cut -c1-16)"
+        fi
+        # 空哈希必须当场失败：它不会让任何一步报错，只会让「配方变了就换资产」这条保证失效。
+        case "$h" in
+          [0-9a-f][0-9a-f]*) ;;
+          *) echo "::error::算不出配方哈希（recipe=$recipe h='$h'）—— 资产名会失去配方绑定"; exit 1;;
+        esac
+        echo "recipe=$h" >> "$GITHUB_OUTPUT"
 
     - name: Try prebuilt static Qt
       id: prebuilt
