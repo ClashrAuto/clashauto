@@ -18,7 +18,10 @@ inputs:
     description: windows-x64 | windows-arm64 | linux-x64 | linux-arm64 | macos-universal
     required: true
   host-qt-path:
-    description: 交叉编译用的同版本宿主 Qt（仅 windows-arm64 需要）
+    description: >-
+      交叉编译用的同版本宿主 Qt（仅 windows-arm64 需要）。**留空即可** ——
+      本 action 会自己取同版本同配方的 windows-x64 静态 Qt 当宿主（见 Host Qt 那一步）。
+      这个入参只是个逃生口：手上另有一份宿主 Qt 时可以顶掉自动解析。
     required: false
     default: ''
   extra-cmake:
@@ -47,6 +50,11 @@ outputs:
   complete:
     description: 这一轮结束时这套 Qt 是否完整可用
     value: ${{ steps.state.outputs.complete }}
+  host-qt-root:
+    description: >-
+      windows-arm64 交叉编译用的宿主 Qt 根目录（其它 target 为空）。调用方**也需要它** ——
+      app 自己的 arm64 构建同样要 -DQT_HOST_PATH，所以这里输出而不是藏在内部。
+    value: ${{ steps.hostqt.outputs.path }}
 
 runs:
   using: composite
@@ -142,6 +150,52 @@ runs:
         fi
         echo "hit=false" >> "$GITHUB_OUTPUT"
 
+    - name: Host Qt (windows-arm64 交叉编译用)
+      id: hostqt
+      if: inputs.target == 'windows-arm64'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # ★★ 宿主 Qt 用**我们自己编的 windows-x64 静态 Qt**，不再用 aqtinstall。
+        #
+        #   不是偏好问题，是 aqt 装不了：Qt 从 6.9 起改了在线仓库的目录布局 ——
+        #       qt6_683/qt6_683/                    旧：一个目录装所有架构
+        #       qt6_6111/qt6_6111_msvc2022_64/      新：按架构分子目录
+        #   aqtinstall 3.3.0（PyPI 最新）仍按旧布局拼路径，装 6.11.x 一律报
+        #   "Failed to locate XML data for Qt version '6.11.1'"。抬到 6.11 之后，
+        #   原来那个 aqt 步骤在 windows-arm64 上是必挂的。
+        #
+        #   换成 x64 静态 Qt 没有任何将就：宿主要的是 moc/rcc/qmlcachegen/qsb 这些**编译期
+        #   可执行文件**，静态构建里一样齐全，而且版本天生对得上（同一个 tag、同一份配方）。
+        #   顺带省掉一次 aqt 下载和它那个"装不上不当场报、拖到三分钟后 Configure 才炸"的失败方式。
+        #
+        #   ★ 这一步**不看缓存命中与否**：就算这套 arm64 Qt 是从预编产物解出来的、一行都不用编，
+        #     调用方仍然需要宿主 Qt 去编 app 自己的 arm64 版本（-DQT_HOST_PATH）。
+        if [ -n '${{ inputs.host-qt-path }}' ]; then
+          echo "path=${{ inputs.host-qt-path }}" >> "$GITHUB_OUTPUT"
+          echo "用调用方指定的宿主 Qt: ${{ inputs.host-qt-path }}"
+          exit 0
+        fi
+        root='C:/qthost'
+        asset="qtstatic-${{ inputs.qt-version }}-windows-x64-${{ steps.paths.outputs.recipe }}.tar.gz"
+        url="https://github.com/ClashrAuto/qt-static/releases/download/qt-${{ inputs.qt-version }}/$asset"
+        echo "取宿主 Qt: $url"
+        tmp="$RUNNER_TEMP/qthost.tar.gz"
+        mkdir -p "$root"
+        if ! curl -fsSL --retry 3 --connect-timeout 20 --max-time 900 \
+                  --speed-limit 10240 --speed-time 60 -o "$tmp" "$url"; then
+          echo "::error::取不到宿主 Qt（$asset）。arm64 是交叉编译，没有同版本宿主 Qt 就无从谈起。"
+          echo "::error::先把 windows-x64 那套编出来并发到 ClashrAuto/qt-static 的 qt-${{ inputs.qt-version }} 上。"
+          exit 1
+        fi
+        tar -xzf "$tmp" -C "$root"
+        rm -f "$tmp"
+        # 当场硬失败，别把「宿主 Qt 没就位」推给几分钟后的 configure 去背锅 —— 那边报出来的是
+        # "QT_HOST_PATH not set"，离真正的错因隔着一整段日志。
+        test -f "$root/bin/moc.exe" || { echo "::error::解出来的宿主 Qt 里没有 bin/moc.exe"; exit 1; }
+        echo "path=$root" >> "$GITHUB_OUTPUT"
+        echo "宿主 Qt: $root（= 同版本同配方的 windows-x64 静态 Qt）"
+
     - name: Restore static Qt cache
       id: restore
       if: steps.prebuilt.outputs.hit != 'true'
@@ -175,7 +229,7 @@ runs:
         QT_PREFIX: ${{ steps.paths.outputs.prefix }}
         QT_SRC: ${{ steps.paths.outputs.src }}
         QT_ARCH: ${{ endsWith(inputs.target, 'arm64') && 'arm64' || 'x64' }}
-        QT_HOST_PATH: ${{ inputs.host-qt-path }}
+        QT_HOST_PATH: ${{ steps.hostqt.outputs.path }}
         QT_BUILD_DEADLINE_MIN: ${{ inputs.build-deadline-min }}
       run: pwsh -File "$env:GITHUB_ACTION_PATH/build-windows.ps1"
 

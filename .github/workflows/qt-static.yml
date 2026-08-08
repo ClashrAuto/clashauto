@@ -17,8 +17,9 @@ on:
     # 每周一 03:17 UTC。错开整点，避开 GitHub 的定时任务高峰（整点排队常常几十分钟起）。
     - cron: '17 3 * * 1'
 
-env:
-  QT_VERSION: 6.8.3
+# Qt 版本按平台分开（与 release.yml 的 QT_VERSION / QT_VERSION_LINUX 必须一致）：
+# Windows / macOS 6.11.1，Linux 留在 6.8.3。缓存键含版本号，两边不一致就是**永远不命中**，
+# 而表现不是报错，是每次发布都从源码编一遍。
 
 jobs:
   warm:
@@ -31,47 +32,36 @@ jobs:
         include:
           - target: windows-x64
             runner: windows-2022
+            qt: 6.11.1
           - target: windows-arm64
             runner: windows-2022
+            qt: 6.11.1
           - target: linux-x64
             runner: ubuntu-22.04
+            qt: 6.8.3
           - target: linux-arm64
             runner: ubuntu-24.04-arm
+            qt: 6.8.3
           - target: macos-universal
             runner: macos-14
+            qt: 6.11.1
     # 交叉编 Qt 自己 + 通用二进制（等于编两遍）都很慢，默认 360 分钟够用但别更短。
     timeout-minutes: 350
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install host Qt (windows-arm64 交叉编译用)
-        # 交叉编 Qt 需要一份**同版本**的宿主 Qt 提供 moc/rcc/qmlcachegen 等工具。
-        # 用 aqt 的共享构建即可 —— 宿主工具是编译期用的，静不静态无所谓。
-        if: matrix.target == 'windows-arm64'
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install aqtinstall
-          for ($i = 1; $i -le 3; $i++) {
-            python -m aqt install-qt windows desktop $env:QT_VERSION win64_msvc2022_64 -O C:\Qt
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 3) { throw "aqt 三次均失败" }
-            Start-Sleep -Seconds 10
-          }
-          $host_root = Get-ChildItem "C:\Qt\$env:QT_VERSION" -Directory |
-            Where-Object { $_.Name -notlike '*arm64*' -and (Test-Path (Join-Path $_.FullName 'bin\moc.exe')) } |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $host_root) { throw "装上的宿主 Qt 里找不到 moc.exe" }
-          "QT_HOST_ROOT=$host_root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      # 宿主 Qt 那一步没了：windows-arm64 要的同版本宿主 Qt 由 qt-static action 自己解析
+      # （取同版本同配方的 windows-x64 静态 Qt）。原来用的 aqtinstall 在 6.11 上必挂 ——
+      # Qt 从 6.9 起改了在线仓库目录布局，aqt 3.3.0 仍按旧布局拼路径。
+      # 连带的前提：windows-arm64 必须在 windows-x64 **之后**才有得编。
 
       - name: Build / restore static Qt
         id: qt
         uses: ./.github/actions/qt-static
         with:
-          qt-version: ${{ env.QT_VERSION }}
+          qt-version: ${{ matrix.qt }}
           target: ${{ matrix.target }}
-          host-qt-path: ${{ matrix.target == 'windows-arm64' && env.QT_HOST_ROOT || '' }}
           # macOS 的 Qt 本身也必须是通用二进制，否则 app 那侧的 -DCMAKE_OSX_ARCHITECTURES
           # 会因为链到单架构静态库而失败（本仓库在 brew 的 libcrypto 上正是这么栽的，
           # CMakeLists 顶部那段注释记着）。部署目标要与 release.yml 的 macos job 一致。

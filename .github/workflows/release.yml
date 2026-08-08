@@ -37,7 +37,13 @@ concurrency:
 
 env:
   APP_NAME: Coast
-  QT_VERSION: 6.8.3
+  # ★ Qt 版本**按平台分开**：Windows / macOS 走 6.11，Linux 留在 6.8.3。
+  #   分开写而不是一个全局值，是因为这两组的约束不一样，将来抬版本也不会同步动。
+  #   注意资产名里带版本号（qtstatic-<ver>-<target>-<配方哈希>.tar.gz），改这里 = 换资产：
+  #   ClashrAuto/qt-static 上必须有对应版本的预编产物，否则该平台会退回源码构建
+  #   （Windows 两个 job 传的是 build-deadline-min: 0，会**当场失败**而不是编到超时）。
+  QT_VERSION: 6.11.1
+  QT_VERSION_LINUX: 6.8.3
   BUILD_DIR: build-release
   STAGE_DIR: dist/package/Coast
 
@@ -113,29 +119,10 @@ jobs:
           "IS_PRERELEASE=$isPre" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "Release version: $version tag=$tag prerelease=$isPre (build number = commit count)"
 
-      - name: Install host Qt (arm64 交叉编译用)
-        # x64 不再需要 aqt：静态 Qt 自带全部工具。只有 arm64 交叉编译要一份**同版本**宿主 Qt
-        # 提供 moc/rcc/qmlcachegen —— 宿主工具是编译期用的，共享构建就够。
-        if: matrix.arch == 'arm64'
-        shell: pwsh
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install aqtinstall
-          # aqt 偶发拉包失败（下载源抖动）——之前 arm64 job 两次挂在这里都是它，且失败方式很差：
-          # 装不上不当场报，一路拖到三分钟后的 Configure 才以 "QT_HOST_PATH not set" 报出来。
-          for ($i = 1; $i -le 3; $i++) {
-            python -m aqt install-qt windows desktop "$env:QT_VERSION" win64_msvc2022_64 -O C:\Qt
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($i -eq 3) { throw "aqt install-qt 三次均失败" }
-            Write-Host "aqt 第 $i 次失败（exit=$LASTEXITCODE），重试..."
-            Start-Sleep -Seconds 10
-          }
-          $hostQtRoot = Get-ChildItem "C:\Qt\$env:QT_VERSION" -Directory |
-            Where-Object { $_.Name -notlike "*arm64*" -and (Test-Path (Join-Path $_.FullName "bin\moc.exe")) } |
-            Select-Object -First 1 -ExpandProperty FullName
-          # 当场硬失败，别把「宿主 Qt 没装上」推给三分钟后的 Configure 去背锅。
-          if (-not $hostQtRoot) { throw "arm64 交叉编译缺宿主 Qt —— QT_HOST_PATH 无从设置" }
-          "QT_HOST_ROOT=$hostQtRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      # 宿主 Qt 那一步没了：arm64 交叉编译要的同版本宿主 Qt 现在由 qt-static action 自己解析
+      # （取同版本同配方的 windows-x64 静态 Qt），并通过 outputs.host-qt-root 交回来。
+      # 原来那步用的 aqtinstall 在 6.11 上是必挂的 —— Qt 从 6.9 起改了在线仓库目录布局，
+      # aqt 3.3.0（PyPI 最新）仍按旧布局拼路径，报 "Failed to locate XML data"。
 
       - name: Static Qt
         id: qt
@@ -146,7 +133,6 @@ jobs:
         with:
           qt-version: ${{ env.QT_VERSION }}
           target: windows-${{ matrix.arch }}
-          host-qt-path: ${{ matrix.arch == 'arm64' && env.QT_HOST_ROOT || '' }}
           # ★ 发布流水线**一个模块都不编**：缓存没就绪就当场失败（约 2 分钟），
           #   而不是编到 6 小时上限被掐。理由是这两件事凑一起会互相抵消：
           #   本 workflow 有并发组（同分支只留最新那轮），而被取消的 job 跑不到
@@ -234,7 +220,10 @@ jobs:
             }
           }
           if ("${{ matrix.arch }}" -eq "arm64") {
-            $args += "-DQT_HOST_PATH=$env:QT_HOST_ROOT"
+            # 宿主 Qt 由 qt-static action 解析（= 同版本同配方的 windows-x64 静态 Qt）。
+            $hostQt = "${{ steps.qt.outputs.host-qt-root }}"
+            if (-not $hostQt) { throw "arm64 交叉编译缺宿主 Qt —— qt-static 没给出 host-qt-root" }
+            $args += "-DQT_HOST_PATH=$hostQt"
           }
           cmake @args
 
@@ -984,9 +973,11 @@ jobs:
       - name: Static Qt
         id: qt
         # 两种架构都是**原生** runner（arm64 job 跑在 ubuntu-24.04-arm 上），不涉及交叉编译。
+        # ★ 这里用的是 QT_VERSION_LINUX（6.8.3），不是上面那个 6.11 —— 两个 linux 预编产物
+        #   已经按 6.8.3 发布好了，跟着 Windows/macOS 一起抬版本等于把它们作废、白编两轮。
         uses: ./.github/actions/qt-static
         with:
-          qt-version: ${{ env.QT_VERSION }}
+          qt-version: ${{ env.QT_VERSION_LINUX }}
           target: linux-${{ matrix.arch }}
 
       - name: Configure
