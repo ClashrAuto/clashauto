@@ -181,7 +181,10 @@ public final class ConfigBuilder: @unchecked Sendable {
         var inDns = false
         var currentList = ""
         var removed = 0
-        for line in yaml.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+        // 按 `isNewline` 切（理由同 LanBrowser.OUIDatabase.load：`"\n"` 匹配不上 CRLF 那个
+        // 字素簇，整份 YAML 会变成「一行」——顶格键判定全废，DNS 块永远进不去）。
+        for line in yaml.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+                        .map(String.init) {
             if !line.hasPrefix(" ") && !line.hasPrefix("\t") {
                 inDns = line.hasPrefix("dns:")      // 顶格键 → 进/出 dns 块
                 currentList = ""
@@ -215,7 +218,8 @@ public final class ConfigBuilder: @unchecked Sendable {
     /// 把被剔空的 nameserver / fallback 补回两条实测可用的。
     private static func refillEmptyDnsLists(_ yaml: String) -> String {
         let good = ["    - https://223.5.5.5/dns-query", "    - https://dns.pub/dns-query"]
-        var lines = yaml.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var lines = yaml.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+                        .map(String.init)
         var inDns = false
         var index = 0
         while index < lines.count {

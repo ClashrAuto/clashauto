@@ -332,15 +332,28 @@ public final class OUIDatabase: @unchecked Sendable {
     }
 
     /// 调用方必须已持有 `lock`。近 4 万行，只在首次查询时读一次。
+    ///
+    /// ★ 厂商名要 `trimming` 掉尾部空白，**主要是为了那个 `\r`**：assets/oui.txt 是三平台
+    ///   共用的一份文本，在 `core.autocrlf=true` 的 Windows 检出里它是 CRLF。按 "\n" 切行
+    ///   就会把 `\r` 留在每一行末尾，于是每个厂商名后面都挂一个看不见的控制符 —— 界面上
+    ///   看着正常，而任何与厂商名做的字符串比较都会静默失配。Qt 那边的 `loadOui()` 一直是
+    ///   `.trimmed()`，这里之前没有，两边行为不一致。
     private func load() {
         loaded = true
         guard let url = Resources.asset("oui.txt"),
               let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        // ★ 按 `isNewline` 切，**不能**写 `split(separator: "\n")`：Swift 把 `\r\n` 当成
+        //   **一个** Character（字素簇），而 `"\n"` 这个 Character 只等于单独的 LF ——
+        //   于是 CRLF 文本一次都匹配不上，整个文件被当成**一行**返回，表变空、所有设备的
+        //   厂商列全空，而且不报任何错。assets/ 是三平台共用的，在 core.autocrlf=true 的
+        //   Windows 检出里这份表就是 CRLF（实测：888050 个字符切出 1 行）。
+        for line in text.split(omittingEmptySubsequences: true, whereSeparator: \.isNewline) {
             guard !line.hasPrefix("#") else { continue }
             let parts = line.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)
             guard parts.count == 2, parts[0].count == 6 else { continue }
-            table[String(parts[0]).uppercased()] = String(parts[1])
+            let vendor = String(parts[1]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !vendor.isEmpty else { continue }
+            table[String(parts[0]).uppercased()] = vendor
         }
     }
 }

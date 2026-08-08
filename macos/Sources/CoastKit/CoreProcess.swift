@@ -390,7 +390,10 @@ public final class CoreProcess {
                     if let data = try? handle.readToEnd(), !data.isEmpty {
                         offset += UInt64(data.count)
                         let text = String(data: data, encoding: .utf8) ?? ""
-                        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+                        // 按 isNewline 切：核心日志真出现 CRLF 时，`"\n"` 匹配不上那个字素簇，
+                        // 整块新增日志会被当成一行灌进日志页（理由同 OUIDatabase.load）。
+                        for line in text.split(omittingEmptySubsequences: true,
+                                               whereSeparator: \.isNewline) {
                             guard let self else { return }
                             await MainActor.run { self.log(String(line), .core) }
                         }
