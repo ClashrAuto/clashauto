@@ -199,9 +199,14 @@ public final class AppState {
     /// 内核有新版。**查不到本地内核版本时恒为 false** —— 宁可漏报也不误报一颗常亮的角标。
     public private(set) var coreUpdateAvailable = false
 
+    /// **本条产品线**（Swift 线，非 `-qt`）在清单里真的能装到的最高版本。判据用它，不用
+    /// `appRelease.tag` —— 两条 macOS 线的 DMG 由外部仓库签完名异步挂上来，同一个 tag 上
+    /// 各平台的包是陆续到的。按 tag 判会说「有新版」，点进更新窗却一个包都挑不出来。
+    public private(set) var lineVersion: String?
+
     public var appUpdateAvailable: Bool {
-        guard let appRelease else { return false }
-        return UpdateChecker.isNewer(remote: appRelease.tag, than: AppInfo.version)
+        guard let lineVersion else { return false } // 这条线还没有包 → 不报（宁可漏报不误报）
+        return UpdateChecker.isNewer(remote: lineVersion, than: AppInfo.version)
     }
 
     /// 查程序 + 内核两条。核心在跑时经本机代理出网 —— 直连 api.github.com 在部分网络下必然 403/超时。
@@ -213,7 +218,9 @@ public final class AppState {
         let checker = UpdateChecker(includePrerelease: config.receiveBeta,
                                     proxyPort: controller.isCoreRunning ? config.mixedPort : nil)
         do {
-            appRelease = try await checker.latestAppRelease()
+            let status = try await checker.latestAppStatus()
+            appRelease = status.release
+            lineVersion = status.lineVersion
             updateHintIsError = false
             updateHint = appUpdateAvailable ? "" : "已是最新版本".t
         } catch {

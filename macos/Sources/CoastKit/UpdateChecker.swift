@@ -62,28 +62,38 @@ public struct UpdateChecker: Sendable {
         }
     }
 
+    /// 一次查更新的完整结果。
+    ///
+    /// ★ 为什么是两个字段而不是一个 `Release`：`release` 是**展示**用的（版本名、更新说明），
+    ///   `lineVersion` 才是**判据**——「本条产品线在对应通道里真的能装到的最高版本」。
+    ///   两条 macOS 产品线的 DMG 是由外部仓库签完名再异步挂上来的，同一个 tag 上各平台的包
+    ///   陆续到达，所以「release 的 tag 比本地新」根本不等于「有我能装的包」。拿 tag 当判据
+    ///   就会出现角标亮着「有新版」、点进更新窗却一个包都挑不出来的死局。
+    ///   拿不到 `lineVersion`（清单里这条线还没有包）时判「无更新」——宁可漏报不误报。
+    public struct AppStatus: Sendable {
+        public let release: Release?
+        public let lineVersion: String?
+    }
+
     /// 数据源是 CI 维护的 `version.json`，**不是 GitHub API** —— 理由见 `VersionManifest`。
     /// 清单被翻译回 `/releases` 的形状后交给下面原样的 `parseReleases`：资源过滤、
     /// -qt 排除、边车校验一条都没重写。
-    public func latestAppRelease() async throws -> Release? {
+    ///
+    /// 清单**只取一次**：展示用的 release 和判据用的 lineVersion 都从这一份里算，
+    /// 免得两次请求之间清单被 CI 换掉、两个字段来自不同快照。
+    public func latestAppStatus() async throws -> AppStatus {
         let root = try await VersionManifest.fetch(session: session)
         let list = VersionManifest.appReleases(root)
         let data = try JSONSerialization.data(withJSONObject: list)
-        return try Self.parseReleases(data: data, status: 200,
-                                      includePrerelease: includePrerelease)
-    }
-
-    /// **本条产品线**在对应通道里能装到的最高版本。角标该拿它去比，而不是 release 的 tag ——
-    /// 同一个 tag 上各平台的包是陆续到的，按 tag 比会说「有新版」却下不到包。
-    public func latestAppVersionForThisLine() async throws -> String? {
-        let root = try await VersionManifest.fetch(session: session)
+        let release = try Self.parseReleases(data: data, status: 200,
+                                             includePrerelease: includePrerelease)
         var best = VersionManifest.versionForThisLine(root, channel: "release")
         if includePrerelease,
            let beta = VersionManifest.versionForThisLine(root, channel: "prerelease"),
            best == nil || Self.isNewer(remote: beta, than: best!) {
             best = beta
         }
-        return best
+        return AppStatus(release: release, lineVersion: best)
     }
 
     /// 从 `/releases` 的响应里挑出该用的那一条。单独抽出来是为了能脱离网络单测 ——
